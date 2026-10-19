@@ -207,15 +207,22 @@ class Database:
     async def _check_product_turn(
         self, db: AsyncSession, turn: Turn, expected: ProductGrant | None,
     ) -> ProductGrant | None:
+        grant = await self._check_product_turn_binding(db, turn, expected)
+        if self.product_authority_enabled:
+            # One native connection/transaction avoids recursive pool checkouts.
+            await self._identity().authorize_admission(db, grant)
+        return grant
+
+    async def _check_product_turn_binding(
+        self, db: AsyncSession, turn: Turn, expected: ProductGrant | None,
+    ) -> ProductGrant | None:
+        """Check immutable provenance; callers must separately check live authority."""
         try:
             grant = await self._saved_product_grant(db, turn)
         except PermissionError as error:
             raise HTTPException(403, str(error)) from error
-        if self.product_authority_enabled:
-            if expected != grant:
-                raise HTTPException(403, "The task's original product authority cannot be replaced.")
-            # One native connection/transaction avoids recursive pool checkouts.
-            await self._identity().authorize_admission(db, grant)
+        if self.product_authority_enabled and expected != grant:
+            raise HTTPException(403, "The task's original product authority cannot be replaced.")
         return grant
 
     @staticmethod
@@ -366,8 +373,7 @@ class Database:
             return await self.allowed_session(db, session_id, actor)
 
     async def messages(self, actor: User, session_id: str, *, after: int = 0) -> list[dict[str, Any]]:
-        from .message_sources import public_message, source_view
-        from .models import MessageSource
+        from .message_sources import public_messages, source_view
 
         async with self.sessions() as db:
             await self.allowed_session(db, session_id, actor)
@@ -386,15 +392,13 @@ class Database:
                 User.id.in_({row.author_id for row in rows if row.author_id}),
             ))}
             identities = {key: await self.same_person(db, actor, key) for key in authors}
-            sources = {item.message_identity: item for item in await db.scalars(select(MessageSource).where(
-                MessageSource.message_identity.in_([row.identity for row in rows]),
-            ))}
+            projected = await public_messages(self, db, rows)
             originals = {item.id: item for item in await db.scalars(select(Upload).where(
                 Upload.session_id == session_id,
             ))}
             result = []
             for row in rows:
-                content, source = await public_message(self, db, row, sources=sources)
+                content, source = projected[row.id]
                 files = pictures.get(row.turn_id, [])
                 if source and source.get("deleted"):
                     files = []
@@ -908,14 +912,16 @@ class Database:
             ):
                 conversation = self.security.unseal(session.conversation).decode()
             elif session.conversation:
-                public = await db.scalars(select(Message).where(
+                from .message_sources import public_messages
+
+                public = list(await db.scalars(select(Message).where(
                     Message.session_id == session.id, Message.turn_id != turn.id,
                     Message.created_at < turn.created_at,
-                ).order_by(Message.id))
+                ).order_by(Message.id)))
+                projected = await public_messages(self, db, public)
                 history = []
                 for message in public:
-                    from .message_sources import public_message
-                    content, _ = await public_message(self, db, message)
+                    content, _ = projected[message.id]
                     if message.role == "assistant":
                         history.append(ModelResponse(parts=[TextPart(content=content)]))
                     else:

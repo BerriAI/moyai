@@ -639,3 +639,62 @@ async def test_batched_snapshot_filters_slack_input_changed_during_native_read(m
     assert explicit is not None and note_content not in explicit.content
     async with product.database.sessions() as db:
         assert (await db.get(Message, message_id)).content == original
+
+
+@pytest.mark.parametrize("change", ["deleted", "edited_after_start"])
+async def test_note_source_batch_is_fresh_after_native_store_await(memory_product, change):
+    from moyai.models import MessageSource
+
+    product = memory_product
+    _, turn, scope, message_id = await memory_execution(product)
+    store = ProductMemoryStore(product.memory, scope, turn.id)
+    for index in range(20):
+        key = f"backend-testing-{index}"
+        await store.write(
+            store.prefix + f"personal-{key}.md", captured_note(message_id, key=key),
+            expected_version=None, operation=MemoryOperation(f"capture-{index}", "a" * 64),
+        )
+    _, before = await store.snapshot(max_chars=32000, path_limit=100)
+    assert len(before) == 21
+
+    class ChangingNativeStore(InMemoryStore):
+        async def read(self, path, *, max_chars):
+            async with product.database.sessions.begin() as db:
+                source = await db.get(MessageSource, f"user:{turn.id}")
+                source.data = product.database.security.seal({"kind": "slack", change: True})
+            return await super().read(path, max_chars=max_chars)
+
+    store.native_store = ChangingNativeStore()
+    main, after = await store.snapshot(max_chars=32000, path_limit=100)
+    assert after == [store.prefix + "MEMORY.md"]
+    assert "personal-backend-testing" not in main.content
+
+
+@pytest.mark.parametrize("binding", ["missing", "different"])
+async def test_view_authorizes_once_per_release_and_still_checks_saved_turn_binding(memory_product, monkeypatch, binding):
+    from sqlalchemy import delete
+
+    from moyai.models import ProductTurnAuthority
+
+    product = memory_product
+    _, turn, scope, _ = await memory_execution(product)
+    store = ProductMemoryStore(product.memory, scope, turn.id)
+    original = product.adapter.authorize_admission
+    calls = []
+
+    async def authorize(db, grant):
+        calls.append(grant)
+        return await original(db, grant)
+
+    monkeypatch.setattr(product.adapter, "authorize_admission", authorize)
+    await store._view()
+    assert calls == [scope.product_grant]
+    await store._view()
+    assert calls == [scope.product_grant, scope.product_grant]
+    async with product.database.sessions.begin() as db:
+        await db.execute(delete(ProductTurnAuthority).where(ProductTurnAuthority.turn_id == turn.id))
+        if binding == "different":
+            db.add(ProductTurnAuthority(turn_id=turn.id, actor_id=scope.actor_id, authority_version="0" * 64))
+    with pytest.raises(HTTPException) as denied:
+        await store._view()
+    assert denied.value.status_code == 403

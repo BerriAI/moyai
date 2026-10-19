@@ -35,7 +35,7 @@ from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .contracts import RunScope
-from .message_sources import memory_text, valid_memory_source
+from .message_sources import memory_text, memory_texts, valid_memory_sources
 from .models import Message, Session, Turn, User, now
 from .product_identity import ProductGrant
 from .product_memory import ProductMemoryService
@@ -174,7 +174,10 @@ class ProductMemoryStore:
                 or turn.session_id != session.id or principal.id != self.scope.actor_id
             ):
                 raise ToolFailed("The memory execution is stopped or no longer current.")
-            await self.service.database._check_product_turn(db, turn, self.grant)
+            # Admission above remains current under the canonical writer lock
+            # and actor row lock. Only the saved turn binding remains to check;
+            # do not repeat the same live identity reads in this boundary.
+            await self.service.database._check_product_turn_binding(db, turn, self.grant)
             await self._connections(db, session)
             if session.visibility != "shared":
                 return {
@@ -192,11 +195,14 @@ class ProductMemoryStore:
                     f"SELECT * FROM {self.service._table('personal_memories')} "
                     "WHERE owner_id=:owner AND deleted=0 ORDER BY updated_at DESC,id"
                 ), {"owner": owner})).mappings()
+                candidates = []
                 for row in rows:
                     if row["expires_at"] and row["expires_at"] <= now():
                         continue
-                    note = self.service._unpack(dict(row))
-                    if not await valid_memory_source(self.service.database, db, note):
+                    candidates.append(self.service._unpack(dict(row)))
+                valid = await valid_memory_sources(self.service.database, db, candidates)
+                for note, supported in zip(candidates, valid, strict=True):
+                    if not supported:
                         continue  # Keep the note for owner review; never automatically recall suspect evidence.
                     if automatic and note["repo_url"] and note["repo_url"] != repository:
                         continue
@@ -205,8 +211,8 @@ class ProductMemoryStore:
                     notes.append(note)
             # Resolve authored text under this same release boundary. Catalog
             # rendering stays pure and never mutates the saved execution input.
-            inputs = [MemoryInput(message.id, await memory_text(self.service.database, db, message))
-                      for message in await self._inputs(db)] if content else []
+            authored = await memory_texts(self.service.database, db, await self._inputs(db)) if content else {}
+            inputs = [MemoryInput(identity, value) for identity, value in authored.items()]
         return prefs, notes, inputs, repository
 
     async def _connections(self, db: AsyncSession, session: Session) -> None:
