@@ -5,12 +5,13 @@ import { SkillComposer } from "./skill-composer"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
-import { api, csrfToken } from "./api"
+import { csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { GeneralPreferences } from "./general-preferences"
-import type { NewConversation, Session, Turn } from "./conversation-state"
+import type { NewConversation, Session } from "./conversation-state"
+import { createSession, createSessionMessage, listConnections, type ConnectionView, type NewSession } from "./generated/api"
 
-type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
+type HomeConnection = Pick<ConnectionView, "id" | "name" | "enabled" | "shared" | "read_only">
 const starters = [
   { label: "Review code", detail: "Find the edge cases", prompt: "Review my changes for bugs and improvements.", Icon: Code2 },
   { label: "Fix a bug", detail: "Trace it to the source", prompt: "Help me investigate and fix this bug: ", Icon: Bug },
@@ -20,7 +21,7 @@ export function homeSubmission(prompt: string, model: string, privateSession: bo
   const connections = [...new Set(selected)].sort()
   const allowed = new Set(available.filter(row => row.enabled && (privateSession || row.shared)).map(row => row.id))
   if (connections.some(id => !allowed.has(id))) throw new Error("Account access changed. Review the selected accounts before sending.")
-  const body = { prompt, model, attachments, connections }, visibility = privateSession ? "private" : "shared"
+  const body = { prompt, model, attachments, connections }, visibility: NonNullable<NewSession["visibility"]> = privateSession ? "private" : "shared"
   return { body, visibility, signature: JSON.stringify([visibility, body]) }
 }
 
@@ -58,7 +59,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     if (!needsAccounts) return
     const controller = new AbortController(), scope = accountScope
     setCatalog({ scope, rows: [], loading: true, error: "" })
-    void api<HomeConnection[]>(`/connections?shared=${!isPrivate}`, "GET", undefined, controller.signal).then(rows => {
+    void listConnections({ query: { shared: !isPrivate }, signal: controller.signal }).then(({ data: rows }) => {
       if (controller.signal.aborted) return
       const eligible = rows.filter(row => row.enabled && (isPrivate || row.shared))
       setCatalog({ scope, rows: eligible, loading: false, error: "" })
@@ -76,11 +77,11 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
       const signature = submission.signature
       if (admission.current?.signature !== signature) admission.current = { signature, request: crypto.randomUUID() }
       if (!admission.current.session) {
-        admission.current.session = await api<Session>("/sessions", "POST", { model, visibility: submission.visibility })
+        admission.current.session = (await createSession({ body: { model, visibility: submission.visibility } })).data
       }
-      const turn = await api<Turn>(`/sessions/${admission.current.session.id}/messages`, "POST", {
+      const { data: turn } = await createSessionMessage({ path: { session_id: admission.current.session.id }, body: {
         ...submission.body, request_key: admission.current.request,
-      })
+      } })
       if (!mounted.current || csrfToken() !== auth) return
       onStarted({ session: admission.current.session, turn, prompt, attachments })
       await onCreated()

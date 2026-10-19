@@ -2,7 +2,7 @@
 export type LiveEvent = {
   type: string; run_id?: string; step?: number; index?: number; text?: string
   phase?: "commentary" | "final_answer" | null
-  id?: string; name?: string; content?: string; arguments?: unknown; data?: unknown; failed?: boolean
+  id?: string; name?: string; content?: string | null; arguments?: unknown; data?: unknown; failed?: boolean
   created_at?: string
 }
 export type LiveTranscript = {

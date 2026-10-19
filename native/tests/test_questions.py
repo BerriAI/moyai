@@ -199,7 +199,7 @@ async def test_http_reply_is_requester_only_and_exposes_a_safe_composer_target(r
             client.cookies.set(COOKIE, cookie)
             client.headers["x-moyai-csrf"] = csrf
             view = (await client.get(f"/api/sessions/{session.id}")).json()
-            assert view.get("can_reply_with_text", False) is (user.id == actor.id)
+            assert bool(view["can_reply_with_text"]) is (user.id == actor.id)
             response = await client.post(f"/api/sessions/{session.id}/messages", json={
                 "prompt": "Blue", "request_key": "typed-http", "reply_to": original.id,
             })

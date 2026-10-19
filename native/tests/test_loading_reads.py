@@ -55,7 +55,7 @@ async def test_session_bootstrap_returns_the_authorized_transcript(runtime, acto
     )
     path = f"/api/sessions/{session.id}?include_activity=false"
     async with sign_in(runtime) as client:
-        assert "messages" not in (await client.get(path)).json()
+        assert (await client.get(path)).json()["messages"] is None
         response = await client.get(path + "&include_messages=true")
         assert response.status_code == 200
         expected = (await client.get(f"/api/sessions/{session.id}/messages")).json()

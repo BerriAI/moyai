@@ -25,7 +25,35 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import load_only
 from temporalio.service import RPCError
 
-from .api_views import Me, MeUser
+from .api_views import (
+    AuthConfig,
+    ConnectionView,
+    EffectResolveResult,
+    HealthStatus,
+    InvocableSkillPage,
+    LoginResult,
+    LogoutResult,
+    Me,
+    MeUser,
+    PendingEffect,
+    PlanStep,
+    QueuedTurnCancelResult,
+    QueuedTurnUpdateResult,
+    SavedActivity,
+    SessionDeleteResult,
+    SessionDetail,
+    SessionFile,
+    SessionListItem,
+    SessionMessage,
+    SessionRestoreResult,
+    SessionStopResult,
+    SessionSummary,
+    SessionUpdateResult,
+    SlackDeliveryRetry,
+    TurnView,
+    TurnWorkProgress,
+    WorkActionDetail,
+)
 from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
@@ -89,6 +117,10 @@ class ConnectionInput(BaseModel):
         if value.get_secret_value().strip().lower() == "oauth":
             raise ValueError("Enter an access token; interactive OAuth is not supported on the worker.")
         return value
+
+
+SAVED_ACTIVITY = TypeAdapter(list[SavedActivity])
+SESSION_MESSAGES = TypeAdapter(list[SessionMessage])
 
 
 def session_view(session: Session) -> dict[str, Any]:
@@ -232,19 +264,21 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     from .swarm_routes import routes as swarm_routes
     app.include_router(swarm_routes(runtime, actor))
 
-    @app.get("/api/skills")
+    @app.get("/api/skills", operation_id="listInvocableSkills")
     async def invocable_skills(
         shared: bool = False, offset: int = Query(0, ge=0, le=10000),
         limit: int = Query(100, ge=1, le=100), user: User = Depends(actor), session_id: str | None = None,
-    ):
+    ) -> InvocableSkillPage:
         if session_id is not None:
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
                 context = await runtime.database.execution_context(db, session)
                 if context.surface != "web":
-                    return {"skills": [], "has_more": False, "next_offset": None}
+                    return InvocableSkillPage(skills=[], has_more=False, next_offset=None)
                 shared = context.visibility != "private"
-        return await runtime.skill_invocations.listing(user, shared=shared, offset=offset, limit=limit)
+        return InvocableSkillPage.model_validate(
+            await runtime.skill_invocations.listing(user, shared=shared, offset=offset, limit=limit)
+        )
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -310,17 +344,19 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-store"
         return response
 
-    @app.get("/health")
-    async def health():
+    @app.get("/health", operation_id="getHealth")
+    async def health() -> HealthStatus:
         async with runtime.database.sessions() as db:
             await db.execute(select(1))
-        return {"status": "ok", "engine": "pydantic-ai", "durability": "temporal"}
+        return HealthStatus(status="ok", engine="pydantic-ai", durability="temporal")
 
-    @app.post("/api/login")
-    async def login(body: Login, request: Request, response: Response):
+    @app.post("/api/login", operation_id="loginWithPassword")
+    async def login(body: Login, request: Request, response: Response) -> LoginResult:
         if runtime.product is not None:
             from .product_auth import password_login
-            return await password_login(runtime, body.password.get_secret_value(), request, response)
+            return LoginResult.model_validate(
+                await password_login(runtime, body.password.get_secret_value(), request, response)
+            )
         await runtime.database.limit_login(
             request.client.host if request.client else "unknown", body.username
         )
@@ -337,30 +373,29 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             COOKIE, token, httponly=True, samesite="strict",
             secure=runtime.settings.secure_cookies, max_age=7 * 86400,
         )
-        return {"csrf": csrf}
+        return LoginResult(csrf=csrf)
 
-    @app.post("/api/logout")
-    async def logout(response: Response, user: User = Depends(actor)):
+    @app.post("/api/logout", operation_id="logout")
+    async def logout(response: Response, user: User = Depends(actor)) -> LogoutResult:
         response.delete_cookie("workspace_session" if runtime.product is not None else COOKIE)
-        result = {"signed_out": True}
         if runtime.product is not None and runtime.product.settings.cloudflare_access_login:
-            return {**result, "logout_url": "/cdn-cgi/access/logout"}
-        return result
+            return LogoutResult(signed_out=True, logout_url="/cdn-cgi/access/logout")
+        return LogoutResult(signed_out=True)
 
-    @app.get("/api/auth/config")
-    async def auth_config():
+    @app.get("/api/auth/config", operation_id="getAuthConfig")
+    async def auth_config() -> AuthConfig:
         product = runtime.product
-        return {
-            "mode": "existing" if product is not None else "standalone",
-            "password_enabled": bool(
+        return AuthConfig(
+            mode="existing" if product is not None else "standalone",
+            password_enabled=bool(
                 product.settings.password_login_enabled
                 and (product.settings.workspace_password or product.settings.workspace_member_password)
                 and not product.settings.cloudflare_access_login
             ) if product is not None else True,
-            "google_enabled": bool(product and product.settings.google_enabled()
-                                   and not product.settings.cloudflare_access_login),
-            "access_enabled": bool(product and product.settings.cloudflare_access_login),
-        }
+            google_enabled=bool(product and product.settings.google_enabled()
+                                and not product.settings.cloudflare_access_login),
+            access_enabled=bool(product and product.settings.cloudflare_access_login),
+        )
 
     @app.get("/api/me", operation_id="getMe")
     async def me(request: Request, user: User = Depends(actor)) -> Me:
@@ -383,8 +418,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             product_mode="existing" if runtime.product_identity is not None else "standalone",
         )
 
-    @app.get("/api/sessions")
-    async def sessions(archived: bool = False, deleted: bool = False, user: User = Depends(actor)):
+    @app.get("/api/sessions", operation_id="listSessions")
+    async def sessions(
+        archived: bool = False, deleted: bool = False, user: User = Depends(actor),
+    ) -> list[SessionListItem]:
         rows = await runtime.database.list_sessions(user, archived=archived, deleted=deleted)
         async with runtime.database.sessions() as db:
             ids = [row.id for row in rows]
@@ -403,25 +440,25 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 SessionRead.user_id == user.id, SessionRead.session_id.in_(ids),
             ))}
             owners = {row.id: await runtime.database.same_person(db, user, row.owner_id) for row in rows}
-        return [{
+        return [SessionListItem.model_validate({
             **session_view(row), "can_manage": owners[row.id],
             "pinned": preferences[row.id].pinned if row.id in preferences else False,
             "folder": preferences[row.id].folder if row.id in preferences else "",
             "participated": row.owner_id != user.id and row.id in participated,
             "unread": bool(reads[row.id].unread or latest.get(row.id, 0) > reads[row.id].message_id)
             if row.id in reads else False,
-        } for row in rows]
+        }) for row in rows]
 
-    @app.post("/api/sessions")
-    async def create_session(body: NewSession, user: User = Depends(actor)):
-        return session_view(await runtime.database.create_session(user, body))
+    @app.post("/api/sessions", operation_id="createSession")
+    async def create_session(body: NewSession, user: User = Depends(actor)) -> SessionSummary:
+        return SessionSummary.model_validate(session_view(await runtime.database.create_session(user, body)))
 
-    @app.get("/api/sessions/{session_id}")
+    @app.get("/api/sessions/{session_id}", operation_id="getSession")
     async def session(
         session_id: str, request: Request, resolve: bool = False, include_activity: bool = True,
         include_messages: bool = False,
         user: User = Depends(actor),
-    ):
+    ) -> SessionDetail:
         reference = None
         if resolve and runtime.product_identity is not None:
             from .product_routes import ProductReadService, Reader
@@ -529,13 +566,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 ]
         if include_messages:
             result["messages"] = await runtime.database.messages(user, session_id)
-        return result
+        return SessionDetail.model_validate(result)
 
-    @app.get("/api/sessions/{session_id}/progress/{turn_id}")
+    @app.get("/api/sessions/{session_id}/progress/{turn_id}", operation_id="getTurnProgress")
     async def progress(
         session_id: str, turn_id: str, request: Request,
         include_activity: bool = False, user: User = Depends(actor),
-    ):
+    ) -> TurnWorkProgress:
         from .progress import turn_progress
 
         await runtime.database.session(user, session_id)
@@ -555,13 +592,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if runtime.product_identity is not None:
             await runtime.product_identity.require_request_current(request)
         await runtime.database.session(user, session_id)
-        return result
+        return TurnWorkProgress.model_validate(result)
 
-    @app.get("/api/sessions/{session_id}/progress/{turn_id}/actions/{action_id}")
+    @app.get("/api/sessions/{session_id}/progress/{turn_id}/actions/{action_id}", operation_id="getTurnAction")
     async def action_detail(
         session_id: str, turn_id: str, action_id: str, request: Request,
         agent_id: str | None = None, user: User = Depends(actor),
-    ):
+    ) -> WorkActionDetail:
         await runtime.database.session(user, session_id)
         async with runtime.database.sessions() as db:
             turn = await db.get(Turn, turn_id)
@@ -578,10 +615,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         await runtime.database.session(user, session_id)
         if source_session != session_id:
             await runtime.database.session(user, source_session)
-        return result
+        return WorkActionDetail.model_validate(result)
 
-    @app.get("/api/sessions/{session_id}/activity")
-    async def session_activity(session_id: str, user: User = Depends(actor)):
+    @app.get("/api/sessions/{session_id}/activity", operation_id="getSessionActivity")
+    async def session_activity(session_id: str, user: User = Depends(actor)) -> list[SavedActivity]:
         await runtime.database.session(user, session_id)
         async with runtime.database.sessions() as db:
             turn = (await db.execute(select(Turn.id, Turn.actor_id, Turn.status).where(
@@ -591,7 +628,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if turn is not None and own and turn.status != "running":
             snapshot = await latest_turn_snapshot(runtime, turn.id)
             if snapshot is not None:
-                return saved_activity(snapshot.messages, turn.id)
+                return SAVED_ACTIVITY.validate_python(saved_activity(snapshot.messages, turn.id))
         return []
 
     @app.get("/api/sessions/{session_id}/debug-trace")
@@ -610,13 +647,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return RedirectResponse(await permalink(runtime, user, session_id, message_id),
                                 status_code=302, headers={"Cache-Control": "no-store"})
 
-    @app.post("/api/sessions/{session_id}/slack-delivery/retry")
-    async def retry_slack_delivery(session_id: str, user: User = Depends(actor)):
+    @app.post("/api/sessions/{session_id}/slack-delivery/retry", operation_id="retrySlackDelivery")
+    async def retry_slack_delivery(session_id: str, user: User = Depends(actor)) -> SlackDeliveryRetry:
         from .slack_delivery_status import retry
-        return await retry(runtime, user, session_id)
+        return SlackDeliveryRetry.model_validate(await retry(runtime, user, session_id))
 
-    @app.patch("/api/sessions/{session_id}")
-    async def edit_session(session_id: str, body: SessionEdit, user: User = Depends(actor)):
+    @app.patch("/api/sessions/{session_id}", operation_id="updateSession")
+    async def edit_session(session_id: str, body: SessionEdit, user: User = Depends(actor)) -> SessionUpdateResult:
         async with runtime.database.sessions.begin() as db:
             await lock_sidebar(db, user.id)
             row = await runtime.database.allowed_session(db, session_id, user)
@@ -647,24 +684,24 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 read.unread = body.unread
                 if not body.unread:
                     read.message_id = await db.scalar(select(func.max(Message.id)).where(Message.session_id == session_id)) or 0
-        return {"updated": True}
+        return SessionUpdateResult(updated=True)
 
-    @app.delete("/api/sessions/{session_id}")
-    async def delete_session(session_id: str, user: User = Depends(actor)):
+    @app.delete("/api/sessions/{session_id}", operation_id="deleteSession")
+    async def delete_session(session_id: str, user: User = Depends(actor)) -> SessionDeleteResult:
         await runtime.database.delete_session(user, session_id)
-        return {"deleted": True}
+        return SessionDeleteResult(deleted=True)
 
-    @app.post("/api/sessions/{session_id}/restore")
-    async def restore_session(session_id: str, user: User = Depends(actor)):
+    @app.post("/api/sessions/{session_id}/restore", operation_id="restoreSession")
+    async def restore_session(session_id: str, user: User = Depends(actor)) -> SessionRestoreResult:
         await runtime.database.restore_session(user, session_id)
-        return {"restored": True}
+        return SessionRestoreResult(restored=True)
 
-    @app.get("/api/sessions/{session_id}/messages")
-    async def messages(session_id: str, after: int = 0, user: User = Depends(actor)):
-        return await runtime.database.messages(user, session_id, after=after)
+    @app.get("/api/sessions/{session_id}/messages", operation_id="listSessionMessages")
+    async def messages(session_id: str, after: int = 0, user: User = Depends(actor)) -> list[SessionMessage]:
+        return SESSION_MESSAGES.validate_python(await runtime.database.messages(user, session_id, after=after))
 
-    @app.post("/api/sessions/{session_id}/messages", status_code=202)
-    async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
+    @app.post("/api/sessions/{session_id}/messages", status_code=202, operation_id="createSessionMessage")
+    async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)) -> TurnView:
         from .skill_invocations import has_invocations
         if body.reply_to is not None:
             async with runtime.database.sessions() as db:
@@ -677,12 +714,12 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
             body = body.model_copy(update={"prompt": await runtime.skill_invocations.normalize(body.prompt, user, session)})
-        return turn_view(await runtime.database.submit(
+        return TurnView.model_validate(turn_view(await runtime.database.submit(
             user, session_id, body, received_at=request.state.moyai_received_at,
-        ))
+        )))
 
-    @app.patch("/api/turns/{turn_id}")
-    async def edit_queued(turn_id: str, body: QueuedEdit, user: User = Depends(actor)):
+    @app.patch("/api/turns/{turn_id}", operation_id="updateQueuedTurn")
+    async def edit_queued(turn_id: str, body: QueuedEdit, user: User = Depends(actor)) -> QueuedTurnUpdateResult:
         async with runtime.database.sessions.begin() as db:
             turn = await db.get(Turn, turn_id)
             if turn is None or not await runtime.database.same_person(db, user, turn.actor_id):
@@ -720,19 +757,19 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             await db.execute(update(Message).where(
                 Message.turn_id == turn.id, Message.role == "user"
             ).values(content=runtime.security.seal(prompt)))
-        return {"updated": True}
+        return QueuedTurnUpdateResult(updated=True)
 
-    @app.post("/api/turns/{turn_id}/steer", status_code=202)
-    async def steer_queued(turn_id: str, user: User = Depends(actor)):
+    @app.post("/api/turns/{turn_id}/steer", status_code=202, operation_id="steerQueuedTurn")
+    async def steer_queued(turn_id: str, user: User = Depends(actor)) -> TurnView:
         async with runtime.database.sessions() as db:
             turn = await db.get(Turn, turn_id)
             if turn is None or not await runtime.database.same_person(db, user, turn.actor_id):
                 raise HTTPException(404, "Message not found.")
         original = await answer_actor(runtime, user, turn)
-        return turn_view(await runtime.database.steer_queued(original, turn_id))
+        return TurnView.model_validate(turn_view(await runtime.database.steer_queued(original, turn_id)))
 
-    @app.delete("/api/turns/{turn_id}")
-    async def cancel_queued(turn_id: str, user: User = Depends(actor)):
+    @app.delete("/api/turns/{turn_id}", operation_id="cancelQueuedTurn")
+    async def cancel_queued(turn_id: str, user: User = Depends(actor)) -> QueuedTurnCancelResult:
         async with runtime.database.sessions.begin() as db:
             turn = await db.get(Turn, turn_id)
             if turn is None or not await runtime.database.same_person(db, user, turn.actor_id):
@@ -744,10 +781,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             ).values(status="stopped", finished_at=now()).returning(Turn.id))
             if changed is None:
                 raise HTTPException(409, "The message was already admitted. Stop the active turn instead.")
-        return {"cancelled": True}
+        return QueuedTurnCancelResult(cancelled=True)
 
-    @app.post("/api/sessions/{session_id}/stop", status_code=202)
-    async def stop(session_id: str, user: User = Depends(actor)):
+    @app.post("/api/sessions/{session_id}/stop", status_code=202, operation_id="stopSession")
+    async def stop(session_id: str, user: User = Depends(actor)) -> SessionStopResult:
         workflow_id = await runtime.database.stop(user, session_id)
         if workflow_id:
             try:
@@ -756,10 +793,12 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             except RPCError:
                 # The persisted Stop already revoked authority. Dispatcher reconciliation follows.
                 pass
-        return {"status": "stopping"}
+        return SessionStopResult(status="stopping")
 
-    @app.post("/api/sessions/{session_id}/answers", status_code=202)
-    async def answer(session_id: str, body: ApprovalReply, request: Request, user: User = Depends(actor)):
+    @app.post("/api/sessions/{session_id}/answers", status_code=202, operation_id="createSessionAnswer")
+    async def answer(
+        session_id: str, body: ApprovalReply, request: Request, user: User = Depends(actor),
+    ) -> TurnView:
         async with runtime.database.sessions() as db:
             await runtime.database.allowed_session(db, session_id, user)
             turn = await db.get(Turn, body.turn_id)
@@ -807,7 +846,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             TypeAdapter(DeferredToolResults).dump_python(results, mode="json"),
             received_at=request.state.moyai_received_at,
         )
-        return turn_view(resumed)
+        return TurnView.model_validate(turn_view(resumed))
 
     @app.get("/api/sessions/{session_id}/events")
     async def events(
@@ -883,10 +922,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             media_type="text/event-stream",
         )
 
-    @app.get("/api/connections")
+    @app.get("/api/connections", operation_id="listConnections")
     async def connections(
         user: User = Depends(actor), session_id: str | None = None, shared: bool = False,
-    ):
+    ) -> list[ConnectionView]:
         surface = "web"
         if session_id is not None:
             async with runtime.database.sessions() as db:
@@ -894,17 +933,17 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 context = await runtime.database.execution_context(db, session)
                 shared, surface = context.visibility == "shared", context.surface
         if runtime.product_connections is not None:
-            return await runtime.product_connections.catalog(
+            return [ConnectionView.model_validate(item) for item in await runtime.product_connections.catalog(
                 user.id, shared_session=shared, surface=surface,
-            )
+            )]
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(Connection).where(
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
             ))
-            return [connection_view(row) for row in rows if not shared or row.shared]
+            return [ConnectionView.model_validate(connection_view(row)) for row in rows if not shared or row.shared]
 
-    @app.post("/api/connections")
-    async def create_connection(body: ConnectionInput, user: User = Depends(actor)):
+    @app.post("/api/connections", operation_id="createConnection")
+    async def create_connection(body: ConnectionInput, user: User = Depends(actor)) -> ConnectionView:
         if runtime.product_connections is not None:
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
         if body.shared and user.role != "admin":
@@ -919,10 +958,12 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 policy=body.policy.model_dump_json(),
             )
             db.add(row)
-        return connection_view(row)
+        return ConnectionView.model_validate(connection_view(row))
 
-    @app.put("/api/connections/{connection_id}")
-    async def edit_connection(connection_id: str, body: ConnectionInput, user: User = Depends(actor)):
+    @app.put("/api/connections/{connection_id}", operation_id="updateConnection")
+    async def edit_connection(
+        connection_id: str, body: ConnectionInput, user: User = Depends(actor),
+    ) -> ConnectionView:
         if runtime.product_connections is not None:
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
         async with runtime.database.sessions.begin() as db:
@@ -939,41 +980,44 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 row.credential = runtime.security.seal(body.credential.get_secret_value())
             row.policy = body.policy.model_dump_json()
             row.revision += 1
-        return connection_view(row)
+        return ConnectionView.model_validate(connection_view(row))
 
-    @app.get("/api/sessions/{session_id}/files")
-    async def files(session_id: str, user: User = Depends(actor)):
+    @app.get("/api/sessions/{session_id}/files", operation_id="listSessionFiles")
+    async def files(session_id: str, user: User = Depends(actor)) -> list[SessionFile]:
         async with runtime.database.sessions() as db:
             await runtime.database.allowed_session(db, session_id, user)
             rows = await db.scalars(select(Artifact).where(Artifact.session_id == session_id))
-            return [{
-                "id": row.id, "name": row.name, "media_type": row.media_type,
-                "size": row.size, "created_at": row.created_at,
-            } for row in rows]
+            return [SessionFile(
+                id=row.id, name=row.name, media_type=row.media_type,
+                size=row.size, created_at=row.created_at,
+            ) for row in rows]
 
-    @app.get("/api/sessions/{session_id}/plan")
-    async def plan(session_id: str, user: User = Depends(actor)):
+    @app.get("/api/sessions/{session_id}/plan", operation_id="getSessionPlan")
+    async def plan(session_id: str, user: User = Depends(actor)) -> list[PlanStep]:
         await runtime.database.session(user, session_id)
-        return TypeAdapter(Any).dump_python(
-            await runtime.stores.plan(session_id).get_items(), mode="json"
-        )
+        return [
+            PlanStep.model_validate(item.model_dump(mode="json"))
+            for item in await runtime.stores.plan(session_id).get_items()
+        ]
 
-    @app.get("/api/sessions/{session_id}/effects")
-    async def effects(session_id: str, user: User = Depends(actor)):
+    @app.get("/api/sessions/{session_id}/effects", operation_id="listSessionEffects")
+    async def effects(session_id: str, user: User = Depends(actor)) -> list[PendingEffect]:
         async with runtime.database.sessions() as db:
             await runtime.database.allowed_session(db, session_id, user)
             rows = await db.scalars(select(Effect).where(
                 Effect.session_id == session_id,
                 Effect.state == "pending",
             ).order_by(Effect.created_at))
-            return [{
-                "id": row.id, "turn_id": row.turn_id, "tool_name": row.tool_name,
-                "arguments": json.loads(runtime.security.unseal(row.arguments)),
-                "created_at": row.created_at,
-            } for row in rows if await runtime.database.same_person(db, user, row.actor_id)]
+            return [PendingEffect(
+                id=row.id, turn_id=row.turn_id, tool_name=row.tool_name,
+                arguments=json.loads(runtime.security.unseal(row.arguments)),
+                created_at=row.created_at,
+            ) for row in rows if await runtime.database.same_person(db, user, row.actor_id)]
 
-    @app.post("/api/effects/{effect_id}/resolve")
-    async def resolve_effect(effect_id: str, body: EffectResolution, user: User = Depends(actor)):
+    @app.post("/api/effects/{effect_id}/resolve", operation_id="resolveEffect")
+    async def resolve_effect(
+        effect_id: str, body: EffectResolution, user: User = Depends(actor),
+    ) -> EffectResolveResult:
         async with runtime.database.sessions.begin() as db:
             row = await db.get(Effect, effect_id)
             if row is None or not await runtime.database.same_person(db, user, row.actor_id):
@@ -998,7 +1042,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             ))
             # Rebuild from the public conversation so the next run sees this evidence.
             session.last_grants = None
-        return {"recorded": True}
+        return EffectResolveResult(recorded=True)
 
     @app.get("/api/files/{artifact_id}")
     async def download(artifact_id: str, user: User = Depends(actor)):

@@ -37,6 +37,28 @@ export type ApprovalReply = {
 };
 
 /**
+ * AuthConfig
+ */
+export type AuthConfig = {
+    /**
+     * Access Enabled
+     */
+    access_enabled: boolean;
+    /**
+     * Google Enabled
+     */
+    google_enabled: boolean;
+    /**
+     * Mode
+     */
+    mode: 'existing' | 'standalone';
+    /**
+     * Password Enabled
+     */
+    password_enabled: boolean;
+};
+
+/**
  * AutomationDefinition
  */
 export type AutomationDefinition = {
@@ -441,6 +463,69 @@ export type ConnectionPolicy = {
 };
 
 /**
+ * ConnectionPolicyView
+ */
+export type ConnectionPolicyView = {
+    /**
+     * Allowed Tools
+     */
+    allowed_tools: Array<string> | null;
+    /**
+     * Product
+     */
+    product: {
+        [key: string]: JsonValue;
+    } | null;
+    /**
+     * Require Approval
+     */
+    require_approval: boolean;
+};
+
+/**
+ * ConnectionView
+ */
+export type ConnectionView = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    policy: ConnectionPolicyView;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Shared
+     */
+    shared: boolean;
+    /**
+     * Source
+     */
+    source: 'product' | null;
+};
+
+/**
  * ContinuationRequest
  */
 export type ContinuationRequest = {
@@ -491,6 +576,16 @@ export type ContinuationRequest = {
 };
 
 /**
+ * CredentialRequestRef
+ */
+export type CredentialRequestRef = {
+    /**
+     * Request Id
+     */
+    request_id: string;
+};
+
+/**
  * EffectResolution
  */
 export type EffectResolution = {
@@ -502,6 +597,16 @@ export type EffectResolution = {
      * Outcome
      */
     outcome: 'completed' | 'not_executed';
+};
+
+/**
+ * EffectResolveResult
+ */
+export type EffectResolveResult = {
+    /**
+     * Recorded
+     */
+    recorded: boolean;
 };
 
 /**
@@ -659,6 +764,116 @@ export type HttpValidationError = {
 };
 
 /**
+ * HealthStatus
+ */
+export type HealthStatus = {
+    /**
+     * Durability
+     */
+    durability: string;
+    /**
+     * Engine
+     */
+    engine: string;
+    /**
+     * Status
+     */
+    status: 'ok';
+};
+
+/**
+ * InvocableSkill
+ */
+export type InvocableSkill = {
+    /**
+     * Archived
+     */
+    archived: boolean | null;
+    /**
+     * Can Manage
+     */
+    can_manage: boolean | null;
+    /**
+     * Created At
+     */
+    created_at: string | null;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Icon
+     */
+    icon: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Reference
+     */
+    reference: string;
+    /**
+     * Revision
+     */
+    revision: number | null;
+    /**
+     * Scope
+     */
+    scope: string;
+    /**
+     * Source
+     */
+    source: string | null;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+};
+
+/**
+ * InvocableSkillPage
+ */
+export type InvocableSkillPage = {
+    /**
+     * Can Publish
+     */
+    can_publish: boolean | null;
+    /**
+     * Capabilities
+     */
+    capabilities: {
+        [key: string]: boolean;
+    } | null;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Note
+     */
+    note: string | null;
+    /**
+     * Skills
+     */
+    skills: Array<InvocableSkill>;
+    /**
+     * Source
+     */
+    source: string | null;
+};
+
+export type JsonValue = unknown;
+
+/**
  * LinkInput
  */
 export type LinkInput = {
@@ -684,6 +899,38 @@ export type Login = {
      * Username
      */
     username?: string;
+};
+
+/**
+ * LoginResult
+ */
+export type LoginResult = {
+    /**
+     * Authenticated
+     */
+    authenticated: boolean | null;
+    /**
+     * Csrf
+     */
+    csrf: string;
+    /**
+     * Role
+     */
+    role: 'admin' | 'member' | null;
+};
+
+/**
+ * LogoutResult
+ */
+export type LogoutResult = {
+    /**
+     * Logout Url
+     */
+    logout_url: string | null;
+    /**
+     * Signed Out
+     */
+    signed_out: boolean;
 };
 
 /**
@@ -744,6 +991,62 @@ export type MemoryInput = {
      * Version
      */
     version?: string | null;
+};
+
+/**
+ * MessageAttachment
+ */
+export type MessageAttachment = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Size
+     */
+    size: number;
+};
+
+/**
+ * MessageAttachmentStatus
+ */
+export type MessageAttachmentStatus = {
+    /**
+     * Bytes
+     */
+    bytes: number | null;
+    /**
+     * Error
+     */
+    error: 'unavailable' | null;
+    /**
+     * File Id
+     */
+    file_id: string | null;
+    /**
+     * Media Type
+     */
+    media_type: string | null;
+    /**
+     * Name
+     */
+    name: string | null;
+    /**
+     * Preview Error
+     */
+    preview_error: 'preview_unavailable' | null;
+    /**
+     * Upload Id
+     */
+    upload_id: string | null;
 };
 
 /**
@@ -920,6 +1223,125 @@ export type Note = {
      * Title
      */
     title: string;
+};
+
+/**
+ * PendingEffect
+ */
+export type PendingEffect = {
+    arguments: JsonValue;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Tool Name
+     */
+    tool_name: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+};
+
+/**
+ * PendingRequests
+ */
+export type PendingRequests = {
+    /**
+     * Approvals
+     */
+    approvals: Array<PendingToolCall>;
+    /**
+     * Calls
+     */
+    calls: Array<PendingToolCall>;
+    /**
+     * Metadata
+     */
+    metadata: {
+        [key: string]: {
+            [key: string]: JsonValue;
+        };
+    };
+};
+
+/**
+ * PendingToolCall
+ *
+ * A pydantic-ai ToolCallPart awaiting an answer or approval.
+ */
+export type PendingToolCall = {
+    /**
+     * Args
+     */
+    args: string | {
+        [key: string]: JsonValue;
+    } | null;
+    /**
+     * Id
+     */
+    id: string | null;
+    /**
+     * Part Kind
+     */
+    part_kind: string;
+    /**
+     * Provider Details
+     */
+    provider_details: {
+        [key: string]: JsonValue;
+    } | null;
+    /**
+     * Provider Name
+     */
+    provider_name: string | null;
+    /**
+     * Tool Call Id
+     */
+    tool_call_id: string;
+    /**
+     * Tool Kind
+     */
+    tool_kind: string | null;
+    /**
+     * Tool Name
+     */
+    tool_name: string;
+};
+
+/**
+ * PlanStep
+ */
+export type PlanStep = {
+    /**
+     * Active Form
+     */
+    active_form: string;
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Depends On
+     */
+    depends_on: Array<string>;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Parent Id
+     */
+    parent_id: string | null;
+    /**
+     * Status
+     */
+    status: 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'blocked';
 };
 
 /**
@@ -1792,6 +2214,26 @@ export type QueuedEdit = {
 };
 
 /**
+ * QueuedTurnCancelResult
+ */
+export type QueuedTurnCancelResult = {
+    /**
+     * Cancelled
+     */
+    cancelled: boolean;
+};
+
+/**
+ * QueuedTurnUpdateResult
+ */
+export type QueuedTurnUpdateResult = {
+    /**
+     * Updated
+     */
+    updated: boolean;
+};
+
+/**
  * ReadThrough
  */
 export type ReadThrough = {
@@ -1933,6 +2375,150 @@ export type SelfManagement = {
 };
 
 /**
+ * SessionDeleteResult
+ */
+export type SessionDeleteResult = {
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+};
+
+/**
+ * SessionDetail
+ */
+export type SessionDetail = {
+    /**
+     * Activity
+     */
+    activity: Array<ToolCallActivity | ToolResultActivity> | null;
+    /**
+     * Can Answer
+     */
+    can_answer: boolean | null;
+    /**
+     * Can Reply With Text
+     */
+    can_reply_with_text: boolean | null;
+    /**
+     * Credential Requests
+     */
+    credential_requests: Array<CredentialRequestRef> | null;
+    /**
+     * Effects
+     */
+    effects: Array<SessionEffect>;
+    /**
+     * Has Unsettled Effects
+     */
+    has_unsettled_effects: boolean;
+    /**
+     * Messages
+     */
+    messages: Array<SessionMessage> | null;
+    pending: PendingRequests | null;
+    /**
+     * Question Deadline
+     */
+    question_deadline: string | null;
+    reference: SessionReference | null;
+    session: SessionDetailSession;
+    slack_delivery: SlackDeliveryStatus | null;
+    /**
+     * Transcript Version
+     */
+    transcript_version: string | null;
+    /**
+     * Turns
+     */
+    turns: Array<SessionTurn>;
+};
+
+/**
+ * SessionDetailSession
+ */
+export type SessionDetailSession = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Can Manage
+     */
+    can_manage: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Folder
+     */
+    folder: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Parent Session Id
+     */
+    parent_session_id: string | null;
+    /**
+     * Pinned
+     */
+    pinned: boolean;
+    /**
+     * Save Warning
+     */
+    save_warning: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Surface
+     */
+    surface: string;
+    /**
+     * Swarm Id
+     */
+    swarm_id: string | null;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Unread
+     */
+    unread: boolean;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Visibility
+     */
+    visibility: string;
+    /**
+     * Workspace
+     */
+    workspace: {
+        [key: string]: JsonValue;
+    } | null;
+};
+
+/**
  * SessionEdit
  */
 export type SessionEdit = {
@@ -1956,6 +2542,51 @@ export type SessionEdit = {
      * Unread
      */
     unread?: boolean | null;
+};
+
+/**
+ * SessionEffect
+ */
+export type SessionEffect = {
+    arguments: JsonValue;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Tool Name
+     */
+    tool_name: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+};
+
+/**
+ * SessionFile
+ */
+export type SessionFile = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Size
+     */
+    size: number;
 };
 
 /**
@@ -1983,6 +2614,172 @@ export type SessionFolderView = {
 };
 
 /**
+ * SessionListItem
+ */
+export type SessionListItem = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Can Manage
+     */
+    can_manage: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Folder
+     */
+    folder: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Participated
+     */
+    participated: boolean;
+    /**
+     * Pinned
+     */
+    pinned: boolean;
+    /**
+     * Save Warning
+     */
+    save_warning: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Surface
+     */
+    surface: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Unread
+     */
+    unread: boolean;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Visibility
+     */
+    visibility: string;
+    /**
+     * Workspace
+     */
+    workspace: {
+        [key: string]: JsonValue;
+    } | null;
+};
+
+/**
+ * SessionMessage
+ */
+export type SessionMessage = {
+    /**
+     * Attachment Status
+     */
+    attachment_status: Array<MessageAttachmentStatus> | null;
+    /**
+     * Attachments
+     */
+    attachments: Array<MessageAttachment>;
+    /**
+     * Attachments Changed
+     */
+    attachments_changed: boolean | null;
+    /**
+     * Author Id
+     */
+    author_id: string | null;
+    /**
+     * Author Name
+     */
+    author_name: string | null;
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Context Status
+     */
+    context_status: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Deleted
+     */
+    deleted: boolean | null;
+    /**
+     * Edited
+     */
+    edited: boolean | null;
+    /**
+     * Edited After Start
+     */
+    edited_after_start: boolean | null;
+    /**
+     * Edited In
+     */
+    edited_in: 'web' | 'slack' | null;
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Is Self
+     */
+    is_self: boolean;
+    /**
+     * Legacy Review Required
+     */
+    legacy_review_required: boolean | null;
+    /**
+     * Role
+     */
+    role: string;
+    /**
+     * Source
+     */
+    source: 'slack' | 'delegation' | null;
+    /**
+     * Source Timestamp
+     */
+    source_timestamp: string | null;
+    /**
+     * Source Url
+     */
+    source_url: string | null;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+};
+
+/**
  * SessionReadResult
  */
 export type SessionReadResult = {
@@ -1990,6 +2787,294 @@ export type SessionReadResult = {
      * Read
      */
     read: true;
+};
+
+/**
+ * SessionReference
+ *
+ * The product read adapter's view of a native session (resolve=true).
+ */
+export type SessionReference = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Can Manage
+     */
+    can_manage: boolean;
+    /**
+     * Capabilities
+     */
+    capabilities: {
+        [key: string]: boolean;
+    };
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Created By Me
+     */
+    created_by_me: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Execution Engine
+     */
+    execution_engine: string;
+    /**
+     * Folder
+     */
+    folder: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Key
+     */
+    key: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Parent Session Id
+     */
+    parent_session_id: string | null;
+    /**
+     * Participated
+     */
+    participated: boolean;
+    /**
+     * Pinned
+     */
+    pinned: boolean;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+    /**
+     * Save Warning
+     */
+    save_warning: null;
+    /**
+     * Source
+     */
+    source: 'native' | 'legacy';
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Source Session Id
+     */
+    source_session_id: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Surface
+     */
+    surface: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Unread
+     */
+    unread: boolean;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Url
+     */
+    url: string;
+    /**
+     * Visibility
+     */
+    visibility: string;
+    /**
+     * Workspace
+     */
+    workspace: null;
+};
+
+/**
+ * SessionRestoreResult
+ */
+export type SessionRestoreResult = {
+    /**
+     * Restored
+     */
+    restored: boolean;
+};
+
+/**
+ * SessionStopResult
+ */
+export type SessionStopResult = {
+    /**
+     * Status
+     */
+    status: 'stopping';
+};
+
+/**
+ * SessionSummary
+ */
+export type SessionSummary = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Save Warning
+     */
+    save_warning: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Surface
+     */
+    surface: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Visibility
+     */
+    visibility: string;
+    /**
+     * Workspace
+     */
+    workspace: {
+        [key: string]: JsonValue;
+    } | null;
+};
+
+/**
+ * SessionTurn
+ */
+export type SessionTurn = {
+    /**
+     * Accepted At
+     */
+    accepted_at: string | null;
+    /**
+     * Actor Id
+     */
+    actor_id: string;
+    /**
+     * Connections
+     */
+    connections: Array<string>;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Enqueue Id
+     */
+    enqueue_id: string | null;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    /**
+     * Guidance At
+     */
+    guidance_at: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Is Self
+     */
+    is_self: boolean;
+    /**
+     * Mode
+     */
+    mode: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Parent Turn
+     */
+    parent_turn: string | null;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Usage
+     */
+    usage: {
+        [key: string]: JsonValue;
+    };
+};
+
+/**
+ * SessionUpdateResult
+ */
+export type SessionUpdateResult = {
+    /**
+     * Updated
+     */
+    updated: boolean;
 };
 
 /**
@@ -2052,6 +3137,34 @@ export type SkillInput = {
      * Scope
      */
     scope?: 'personal' | 'shared';
+};
+
+/**
+ * SlackDeliveryRetry
+ */
+export type SlackDeliveryRetry = {
+    /**
+     * Retried
+     */
+    retried: number;
+};
+
+/**
+ * SlackDeliveryStatus
+ */
+export type SlackDeliveryStatus = {
+    /**
+     * Pending
+     */
+    pending: number;
+    /**
+     * Rejected
+     */
+    rejected: number;
+    /**
+     * Sending
+     */
+    sending: number;
 };
 
 /**
@@ -2333,6 +3446,56 @@ export type TokenConnection = {
 };
 
 /**
+ * ToolCallActivity
+ */
+export type ToolCallActivity = {
+    /**
+     * Arguments
+     */
+    arguments: string | {
+        [key: string]: JsonValue;
+    } | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Type
+     */
+    type: 'tool_call';
+};
+
+/**
+ * ToolResultActivity
+ */
+export type ToolResultActivity = {
+    /**
+     * Content
+     */
+    content: string | null;
+    /**
+     * Failed
+     */
+    failed: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Type
+     */
+    type: 'tool_result';
+};
+
+/**
  * Trigger
  */
 export type Trigger = {
@@ -2342,6 +3505,96 @@ export type Trigger = {
      */
     id?: string;
     schedule?: Timing | null;
+};
+
+/**
+ * TurnView
+ */
+export type TurnView = {
+    /**
+     * Accepted At
+     */
+    accepted_at: string | null;
+    /**
+     * Actor Id
+     */
+    actor_id: string;
+    /**
+     * Connections
+     */
+    connections: Array<string>;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Enqueue Id
+     */
+    enqueue_id: string | null;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Mode
+     */
+    mode: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Parent Turn
+     */
+    parent_turn: string | null;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Usage
+     */
+    usage: {
+        [key: string]: JsonValue;
+    };
+};
+
+/**
+ * TurnWorkProgress
+ */
+export type TurnWorkProgress = {
+    /**
+     * Messages
+     */
+    messages: Array<WorkCommentary>;
+    /**
+     * Subagents
+     */
+    subagents: Array<WorkAgentProgress> | null;
+    /**
+     * Subagents Limited
+     */
+    subagents_limited: boolean | null;
+    /**
+     * Tools
+     */
+    tools: Array<WorkToolProgress> | null;
+    /**
+     * Tools Limited
+     */
+    tools_limited: boolean | null;
 };
 
 /**
@@ -2454,6 +3707,184 @@ export type WebhookSetup = {
      * Revision
      */
     revision: number;
+};
+
+/**
+ * WorkActionDetail
+ */
+export type WorkActionDetail = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Input
+     */
+    input: string | null;
+    /**
+     * Input Truncated
+     */
+    input_truncated: boolean;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Output
+     */
+    output: string | null;
+    /**
+     * Output Truncated
+     */
+    output_truncated: boolean;
+    /**
+     * Restricted
+     */
+    restricted: boolean;
+    /**
+     * Status
+     */
+    status: 'running' | 'completed' | 'failed' | 'interrupted';
+};
+
+/**
+ * WorkAgentProgress
+ */
+export type WorkAgentProgress = {
+    /**
+     * Avatar
+     */
+    avatar: number;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Depth
+     */
+    depth: number;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Messages
+     */
+    messages: Array<WorkProgressMessage>;
+    /**
+     * Messages Limited
+     */
+    messages_limited: boolean;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Parent Id
+     */
+    parent_id: string | null;
+    /**
+     * Parent Name
+     */
+    parent_name: string | null;
+    /**
+     * Session Id
+     */
+    session_id: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Tools
+     */
+    tools: Array<WorkToolProgress>;
+    /**
+     * Tools Limited
+     */
+    tools_limited: boolean;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * WorkCommentary
+ */
+export type WorkCommentary = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Phase
+     */
+    phase: 'commentary';
+    /**
+     * Text
+     */
+    text: string;
+};
+
+/**
+ * WorkProgressMessage
+ */
+export type WorkProgressMessage = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Phase
+     */
+    phase: 'commentary' | 'final_answer';
+    /**
+     * Text
+     */
+    text: string;
+};
+
+/**
+ * WorkToolProgress
+ */
+export type WorkToolProgress = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Status
+     */
+    status: 'running' | 'completed' | 'failed' | 'interrupted';
 };
 
 /**
@@ -2983,19 +4414,21 @@ export type InfrastructureApiAdminSpendInfrastructureGetResponses = {
 
 export type InfrastructureApiAdminSpendInfrastructureGetResponse = InfrastructureApiAdminSpendInfrastructureGetResponses[keyof InfrastructureApiAdminSpendInfrastructureGetResponses];
 
-export type AuthConfigApiAuthConfigGetData = {
+export type GetAuthConfigData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/auth/config';
 };
 
-export type AuthConfigApiAuthConfigGetResponses = {
+export type GetAuthConfigResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: AuthConfig;
 };
+
+export type GetAuthConfigResponse = GetAuthConfigResponses[keyof GetAuthConfigResponses];
 
 export type StartApiAuthGoogleStartPostData = {
     body: SignInStart;
@@ -3020,7 +4453,7 @@ export type StartApiAuthGoogleStartPostResponses = {
     200: unknown;
 };
 
-export type ConnectionsApiConnectionsGetData = {
+export type ListConnectionsData = {
     body?: never;
     path?: never;
     query?: {
@@ -3036,44 +4469,50 @@ export type ConnectionsApiConnectionsGetData = {
     url: '/api/connections';
 };
 
-export type ConnectionsApiConnectionsGetErrors = {
+export type ListConnectionsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ConnectionsApiConnectionsGetError = ConnectionsApiConnectionsGetErrors[keyof ConnectionsApiConnectionsGetErrors];
+export type ListConnectionsError = ListConnectionsErrors[keyof ListConnectionsErrors];
 
-export type ConnectionsApiConnectionsGetResponses = {
+export type ListConnectionsResponses = {
     /**
+     * Response Listconnections
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<ConnectionView>;
 };
 
-export type CreateConnectionApiConnectionsPostData = {
+export type ListConnectionsResponse = ListConnectionsResponses[keyof ListConnectionsResponses];
+
+export type CreateConnectionData = {
     body: ConnectionInputWritable;
     path?: never;
     query?: never;
     url: '/api/connections';
 };
 
-export type CreateConnectionApiConnectionsPostErrors = {
+export type CreateConnectionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateConnectionApiConnectionsPostError = CreateConnectionApiConnectionsPostErrors[keyof CreateConnectionApiConnectionsPostErrors];
+export type CreateConnectionError = CreateConnectionErrors[keyof CreateConnectionErrors];
 
-export type CreateConnectionApiConnectionsPostResponses = {
+export type CreateConnectionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ConnectionView;
 };
+
+export type CreateConnectionResponse = CreateConnectionResponses[keyof CreateConnectionResponses];
 
 export type ExistingAppApiConnectionsGithubAppPostData = {
     body?: never;
@@ -3201,7 +4640,7 @@ export type StartApiConnectionsSlackPersonalOauthPostResponses = {
     200: unknown;
 };
 
-export type EditConnectionApiConnectionsConnectionIdPutData = {
+export type UpdateConnectionData = {
     body: ConnectionInputWritable;
     path: {
         /**
@@ -3213,21 +4652,23 @@ export type EditConnectionApiConnectionsConnectionIdPutData = {
     url: '/api/connections/{connection_id}';
 };
 
-export type EditConnectionApiConnectionsConnectionIdPutErrors = {
+export type UpdateConnectionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditConnectionApiConnectionsConnectionIdPutError = EditConnectionApiConnectionsConnectionIdPutErrors[keyof EditConnectionApiConnectionsConnectionIdPutErrors];
+export type UpdateConnectionError = UpdateConnectionErrors[keyof UpdateConnectionErrors];
 
-export type EditConnectionApiConnectionsConnectionIdPutResponses = {
+export type UpdateConnectionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ConnectionView;
 };
+
+export type UpdateConnectionResponse = UpdateConnectionResponses[keyof UpdateConnectionResponses];
 
 export type DisconnectApiConnectionsProviderDeleteData = {
     body?: never;
@@ -3560,7 +5001,7 @@ export type UpdateApiCredentialsSecretsIdentityPatchResponses = {
     200: unknown;
 };
 
-export type ResolveEffectApiEffectsEffectIdResolvePostData = {
+export type ResolveEffectData = {
     body: EffectResolution;
     path: {
         /**
@@ -3572,21 +5013,23 @@ export type ResolveEffectApiEffectsEffectIdResolvePostData = {
     url: '/api/effects/{effect_id}/resolve';
 };
 
-export type ResolveEffectApiEffectsEffectIdResolvePostErrors = {
+export type ResolveEffectErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ResolveEffectApiEffectsEffectIdResolvePostError = ResolveEffectApiEffectsEffectIdResolvePostErrors[keyof ResolveEffectApiEffectsEffectIdResolvePostErrors];
+export type ResolveEffectError = ResolveEffectErrors[keyof ResolveEffectErrors];
 
-export type ResolveEffectApiEffectsEffectIdResolvePostResponses = {
+export type ResolveEffectResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: EffectResolveResult;
 };
+
+export type ResolveEffectResponse = ResolveEffectResponses[keyof ResolveEffectResponses];
 
 export type DownloadApiFilesArtifactIdGetData = {
     body?: never;
@@ -3778,42 +5221,46 @@ export type MessagesApiHistorySessionsRunIdMessagesGetResponses = {
     200: unknown;
 };
 
-export type LoginApiLoginPostData = {
+export type LoginWithPasswordData = {
     body: LoginWritable;
     path?: never;
     query?: never;
     url: '/api/login';
 };
 
-export type LoginApiLoginPostErrors = {
+export type LoginWithPasswordErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type LoginApiLoginPostError = LoginApiLoginPostErrors[keyof LoginApiLoginPostErrors];
+export type LoginWithPasswordError = LoginWithPasswordErrors[keyof LoginWithPasswordErrors];
 
-export type LoginApiLoginPostResponses = {
+export type LoginWithPasswordResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: LoginResult;
 };
 
-export type LogoutApiLogoutPostData = {
+export type LoginWithPasswordResponse = LoginWithPasswordResponses[keyof LoginWithPasswordResponses];
+
+export type LogoutData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/logout';
 };
 
-export type LogoutApiLogoutPostResponses = {
+export type LogoutResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: LogoutResult;
 };
+
+export type LogoutResponse = LogoutResponses[keyof LogoutResponses];
 
 export type GetMeData = {
     body?: never;
@@ -5015,7 +6462,7 @@ export type RenameSessionFolderResponses = {
 
 export type RenameSessionFolderResponse = RenameSessionFolderResponses[keyof RenameSessionFolderResponses];
 
-export type SessionsApiSessionsGetData = {
+export type ListSessionsData = {
     body?: never;
     path?: never;
     query?: {
@@ -5031,46 +6478,52 @@ export type SessionsApiSessionsGetData = {
     url: '/api/sessions';
 };
 
-export type SessionsApiSessionsGetErrors = {
+export type ListSessionsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SessionsApiSessionsGetError = SessionsApiSessionsGetErrors[keyof SessionsApiSessionsGetErrors];
+export type ListSessionsError = ListSessionsErrors[keyof ListSessionsErrors];
 
-export type SessionsApiSessionsGetResponses = {
+export type ListSessionsResponses = {
     /**
+     * Response Listsessions
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<SessionListItem>;
 };
 
-export type CreateSessionApiSessionsPostData = {
+export type ListSessionsResponse = ListSessionsResponses[keyof ListSessionsResponses];
+
+export type CreateSessionData = {
     body: NewSession;
     path?: never;
     query?: never;
     url: '/api/sessions';
 };
 
-export type CreateSessionApiSessionsPostErrors = {
+export type CreateSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateSessionApiSessionsPostError = CreateSessionApiSessionsPostErrors[keyof CreateSessionApiSessionsPostErrors];
+export type CreateSessionError = CreateSessionErrors[keyof CreateSessionErrors];
 
-export type CreateSessionApiSessionsPostResponses = {
+export type CreateSessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionSummary;
 };
 
-export type DeleteSessionApiSessionsSessionIdDeleteData = {
+export type CreateSessionResponse = CreateSessionResponses[keyof CreateSessionResponses];
+
+export type DeleteSessionData = {
     body?: never;
     path: {
         /**
@@ -5082,23 +6535,25 @@ export type DeleteSessionApiSessionsSessionIdDeleteData = {
     url: '/api/sessions/{session_id}';
 };
 
-export type DeleteSessionApiSessionsSessionIdDeleteErrors = {
+export type DeleteSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DeleteSessionApiSessionsSessionIdDeleteError = DeleteSessionApiSessionsSessionIdDeleteErrors[keyof DeleteSessionApiSessionsSessionIdDeleteErrors];
+export type DeleteSessionError = DeleteSessionErrors[keyof DeleteSessionErrors];
 
-export type DeleteSessionApiSessionsSessionIdDeleteResponses = {
+export type DeleteSessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionDeleteResult;
 };
 
-export type SessionApiSessionsSessionIdGetData = {
+export type DeleteSessionResponse = DeleteSessionResponses[keyof DeleteSessionResponses];
+
+export type GetSessionData = {
     body?: never;
     path: {
         /**
@@ -5123,23 +6578,25 @@ export type SessionApiSessionsSessionIdGetData = {
     url: '/api/sessions/{session_id}';
 };
 
-export type SessionApiSessionsSessionIdGetErrors = {
+export type GetSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SessionApiSessionsSessionIdGetError = SessionApiSessionsSessionIdGetErrors[keyof SessionApiSessionsSessionIdGetErrors];
+export type GetSessionError = GetSessionErrors[keyof GetSessionErrors];
 
-export type SessionApiSessionsSessionIdGetResponses = {
+export type GetSessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionDetail;
 };
 
-export type EditSessionApiSessionsSessionIdPatchData = {
+export type GetSessionResponse = GetSessionResponses[keyof GetSessionResponses];
+
+export type UpdateSessionData = {
     body: SessionEdit;
     path: {
         /**
@@ -5151,23 +6608,25 @@ export type EditSessionApiSessionsSessionIdPatchData = {
     url: '/api/sessions/{session_id}';
 };
 
-export type EditSessionApiSessionsSessionIdPatchErrors = {
+export type UpdateSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditSessionApiSessionsSessionIdPatchError = EditSessionApiSessionsSessionIdPatchErrors[keyof EditSessionApiSessionsSessionIdPatchErrors];
+export type UpdateSessionError = UpdateSessionErrors[keyof UpdateSessionErrors];
 
-export type EditSessionApiSessionsSessionIdPatchResponses = {
+export type UpdateSessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionUpdateResult;
 };
 
-export type SessionActivityApiSessionsSessionIdActivityGetData = {
+export type UpdateSessionResponse = UpdateSessionResponses[keyof UpdateSessionResponses];
+
+export type GetSessionActivityData = {
     body?: never;
     path: {
         /**
@@ -5179,23 +6638,27 @@ export type SessionActivityApiSessionsSessionIdActivityGetData = {
     url: '/api/sessions/{session_id}/activity';
 };
 
-export type SessionActivityApiSessionsSessionIdActivityGetErrors = {
+export type GetSessionActivityErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SessionActivityApiSessionsSessionIdActivityGetError = SessionActivityApiSessionsSessionIdActivityGetErrors[keyof SessionActivityApiSessionsSessionIdActivityGetErrors];
+export type GetSessionActivityError = GetSessionActivityErrors[keyof GetSessionActivityErrors];
 
-export type SessionActivityApiSessionsSessionIdActivityGetResponses = {
+export type GetSessionActivityResponses = {
     /**
+     * Response Getsessionactivity
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<ToolCallActivity | ToolResultActivity>;
 };
 
-export type AnswerApiSessionsSessionIdAnswersPostData = {
+export type GetSessionActivityResponse = GetSessionActivityResponses[keyof GetSessionActivityResponses];
+
+export type CreateSessionAnswerData = {
     body: ApprovalReply;
     path: {
         /**
@@ -5207,21 +6670,23 @@ export type AnswerApiSessionsSessionIdAnswersPostData = {
     url: '/api/sessions/{session_id}/answers';
 };
 
-export type AnswerApiSessionsSessionIdAnswersPostErrors = {
+export type CreateSessionAnswerErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type AnswerApiSessionsSessionIdAnswersPostError = AnswerApiSessionsSessionIdAnswersPostErrors[keyof AnswerApiSessionsSessionIdAnswersPostErrors];
+export type CreateSessionAnswerError = CreateSessionAnswerErrors[keyof CreateSessionAnswerErrors];
 
-export type AnswerApiSessionsSessionIdAnswersPostResponses = {
+export type CreateSessionAnswerResponses = {
     /**
      * Successful Response
      */
-    202: unknown;
+    202: TurnView;
 };
+
+export type CreateSessionAnswerResponse = CreateSessionAnswerResponses[keyof CreateSessionAnswerResponses];
 
 export type GetBrowserData = {
     body?: never;
@@ -5376,7 +6841,7 @@ export type SessionDebugTraceApiSessionsSessionIdDebugTraceGetResponses = {
     200: unknown;
 };
 
-export type EffectsApiSessionsSessionIdEffectsGetData = {
+export type ListSessionEffectsData = {
     body?: never;
     path: {
         /**
@@ -5388,21 +6853,25 @@ export type EffectsApiSessionsSessionIdEffectsGetData = {
     url: '/api/sessions/{session_id}/effects';
 };
 
-export type EffectsApiSessionsSessionIdEffectsGetErrors = {
+export type ListSessionEffectsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EffectsApiSessionsSessionIdEffectsGetError = EffectsApiSessionsSessionIdEffectsGetErrors[keyof EffectsApiSessionsSessionIdEffectsGetErrors];
+export type ListSessionEffectsError = ListSessionEffectsErrors[keyof ListSessionEffectsErrors];
 
-export type EffectsApiSessionsSessionIdEffectsGetResponses = {
+export type ListSessionEffectsResponses = {
     /**
+     * Response Listsessioneffects
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<PendingEffect>;
 };
+
+export type ListSessionEffectsResponse = ListSessionEffectsResponses[keyof ListSessionEffectsResponses];
 
 export type EventsApiSessionsSessionIdEventsGetData = {
     body?: never;
@@ -5549,7 +7018,7 @@ export type DownloadApiSessionsSessionIdFilePreviewKindResourceIdDownloadGetResp
     200: unknown;
 };
 
-export type FilesApiSessionsSessionIdFilesGetData = {
+export type ListSessionFilesData = {
     body?: never;
     path: {
         /**
@@ -5561,21 +7030,25 @@ export type FilesApiSessionsSessionIdFilesGetData = {
     url: '/api/sessions/{session_id}/files';
 };
 
-export type FilesApiSessionsSessionIdFilesGetErrors = {
+export type ListSessionFilesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type FilesApiSessionsSessionIdFilesGetError = FilesApiSessionsSessionIdFilesGetErrors[keyof FilesApiSessionsSessionIdFilesGetErrors];
+export type ListSessionFilesError = ListSessionFilesErrors[keyof ListSessionFilesErrors];
 
-export type FilesApiSessionsSessionIdFilesGetResponses = {
+export type ListSessionFilesResponses = {
     /**
+     * Response Listsessionfiles
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<SessionFile>;
 };
+
+export type ListSessionFilesResponse = ListSessionFilesResponses[keyof ListSessionFilesResponses];
 
 export type AttachSessionLinkData = {
     body: LinkInput;
@@ -5641,7 +7114,7 @@ export type RemoveSessionLinkResponses = {
 
 export type RemoveSessionLinkResponse = RemoveSessionLinkResponses[keyof RemoveSessionLinkResponses];
 
-export type MessagesApiSessionsSessionIdMessagesGetData = {
+export type ListSessionMessagesData = {
     body?: never;
     path: {
         /**
@@ -5658,23 +7131,27 @@ export type MessagesApiSessionsSessionIdMessagesGetData = {
     url: '/api/sessions/{session_id}/messages';
 };
 
-export type MessagesApiSessionsSessionIdMessagesGetErrors = {
+export type ListSessionMessagesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type MessagesApiSessionsSessionIdMessagesGetError = MessagesApiSessionsSessionIdMessagesGetErrors[keyof MessagesApiSessionsSessionIdMessagesGetErrors];
+export type ListSessionMessagesError = ListSessionMessagesErrors[keyof ListSessionMessagesErrors];
 
-export type MessagesApiSessionsSessionIdMessagesGetResponses = {
+export type ListSessionMessagesResponses = {
     /**
+     * Response Listsessionmessages
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<SessionMessage>;
 };
 
-export type SendApiSessionsSessionIdMessagesPostData = {
+export type ListSessionMessagesResponse = ListSessionMessagesResponses[keyof ListSessionMessagesResponses];
+
+export type CreateSessionMessageData = {
     body: NewMessage;
     path: {
         /**
@@ -5686,21 +7163,23 @@ export type SendApiSessionsSessionIdMessagesPostData = {
     url: '/api/sessions/{session_id}/messages';
 };
 
-export type SendApiSessionsSessionIdMessagesPostErrors = {
+export type CreateSessionMessageErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SendApiSessionsSessionIdMessagesPostError = SendApiSessionsSessionIdMessagesPostErrors[keyof SendApiSessionsSessionIdMessagesPostErrors];
+export type CreateSessionMessageError = CreateSessionMessageErrors[keyof CreateSessionMessageErrors];
 
-export type SendApiSessionsSessionIdMessagesPostResponses = {
+export type CreateSessionMessageResponses = {
     /**
      * Successful Response
      */
-    202: unknown;
+    202: TurnView;
 };
+
+export type CreateSessionMessageResponse = CreateSessionMessageResponses[keyof CreateSessionMessageResponses];
 
 export type MessageSourceApiSessionsSessionIdMessagesMessageIdSourceGetData = {
     body?: never;
@@ -5734,7 +7213,7 @@ export type MessageSourceApiSessionsSessionIdMessagesMessageIdSourceGetResponses
     200: unknown;
 };
 
-export type PlanApiSessionsSessionIdPlanGetData = {
+export type GetSessionPlanData = {
     body?: never;
     path: {
         /**
@@ -5746,23 +7225,27 @@ export type PlanApiSessionsSessionIdPlanGetData = {
     url: '/api/sessions/{session_id}/plan';
 };
 
-export type PlanApiSessionsSessionIdPlanGetErrors = {
+export type GetSessionPlanErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlanApiSessionsSessionIdPlanGetError = PlanApiSessionsSessionIdPlanGetErrors[keyof PlanApiSessionsSessionIdPlanGetErrors];
+export type GetSessionPlanError = GetSessionPlanErrors[keyof GetSessionPlanErrors];
 
-export type PlanApiSessionsSessionIdPlanGetResponses = {
+export type GetSessionPlanResponses = {
     /**
+     * Response Getsessionplan
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<PlanStep>;
 };
 
-export type ProgressApiSessionsSessionIdProgressTurnIdGetData = {
+export type GetSessionPlanResponse = GetSessionPlanResponses[keyof GetSessionPlanResponses];
+
+export type GetTurnProgressData = {
     body?: never;
     path: {
         /**
@@ -5783,23 +7266,25 @@ export type ProgressApiSessionsSessionIdProgressTurnIdGetData = {
     url: '/api/sessions/{session_id}/progress/{turn_id}';
 };
 
-export type ProgressApiSessionsSessionIdProgressTurnIdGetErrors = {
+export type GetTurnProgressErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ProgressApiSessionsSessionIdProgressTurnIdGetError = ProgressApiSessionsSessionIdProgressTurnIdGetErrors[keyof ProgressApiSessionsSessionIdProgressTurnIdGetErrors];
+export type GetTurnProgressError = GetTurnProgressErrors[keyof GetTurnProgressErrors];
 
-export type ProgressApiSessionsSessionIdProgressTurnIdGetResponses = {
+export type GetTurnProgressResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: TurnWorkProgress;
 };
 
-export type ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetData = {
+export type GetTurnProgressResponse = GetTurnProgressResponses[keyof GetTurnProgressResponses];
+
+export type GetTurnActionData = {
     body?: never;
     path: {
         /**
@@ -5824,21 +7309,23 @@ export type ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetData
     url: '/api/sessions/{session_id}/progress/{turn_id}/actions/{action_id}';
 };
 
-export type ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetErrors = {
+export type GetTurnActionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetError = ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetErrors[keyof ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetErrors];
+export type GetTurnActionError = GetTurnActionErrors[keyof GetTurnActionErrors];
 
-export type ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetResponses = {
+export type GetTurnActionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: WorkActionDetail;
 };
+
+export type GetTurnActionResponse = GetTurnActionResponses[keyof GetTurnActionResponses];
 
 export type GetPullRequestData = {
     body?: never;
@@ -5925,7 +7412,7 @@ export type MarkSessionReadResponses = {
 
 export type MarkSessionReadResponse = MarkSessionReadResponses[keyof MarkSessionReadResponses];
 
-export type RestoreSessionApiSessionsSessionIdRestorePostData = {
+export type RestoreSessionData = {
     body?: never;
     path: {
         /**
@@ -5937,23 +7424,25 @@ export type RestoreSessionApiSessionsSessionIdRestorePostData = {
     url: '/api/sessions/{session_id}/restore';
 };
 
-export type RestoreSessionApiSessionsSessionIdRestorePostErrors = {
+export type RestoreSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RestoreSessionApiSessionsSessionIdRestorePostError = RestoreSessionApiSessionsSessionIdRestorePostErrors[keyof RestoreSessionApiSessionsSessionIdRestorePostErrors];
+export type RestoreSessionError = RestoreSessionErrors[keyof RestoreSessionErrors];
 
-export type RestoreSessionApiSessionsSessionIdRestorePostResponses = {
+export type RestoreSessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionRestoreResult;
 };
 
-export type RetrySlackDeliveryApiSessionsSessionIdSlackDeliveryRetryPostData = {
+export type RestoreSessionResponse = RestoreSessionResponses[keyof RestoreSessionResponses];
+
+export type RetrySlackDeliveryData = {
     body?: never;
     path: {
         /**
@@ -5965,23 +7454,25 @@ export type RetrySlackDeliveryApiSessionsSessionIdSlackDeliveryRetryPostData = {
     url: '/api/sessions/{session_id}/slack-delivery/retry';
 };
 
-export type RetrySlackDeliveryApiSessionsSessionIdSlackDeliveryRetryPostErrors = {
+export type RetrySlackDeliveryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RetrySlackDeliveryApiSessionsSessionIdSlackDeliveryRetryPostError = RetrySlackDeliveryApiSessionsSessionIdSlackDeliveryRetryPostErrors[keyof RetrySlackDeliveryApiSessionsSessionIdSlackDeliveryRetryPostErrors];
+export type RetrySlackDeliveryError = RetrySlackDeliveryErrors[keyof RetrySlackDeliveryErrors];
 
-export type RetrySlackDeliveryApiSessionsSessionIdSlackDeliveryRetryPostResponses = {
+export type RetrySlackDeliveryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SlackDeliveryRetry;
 };
 
-export type StopApiSessionsSessionIdStopPostData = {
+export type RetrySlackDeliveryResponse = RetrySlackDeliveryResponses[keyof RetrySlackDeliveryResponses];
+
+export type StopSessionData = {
     body?: never;
     path: {
         /**
@@ -5993,21 +7484,23 @@ export type StopApiSessionsSessionIdStopPostData = {
     url: '/api/sessions/{session_id}/stop';
 };
 
-export type StopApiSessionsSessionIdStopPostErrors = {
+export type StopSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type StopApiSessionsSessionIdStopPostError = StopApiSessionsSessionIdStopPostErrors[keyof StopApiSessionsSessionIdStopPostErrors];
+export type StopSessionError = StopSessionErrors[keyof StopSessionErrors];
 
-export type StopApiSessionsSessionIdStopPostResponses = {
+export type StopSessionResponses = {
     /**
      * Successful Response
      */
-    202: unknown;
+    202: SessionStopResult;
 };
+
+export type StopSessionResponse = StopSessionResponses[keyof StopSessionResponses];
 
 export type GetSubagentData = {
     body?: never;
@@ -6882,7 +8375,7 @@ export type EditUserApiSettingsUsersIdentityPatchResponses = {
     200: unknown;
 };
 
-export type InvocableSkillsApiSkillsGetData = {
+export type ListInvocableSkillsData = {
     body?: never;
     path?: never;
     query?: {
@@ -6906,21 +8399,23 @@ export type InvocableSkillsApiSkillsGetData = {
     url: '/api/skills';
 };
 
-export type InvocableSkillsApiSkillsGetErrors = {
+export type ListInvocableSkillsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type InvocableSkillsApiSkillsGetError = InvocableSkillsApiSkillsGetErrors[keyof InvocableSkillsApiSkillsGetErrors];
+export type ListInvocableSkillsError = ListInvocableSkillsErrors[keyof ListInvocableSkillsErrors];
 
-export type InvocableSkillsApiSkillsGetResponses = {
+export type ListInvocableSkillsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: InvocableSkillPage;
 };
+
+export type ListInvocableSkillsResponse = ListInvocableSkillsResponses[keyof ListInvocableSkillsResponses];
 
 export type ReportApiSpendGetData = {
     body?: never;
@@ -7053,7 +8548,7 @@ export type ControlSwarmResponses = {
 
 export type ControlSwarmResponse = ControlSwarmResponses[keyof ControlSwarmResponses];
 
-export type CancelQueuedApiTurnsTurnIdDeleteData = {
+export type CancelQueuedTurnData = {
     body?: never;
     path: {
         /**
@@ -7065,23 +8560,25 @@ export type CancelQueuedApiTurnsTurnIdDeleteData = {
     url: '/api/turns/{turn_id}';
 };
 
-export type CancelQueuedApiTurnsTurnIdDeleteErrors = {
+export type CancelQueuedTurnErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CancelQueuedApiTurnsTurnIdDeleteError = CancelQueuedApiTurnsTurnIdDeleteErrors[keyof CancelQueuedApiTurnsTurnIdDeleteErrors];
+export type CancelQueuedTurnError = CancelQueuedTurnErrors[keyof CancelQueuedTurnErrors];
 
-export type CancelQueuedApiTurnsTurnIdDeleteResponses = {
+export type CancelQueuedTurnResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: QueuedTurnCancelResult;
 };
 
-export type EditQueuedApiTurnsTurnIdPatchData = {
+export type CancelQueuedTurnResponse = CancelQueuedTurnResponses[keyof CancelQueuedTurnResponses];
+
+export type UpdateQueuedTurnData = {
     body: QueuedEdit;
     path: {
         /**
@@ -7093,23 +8590,25 @@ export type EditQueuedApiTurnsTurnIdPatchData = {
     url: '/api/turns/{turn_id}';
 };
 
-export type EditQueuedApiTurnsTurnIdPatchErrors = {
+export type UpdateQueuedTurnErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditQueuedApiTurnsTurnIdPatchError = EditQueuedApiTurnsTurnIdPatchErrors[keyof EditQueuedApiTurnsTurnIdPatchErrors];
+export type UpdateQueuedTurnError = UpdateQueuedTurnErrors[keyof UpdateQueuedTurnErrors];
 
-export type EditQueuedApiTurnsTurnIdPatchResponses = {
+export type UpdateQueuedTurnResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: QueuedTurnUpdateResult;
 };
 
-export type SteerQueuedApiTurnsTurnIdSteerPostData = {
+export type UpdateQueuedTurnResponse = UpdateQueuedTurnResponses[keyof UpdateQueuedTurnResponses];
+
+export type SteerQueuedTurnData = {
     body?: never;
     path: {
         /**
@@ -7121,21 +8620,23 @@ export type SteerQueuedApiTurnsTurnIdSteerPostData = {
     url: '/api/turns/{turn_id}/steer';
 };
 
-export type SteerQueuedApiTurnsTurnIdSteerPostErrors = {
+export type SteerQueuedTurnErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SteerQueuedApiTurnsTurnIdSteerPostError = SteerQueuedApiTurnsTurnIdSteerPostErrors[keyof SteerQueuedApiTurnsTurnIdSteerPostErrors];
+export type SteerQueuedTurnError = SteerQueuedTurnErrors[keyof SteerQueuedTurnErrors];
 
-export type SteerQueuedApiTurnsTurnIdSteerPostResponses = {
+export type SteerQueuedTurnResponses = {
     /**
      * Successful Response
      */
-    202: unknown;
+    202: TurnView;
 };
+
+export type SteerQueuedTurnResponse = SteerQueuedTurnResponses[keyof SteerQueuedTurnResponses];
 
 export type UploadFileData = {
     body: Blob | File;
@@ -7287,19 +8788,21 @@ export type InferBrokerNativeV1RoutePostResponses = {
     200: unknown;
 };
 
-export type HealthHealthGetData = {
+export type GetHealthData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/health';
 };
 
-export type HealthHealthGetResponses = {
+export type GetHealthResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: HealthStatus;
 };
+
+export type GetHealthResponse = GetHealthResponses[keyof GetHealthResponses];
 
 export type DefaultWebhookHooksAutomationsIdentityPostData = {
     body?: never;
