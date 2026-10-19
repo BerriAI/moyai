@@ -1,14 +1,14 @@
 /** Presentation of the SDK's root-only stream. Saved messages remain authoritative. */
-export type LiveEvent = {
-  type: string; run_id?: string; step?: number; index?: number; text?: string
-  phase?: "commentary" | "final_answer" | null
-  id?: string; name?: string; content?: string | null; arguments?: unknown; data?: unknown; failed?: boolean
-  created_at?: string
-}
+import type { LiveEvent as LiveEventFrame, TextEvent } from "./generated/api"
+
+/** One server frame; activity rows also record when the browser received them. */
+export type LiveEvent = LiveEventFrame & { created_at?: string }
+/** Tool and capability frames, which the activity panel keeps. */
+export type ActivityEvent = Extract<LiveEvent, { type: "tool_call" | "tool_result" | "capability" }>
 export type LiveTranscript = {
   turnId: string; offset: number; step: number | null
-  rounds: { step: number; parts: Record<number, string>; phases?: Record<number, LiveEvent["phase"]>; created_at?: string }[]
-  activity: LiveEvent[]; action: string; finished: boolean
+  rounds: { step: number; parts: Record<number, string>; phases?: Record<number, TextEvent["phase"] | undefined>; created_at?: string }[]
+  activity: ActivityEvent[]; action: string; finished: boolean
 }
 export const emptyLiveTranscript = (turnId = ""): LiveTranscript => ({
   turnId, offset: -1, step: null, rounds: [], activity: [], action: "", finished: false,
@@ -66,10 +66,10 @@ export function liveFinalAnswer(state: LiveTranscript): string {
   return state.rounds.flatMap(round => Object.entries(round.parts).sort(([a], [b]) => Number(a) - Number(b))
     .filter(([index]) => round.phases?.[Number(index)] === "final_answer").map(([, text]) => text)).join("\n\n")
 }
-export function mergeActivity(saved: LiveEvent[], live: LiveEvent[]): LiveEvent[] {
+export function mergeActivity(saved: ActivityEvent[], live: ActivityEvent[]): ActivityEvent[] {
   const seen = new Set<string>()
   return [...saved, ...live].filter(item => {
-    const key = item.id ? `${item.type}:${item.id}` : JSON.stringify(item)
+    const key = item.type !== "capability" && item.id ? `${item.type}:${item.id}` : JSON.stringify(item)
     if (seen.has(key)) return false
     seen.add(key); return true
   })

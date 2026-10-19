@@ -4,11 +4,12 @@ import json
 import re
 import secrets
 import time
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, ValidationError
 
 from .connector_errors import ConnectorError
 from .github import MANIFEST_PERMISSIONS, supports_permissions
@@ -20,6 +21,54 @@ class ExistingApp(BaseModel):
     model_config = ConfigDict(extra='forbid')
     app_id: int = Field(gt=0)
     private_key: SecretStr = Field(min_length=100, max_length=20000)
+
+
+class GitHubOrganization(BaseModel):
+    organization: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9-]{0,38}$')
+
+
+class GitHubRepositoryIds(BaseModel):
+    repository_ids: list[Annotated[StrictInt, Field(gt=0)]] = Field(min_length=1, max_length=1000)
+
+
+class GitHubSetupResponse(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class GitHubSetupRedirect(GitHubSetupResponse):
+    """Continue setup on GitHub or the registration page (absolute GitHub or relative URL)."""
+    url: str
+
+
+class GitHubSetupConnected(GitHubSetupResponse):
+    connected: Literal[True]
+
+
+class GitHubRepositoryOption(GitHubSetupResponse):
+    id: int
+    full_name: str
+
+
+class GitHubConnectionRefresh(GitHubSetupResponse):
+    connected: Literal[True]
+    repositories: list[GitHubRepositoryOption]
+
+
+class GitHubRepositoryChoices(GitHubSetupResponse):
+    repositories: list[GitHubRepositoryOption]
+    selected_ids: list[int]
+    installation_url: str
+
+
+class GitHubRepositorySelection(GitHubSetupResponse):
+    repositories: list[GitHubRepositoryOption]
+
+
+def json_body(model: type[BaseModel], *, required: bool = True) -> dict[str, Any]:
+    """Document a body the handler parses itself, keeping its size limit and friendly 422 text."""
+    return {'requestBody': {'required': required, 'content': {'application/json': {
+        'schema': model.model_json_schema(ref_template='#/components/schemas/{model}'),
+    }}}}
 
 
 def routes(connectors, security, store, settings):
@@ -49,8 +98,9 @@ def routes(connectors, security, store, settings):
         slug = github.app_config()['slug']
         return 'https://github.com/apps/' + slug + '/installations/new?' + urlencode({'state': state_for(sid, 'github')})
 
-    @router.post('/api/connections/github/app')
-    async def existing_app(request: Request):
+    @router.post('/api/connections/github/app', operation_id='connectExistingGitHubApp',
+                 openapi_extra=json_body(ExistingApp))
+    async def existing_app(request: Request) -> GitHubSetupRedirect:
         sid = security.require(request, mutation=True, admin=True)
         raw = await request.body()
         if len(raw) > 24000:
@@ -74,30 +124,29 @@ def routes(connectors, security, store, settings):
             github.save_app(config)
             connectors.expire_approvals('github')
             connectors.audit('github', 'Verified existing organization GitHub App; repository access awaits installation')
-            return {'url': install_url(sid)}
+            return GitHubSetupRedirect(url=install_url(sid))
 
-    @router.post('/api/connections/github/oauth')
-    async def start(request: Request):
+    @router.post('/api/connections/github/oauth', operation_id='startGitHubConnection',
+                 openapi_extra=json_body(GitHubOrganization, required=False))
+    async def start(request: Request) -> GitHubSetupConnected | GitHubSetupRedirect:
+        """Without a registered App, ``organization`` is required to register one."""
         sid = security.require(request, mutation=True, admin=True)
         if github.app_config():
             if github.saved_credentials():
                 await github.refresh_connection()
-                return {'connected': True}
-            return {'url': install_url(sid)}
+                return GitHubSetupConnected(connected=True)
+            return GitHubSetupRedirect(url=install_url(sid))
         try:
-            args = json.loads(await request.body() or b'{}')
-            owner = args.get('organization', '')
-        except (ValueError, AttributeError):
+            owner = GitHubOrganization.model_validate_json(await request.body() or b'{}').organization
+        except ValidationError:
             raise HTTPException(422, 'Enter your GitHub organization.') from None
-        if not isinstance(owner, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}', owner):
-            raise HTTPException(422, 'Enter your GitHub organization.')
         organization = await github.request('GET', '/orgs/' + owner)
         if not positive_id(organization.get('id')) or organization.get('type') != 'Organization' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}', organization.get('login', '')):
             raise ConnectorError('GitHub did not confirm the organization.')
         state = state_for(sid, 'github_app')
         store.execute('INSERT INTO github_registration VALUES(?,?,?)',
                       (digest(state), organization['id'], organization['login']))
-        return {'url': '/auth/github/register?' + urlencode({'state': state})}
+        return GitHubSetupRedirect(url='/auth/github/register?' + urlencode({'state': state}))
 
     def registration_owner(state):
         rows = store.rows('SELECT * FROM github_registration WHERE state_hash=?', (digest(state),))
@@ -105,32 +154,31 @@ def routes(connectors, security, store, settings):
             raise HTTPException(400, 'Start GitHub registration again from Connections.')
         return rows[0]
 
-    @router.post('/api/connections/github/refresh')
-    async def refresh(request: Request):
+    @router.post('/api/connections/github/refresh', operation_id='refreshGitHubConnection')
+    async def refresh(request: Request) -> GitHubConnectionRefresh:
         security.require(request, mutation=True, admin=True)
         await github.refresh_connection()
-        return {'connected': True, 'repositories': github.repository_options()}
+        return GitHubConnectionRefresh(connected=True, repositories=github.repository_options())
 
-    @router.get('/api/connections/github/repositories')
-    async def repositories(request: Request):
+    @router.get('/api/connections/github/repositories', operation_id='listGitHubRepositories')
+    async def repositories(request: Request) -> GitHubRepositoryChoices:
         security.require(request, admin=True)
         current = await github.ensure_connection()
         discovered = await github.discover_repositories(current['installation_id'])
         options = {r['id']: r for r in github.repository_options(discovered)}
         options.update({r['id']: r for r in github.repository_options(current)})
-        return {'repositories': sorted(options.values(), key=lambda r: r['full_name'].lower()),
-                'selected_ids': github.connected_ids(current),
-                'installation_url': f"https://github.com/apps/{github.app_config()['slug']}/installations/{current['installation_id']}"}
+        return GitHubRepositoryChoices(
+            repositories=sorted(options.values(), key=lambda r: r['full_name'].lower()),
+            selected_ids=github.connected_ids(current),
+            installation_url=f"https://github.com/apps/{github.app_config()['slug']}/installations/{current['installation_id']}")
 
-    @router.post('/api/connections/github/repositories')
-    async def select_repositories(request: Request):
+    @router.post('/api/connections/github/repositories', operation_id='selectGitHubRepositories',
+                 openapi_extra=json_body(GitHubRepositoryIds))
+    async def select_repositories(request: Request) -> GitHubRepositorySelection:
         security.require(request, mutation=True, admin=True)
         try:
-            raw = json.loads(await request.body())
-            ids = raw['repository_ids']
-            if not isinstance(ids, list) or not 1 <= len(ids) <= 1000 or not all(map(positive_id, ids)):
-                raise ValueError()
-        except (ValueError, KeyError, TypeError):
+            ids = GitHubRepositoryIds.model_validate_json(await request.body()).repository_ids
+        except ValidationError:
             raise HTTPException(422, 'Select at least one repository using its GitHub ID.') from None
         async with github.setup_lock:
             current = await github.ensure_connection()
@@ -150,7 +198,7 @@ def routes(connectors, security, store, settings):
             store.execute("UPDATE connections SET label=? WHERE provider='github'", (label,))
             connectors.record_check('github', 'healthy')
             connectors.audit('github', 'Updated selected permanent repository IDs: ' + ', '.join(map(str, ids)))
-            return {'repositories': github.repository_options(updated)}
+            return GitHubRepositorySelection(repositories=github.repository_options(updated))
 
     @router.get('/auth/github/register')
     async def registration(request: Request, state: str = ''):

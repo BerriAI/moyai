@@ -27,6 +27,8 @@ from .analytics_service import report as analytics_report
 from .contracts import PreparedTurn, RunScope
 from .general_preferences import GeneralPreferences, general_preferences, preference_document
 from .models import Connection, Turn, User, now
+from .product_auth import ProductUserDirectory, user_directory
+from .product_secrets import CredentialInventory
 from .pull_requests import PullRequestService
 from .security import password_hash
 from .settings_models import SettingAutomation, SettingAutomationRun, SettingSecret, SettingSkill
@@ -446,8 +448,14 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             await db.delete(await resource(db, SettingSkill, identity, user))
         return SettingsDeleted(deleted=True)
 
+    # Product mode answers these settings routes from the product services, so
+    # each path has one handler and one documented contract for both modes.
     @router.get("/secrets", operation_id="listSettingsSecrets")
-    async def secrets(user: User = Depends(actor)) -> SettingsSecretList:
+    async def secrets(
+        request: Request, run_id: str = Query("", description="Product mode only."), user: User = Depends(actor),
+    ) -> SettingsSecretList | CredentialInventory:
+        if runtime.product_secrets is not None:
+            return await runtime.product_secrets.settings_inventory(request, run_id)
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(SettingSecret).where(accessible(SettingSecret, user)).order_by(
                 SettingSecret.name,
@@ -459,7 +467,9 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             })
 
     @router.post("/secrets", status_code=201, operation_id="createSettingsSecret")
-    async def create_secret(body: SecretInput, user: User = Depends(actor)) -> SettingsSecret:
+    async def create_secret(body: SecretInput, request: Request, user: User = Depends(actor)) -> SettingsSecret:
+        if runtime.product_secrets is not None:
+            await runtime.product_secrets.reject_settings_mutation(request)
         key = scope_key(body.scope, user)
         try:
             async with runtime.database.sessions.begin() as db:
@@ -473,7 +483,9 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             raise HTTPException(409, "A secret with this name already exists in that scope.") from None
 
     @router.patch("/secrets/{identity}", operation_id="updateSettingsSecret")
-    async def edit_secret(identity: str, body: SecretEdit, user: User = Depends(actor)) -> SettingsSecret:
+    async def edit_secret(identity: str, body: SecretEdit, request: Request, user: User = Depends(actor)) -> SettingsSecret:
+        if runtime.product_secrets is not None:
+            await runtime.product_secrets.reject_settings_mutation(request)
         key = scope_key(body.scope, user) if body.scope is not None else None
         try:
             async with runtime.database.sessions.begin() as db:
@@ -494,7 +506,9 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             raise HTTPException(409, "A secret with this name already exists in that scope.") from None
 
     @router.delete("/secrets/{identity}", operation_id="deleteSettingsSecret")
-    async def delete_secret(identity: str, user: User = Depends(actor)) -> SettingsDeleted:
+    async def delete_secret(identity: str, request: Request, user: User = Depends(actor)) -> SettingsDeleted:
+        if runtime.product_secrets is not None:
+            await runtime.product_secrets.reject_settings_mutation(request)
         async with runtime.database.sessions.begin() as db:
             await lock_actor(db, user)
             await db.delete(await resource(db, SettingSecret, identity, user))
@@ -543,7 +557,11 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         return SettingsDeleted(deleted=True)
 
     @router.get("/users", operation_id="listSettingsUsers")
-    async def users(user: User = Depends(actor)) -> SettingsAccountList:
+    async def users(user: User = Depends(actor)) -> SettingsAccountList | ProductUserDirectory:
+        if runtime.product is not None:
+            if user.role != "admin":
+                raise HTTPException(403, "An organization administrator must perform this action.")
+            return await user_directory(runtime)
         admin(user)
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(User).order_by(User.username))
@@ -553,6 +571,8 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
 
     @router.post("/users", status_code=201, operation_id="createSettingsUser")
     async def create_user(body: UserInput, user: User = Depends(actor)) -> SettingsAccount:
+        if runtime.product is not None:
+            raise HTTPException(409, "Manage this account through organization sign-in and product roles.")
         admin(user)
         encoded = await asyncio.to_thread(password_hash, body.password.get_secret_value())
         try:
@@ -568,6 +588,8 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
 
     @router.patch("/users/{identity}", operation_id="updateSettingsUser")
     async def edit_user(identity: str, body: UserEdit, request: Request, user: User = Depends(actor)) -> SettingsAccount:
+        if runtime.product is not None:
+            raise HTTPException(409, "Manage this account through organization sign-in and product roles.")
         result = await change_user(runtime, user, identity, body)
         # A self-edit intentionally revokes this cookie. Its authorized result
         # contains only user metadata and no post-commit external read.
@@ -576,6 +598,8 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
 
     @router.delete("/users/{identity}", operation_id="deleteSettingsUser")
     async def delete_user(identity: str, request: Request, user: User = Depends(actor)) -> SettingsAccount:
+        if runtime.product is not None:
+            raise HTTPException(409, "Manage this account through organization sign-in and product roles.")
         # Preserve FK-backed audit history while revoking every existing session.
         result = await change_user(runtime, user, identity, UserEdit(enabled=False))
         request.state.settings_self_auth_change = identity == user.id

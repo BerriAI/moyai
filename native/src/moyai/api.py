@@ -31,6 +31,7 @@ from .api_views import (
     EffectResolveResult,
     HealthStatus,
     InvocableSkillPage,
+    LiveEvent,
     LoginResult,
     LogoutResult,
     Me,
@@ -121,6 +122,10 @@ class ConnectionInput(BaseModel):
 
 SAVED_ACTIVITY = TypeAdapter(list[SavedActivity])
 SESSION_MESSAGES = TypeAdapter(list[SessionMessage])
+
+
+class EventStream(StreamingResponse):
+    media_type = "text/event-stream"
 
 
 def session_view(session: Session) -> dict[str, Any]:
@@ -845,7 +850,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         )
         return TurnView.model_validate(turn_view(resumed))
 
-    @app.get("/api/sessions/{session_id}/events")
+    @app.get(
+        "/api/sessions/{session_id}/events", operation_id="streamSessionEvents", response_class=EventStream,
+        responses={200: {"model": LiveEvent, "description": "Server-sent events; each data frame is one LiveEvent."}},
+    )
     async def events(
         request: Request, session_id: str, turn_id: str, offset: int = 0,
         user: User = Depends(actor),

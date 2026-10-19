@@ -11,8 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
-import { api, ApiError, csrfToken, setCsrf } from "./api"
-import { getMe, listPullRequestStatuses, listSessionFolders, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
+import { ApiError, csrfToken, setCsrf } from "./api"
+import { getMe, listPullRequestStatuses, startGoogleSignIn, listSessionFolders, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
 import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, getSessionActivity, getSessionPlan, listConnections, listSessionMessages, listSessions, loginWithPassword, logout, resolveEffect, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending, type PlanStep, type SessionDetail, type SessionEffect } from "./generated/api"
 import { listHistorySessions, searchHistory, type HistorySessionList, type SourcedHistorySession } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
@@ -35,7 +35,7 @@ import { FilesPanel, OutputPanel } from "./output"
 import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
 import type { ActionSelection, OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
-import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
+import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type ActivityEvent, type LiveEvent } from "./live-transcript"
 import { TurnProgress, toolLabel } from "./turn-progress"
 import { ActionPanel } from "./action-panel"
 import { useWorkProgress } from "./use-work-progress"
@@ -58,7 +58,7 @@ type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" |
 type Connection = ConnectionView
 /** A loaded session detail, or the optimistic view of a just-created conversation. */
 type View = Partial<Omit<SessionDetail, "session" | "turns" | "messages">> & { session: Session; turns: Turn[]; messages?: Message[] | null }
-type Activity = LiveEvent
+type Activity = ActivityEvent
 function metadataText(value: { [key: string]: unknown } | undefined, key: string): string | undefined {
   const item = value?.[key]
   return typeof item === "string" ? item : undefined
@@ -416,7 +416,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
     {!config && !error && <p role="status">Loading sign-in options…</p>}
     {config?.google_enabled && <Button variant="outline" disabled={busy} onClick={async () => {
       setBusy(true); setError("")
-      try { const result = await api<{ url: string }>("/auth/google/start", "POST", { return_to: "/" }); navigateAuth(result.url) }
+      try { const { data: result } = await startGoogleSignIn({ body: { return_to: "/" } }); navigateAuth(result.url) }
       catch (reason) { setError(String(reason)); setBusy(false) }
     }}>Continue with Google</Button>}
     {config?.password_enabled && <form className="login-password" onSubmit={async event => {
@@ -1068,9 +1068,7 @@ function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelec
 }
 
 function ActivityRow({ item }: { item: Activity }) {
-  if (item.type === "agent_finished") return null
-  if (item.type === "text_start") return <div className="activity-text">{item.text}</div>
-  return <details className="activity-row"><summary>{item.type === "tool_result" ? "Finished" : item.type === "tool_call" ? "Using" : "Updated"} {item.name?.replaceAll("_", " ")}</summary><pre>{typeof item.content === "string" ? item.content : JSON.stringify(item.arguments ?? item.data ?? {}, null, 2)}</pre></details>
+  return <details className="activity-row"><summary>{item.type === "tool_result" ? "Finished" : item.type === "tool_call" ? "Using" : "Updated"} {item.name?.replaceAll("_", " ")}</summary><pre>{item.type === "tool_result" ? item.content ?? "{}" : JSON.stringify((item.type === "tool_call" ? item.arguments : item.data) ?? {}, null, 2)}</pre></details>
 }
 
 function EffectReview({ effect, onDone }: { effect: SessionEffect; onDone: () => Promise<void> }) {

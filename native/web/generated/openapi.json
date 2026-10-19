@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "AgentFinishedEvent": {
+        "properties": {
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "agent_finished",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "run_id"
+        ],
+        "title": "AgentFinishedEvent",
+        "type": "object"
+      },
       "AnalyticsCapabilities": {
         "properties": {
           "pr_analytics": {
@@ -5112,6 +5131,31 @@
         "title": "BrowserTabs",
         "type": "object"
       },
+      "CapabilityUpdateEvent": {
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "const": "capability",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "name",
+          "data"
+        ],
+        "title": "CapabilityUpdateEvent",
+        "type": "object"
+      },
       "ComputerCommand": {
         "properties": {
           "action": {
@@ -6576,6 +6620,119 @@
         "title": "GeneralPreferences",
         "type": "object"
       },
+      "GitHubConnectionRefresh": {
+        "properties": {
+          "connected": {
+            "const": true,
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/GitHubRepositoryOption"
+            },
+            "title": "Repositories",
+            "type": "array"
+          }
+        },
+        "required": [
+          "connected",
+          "repositories"
+        ],
+        "title": "GitHubConnectionRefresh",
+        "type": "object"
+      },
+      "GitHubRepositoryChoices": {
+        "properties": {
+          "installation_url": {
+            "title": "Installation Url",
+            "type": "string"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/GitHubRepositoryOption"
+            },
+            "title": "Repositories",
+            "type": "array"
+          },
+          "selected_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Selected Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repositories",
+          "selected_ids",
+          "installation_url"
+        ],
+        "title": "GitHubRepositoryChoices",
+        "type": "object"
+      },
+      "GitHubRepositoryOption": {
+        "properties": {
+          "full_name": {
+            "title": "Full Name",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "full_name"
+        ],
+        "title": "GitHubRepositoryOption",
+        "type": "object"
+      },
+      "GitHubRepositorySelection": {
+        "properties": {
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/GitHubRepositoryOption"
+            },
+            "title": "Repositories",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repositories"
+        ],
+        "title": "GitHubRepositorySelection",
+        "type": "object"
+      },
+      "GitHubSetupConnected": {
+        "properties": {
+          "connected": {
+            "const": true,
+            "title": "Connected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "connected"
+        ],
+        "title": "GitHubSetupConnected",
+        "type": "object"
+      },
+      "GitHubSetupRedirect": {
+        "description": "Continue setup on GitHub or the registration page (absolute GitHub or relative URL).",
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "GitHubSetupRedirect",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -7689,6 +7846,43 @@
         "title": "LinkInput",
         "type": "object"
       },
+      "LiveEvent": {
+        "description": "One `data:` frame of GET /api/sessions/{id}/events (see presentation.public_event).",
+        "discriminator": {
+          "mapping": {
+            "agent_finished": "#/components/schemas/AgentFinishedEvent",
+            "capability": "#/components/schemas/CapabilityUpdateEvent",
+            "response_start": "#/components/schemas/ResponseStartEvent",
+            "text_delta": "#/components/schemas/TextEvent",
+            "text_end": "#/components/schemas/TextEvent",
+            "text_start": "#/components/schemas/TextEvent",
+            "tool_call": "#/components/schemas/ToolCallActivity",
+            "tool_result": "#/components/schemas/ToolResultActivity"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ResponseStartEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TextEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolCallActivity"
+          },
+          {
+            "$ref": "#/components/schemas/ToolResultActivity"
+          },
+          {
+            "$ref": "#/components/schemas/AgentFinishedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/CapabilityUpdateEvent"
+          }
+        ],
+        "title": "LiveEvent"
+      },
       "Login": {
         "properties": {
           "password": {
@@ -8753,6 +8947,73 @@
           "part_kind"
         ],
         "title": "PendingToolCall",
+        "type": "object"
+      },
+      "PersonalSlackOAuthStart": {
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "PersonalSlackOAuthStart",
+        "type": "object"
+      },
+      "PersonalSlackStatus": {
+        "description": "The signed-in owner's personal Slack connection; grant material never leaves the server.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "effective_source": {
+            "enum": [
+              "personal",
+              "organization",
+              "none"
+            ],
+            "title": "Effective Source",
+            "type": "string"
+          },
+          "health": {
+            "enum": [
+              "healthy",
+              "error",
+              "absent"
+            ],
+            "title": "Health",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "limitation": {
+            "title": "Limitation",
+            "type": "string"
+          },
+          "oauth_configured": {
+            "title": "Oauth Configured",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "available",
+          "connected",
+          "oauth_configured",
+          "label",
+          "health",
+          "effective_source",
+          "limitation"
+        ],
+        "title": "PersonalSlackStatus",
         "type": "object"
       },
       "PlanStep": {
@@ -10207,6 +10468,111 @@
         "title": "ProductContinuationResult",
         "type": "object"
       },
+      "ProductDirectoryCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "read": {
+            "title": "Read",
+            "type": "boolean"
+          },
+          "roles": {
+            "title": "Roles",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read",
+          "create",
+          "update",
+          "delete",
+          "roles"
+        ],
+        "title": "ProductDirectoryCapabilities",
+        "type": "object"
+      },
+      "ProductDirectoryUser": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "has_signed_in": {
+            "title": "Has Signed In",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "enabled",
+          "email",
+          "name",
+          "has_signed_in",
+          "last_seen",
+          "role",
+          "revision"
+        ],
+        "title": "ProductDirectoryUser",
+        "type": "object"
+      },
       "ProductEnvironment": {
         "properties": {
           "active_build": {
@@ -11238,6 +11604,39 @@
         "title": "ProductMessagePage",
         "type": "object"
       },
+      "ProductRoleActivity": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "previous_role": {
+            "title": "Previous Role",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "previous_role",
+          "role",
+          "actor",
+          "created_at"
+        ],
+        "title": "ProductRoleActivity",
+        "type": "object"
+      },
       "ProductSaveSecret": {
         "additionalProperties": false,
         "properties": {
@@ -11821,6 +12220,53 @@
           "revision"
         ],
         "title": "ProductUpdateSecret",
+        "type": "object"
+      },
+      "ProductUserDirectory": {
+        "properties": {
+          "activity": {
+            "items": {
+              "$ref": "#/components/schemas/ProductRoleActivity"
+            },
+            "title": "Activity",
+            "type": "array"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ProductDirectoryCapabilities"
+          },
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "source": {
+            "const": "product",
+            "title": "Source",
+            "type": "string"
+          },
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/ProductDirectoryUser"
+            },
+            "title": "Users",
+            "type": "array"
+          }
+        },
+        "required": [
+          "users",
+          "activity",
+          "domains",
+          "source",
+          "capabilities",
+          "note"
+        ],
+        "title": "ProductUserDirectory",
         "type": "object"
       },
       "ProductUserRoleResult": {
@@ -13625,6 +14071,30 @@
           }
         },
         "title": "Resolve",
+        "type": "object"
+      },
+      "ResponseStartEvent": {
+        "properties": {
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          },
+          "type": {
+            "const": "response_start",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "run_id",
+          "step"
+        ],
+        "title": "ResponseStartEvent",
         "type": "object"
       },
       "Revision": {
@@ -16004,6 +16474,20 @@
         "title": "SettingsSkillList",
         "type": "object"
       },
+      "SignInRedirect": {
+        "description": "Where the browser goes next: Google's authorization page, or a local path.",
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "SignInRedirect",
+        "type": "object"
+      },
       "SignInStart": {
         "properties": {
           "return_to": {
@@ -16808,6 +17292,50 @@
           "payload"
         ],
         "title": "TestEvent",
+        "type": "object"
+      },
+      "TextEvent": {
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "commentary",
+                  "final_answer"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "text_start",
+              "text_delta",
+              "text_end"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "index",
+          "text",
+          "phase"
+        ],
+        "title": "TextEvent",
         "type": "object"
       },
       "Timing": {
@@ -18221,7 +18749,7 @@
     },
     "/api/auth/google/start": {
       "post": {
-        "operationId": "start_api_auth_google_start_post",
+        "operationId": "startGoogleSignIn",
         "requestBody": {
           "content": {
             "application/json": {
@@ -18236,7 +18764,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SignInRedirect"
+                }
               }
             },
             "description": "Successful Response"
@@ -18353,12 +18883,45 @@
     },
     "/api/connections/github/app": {
       "post": {
-        "operationId": "existing_app_api_connections_github_app_post",
+        "operationId": "connectExistingGitHubApp",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app_id": {
+                    "exclusiveMinimum": 0.0,
+                    "title": "App Id",
+                    "type": "integer"
+                  },
+                  "private_key": {
+                    "format": "password",
+                    "maxLength": 20000,
+                    "minLength": 100,
+                    "title": "Private Key",
+                    "type": "string",
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "app_id",
+                  "private_key"
+                ],
+                "title": "ExistingApp",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubSetupRedirect"
+                }
               }
             },
             "description": "Successful Response"
@@ -18369,12 +18932,44 @@
     },
     "/api/connections/github/oauth": {
       "post": {
-        "operationId": "start_api_connections_github_oauth_post",
+        "description": "Without a registered App, ``organization`` is required to register one.",
+        "operationId": "startGitHubConnection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "organization": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$",
+                    "title": "Organization",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "organization"
+                ],
+                "title": "GitHubOrganization",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/GitHubSetupConnected"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GitHubSetupRedirect"
+                    }
+                  ],
+                  "title": "Response Startgithubconnection"
+                }
               }
             },
             "description": "Successful Response"
@@ -18385,12 +18980,14 @@
     },
     "/api/connections/github/refresh": {
       "post": {
-        "operationId": "refresh_api_connections_github_refresh_post",
+        "operationId": "refreshGitHubConnection",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubConnectionRefresh"
+                }
               }
             },
             "description": "Successful Response"
@@ -18401,12 +18998,14 @@
     },
     "/api/connections/github/repositories": {
       "get": {
-        "operationId": "repositories_api_connections_github_repositories_get",
+        "operationId": "listGitHubRepositories",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubRepositoryChoices"
+                }
               }
             },
             "description": "Successful Response"
@@ -18415,12 +19014,40 @@
         "summary": "Repositories"
       },
       "post": {
-        "operationId": "select_repositories_api_connections_github_repositories_post",
+        "operationId": "selectGitHubRepositories",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "repository_ids": {
+                    "items": {
+                      "exclusiveMinimum": 0.0,
+                      "type": "integer"
+                    },
+                    "maxItems": 1000,
+                    "minItems": 1,
+                    "title": "Repository Ids",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "repository_ids"
+                ],
+                "title": "GitHubRepositoryIds",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubRepositorySelection"
+                }
               }
             },
             "description": "Successful Response"
@@ -18431,12 +19058,14 @@
     },
     "/api/connections/slack/personal": {
       "delete": {
-        "operationId": "disconnect_api_connections_slack_personal_delete",
+        "operationId": "disconnectPersonalSlack",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalSlackStatus"
+                }
               }
             },
             "description": "Successful Response"
@@ -18445,12 +19074,14 @@
         "summary": "Disconnect"
       },
       "get": {
-        "operationId": "status_api_connections_slack_personal_get",
+        "operationId": "getPersonalSlack",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalSlackStatus"
+                }
               }
             },
             "description": "Successful Response"
@@ -18461,12 +19092,14 @@
     },
     "/api/connections/slack/personal/check": {
       "post": {
-        "operationId": "check_api_connections_slack_personal_check_post",
+        "operationId": "checkPersonalSlack",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalSlackStatus"
+                }
               }
             },
             "description": "Successful Response"
@@ -18477,12 +19110,14 @@
     },
     "/api/connections/slack/personal/oauth": {
       "post": {
-        "operationId": "start_api_connections_slack_personal_oauth_post",
+        "operationId": "startPersonalSlackOAuth",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalSlackOAuthStart"
+                }
               }
             },
             "description": "Successful Response"
@@ -22104,7 +22739,7 @@
     },
     "/api/sessions/{session_id}/events": {
       "get": {
-        "operationId": "events_api_sessions__session_id__events_get",
+        "operationId": "streamSessionEvents",
         "parameters": [
           {
             "in": "path",
@@ -22138,11 +22773,14 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveEvent",
+                  "type": "string"
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "Server-sent events; each data frame is one LiveEvent."
           },
           "422": {
             "content": {
@@ -24083,16 +24721,48 @@
     "/api/settings/secrets": {
       "get": {
         "operationId": "listSettingsSecrets",
+        "parameters": [
+          {
+            "description": "Product mode only.",
+            "in": "query",
+            "name": "run_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "Product mode only.",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SettingsSecretList"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SettingsSecretList"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CredentialInventory"
+                    }
+                  ],
+                  "title": "Response Listsettingssecrets"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Secrets",
@@ -24578,7 +25248,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SettingsAccountList"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SettingsAccountList"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ProductUserDirectory"
+                    }
+                  ],
+                  "title": "Response Listsettingsusers"
                 }
               }
             },

@@ -689,6 +689,8 @@ def routes(service: ProductConnections) -> APIRouter:
             router.add_api_route(
                 route.path, offloaded_github(route.endpoint, route.path), methods=list(route.methods or {"GET"}),
                 name=route.name, status_code=route.status_code,
+                response_model=route.response_model, operation_id=route.operation_id,
+                openapi_extra=route.openapi_extra, include_in_schema=route.include_in_schema,
             )
     personal_callback = connectors.personal_slack.routes(router)
 

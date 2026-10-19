@@ -10,9 +10,9 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { api, ApiError } from "./api"
+import { ApiError } from "./api"
 import {
-  continueProductSession, getHistorySession, getMe, getProductSessionFileContent, listProductContinuationFiles,
+  continueProductSession, getHistorySession, getMe, listConnections, getProductSessionFileContent, listProductContinuationFiles,
   listProductSessionChildren, listProductSessionFiles, listProductSessionMessages, previewProductContinuation,
   type ContinuationRecoveryFile, type HistoryAttachment, type ProductContinuationResult, type ProductFile,
 } from "./generated/api"
@@ -327,8 +327,6 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
   </section>
 }
 
-type ContinuationConnection = { id: string; name: string; kind: string; enabled: boolean }
-
 function ContinuationComposer({ sessionId, active, revision, onContinued, onDenied }: {
   sessionId: string; active: boolean; revision: number
   onContinued: (session: HistorySessionRef) => void; onDenied: (error: Error) => void
@@ -343,9 +341,10 @@ function ContinuationComposer({ sessionId, active, revision, onContinued, onDeni
   const review = useJson(endpoint, active && open, revision + attempt,
     async signal => (await previewProductContinuation({ path: { run_id: sessionId }, signal })).data)
   const me = useJson("/me", active && open, revision, async signal => (await getMe({ signal })).data)
-  const connectionsPath = review.data ? `/connections?shared=${review.data.visibility === "shared"}` : null
+  const shared = review.data?.visibility === "shared"
+  const connectionsPath = review.data ? `/connections?shared=${shared}` : null
   const connections = useJson(connectionsPath, active && open, revision + attempt,
-    signal => api<ContinuationConnection[]>(connectionsPath ?? "", "GET", undefined, signal))
+    async signal => (await listConnections({ query: { shared }, signal })).data)
   const data = review.data
   useEffect(() => {
     mounted.current = true

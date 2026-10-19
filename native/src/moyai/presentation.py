@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.run import AgentRunResultEvent
 
+from .api_views import LiveEvent
 from .commentary import text_phase
 from .live_events import PUBLIC_UPDATE_PREFIXES, ResponseStart
 
@@ -30,6 +31,12 @@ def private_tool(name: str | None) -> bool:
 
 
 def public_event(event: Any) -> dict[str, Any] | None:
+    """A LiveEvent frame (api_views.LiveEvent, the documented contract), or None if private."""
+    item = _public_event(event)
+    return None if item is None else LiveEvent.model_validate(item).model_dump()
+
+
+def _public_event(event: Any) -> dict[str, Any] | None:
     if isinstance(event, ResponseStart):
         return {"type": "response_start", "run_id": event.run_id, "step": event.step}
     if isinstance(event, PartStartEvent):

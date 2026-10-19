@@ -5,9 +5,9 @@ These are the source of the generated frontend types (native/web/generated/api).
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel
 
 from .general_preferences import GeneralPreferences
 
@@ -280,6 +280,38 @@ class ToolResultActivity(ApiView):
 
 
 SavedActivity = Annotated[ToolCallActivity | ToolResultActivity, Field(discriminator="type")]
+
+
+class ResponseStartEvent(ApiView):
+    type: Literal["response_start"]
+    run_id: str
+    step: int
+
+
+class TextEvent(ApiView):
+    type: Literal["text_start", "text_delta", "text_end"]
+    index: int
+    text: str
+    phase: Literal["commentary", "final_answer"] | None
+
+
+class AgentFinishedEvent(ApiView):
+    type: Literal["agent_finished"]
+    run_id: str
+
+
+class CapabilityUpdateEvent(ApiView):
+    type: Literal["capability"]
+    name: str
+    # asdict() of a public pydantic-ai capability update; shapes vary by capability.
+    data: dict[str, Any]
+
+
+class LiveEvent(RootModel[Annotated[
+    ResponseStartEvent | TextEvent | ToolCallActivity | ToolResultActivity | AgentFinishedEvent | CapabilityUpdateEvent,
+    Field(discriminator="type"),
+]]):
+    """One `data:` frame of GET /api/sessions/{id}/events (see presentation.public_event)."""
 
 
 class SessionDetail(ApiView):

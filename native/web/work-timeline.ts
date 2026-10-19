@@ -136,7 +136,7 @@ export function mergeProgress(saved: ProgressMessage[], live: ProgressMessage[])
 export function liveTools(live?: LiveTranscript): ToolProgress[] {
   const calls = new Map<string, ToolProgress>()
   for (const event of live?.activity ?? []) {
-    if (!event.id || !event.name || !["tool_call", "tool_result"].includes(event.type)) continue
+    if (event.type === "capability" || !event.id || !event.name) continue
     const previous = calls.get(event.id)
     const at = event.created_at ?? previous?.created_at ?? ""
     calls.set(event.id, {

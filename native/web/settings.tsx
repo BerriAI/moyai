@@ -7,12 +7,16 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { api, ApiError, csrfToken } from "./api"
+import { ApiError, csrfToken } from "./api"
 import { createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
-import { updateProductUserRole } from "./generated/api"
+import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "./generated/api"
+import {
+  type PersonalSlackStatus, checkPersonalSlack, connectExistingGitHubApp, disconnectPersonalSlack, getMe, getPersonalSlack, listGitHubRepositories,
+  selectGitHubRepositories, startGitHubConnection, startPersonalSlackOAuth,
+} from "./generated/api"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
 import type { GeneralPreferences } from "./general-preferences"
@@ -43,7 +47,15 @@ type CredentialDraft = {
 }
 /** UI view of a saved note: editing stays disabled for a truncated preview, and a confirmed repository ID is kept on resave. */
 type ProductMemoryNote = ProductMemoryNoteData & { repository_id?: number | null; truncated?: boolean }
-type Account = { id: string; username: string; display_name: string; role: string; enabled: boolean; email?: string; revision?: number }
+/** A row of either directory: native accounts, or product members (who also carry email and role revision). */
+type Account = Pick<SettingsAccount, "id" | "username" | "display_name" | "role" | "enabled"> & Partial<Pick<ProductDirectoryUser, "email" | "revision">>
+type UserDirectory = { users: Account[]; product: boolean; note?: string } & Collection
+async function loadUsers(signal: AbortSignal): Promise<UserDirectory> {
+  const { data } = await listSettingsUsers({ signal })
+  return "source" in data
+    ? { users: data.users, product: true, note: data.note, capabilities: data.capabilities }
+    : { users: data.users, product: false, capabilities: data.capabilities }
+}
 type Connection = ConnectionView
 const loadConnections = async (signal: AbortSignal) => (await listConnections({ signal })).data
 const loadSessions = async (signal: AbortSignal) => (await listSessions({ signal })).data
@@ -55,10 +67,6 @@ function connectionInput(values: FormValues, policy: ConnectionPolicy): Connecti
     name: String(values.name ?? ""), kind, credential: String(values.credential ?? ""),
     shared: values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy,
   }
-}
-type PersonalSlack = {
-  available: boolean; connected: boolean; oauth_configured: boolean; label?: string; health?: string
-  effective_source?: string; limitation?: string; description?: string
 }
 type Option = { value: string; label: string }
 type Resource<T> = { data: T | undefined; loading: boolean; error: string; refresh: () => void }
@@ -89,8 +97,8 @@ const errorText = (error: unknown) => error instanceof ApiError && error.status 
 
 const scopeInput = (value: FormValues[string]) => value === "shared" ? "shared" as const : "personal" as const
 
-/** `path` keys the read; `load` (a generated SDK call) replaces the legacy untyped GET of `path`. */
-function useResource<T>(path: string | null, load?: (signal: AbortSignal) => Promise<T>): Resource<T> {
+/** `path` keys the read (and its cache); `load` performs it with a generated SDK call. */
+function useResource<T>(path: string | null, load: (signal: AbortSignal) => Promise<T>): Resource<T> {
   const loader = useRef(load)
   loader.current = load
   const [revision, setRevision] = useState(0)
@@ -99,7 +107,7 @@ function useResource<T>(path: string | null, load?: (signal: AbortSignal) => Pro
     if (!path) { setState({ path, loading: false, error: "" }); return }
     const controller = new AbortController()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true, error: "" }))
-    void (loader.current ? loader.current(controller.signal) : api<T>(path, "GET", undefined, controller.signal)).then(
+    void loader.current(controller.signal).then(
       data => { if (!controller.signal.aborted) setState({ path, data, loading: false, error: "" }) },
       error => { if (!controller.signal.aborted) setState({ path, loading: false, error: errorText(error) }) },
     )
@@ -250,7 +258,12 @@ function SkillsPage({ user }: { user: SettingsUser }) {
 }
 
 function SecretsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource("/settings/secrets", signal => listSettingsSecrets({ signal }).then(({ data }) => data))
+  const resource = useResource("/settings/secrets", async signal => {
+    const { data } = await listSettingsSecrets({ signal })
+    // Product mode answers with the credential inventory; that mode renders ProductSecretsPage.
+    if ("providers" in data) throw new Error("Saved secrets are managed under Credentials.")
+    return data
+  })
   const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
   const [editor, setEditor] = useState<SettingsSecret | "new" | null>(null), [remove, setRemove] = useState<SettingsSecret | null>(null)
   return <LoadState resource={resource}>{data => {
@@ -731,11 +744,11 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
   return <div className="ns-fields">
     {connection.id === "github" ? <>
       <p>Connect the organization’s GitHub App. Its installation controls which repositories can be selected.</p>
-      {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect(() => api("/connections/github/oauth", "POST"))}>Continue with GitHub</Button> : <>
+      {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect(() => startGitHubConnection().then(({ data }) => data))}>Continue with GitHub</Button> : <>
         <form className="ns-fields" onSubmit={event => { event.preventDefault(); let destination: string; void mutation.run(async () => {
           const selected = file.current?.files?.[0]
           if (!selected || selected.size > 20_000) throw new Error("Choose a PEM private key file under 20 KB.")
-          const result = await api<{ url: string }>("/connections/github/app", "POST", { app_id: Number(appId), private_key: await selected.text() })
+          const { data: result } = await connectExistingGitHubApp({ body: { app_id: Number(appId), private_key: await selected.text() } })
           if (file.current) file.current.value = ""
           destination = productRedirect(result.url, location.origin)
         }, () => window.location.assign(destination)) }}>
@@ -744,7 +757,7 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
           <div className="ns-field"><label>PEM private key<Input ref={file} type="file" accept=".pem" required disabled={mutation.busy} /></label><p className="ns-field-hint">Choose the key from GitHub App settings. It is never displayed here or placed in chat.</p></div>
           <Button type="submit" disabled={mutation.busy}>Verify app and continue</Button>
         </form>
-        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect(() => api("/connections/github/oauth", "POST", { organization: organization.trim() })) }}>
+        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect(() => startGitHubConnection({ body: { organization: organization.trim() } }).then(({ data }) => data)) }}>
           <h3>Register an organization App</h3><div className="ns-field"><label>GitHub organization<Input required maxLength={39} pattern="[A-Za-z0-9][A-Za-z0-9-]{0,38}" disabled={mutation.busy} value={organization} onChange={event => setOrganization(event.target.value)} /></label></div>
           <Button type="submit" variant="outline" disabled={mutation.busy}>Continue to GitHub registration</Button>
         </form>
@@ -762,7 +775,7 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
   </div>
 }
 function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
-  const resource = useResource<{ repositories: { id: number; full_name: string }[]; selected_ids: number[]; installation_url: string }>("/connections/github/repositories")
+  const resource = useResource("/connections/github/repositories", signal => listGitHubRepositories({ signal }).then(({ data }) => data))
   const mutation = useMutation(), initialized = useRef(false)
   const [selected, setSelected] = useState<number[]>([]), [search, setSearch] = useState("")
   useEffect(() => { onBusyChange(mutation.busy); return () => onBusyChange(false) }, [mutation.busy, onBusyChange])
@@ -771,7 +784,7 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
     const rows = data.repositories.filter(row => contains(search, row.full_name))
     let installation: string | undefined
     try { installation = productRedirect(data.installation_url, location.origin) } catch {}
-    return <form onSubmit={event => { event.preventDefault(); void mutation.run(() => api("/connections/github/repositories", "POST", { repository_ids: selected }), onDone) }}>
+    return <form onSubmit={event => { event.preventDefault(); void mutation.run(() => selectGitHubRepositories({ body: { repository_ids: selected } }), onDone) }}>
       <p>Choose repositories by their permanent GitHub IDs. Renaming a repository keeps the connection and saved work.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} />
       <div className="ns-fields">{rows.map(repo => <label className="check-label" key={repo.id}><Checkbox checked={selected.includes(repo.id)} disabled={mutation.busy} onCheckedChange={checked => setSelected(previous => checked ? [...new Set([...previous, repo.id])] : previous.filter(id => id !== repo.id))} />{repo.full_name}</label>)}</div>
@@ -781,28 +794,28 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
     </form>
   }}</LoadState>
 }
-const personalSlackSources: Record<string, string> = { personal: "your personal Slack account", organization: "organization Slack connection", none: "no Slack connection" }
+const personalSlackSources: Record<PersonalSlackStatus["effective_source"], string> = { personal: "your personal Slack account", organization: "organization Slack connection", none: "no Slack connection" }
 function ProductPersonalSlack({ individual, heading = "Personal Slack" }: { individual: boolean; heading?: string }) {
-  const resource = useResource<PersonalSlack>("/connections/slack/personal")
+  const resource = useResource("/connections/slack/personal", signal => getPersonalSlack({ signal }).then(({ data }) => data))
   const mutation = useMutation(), [disconnect, setDisconnect] = useState(false)
   return <section className="ns-section"><h2>{heading}</h2><LoadState resource={resource}>{data => <>
     <p>{data.label || "No personal Slack account connected"} · {data.connected ? data.health === "healthy" ? "Connected" : "Needs attention" : "Not connected"}</p>
-    <p className="ns-muted">Effective read identity: {personalSlackSources[data.effective_source || ""] || "Unavailable"}. A configured personal account never silently falls back to organization credentials after a failure.</p>
+    <p className="ns-muted">Effective read identity: {personalSlackSources[data.effective_source]}. A configured personal account never silently falls back to organization credentials after a failure.</p>
     <p className="ns-notice">Personal Slack reads require a private web session. They are unavailable in shared chats, Slack threads, and automations.</p>
-    {data.description && <p>{data.description}</p>}{data.limitation && <p className="ns-muted">{data.limitation}</p>}
+    {data.limitation && <p className="ns-muted">{data.limitation}</p>}
     {!data.available && <p className="ns-muted">Use an individual workspace sign-in to own a personal Slack connection.</p>}
     {!data.oauth_configured && <p className="ns-muted">An administrator must configure Slack OAuth before connecting.</p>}
     <div className="ns-row-actions">
       <Button disabled={mutation.busy || !data.available || !data.oauth_configured} onClick={() => {
-        let result: { url: string }
-        void mutation.run(async () => { result = await api("/connections/slack/personal/oauth", "POST") }, () => window.location.assign(productRedirect(result.url, location.origin)))
+        let url: string
+        void mutation.run(async () => { url = (await startPersonalSlackOAuth()).data.url }, () => window.location.assign(productRedirect(url, location.origin)))
       }}>{data.connected ? "Reconnect Slack" : "Connect Slack"}</Button>
-      {data.connected && <><Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => api("/connections/slack/personal/check", "POST"), resource.refresh)}>Check connection</Button><Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button></>}
+      {data.connected && <><Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => checkPersonalSlack(), resource.refresh)}>Check connection</Button><Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button></>}
       {data.available && individual && <Button variant="outline" disabled={mutation.busy} onClick={() => { location.hash = "" }}>Start private web session</Button>}
     </div>
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
     {disconnect && <Confirm title="Disconnect personal Slack?" description="Future Slack reads can use the organization connection when available. Existing private sessions stay private. Only your personal connection is removed." label="Disconnect personal Slack"
-      onConfirm={async () => { await api("/connections/slack/personal", "DELETE"); resource.refresh() }} onClose={() => setDisconnect(false)} />}
+      onConfirm={async () => { await disconnectPersonalSlack(); resource.refresh() }} onClose={() => setDisconnect(false)} />}
   </>}</LoadState></section>
 }
 
@@ -876,11 +889,11 @@ function ConnectionsPage({ user }: { user: SettingsUser }) {
 }
 
 function UsersPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { users: Account[]; source?: string; note?: string }>("/settings/users")
+  const resource = useResource("/settings/users", loadUsers)
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [editor, setEditor] = useState<Account | "new" | null>(null), [remove, setRemove] = useState<Account | null>(null)
   return <LoadState resource={resource}>{data => {
-    const product = data.source === "product"
+    const product = data.product
     const rows = data.users.filter(row => contains(search, row.username, row.display_name, row.email) && (filter === "all" || (filter === "disabled" ? !row.enabled : row.role === filter)))
     return <><CapabilityNote {...data} />{data.note && <p className="ns-notice">{data.note}</p>}<Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
       filter={<Choice label="User role or access" value={filter} onChange={setFilter} options={[{ value: "all", label: "All members" }, { value: "admin", label: "Administrators" }, { value: "member", label: "Members" }, ...product ? [] : [{ value: "disabled", label: "Disabled" }]]} />}
@@ -923,7 +936,7 @@ function UsersPage({ user }: { user: SettingsUser }) {
 
 function AutomationEditor({ user, onClose, refresh }: { user: SettingsUser; onClose: () => void; refresh: () => void }) {
   const sessions = useResource("/sessions", loadSessions)
-  const models = useResource<{ models: string[]; default_model: string }>("/me")
+  const models = useResource("/me", signal => getMe({ signal }).then(({ data }) => data))
   const connections = useResource("/connections", loadConnections)
   if (sessions.error || models.error || connections.error || !sessions.data || !models.data || !connections.data) return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog"><DialogHeader><DialogTitle>New automation</DialogTitle><DialogDescription>Choose an active session and a model available to your account.</DialogDescription></DialogHeader>
     {sessions.error || models.error || connections.error ? <><p className="ns-error" role="alert">{sessions.error || models.error || connections.error}</p><Button variant="outline" onClick={() => { sessions.refresh(); models.refresh(); connections.refresh() }}>Try again</Button></> : <p role="status">Loading sessions and models…</p>}

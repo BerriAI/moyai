@@ -73,6 +73,24 @@ class ProductUserDirectory(BaseModel):
     note: str
 
 
+async def user_directory(runtime: Runtime) -> ProductUserDirectory:
+    """GET /api/settings/users in product mode; settings_api owns the route."""
+    product = runtime.product
+    assert product is not None
+    directory = await asyncio.to_thread(product.roles.directory)
+    return ProductUserDirectory.model_validate({
+        **directory,
+        "users": [{
+            **row, "id": row["email"], "username": row["email"],
+            "display_name": row["name"] or row["email"], "enabled": True,
+        } for row in directory["users"]],
+        "source": "product", "capabilities": {
+            "read": True, "create": False, "update": False, "delete": False, "roles": True,
+        },
+        "note": "Organization sign-in manages accounts. Roles are shared with existing Moyai.",
+    })
+
+
 async def password_login(runtime: Runtime, password: str, request: Request, response: Response):
     product = runtime.product
     assert product is not None
@@ -100,26 +118,6 @@ def routes(runtime: Runtime, actor) -> APIRouter:
     router = APIRouter()
     router.include_router(product.google.routes())
 
-    # These /api/settings/users routes shadow settings_api.py's (same path and
-    # method), which owns the documented contract. Hidden here so the OpenAPI
-    # document is not silently overwritten by whichever router mounts last.
-    @router.get("/api/settings/users", include_in_schema=False)
-    async def users(user: User = Depends(actor)) -> ProductUserDirectory:
-        if user.role != "admin":
-            raise HTTPException(403, "An organization administrator must perform this action.")
-        directory = await asyncio.to_thread(product.roles.directory)
-        return ProductUserDirectory.model_validate({
-            **directory,
-            "users": [{
-                **row, "id": row["email"], "username": row["email"],
-                "display_name": row["name"] or row["email"], "enabled": True,
-            } for row in directory["users"]],
-            "source": "product", "capabilities": {
-                "read": True, "create": False, "update": False, "delete": False, "roles": True,
-            },
-            "note": "Organization sign-in manages accounts. Roles are shared with existing Moyai.",
-        })
-
     @router.put("/api/settings/users/role", operation_id="updateProductUserRole")
     async def role(body: RoleEdit, request: Request, user: User = Depends(actor)) -> ProductUserRoleResult:
         if user.role != "admin":
@@ -132,11 +130,5 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             product.roles.change, RoleChange(**body.model_dump()), info,
         )
         return ProductUserRoleResult.model_validate(result)
-
-    @router.post("/api/settings/users", include_in_schema=False)
-    @router.patch("/api/settings/users/{identity}", include_in_schema=False)
-    @router.delete("/api/settings/users/{identity}", include_in_schema=False)
-    async def native_account_mutation(user: User = Depends(actor)):
-        raise HTTPException(409, "Manage this account through organization sign-in and product roles.")
 
     return router

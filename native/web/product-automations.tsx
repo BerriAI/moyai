@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { automationDefaultSchedule, automationEventFields, automationSetupNotes, automationSources, automationTriggers } from "./automation-helpers.js"
 import { automationHistoryMerge, automationRunStatus, automationTiming } from "./automation-helpers.js"
-import { api, ApiError, csrfToken } from "./api"
+import { ApiError, csrfToken } from "./api"
 import {
   configureProductAutomationWebhook, createProductAutomation, getMe, getProductAutomationPreview, getProductAutomationWebhook,
   listProductAutomationHistory, listProductAutomations, migrateProductAutomation, runProductAutomation, setProductAutomationState,
@@ -22,7 +22,7 @@ import {
   type AutomationTiming, type AutomationTrigger, type AutomationEvent, type ProductAutomation, type AutomationRunResult,
   type AutomationWebhookResult, type AutomationEnvironment, type AutomationConnection,
 } from "./product-automation-data"
-import { listOrganizationConnections } from "./generated/api"
+import { listOrganizationConnections, listProductEnvironments } from "./generated/api"
 import "./product-automations.css"
 
 const base = "/product/automations"
@@ -30,8 +30,8 @@ const timeLabel = (value: string) => Number.isFinite(Date.parse(value)) ? new Da
 const errorLabel = (reason: unknown) => reason instanceof ApiError && reason.status === 404
   ? "This automation service or saved definition is not available."
   : reason instanceof Error ? reason.message : "The request could not be completed."
-/** `path` identifies the resource; `load` fetches it (legacy `api<T>(path)` when omitted). */
-function useRead<T>(path: string | null, load?: (signal: AbortSignal) => Promise<T>) {
+/** `path` identifies the resource; `load` fetches it with a generated SDK call. */
+function useRead<T>(path: string | null, load: (signal: AbortSignal) => Promise<T>) {
   const loader = useRef(load); loader.current = load
   const [version, setVersion] = useState(0)
   const [state, setState] = useState<{ path: string | null; data?: T; loading: boolean; error: string }>({ path: null, loading: false, error: "" })
@@ -40,7 +40,7 @@ function useRead<T>(path: string | null, load?: (signal: AbortSignal) => Promise
     const controller = new AbortController()
     const requestAuth = csrfToken()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true, error: "" }))
-    void (loader.current ? loader.current(controller.signal) : api<T>(path, "GET", undefined, controller.signal)).then(data => {
+    void loader.current(controller.signal).then(data => {
       if (!controller.signal.aborted && csrfToken() === requestAuth) setState({ path, data, loading: false, error: "" })
     }, error => { if (!controller.signal.aborted && csrfToken() === requestAuth) setState({ path, loading: false, error: errorLabel(error) }) })
     return () => controller.abort()
@@ -257,7 +257,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
   const preview = useRead(id ? `${base}/${encodeURIComponent(id)}/preview` : null,
     signal => getProductAutomationPreview({ path: { identity: id! }, signal }).then(({ data }) => data))
   const models = useRead("/me", signal => getMe({ signal }).then(({ data }) => data))
-  const environments = useRead<AutomationEnvironment[]>(mode !== "review" ? "/product/environments" : null)
+  const environments = useRead(mode !== "review" ? "/product/environments" : null, signal => listProductEnvironments({ signal }).then(({ data }) => data))
   const connections = useRead<AutomationConnection[]>(mode !== "review" ? "/product/connections" : null, signal => listOrganizationConnections({ signal }).then(({ data }) => data))
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [historyVersion, setHistoryVersion] = useState(0)
   const [confirm, setConfirm] = useState<"migrate" | "enable" | "pause" | "run" | "retire" | null>(null)

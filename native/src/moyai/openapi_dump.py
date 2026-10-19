@@ -11,10 +11,14 @@ import sys
 import tempfile
 import warnings
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from cryptography.fernet import Fernet
+from fastapi import FastAPI
+from pydantic_settings import BaseSettings
 
 SYNTHETIC_PRODUCT = {
     "MOYAI_CORE": "pydantic", "MOYAI_PRODUCT_MODE": "existing", "MOYAI_RUNTIME_ROLE": "api",
@@ -36,7 +40,9 @@ SYNTHETIC_PRODUCT = {
 }
 
 
-def openapi_document() -> dict[str, Any]:
+@contextmanager
+def schema_app() -> Iterator[FastAPI]:
+    """The app as the frontend sees it: product mode with every optional router mounted."""
     from .api import create_app
     from .product_config import NATIVE_KEY_FORMAT, NATIVE_OBJECT_FORMAT, load_product_config
     from .runtime import Runtime
@@ -49,11 +55,15 @@ def openapi_document() -> dict[str, Any]:
             "MOYAI_NATIVE_KEY_FORMAT": NATIVE_KEY_FORMAT, "MOYAI_NATIVE_OBJECT_FORMAT": NATIVE_OBJECT_FORMAT,
             "DATA_DIR": data_dir,
         })
-        app = create_app(Runtime(Settings(_env_file=None), product_config=config), run_dispatcher=False)
-        with warnings.catch_warnings():
-            # Duplicate operation IDs are reported below as a hard failure.
-            warnings.simplefilter("ignore", UserWarning)
-            document = app.openapi()
+        settings = cast(Settings, cast(type[BaseSettings], Settings)(_env_file=None))
+        yield create_app(Runtime(settings, product_config=config), run_dispatcher=False)
+
+
+def openapi_document() -> dict[str, Any]:
+    with schema_app() as app, warnings.catch_warnings():
+        # Duplicate operation IDs are reported below as a hard failure.
+        warnings.simplefilter("ignore", UserWarning)
+        document = app.openapi()
     duplicates = [
         name for name, count in Counter(
             operation["operationId"] for item in document["paths"].values() for operation in item.values()

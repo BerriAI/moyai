@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import re
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from app.credentials import PROVIDERS, Credentials, Provider, Resolve, SaveSecret, UpdateSecret
 from app.db import database as source_database
@@ -378,7 +378,6 @@ class ProductSecrets:
         router = APIRouter(route_class=SecretRoute)
 
         @router.get("/api/credentials", operation_id="listCredentials")
-        @router.get("/api/settings/secrets", include_in_schema=False)
         async def inventory(request: Request, run_id: str = "") -> CredentialInventory:
             return CredentialInventory.model_validate(await self.inventory(await self.principal(request), run_id))
 
@@ -418,13 +417,13 @@ class ProductSecrets:
                 await self.execution.describe(await self.principal(request), identity),
             )
 
-        # Product-mode aliases of the standalone settings routes. The standalone
-        # settings_api owns their OpenAPI operations.
-        @router.post("/api/settings/secrets", include_in_schema=False)
-        @router.patch("/api/settings/secrets/{identity}", include_in_schema=False)
-        @router.delete("/api/settings/secrets/{identity}", include_in_schema=False)
-        async def native_secret_mutation(request: Request):
-            await self.principal(request, mutation=True)
-            raise HTTPException(409, "Use canonical credential routes to preserve scope and revision.")
-
         return router
+
+    async def settings_inventory(self, request: Request, run_id: str) -> CredentialInventory:
+        """GET /api/settings/secrets in product mode; settings_api owns the route."""
+        return CredentialInventory.model_validate(await self.inventory(await self.principal(request), run_id))
+
+    async def reject_settings_mutation(self, request: Request) -> NoReturn:
+        """Settings secret writes in product mode: canonical credential routes own scope and revision."""
+        await self.principal(request, mutation=True)
+        raise HTTPException(409, "Use canonical credential routes to preserve scope and revision.")

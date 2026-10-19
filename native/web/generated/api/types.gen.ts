@@ -5,6 +5,20 @@ export type ClientOptions = {
 };
 
 /**
+ * AgentFinishedEvent
+ */
+export type AgentFinishedEvent = {
+    /**
+     * Run Id
+     */
+    run_id: string;
+    /**
+     * Type
+     */
+    type: 'agent_finished';
+};
+
+/**
  * AnalyticsCapabilities
  */
 export type AnalyticsCapabilities = {
@@ -2695,6 +2709,26 @@ export type BrowserTabs = {
 };
 
 /**
+ * CapabilityUpdateEvent
+ */
+export type CapabilityUpdateEvent = {
+    /**
+     * Data
+     */
+    data: {
+        [key: string]: unknown;
+    };
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Type
+     */
+    type: 'capability';
+};
+
+/**
  * ComputerCommand
  */
 export type ComputerCommand = {
@@ -3606,6 +3640,84 @@ export type GeneralPreferencesOutput = {
 };
 
 /**
+ * GitHubConnectionRefresh
+ */
+export type GitHubConnectionRefresh = {
+    /**
+     * Connected
+     */
+    connected: true;
+    /**
+     * Repositories
+     */
+    repositories: Array<GitHubRepositoryOption>;
+};
+
+/**
+ * GitHubRepositoryChoices
+ */
+export type GitHubRepositoryChoices = {
+    /**
+     * Installation Url
+     */
+    installation_url: string;
+    /**
+     * Repositories
+     */
+    repositories: Array<GitHubRepositoryOption>;
+    /**
+     * Selected Ids
+     */
+    selected_ids: Array<number>;
+};
+
+/**
+ * GitHubRepositoryOption
+ */
+export type GitHubRepositoryOption = {
+    /**
+     * Full Name
+     */
+    full_name: string;
+    /**
+     * Id
+     */
+    id: number;
+};
+
+/**
+ * GitHubRepositorySelection
+ */
+export type GitHubRepositorySelection = {
+    /**
+     * Repositories
+     */
+    repositories: Array<GitHubRepositoryOption>;
+};
+
+/**
+ * GitHubSetupConnected
+ */
+export type GitHubSetupConnected = {
+    /**
+     * Connected
+     */
+    connected: true;
+};
+
+/**
+ * GitHubSetupRedirect
+ *
+ * Continue setup on GitHub or the registration page (absolute GitHub or relative URL).
+ */
+export type GitHubSetupRedirect = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
  * HTTPValidationError
  */
 export type HttpValidationError = {
@@ -4295,6 +4407,25 @@ export type LinkInput = {
 };
 
 /**
+ * LiveEvent
+ *
+ * One `data:` frame of GET /api/sessions/{id}/events (see presentation.public_event).
+ */
+export type LiveEvent = ({
+    type: 'response_start';
+} & ResponseStartEvent) | ({
+    type: 'text_delta' | 'text_end' | 'text_start';
+} & TextEvent) | ({
+    type: 'tool_call';
+} & ToolCallActivity) | ({
+    type: 'tool_result';
+} & ToolResultActivity) | ({
+    type: 'agent_finished';
+} & AgentFinishedEvent) | ({
+    type: 'capability';
+} & CapabilityUpdateEvent);
+
+/**
  * Login
  */
 export type Login = {
@@ -4885,6 +5016,52 @@ export type PendingToolCall = {
      * Tool Name
      */
     tool_name: string;
+};
+
+/**
+ * PersonalSlackOAuthStart
+ */
+export type PersonalSlackOAuthStart = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PersonalSlackStatus
+ *
+ * The signed-in owner's personal Slack connection; grant material never leaves the server.
+ */
+export type PersonalSlackStatus = {
+    /**
+     * Available
+     */
+    available: boolean;
+    /**
+     * Connected
+     */
+    connected: boolean;
+    /**
+     * Effective Source
+     */
+    effective_source: 'personal' | 'organization' | 'none';
+    /**
+     * Health
+     */
+    health: 'healthy' | 'error' | 'absent';
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Limitation
+     */
+    limitation: string;
+    /**
+     * Oauth Configured
+     */
+    oauth_configured: boolean;
 };
 
 /**
@@ -5760,6 +5937,78 @@ export type ProductContinuationResult = {
 };
 
 /**
+ * ProductDirectoryCapabilities
+ */
+export type ProductDirectoryCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Read
+     */
+    read: boolean;
+    /**
+     * Roles
+     */
+    roles: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * ProductDirectoryUser
+ */
+export type ProductDirectoryUser = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Email
+     */
+    email: string;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Has Signed In
+     */
+    has_signed_in: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Last Seen
+     */
+    last_seen: string | null;
+    /**
+     * Name
+     */
+    name: string | null;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Role
+     */
+    role: string;
+    /**
+     * Username
+     */
+    username: string;
+};
+
+/**
  * ProductEnvironment
  */
 export type ProductEnvironment = {
@@ -6377,6 +6626,32 @@ export type ProductMessagePage = {
 };
 
 /**
+ * ProductRoleActivity
+ */
+export type ProductRoleActivity = {
+    /**
+     * Actor
+     */
+    actor: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Email
+     */
+    email: string;
+    /**
+     * Previous Role
+     */
+    previous_role: string;
+    /**
+     * Role
+     */
+    role: string;
+};
+
+/**
  * ProductSaveSecret
  */
 export type ProductSaveSecret = {
@@ -6725,6 +7000,33 @@ export type ProductUpdateSecret = {
      * Value
      */
     value?: null;
+};
+
+/**
+ * ProductUserDirectory
+ */
+export type ProductUserDirectory = {
+    /**
+     * Activity
+     */
+    activity: Array<ProductRoleActivity>;
+    capabilities: ProductDirectoryCapabilities;
+    /**
+     * Domains
+     */
+    domains: Array<string>;
+    /**
+     * Note
+     */
+    note: string;
+    /**
+     * Source
+     */
+    source: 'product';
+    /**
+     * Users
+     */
+    users: Array<ProductDirectoryUser>;
 };
 
 /**
@@ -7564,6 +7866,24 @@ export type Resolve = {
      * Secret Id
      */
     secret_id?: string;
+};
+
+/**
+ * ResponseStartEvent
+ */
+export type ResponseStartEvent = {
+    /**
+     * Run Id
+     */
+    run_id: string;
+    /**
+     * Step
+     */
+    step: number;
+    /**
+     * Type
+     */
+    type: 'response_start';
 };
 
 /**
@@ -8965,6 +9285,18 @@ export type SettingsSkillList = {
 };
 
 /**
+ * SignInRedirect
+ *
+ * Where the browser goes next: Google's authorization page, or a local path.
+ */
+export type SignInRedirect = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
  * SignInStart
  */
 export type SignInStart = {
@@ -9477,6 +9809,28 @@ export type TestEvent = {
      * Provider
      */
     provider: string;
+};
+
+/**
+ * TextEvent
+ */
+export type TextEvent = {
+    /**
+     * Index
+     */
+    index: number;
+    /**
+     * Phase
+     */
+    phase: 'commentary' | 'final_answer' | null;
+    /**
+     * Text
+     */
+    text: string;
+    /**
+     * Type
+     */
+    type: 'text_start' | 'text_delta' | 'text_end';
 };
 
 /**
@@ -10500,28 +10854,30 @@ export type GetAuthConfigResponses = {
 
 export type GetAuthConfigResponse = GetAuthConfigResponses[keyof GetAuthConfigResponses];
 
-export type StartApiAuthGoogleStartPostData = {
+export type StartGoogleSignInData = {
     body: SignInStart;
     path?: never;
     query?: never;
     url: '/api/auth/google/start';
 };
 
-export type StartApiAuthGoogleStartPostErrors = {
+export type StartGoogleSignInErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type StartApiAuthGoogleStartPostError = StartApiAuthGoogleStartPostErrors[keyof StartApiAuthGoogleStartPostErrors];
+export type StartGoogleSignInError = StartGoogleSignInErrors[keyof StartGoogleSignInErrors];
 
-export type StartApiAuthGoogleStartPostResponses = {
+export type StartGoogleSignInResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SignInRedirect;
 };
+
+export type StartGoogleSignInResponse = StartGoogleSignInResponses[keyof StartGoogleSignInResponses];
 
 export type ListConnectionsData = {
     body?: never;
@@ -10584,131 +10940,179 @@ export type CreateConnectionResponses = {
 
 export type CreateConnectionResponse = CreateConnectionResponses[keyof CreateConnectionResponses];
 
-export type ExistingAppApiConnectionsGithubAppPostData = {
-    body?: never;
+export type ConnectExistingGitHubAppData = {
+    /**
+     * ExistingApp
+     */
+    body: {
+        /**
+         * App Id
+         */
+        app_id: number;
+        /**
+         * Private Key
+         */
+        private_key: string;
+    };
     path?: never;
     query?: never;
     url: '/api/connections/github/app';
 };
 
-export type ExistingAppApiConnectionsGithubAppPostResponses = {
+export type ConnectExistingGitHubAppResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: GitHubSetupRedirect;
 };
 
-export type StartApiConnectionsGithubOauthPostData = {
-    body?: never;
+export type ConnectExistingGitHubAppResponse = ConnectExistingGitHubAppResponses[keyof ConnectExistingGitHubAppResponses];
+
+export type StartGitHubConnectionData = {
+    /**
+     * GitHubOrganization
+     */
+    body?: {
+        /**
+         * Organization
+         */
+        organization: string;
+    };
     path?: never;
     query?: never;
     url: '/api/connections/github/oauth';
 };
 
-export type StartApiConnectionsGithubOauthPostResponses = {
+export type StartGitHubConnectionResponses = {
     /**
+     * Response Startgithubconnection
+     *
      * Successful Response
      */
-    200: unknown;
+    200: GitHubSetupConnected | GitHubSetupRedirect;
 };
 
-export type RefreshApiConnectionsGithubRefreshPostData = {
+export type StartGitHubConnectionResponse = StartGitHubConnectionResponses[keyof StartGitHubConnectionResponses];
+
+export type RefreshGitHubConnectionData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/connections/github/refresh';
 };
 
-export type RefreshApiConnectionsGithubRefreshPostResponses = {
+export type RefreshGitHubConnectionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: GitHubConnectionRefresh;
 };
 
-export type RepositoriesApiConnectionsGithubRepositoriesGetData = {
+export type RefreshGitHubConnectionResponse = RefreshGitHubConnectionResponses[keyof RefreshGitHubConnectionResponses];
+
+export type ListGitHubRepositoriesData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/connections/github/repositories';
 };
 
-export type RepositoriesApiConnectionsGithubRepositoriesGetResponses = {
+export type ListGitHubRepositoriesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: GitHubRepositoryChoices;
 };
 
-export type SelectRepositoriesApiConnectionsGithubRepositoriesPostData = {
-    body?: never;
+export type ListGitHubRepositoriesResponse = ListGitHubRepositoriesResponses[keyof ListGitHubRepositoriesResponses];
+
+export type SelectGitHubRepositoriesData = {
+    /**
+     * GitHubRepositoryIds
+     */
+    body: {
+        /**
+         * Repository Ids
+         */
+        repository_ids: Array<number>;
+    };
     path?: never;
     query?: never;
     url: '/api/connections/github/repositories';
 };
 
-export type SelectRepositoriesApiConnectionsGithubRepositoriesPostResponses = {
+export type SelectGitHubRepositoriesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: GitHubRepositorySelection;
 };
 
-export type DisconnectApiConnectionsSlackPersonalDeleteData = {
+export type SelectGitHubRepositoriesResponse = SelectGitHubRepositoriesResponses[keyof SelectGitHubRepositoriesResponses];
+
+export type DisconnectPersonalSlackData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/connections/slack/personal';
 };
 
-export type DisconnectApiConnectionsSlackPersonalDeleteResponses = {
+export type DisconnectPersonalSlackResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: PersonalSlackStatus;
 };
 
-export type StatusApiConnectionsSlackPersonalGetData = {
+export type DisconnectPersonalSlackResponse = DisconnectPersonalSlackResponses[keyof DisconnectPersonalSlackResponses];
+
+export type GetPersonalSlackData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/connections/slack/personal';
 };
 
-export type StatusApiConnectionsSlackPersonalGetResponses = {
+export type GetPersonalSlackResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: PersonalSlackStatus;
 };
 
-export type CheckApiConnectionsSlackPersonalCheckPostData = {
+export type GetPersonalSlackResponse = GetPersonalSlackResponses[keyof GetPersonalSlackResponses];
+
+export type CheckPersonalSlackData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/connections/slack/personal/check';
 };
 
-export type CheckApiConnectionsSlackPersonalCheckPostResponses = {
+export type CheckPersonalSlackResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: PersonalSlackStatus;
 };
 
-export type StartApiConnectionsSlackPersonalOauthPostData = {
+export type CheckPersonalSlackResponse = CheckPersonalSlackResponses[keyof CheckPersonalSlackResponses];
+
+export type StartPersonalSlackOAuthData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/connections/slack/personal/oauth';
 };
 
-export type StartApiConnectionsSlackPersonalOauthPostResponses = {
+export type StartPersonalSlackOAuthResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: PersonalSlackOAuthStart;
 };
+
+export type StartPersonalSlackOAuthResponse = StartPersonalSlackOAuthResponses[keyof StartPersonalSlackOAuthResponses];
 
 export type UpdateConnectionData = {
     body: ConnectionInputWritable;
@@ -13043,7 +13447,7 @@ export type ListSessionEffectsResponses = {
 
 export type ListSessionEffectsResponse = ListSessionEffectsResponses[keyof ListSessionEffectsResponses];
 
-export type EventsApiSessionsSessionIdEventsGetData = {
+export type StreamSessionEventsData = {
     body?: never;
     path: {
         /**
@@ -13064,21 +13468,23 @@ export type EventsApiSessionsSessionIdEventsGetData = {
     url: '/api/sessions/{session_id}/events';
 };
 
-export type EventsApiSessionsSessionIdEventsGetErrors = {
+export type StreamSessionEventsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EventsApiSessionsSessionIdEventsGetError = EventsApiSessionsSessionIdEventsGetErrors[keyof EventsApiSessionsSessionIdEventsGetErrors];
+export type StreamSessionEventsError = StreamSessionEventsErrors[keyof StreamSessionEventsErrors];
 
-export type EventsApiSessionsSessionIdEventsGetResponses = {
+export type StreamSessionEventsResponses = {
     /**
-     * Successful Response
+     * Server-sent events; each data frame is one LiveEvent.
      */
-    200: unknown;
+    200: LiveEvent;
 };
+
+export type StreamSessionEventsResponse = StreamSessionEventsResponses[keyof StreamSessionEventsResponses];
 
 export type GetSessionFilePreviewData = {
     body?: never;
@@ -14208,15 +14614,33 @@ export type GetSettingsPerformanceResponse = GetSettingsPerformanceResponses[key
 export type ListSettingsSecretsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Run Id
+         *
+         * Product mode only.
+         */
+        run_id?: string;
+    };
     url: '/api/settings/secrets';
 };
 
+export type ListSettingsSecretsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSettingsSecretsError = ListSettingsSecretsErrors[keyof ListSettingsSecretsErrors];
+
 export type ListSettingsSecretsResponses = {
     /**
+     * Response Listsettingssecrets
+     *
      * Successful Response
      */
-    200: SettingsSecretList;
+    200: SettingsSecretList | CredentialInventory;
 };
 
 export type ListSettingsSecretsResponse = ListSettingsSecretsResponses[keyof ListSettingsSecretsResponses];
@@ -14482,9 +14906,11 @@ export type ListSettingsUsersData = {
 
 export type ListSettingsUsersResponses = {
     /**
+     * Response Listsettingsusers
+     *
      * Successful Response
      */
-    200: SettingsAccountList;
+    200: SettingsAccountList | ProductUserDirectory;
 };
 
 export type ListSettingsUsersResponse = ListSettingsUsersResponses[keyof ListSettingsUsersResponses];
