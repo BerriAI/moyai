@@ -255,9 +255,6 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     if runtime.product_automations is not None:
         from .product_automations import routes as product_automation_routes
         app.include_router(product_automation_routes(runtime.product_automations))
-    if runtime.product_automation_events is not None:
-        from .product_automation_events import routes as product_event_routes
-        app.include_router(product_event_routes(runtime.product_automation_events))
     from .product_routes import routes as product_routes
     app.include_router(product_routes(runtime, actor))
     app.include_router(settings_routes(runtime, actor))
