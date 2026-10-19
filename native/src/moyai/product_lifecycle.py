@@ -71,12 +71,16 @@ class ProductRoleLifecycle:
         self.admission_busy = False
 
     @property
-    def healthy(self) -> bool:
+    def operational(self) -> bool:
         if not self.ready or self.failed or self.closing or self.quiescence.requested:
             return False
         if self.handoff is not None and not self.handoff.healthy:
             return False
         return self.broker is None or not self.broker.draining
+
+    @property
+    def healthy(self) -> bool:
+        return self.operational and (self.admission is None or not self.admission.sealed)
 
     def headers(self) -> dict[str, str]:
         product = self.runtime.product
@@ -206,10 +210,11 @@ class ProductRoleLifecycle:
     async def lifespan(self):
         product = self.runtime.product
         assert product is not None
-        async with AsyncExitStack() as stack:
-            from .fleet_admission import FleetAdmission
-            self.admission = FleetAdmission(self)
-            await self.admission.start()
+        from .fleet_admission import FleetAdmission
+        self.admission = FleetAdmission(self)
+        # Keep the startup gate until all partial role resources are cleaned up
+        # on failure; on success, release it only after readiness and watch exist.
+        async with self.admission.startup(), AsyncExitStack() as stack:
             async with asyncio.timeout(product.settings.temporal_startup_timeout_seconds):
                 await self.runtime.connect()
             if self.role == "worker":
@@ -239,6 +244,7 @@ class ProductRoleLifecycle:
             self.watch_task = asyncio.create_task(self.watch(), name="native-role-owner")
             stack.push_async_callback(self.close_watch)
             try:
+                await self.admission.complete_startup()
                 yield
             finally:
                 self.closing, self.ready = True, False

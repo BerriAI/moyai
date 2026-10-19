@@ -72,6 +72,24 @@ restarts from starting role pollers/background tasks. Existing instances observe
 the recorded request and drain cooperatively. A direct socket quiesce request
 cannot bypass that durable seal or change its request ID.
 
+Cold startup also holds a role-scoped shared advisory lock on its original
+canonical owner session. Sealing takes the matching exclusive transaction lock
+before locking the role row. After acquiring the startup gate, the process
+rereads admission; a delayed registration reply cannot authorize work after a
+seal. If that exact captured owner has not started role work, it records a
+zero-work drain receipt and exits. Otherwise the gate remains held through
+initialization and any partial-startup cleanup. A successful startup releases
+it only after role readiness and its watcher exist. Owner-session loss releases
+the gate and fences application writes through the existing ownership checks.
+
+The owner session performs only the nonblocking startup lock/unlock operations
+and its usual ownership checks; registry observations use separate pooled
+transactions. Metadata locks or pool exhaustion therefore do not queue registry
+queries ahead of health on the owner session. Metadata contention is retried
+without treating it as lost canonical ownership. This adds no connection pool
+or unaccounted dedicated connection. A controller must qualify the
+`startup_seal_fence` capability on participating roles.
+
 Active roles can self-register replacement process lifetimes against their bound
 service/build; normal recovery does not need a continuously running deployment
 controller. Registration checks both the canonical PostgreSQL owner PID and

@@ -82,7 +82,9 @@ class ProductQuiescence:
             admission.require_drain(request_id)
         if self.life.role == "worker" and (admission is None or not admission.sealed):
             raise ValueError("Worker retirement requires Temporal deployment drainage.")
-        if not self.life.healthy:
+        # A learned durable seal immediately removes HTTP readiness. The
+        # otherwise operational process must still be able to drain its work.
+        if not self.life.operational:
             raise ValueError("Only a ready process can begin planned quiescence.")
         # Admission and task registration run on the same loop without an await.
         self.request_id, self.state = request_id, "quiescing"

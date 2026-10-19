@@ -37,6 +37,11 @@ class FleetRegistry:
     def query(self, statement: LiteralString):
         return sql.SQL(statement).format(schema=sql.Identifier(self.schema))
 
+    def startup_key(self, *, fleet: str, generation: str, role: str) -> int:
+        """Shared startup / exclusive seal lock, in the single-bigint key space."""
+        scope = ("moyai-fleet-startup-v1", self.schema, fleet, generation, role)
+        return int.from_bytes(hashlib.sha256(json.dumps(scope).encode()).digest()[:8], "big", signed=True)
+
     def installed(self) -> bool:
         row = self.connection.execute(
             "SELECT to_regclass(%s)", (self.schema + ".schema_version",),
@@ -284,6 +289,12 @@ class FleetRegistry:
         if not proof or not isinstance(proof, dict):
             raise FleetAdmissionError("fleet_admission_seal_proof_missing")
         with self.connection.transaction():
+            # Startup owns the shared session lock on its canonical owner
+            # connection until role work is initialized. Take this before the
+            # row lock so registration/observation can finish without inversion.
+            self.connection.execute("SELECT pg_advisory_xact_lock(%s)", (
+                self.startup_key(fleet=fleet, generation=generation, role=role),
+            ))
             row = self.connection.execute(self.query("""
                 SELECT service_id,state,drain_request,drain_proof,worker_deployment,worker_build,source_sha
                 FROM {schema}.roles

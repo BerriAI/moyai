@@ -57,6 +57,7 @@ def capabilities(config: ProductConfig) -> dict:
         "generation_admission": {
             "protocol": ADMISSION_PROTOCOL, "durable_role_seals": True, "image_revision_fence": True,
             "durable_drain_receipts": True,
+            "startup_seal_fence": True,
         },
         "worker": {
             "deployment": settings.worker_deployment, "build": settings.worker_build_id,

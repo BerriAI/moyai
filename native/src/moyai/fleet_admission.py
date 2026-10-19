@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from contextlib import nullcontext
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -57,6 +57,7 @@ class FleetAdmission:
         self.required = required == "true"
         self.registered = False
         self.current: dict | None = None
+        self._startup_lock: int | None = None
 
     @property
     def sealed(self) -> bool:
@@ -74,11 +75,12 @@ class FleetAdmission:
         # disabled. An activation must take that row exclusively and inventory
         # canonical owners after the lock, so a concurrent unmanaged start is
         # either inventoried first or sees the newly enabled registry.
-        context = product.store.connect() if starting else nullcontext(product.store.database.owner)
-        with context as connection:
-            if starting:
-                connection.check_owner()
-            registry = FleetRegistry(connection.raw if starting else connection, schema=self.schema)
+        # Registry locks and pool waits must not occupy the canonical owner
+        # session used by health/leadership checks. Keep every observation on
+        # its own pooled transaction, including unmanaged and hot-adoption reads.
+        with product.store.connect() as connection:
+            connection.check_owner()
+            registry = FleetRegistry(connection.raw, schema=self.schema)
             scope = registry.scope(product.settings.moyai_database_schema, lock=starting)
             if scope is None or not scope["enabled"]:
                 if self.required or self.registered:
@@ -148,6 +150,76 @@ class FleetAdmission:
                     # startup budget without pretending registration succeeded.
                     pass
                 await asyncio.sleep(.1)
+
+    def _lock_startup(self) -> bool:
+        product = self.life.runtime.product
+        assert product is not None and self.current is not None
+        if self._startup_lock is not None:
+            raise FleetAdmissionError("fleet_startup_already_locked")
+        owner = product.store.database
+        owner.check_owner()
+        key = FleetRegistry(owner.owner, schema=self.schema).startup_key(
+            fleet=self.current["fleet"], generation=self.current["generation"], role=self.life.role,
+        )
+        # This is a nonblocking ownership operation, not a registry read or a
+        # transaction. Losing this session releases the gate AND fences normal
+        # application writes through the existing canonical ownership checks.
+        acquired = owner.owner.execute("SELECT pg_try_advisory_lock_shared(%s)", (key,)).fetchone()[0]
+        if acquired:
+            self._startup_lock = key
+        return acquired
+
+    def _unlock_startup(self) -> None:
+        if self._startup_lock is None:
+            return
+        product = self.life.runtime.product
+        assert product is not None
+        key, self._startup_lock = self._startup_lock, None
+        owner = product.store.database.owner
+        if (
+            not owner.closed and not owner.broken
+            and not owner.execute("SELECT pg_advisory_unlock_shared(%s)", (key,)).fetchone()[0]
+        ):
+            raise FleetAdmissionError("fleet_startup_lock_lost")
+
+    async def complete_startup(self) -> None:
+        if self._startup_lock is not None:
+            def complete():
+                product = self.life.runtime.product
+                assert product is not None
+                try:
+                    product.store.database.check_owner()
+                finally:
+                    self._unlock_startup()
+            await database(complete)
+
+    @asynccontextmanager
+    async def startup(self):
+        """Order role startup against sealing, including a lost registration reply."""
+        try:
+            await self.start()
+            if self.current is not None:
+                product = self.life.runtime.product
+                assert product is not None
+                async with asyncio.timeout(product.settings.temporal_startup_timeout_seconds):
+                    while not await database(self._lock_startup):
+                        await asyncio.sleep(.1)
+                    # Registration may have committed before a seal and its
+                    # acknowledgement arrived afterward. Reread under the gate;
+                    # a registration receipt alone cannot authorize startup.
+                    await self.refresh(starting=True)
+                if self.sealed:
+                    # This exact captured owner never started role work. Persist
+                    # that completion before exiting so retirement can reconcile
+                    # it without incorrectly treating owner disappearance as proof.
+                    await self.finish_drain(self.request_id)
+                    raise FleetAdmissionError("fleet_admission_sealed_before_start")
+            yield
+        finally:
+            # database() drains acquisition before propagating cancellation;
+            # the lock remains discoverable here even if its reply was lost.
+            if self._startup_lock is not None:
+                await database(self._unlock_startup)
 
     def require_drain(self, request_id: str) -> None:
         if self.current is not None and (
