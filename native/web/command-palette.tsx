@@ -13,7 +13,7 @@ export type PaletteSession = {
   source?: string; source_format?: string; url?: string; read_only?: boolean
   deleted?: boolean; deleting?: boolean; parent_session_id?: string | null
   snippet?: string; search_snippet?: string; search_query?: string
-  match?: { message_id?: string | number | null; snippet?: string }
+  match?: { message_id?: string | number | null; snippet?: string } | null
   capabilities?: { read?: boolean; rename?: boolean; move?: boolean; pin?: boolean }
 }
 export type PaletteCurrentSession = PaletteSession & { pinned?: boolean }

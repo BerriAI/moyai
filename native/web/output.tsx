@@ -11,17 +11,12 @@ import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api, ApiError } from "./api"
 import { attachSessionLink, getWorkspace, removeSessionLink, type SessionWorkspace } from "./generated/api"
+import { getSessionFilePreview, type SessionFilePreview } from "./generated/api"
 import type { OutputResource } from "./workspace-types"
 import { fileReference, previewFileLink, type OpenFile } from "./file-links"
 import "./output.css"
 
 export type { OutputResource } from "./workspace-types"
-type Preview = {
-  id: string; kind: "artifact" | "upload"; name: string; size: number; media_type: string
-  preview_kind: "text" | "markdown" | "code" | "image" | "video" | "audio" | "pdf" | "unsupported"
-  text: string | null; language: string | null; truncated: boolean; notice: string | null
-  text_byte_limit: number; text_line_limit: number; download_url: string; content_url: string | null
-}
 type Workspace = SessionWorkspace
 
 function externalUrl(value: string): string | undefined {
@@ -87,7 +82,7 @@ function ExternalPreview({ resource, active }: { resource: OutputResource; activ
 }
 
 function FilePreview({ sessionId, resource, active, onOpenFile, onName }: OutputPanelProps & { active: boolean }) {
-  const [preview, setPreview] = useState<Preview | null>(null)
+  const [preview, setPreview] = useState<SessionFilePreview | null>(null)
   const [error, setError] = useState("")
   const [mediaError, setMediaError] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -105,10 +100,11 @@ function FilePreview({ sessionId, resource, active, onOpenFile, onName }: Output
   useEffect(() => { if (active) heading.current?.focus() }, [])
   useEffect(() => {
     if (!active) { setPreview(null); setError(""); setLoading(false); return }
-    if (!path) { setLoading(false); setError("This file has no identifier. Reopen it from Files."); return }
+    const { id, kind } = resource
+    if (!path || !id || kind === "link") { setLoading(false); setError("This file has no identifier. Reopen it from Files."); return }
     const controller = new AbortController()
     setLoading(true); setError(""); setMediaError(false)
-    void api<Preview>(path, "GET", undefined, controller.signal).then(value => {
+    void getSessionFilePreview({ path: { session_id: sessionId, kind, resource_id: id }, signal: controller.signal }).then(({ data: value }) => {
       if (!controller.signal.aborted) { setPreview(value); setLoading(false); nameCallback.current?.(value.name) }
     }, reason => {
       if (!controller.signal.aborted) { setPreview(null); setError(String(reason)); setLoading(false) }

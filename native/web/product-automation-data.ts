@@ -18,11 +18,7 @@ export type AutomationDefinition = Omit<ProductAutomationDefinition, "triggers">
 export type ProductAutomation = ProductAutomationSummary
 export type AutomationPreview = ProductAutomationPreview
 export type AutomationHistory = ProductAutomationHistoryEntry
-export type AutomationEnvironment = {
-  id: string; name: string; repository: string; repository_id: number | null; revision: number
-  enabled: boolean; active_build: string | null; is_default: boolean; ready: boolean; phase: string
-  prepared_build: { id: string; revision: number; commit_sha: string; sandbox_provider: string } | null
-}
+export type { ProductEnvironment as AutomationEnvironment } from "./generated/api"
 export type AutomationConnection = Pick<OrganizationConnection, "id" | "connected" | "enabled" | "read_only"> & { tools?: OrganizationConnection["tools"] }
 
 export const calendarFrequencies: { value: AutomationTiming["frequency"]; label: string }[] = [
