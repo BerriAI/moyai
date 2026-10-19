@@ -28,7 +28,8 @@
 }
 .sidebar > .rail-caption > span { gap: 8px; }
 .sidebar .session-group { margin-bottom: 8px; }
-.sidebar .session-group-toggle { height: 28px; min-height: 28px; gap: 6px; padding: 4px 6px; }
+.sidebar .session-group-toggle { height: 28px; min-height: 28px; gap: 8px; padding: 4px 6px; padding-inline-start: 10px; }
+.sidebar .session-group-toggle .session-leading { width: var(--session-leading-width); justify-content: center; }
 .sidebar .session-group-heading > button:not(.session-group-toggle) {
   width: 28px;
   height: 28px;
@@ -45,6 +46,7 @@
 /* Extend only the scrolling list through the sidebar's 12px inline padding.
    Classic gutters stay outside the rows; the row padding also clears overlay thumbs. */
 .sidebar .session-list {
+  --session-leading-width: 16px;
   margin-inline: -10px;
   padding: 0 6px 8px;
   overflow-x: hidden;
@@ -63,7 +65,6 @@
 }
 
 .sidebar .session-row {
-  --session-leading-width: 16px;
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -271,7 +272,7 @@
 .native-session-menu.sidebar-pr-menu button:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
 
 @media (hover: none), (pointer: coarse), (max-width: 600px) {
-  .sidebar .session-row { --session-leading-width: 44px; }
+  .sidebar .session-list { --session-leading-width: 44px; }
   .sidebar .session-children-toggle { width: 44px; height: 44px; min-height: 44px; top: 2px; inset-inline-start: 10px; }
   .sidebar .session-children { padding-inline-start: 52px; }
   .sidebar > .new-chat,

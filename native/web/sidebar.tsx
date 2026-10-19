@@ -270,7 +270,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
       onDragOver={event => { if (target) dragOver(event, target, dropKey) }}
       onDragLeave={event => leaveDrop(event, dropKey)}
       onDrop={event => { if (target) drop(event, target) }}>
-      <div className="session-group-heading"><Button variant="ghost" className="session-group-toggle" aria-expanded={expanded} aria-controls={`sessions-${encodeURIComponent(key)}`} onClick={() => toggle(key)}>{icon}<span>{label}</span><small>{items.length}</small><ChevronDown className={expanded ? "" : "closed"} size={12} /></Button>
+      <div className="session-group-heading"><Button variant="ghost" className="session-group-toggle" aria-expanded={expanded} aria-controls={`sessions-${encodeURIComponent(key)}`} onClick={() => toggle(key)}><span className="session-leading" aria-hidden="true">{icon}</span><span>{label}</span><small>{items.length}</small><ChevronDown className={expanded ? "" : "closed"} size={12} /></Button>
         {folder && <ActionMenu label={`Folder actions for ${folder.name}`}>{close => <>
           <ActionItem disabled={busy} onClick={() => { close(); openEditor({ action: "folder-rename", folder }) }}><Pencil />Rename folder</ActionItem>
           <ActionItem disabled={busy} onClick={() => { close(); openEditor({ action: "folder-remove", folder }) }}><Trash2 />Remove folder</ActionItem>

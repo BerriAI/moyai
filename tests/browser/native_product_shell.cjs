@@ -356,6 +356,29 @@ test('Recent and Participated list sessions once with status and PR metadata',as
   assert.equal(await participated.getAttribute('aria-expanded'),'true');
   const sectionNames=await page.locator('.session-group-toggle > span').allTextContents();
   assert.ok(sectionNames.indexOf('Recent')<sectionNames.indexOf('Participated'));
+  const assertRecentAlignment=async target=>{
+    const heading=target.getByRole('button',{name:/^Recent /});
+    const label=heading.locator('span').filter({hasText:/^Recent$/});
+    const firstRow=target.locator('#sessions-recent > .session-branch > .session-row').first();
+    await firstRow.waitFor();
+    const toggle=firstRow.locator('.session-children-toggle');
+    const adornment=await toggle.count()?toggle:firstRow.locator('.session-bullet');
+    const [labelBox,titleBox,metaBox,headingIconBox,adornmentBox]=await Promise.all([
+      label.boundingBox(),
+      firstRow.locator('.session-title').boundingBox(),
+      firstRow.locator('.session-row-meta > .session-meta-item').first().boundingBox(),
+      heading.locator('.session-leading').boundingBox(),
+      adornment.boundingBox(),
+    ]);
+    const center=box=>box.x+box.width/2;
+    assert.ok(Math.abs(labelBox.x-titleBox.x)<=1,'Recent label aligns with session title');
+    assert.ok(Math.abs(labelBox.x-metaBox.x)<=1,'Recent label aligns with session metadata');
+    assert.ok(Math.abs(center(headingIconBox)-center(adornmentBox))<=1,'Recent icon aligns with row adornment');
+  };
+  await assertRecentAlignment(page);
+  const mobilePage=await pageFor(t,'#',320);
+  await mobilePage.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await assertRecentAlignment(mobilePage);
   assert.equal(await page.locator('#sessions-participated').locator(`[data-session-key="native:${shared}"]`).isVisible(),true);
   assert.equal(await row(hidden).count(),0);
   for(const id of [sessionId,waiting,working,review,draft,shared,child])assert.equal(await row(id).count(),1);
