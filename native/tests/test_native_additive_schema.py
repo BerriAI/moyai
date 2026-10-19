@@ -120,6 +120,27 @@ def test_historical_column_filter_rejects_textual_dependencies(installed, depend
         collection.remove(item)
 
 
+@pytest.mark.parametrize("change", ["default", "check", "index"])
+def test_installed_models_cannot_silently_change_the_legacy_root(monkeypatch, change):
+    product.application_metadata("native_online")
+    table = product.Base.metadata.tables["moyai_sessions"]
+    item = None
+    if change == "default":
+        from sqlalchemy import DefaultClause
+        monkeypatch.setattr(table.columns["title"], "server_default", DefaultClause(text("'unreviewed'")))
+    elif change == "check":
+        item = CheckConstraint("length(title)>0")
+        table.append_constraint(item)
+    else:
+        item = Index("unregistered_root_index", table.columns["title"])
+    try:
+        with pytest.raises(online.OnlineSchemaError, match="source_inventory_changed"):
+            online.plan("moyai", "native_online", "native-q")
+    finally:
+        if item is not None:
+            (table.constraints if change == "check" else table.indexes).remove(item)
+
+
 @pytest.mark.parametrize("change", ["default", "check", "fk", "type", "nullable", "index", "drop", "column-default"])
 def test_semantic_verifier_rejects_edits_disguised_as_additions(monkeypatch, change):
     def unsafe(metadata, schema):

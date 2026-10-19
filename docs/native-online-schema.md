@@ -23,6 +23,10 @@ target manifest, Harness versions, and the exact generated DDL digest.
 The candidate must agree with those frozen definitions. Semantic comparison
 includes column order, types, nullability, defaults, full constraints and indexes,
 without depending on SQLAlchemy's unordered constraint collections.
+The reviewed v21 starting inventory also has a frozen semantic fingerprint at
+a canonical schema name. This catches unversioned model changes to older
+defaults, constraints or indexes that legacy receipt hashes did not encode.
+Later column births must preserve that starting inventory.
 The operator sends no arbitrary SQL. A changed earlier manifest, partial target
 table, unsupported migration, changed schema/queue, or mismatched plan is
 rejected. The original v21 → v22 plan format, DDL digest and receipts retain their

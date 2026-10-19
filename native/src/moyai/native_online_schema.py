@@ -42,6 +42,10 @@ TO_VERSION = "2026-10-17-goals-v22"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
+# Legacy receipt hashes omit defaults and most constraints/index semantics.
+# Freeze the reviewed v21 root at a canonical scope without changing its
+# historical plan/receipt format. Later column births must preserve this root.
+BASE_SHAPE = "c5f437f3de8fb0045cd10635f2adb3af7d7764071a45f144caedd77df474d019"
 
 
 class OnlineSchemaError(RuntimeError):
@@ -240,6 +244,9 @@ def _define(metadata: MetaData, schema: str, step: Expansion) -> None:
 def _inventory(schema: str) -> dict[str, MetaData]:
     from .product_schema import MIGRATIONS, application_metadata
 
+    baseline = application_metadata("native_online_history", version=FROM_VERSION)
+    require(digest({table.name: _table_shape(table) for table in baseline.tables.values()}) == BASE_SHAPE,
+            "source_inventory_changed")
     installed = {version for version, _ in MIGRATIONS}
     frozen = {step.after: step for step in EXPANSIONS}
     inventories: dict[str, MetaData] = {}
