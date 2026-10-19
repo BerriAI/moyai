@@ -21,8 +21,8 @@ class FailureReport:
     @classmethod
     async def for_turn(cls, runtime: Runtime, turn: Turn) -> FailureReport:
         text = (
-            f"This task stopped before it completed: {turn.error}\nDebug log attached."
-            if turn.error else "This task stopped before it completed.\nDebug log attached."
+            f"This task stopped before it completed: {turn.error}"
+            if turn.error else "This task stopped before it completed."
         )
         try:
             async with runtime.database.sessions() as db:

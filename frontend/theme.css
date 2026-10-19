@@ -157,7 +157,7 @@ html[data-theme="light"] {
     --ui-glass-blur: blur(14px) saturate(110%);
     --ui-glass-inset: inset 0 1px 0 rgb(255 255 255 / 16%), inset 1px 0 0 rgb(255 255 255 / 4%);
     --ui-glass-shadow: var(--ui-glass-inset), 0 12px 32px rgb(0 0 0 / 24%);
-    --ui-desktop-image: radial-gradient(ellipse at 4% 0%, #62666e 0%, transparent 52%), radial-gradient(ellipse at 100% 100%, #33363d 0%, transparent 58%);
+    --ui-desktop-image: radial-gradient(ellipse at 4% 0%, #1b1c1f 0%, transparent 52%), radial-gradient(ellipse at 100% 100%, #151619 0%, transparent 58%);
   }
   html[data-theme="light"] {
     --ui-shell: rgb(255 255 255 / 38%);

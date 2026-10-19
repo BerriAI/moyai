@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     RetryPromptPart,
     SystemPromptPart,
+    TextContent,
     TextPart,
     ThinkingPart,
     ToolCallPart,
@@ -34,7 +35,8 @@ def _timestamp(value: datetime | str | None) -> str | None:
 def _user_prompt_text(part: UserPromptPart) -> str:
     if isinstance(part.content, str):
         return part.content
-    return "\n".join(item for item in part.content if isinstance(item, str))
+    return "\n".join(item.content if isinstance(item, TextContent) else item
+                     for item in part.content if isinstance(item, (str, TextContent)))
 
 
 def _turn_cost(turn: Turn) -> float | None:
@@ -130,7 +132,7 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
             steps.append(user_step)
 
         if own[turn.actor_id]:
-            snapshot = await latest_turn_snapshot(runtime, turn.id)
+            snapshot = await latest_turn_snapshot(runtime, turn.id, include_interrupted=True)
             if snapshot is not None:
                 tool_steps: dict[str, tuple[dict[str, Any], bool]] = {}
                 first_request = True
@@ -294,6 +296,18 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
         if (cost := _turn_cost(turn)) is not None:
             total_cost_usd += cost
             has_cost = True
+
+    # Parent runs and admitted steering overlap in time. Storage turn order is
+    # not chronology. Prefer the original authored input to its model copy.
+    authored = {(step.get("timestamp"), step.get("message")) for step in steps
+                if step["source"] == "user" and step.get("extra", {}).get("turn_id")}
+    steps = [step for step in steps if not (
+        step.get("extra", {}).get("kind") == "steering"
+        and (step.get("timestamp"), step.get("message")) in authored
+    )]
+    steps.sort(key=lambda step: step.get("timestamp") or "")
+    for index, step in enumerate(steps, 1):
+        step["step_id"] = index
 
     final_metrics: dict[str, int | float] = {
         "total_prompt_tokens": sum(

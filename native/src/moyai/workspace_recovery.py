@@ -33,6 +33,7 @@ class WorkspaceCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: Literal[1] = 1
+    kind: Literal["answer", "interrupted"] = "answer"
     session_id: str
     workspace: dict[str, str]
     scope: str
@@ -151,11 +152,19 @@ async def validate_checkpoint(
     ):
         raise preparation_blocked("workspace_checkpoint_missing")
     source = await db.get(Turn, saved.turn_id)
-    if (
-        source is None or source.session_id != session.id or not source.result_accepted
-        or source.result_fingerprint != saved.result_fingerprint
-        or source.status not in {"completed", "waiting", "resumed"}
-    ):
+    valid_source = source is not None and source.session_id == session.id
+    if saved.kind == "interrupted":
+        valid_source = valid_source and source is not None and (
+            source.status == "failed" and not source.result_accepted and bool(source.conversation)
+            and hashlib.sha256(database.security.unseal(source.conversation)).hexdigest() == saved.conversation_digest
+            and saved.result_fingerprint == saved.conversation_digest
+        )
+    else:
+        valid_source = valid_source and source is not None and (
+            source.result_accepted and source.result_fingerprint == saved.result_fingerprint
+            and source.status in {"completed", "waiting", "resumed"}
+        )
+    if not valid_source:
         raise preparation_blocked("workspace_checkpoint_missing")
     if database.product_authority_enabled and await product_bindings(db, scope, reference) != (
         saved.product_context, saved.restoration_manifest,

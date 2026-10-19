@@ -65,6 +65,16 @@ class PublishBranch(Changes):
         return self
 
 
+class WorkspacePublishBranch(Write):
+    """Publish the staged tree without copying file contents through the model."""
+
+    directory: str = Field(pattern=r"^/workspace/[A-Za-z0-9_.-]+$", max_length=250)
+    base_sha: SHA
+    branch: Branch
+    title: str = Field(min_length=3, max_length=250)
+    expected_head_sha: SHA | None = None
+
+
 class OpenPullRequest(Write):
     base_branch: Branch
     head_branch: Branch

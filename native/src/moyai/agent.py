@@ -38,6 +38,7 @@ from pydantic_ai_harness import (
 )
 from pydantic_ai_harness.ask_user import AskUserRequest, Question
 from pydantic_ai_harness.conversation_search import SnapshotHistorySource
+from pydantic_ai_harness.planning import PlanItem
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
@@ -46,6 +47,7 @@ from .artifacts import artifact_capability
 from .browser import browser_capability
 from .browser_login import BrowserLogin
 from .bundled_skills import bundled_skill_catalog
+from .coding_image import with_node
 from .commentary import Commentary
 from .computer_startup import OnDemandDurability, on_demand_coder
 from .connection_catalog import ConnectionToolSearch
@@ -200,8 +202,21 @@ class WorkflowPlanning(Planning[RunScope]):
     @cached_property
     def registered_toolset(self) -> AbstractToolset[RunScope]:
         native = super().get_toolset()
-        if not isinstance(native, AbstractToolset):
+        if not isinstance(native, FunctionToolset):
             raise TypeError("The native planning capability changed its toolset contract.")
+        if "write_plan" in native.tools and "read_plan" in native.tools:
+            original = native.tools.pop("write_plan")
+            read = native.tools["read_plan"].function
+
+            async def write_plan(ctx: RunContext[RunScope], items: list[PlanItem]) -> str:
+                result = await original.function(ctx, items)
+                if not result.startswith("Plan updated:"):
+                    return result
+                # Read the persisted IDs, including IDs replayed by the durable
+                # store. Ordinal display numbers cannot address granular edits.
+                return "Plan updated.\n\n" + await read(ctx)
+
+            native.add_function(write_plan, description=original.description)
         return native.with_metadata(temporal=False)
 
     def get_toolset(self) -> AbstractToolset[RunScope]:
@@ -307,11 +322,12 @@ def workspace_image() -> modal.Image:
     """The same image definition for lazy startup and deployment prewarming."""
     image = (
         modal.Image.debian_slim(python_version="3.13")
-        .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm",
+        .apt_install("git", "ripgrep", "curl", "jq", "util-linux",
                      "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
                      "x11-xserver-utils", "fonts-dejavu-core")
         .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
     )
+    image = with_node(image)
     for tool in WORKSPACE_TOOLS:
         image = tool.install(image)
     return (

@@ -25,15 +25,15 @@ the parent's feed. Activity is bounded and indicates when older entries were
 omitted. Visible active conversations refresh persisted activity every four
 seconds alongside the existing root text stream.
 
-Slack reserves one bot reply for each admitted input segment. Public parent or
-named child updates edit that reply, coalesced to at most one progress revision
+Slack posts its first bot reply only when an admitted input segment has real
+commentary or an answer. Later public parent or named child updates edit that reply, coalesced to at most one progress revision
 every 30 seconds. Steering preserves the prior slot, starts a slot after the new
 input, and routes the final answer into that latest slot—even after accepted
 guidance becomes included in answer settlement. Older queued inputs promoted
 with **Send now** use admission order.
 
-Slack's native **“Moyai is working…”** indicator runs alongside those editable
-replies. It reflects queued, starting, running and saving work, refreshes every
+Slack's native **“Moyai is working…”** indicator replaces canned received, ready,
+working and saving replies and the eyes reaction. It reflects queued, starting, running and saving work, refreshes every
 minute, and is reasserted after attempted or confirmed bot replies. Steering
 keeps the execution's indicator active while preserving the previous reply
 slot. Completion, failure, Stop, pause, deletion and requests for user input
