@@ -31,7 +31,9 @@ While prepared, a versioned replacement is admitted only for the exact target
 generation/build and the source image. Another deployment, image, generation,
 or configuration fails before polling or serving requests. Source registration
 uses the original canonical owner lifetime and the existing startup/seal gate.
-All metadata reads use the existing pooled/offloaded connection path.
+The early permit check reuses the read-only schema-verification connection.
+Ongoing admission reads use the existing pooled, offloaded connection path;
+the bridge creates no additional pool.
 
 ## Preparation and activation
 
