@@ -7,7 +7,7 @@ import json
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
@@ -56,6 +56,63 @@ class TestEvent(BaseModel):
     provider: str = Field(max_length=32)
     event_header: str = Field(default="", max_length=80)
     payload: dict
+
+
+_OUTPUT = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class ProductAutomationWebhookExample(BaseModel):
+    model_config = _OUTPUT
+    trigger_id: str
+    payload: dict[str, Any]
+    event_header: str
+
+
+class ProductAutomationWebhookProvider(BaseModel):
+    model_config = _OUTPUT
+    provider: str
+    ready: bool
+    url: str
+    examples: list[ProductAutomationWebhookExample]
+
+
+class ProductAutomationEventDelivery(BaseModel):
+    model_config = _OUTPUT
+    status: str
+    detail: str
+    received_at: str
+
+
+class ProductAutomationWebhookInfo(BaseModel):
+    model_config = _OUTPUT
+    providers: list[ProductAutomationWebhookProvider]
+    ready: bool
+    deliveries: list[ProductAutomationEventDelivery]
+
+
+class ProductAutomationWebhookResult(BaseModel):
+    model_config = _OUTPUT
+    id: str
+    revision: int
+    provider: str
+    paused: bool
+    configured: bool
+    registered_at_provider: bool
+    secret: str
+
+
+class ProductAutomationTestContext(BaseModel):
+    """Normalized provider context; its other keys depend on the provider."""
+
+    model_config = ConfigDict(extra="allow", json_schema_serialization_defaults_required=True)
+    matched_trigger_ids: list[str]
+
+
+class ProductAutomationTestResult(BaseModel):
+    model_config = _OUTPUT
+    matches: bool
+    context: ProductAutomationTestContext | None
+    started: Literal[False]
 
 
 class ProductAutomationEvents:
@@ -747,19 +804,19 @@ def routes(events: ProductAutomationEvents) -> APIRouter:
     async def default_webhook(identity: str, request: Request):
         return await events.receive(identity, "", request)
 
-    @router.get("/api/product/automations/{identity}/webhook")
-    async def info(identity: str, request: Request):
+    @router.get("/api/product/automations/{identity}/webhook", operation_id="getProductAutomationWebhook")
+    async def info(identity: str, request: Request) -> ProductAutomationWebhookInfo:
         actor = await events.service.identity.authenticate(request)
-        return await events.info(actor.grant, identity)
+        return ProductAutomationWebhookInfo.model_validate(await events.info(actor.grant, identity))
 
-    @router.post("/api/product/automations/{identity}/webhook")
-    async def configure(identity: str, body: WebhookSetup, request: Request):
+    @router.post("/api/product/automations/{identity}/webhook", operation_id="configureProductAutomationWebhook")
+    async def configure(identity: str, body: WebhookSetup, request: Request) -> ProductAutomationWebhookResult:
         actor = await events.service.identity.authenticate(request, mutation=True)
-        return await events.configure(actor.grant, identity, body)
+        return ProductAutomationWebhookResult.model_validate(await events.configure(actor.grant, identity, body))
 
-    @router.post("/api/product/automations/{identity}/test-event")
-    async def test_event(identity: str, body: TestEvent, request: Request):
+    @router.post("/api/product/automations/{identity}/test-event", operation_id="testProductAutomationEvent")
+    async def test_event(identity: str, body: TestEvent, request: Request) -> ProductAutomationTestResult:
         actor = await events.service.identity.authenticate(request, mutation=True)
-        return await events.test_event(actor.grant, identity, body)
+        return ProductAutomationTestResult.model_validate(await events.test_event(actor.grant, identity, body))
 
     return router

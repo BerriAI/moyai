@@ -2501,6 +2501,1198 @@
         "title": "Preferences",
         "type": "object"
       },
+      "ProductAutomationCapabilities": {
+        "properties": {
+          "enable": {
+            "title": "Enable",
+            "type": "boolean"
+          },
+          "migrate": {
+            "title": "Migrate",
+            "type": "boolean"
+          },
+          "pause": {
+            "title": "Pause",
+            "type": "boolean"
+          },
+          "retire": {
+            "title": "Retire",
+            "type": "boolean"
+          },
+          "run": {
+            "title": "Run",
+            "type": "boolean"
+          },
+          "test_event": {
+            "title": "Test Event",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          },
+          "webhook": {
+            "title": "Webhook",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "update",
+          "migrate",
+          "enable",
+          "pause",
+          "retire",
+          "run",
+          "webhook",
+          "test_event"
+        ],
+        "title": "ProductAutomationCapabilities",
+        "type": "object"
+      },
+      "ProductAutomationDefinition": {
+        "additionalProperties": false,
+        "description": "A saved canonical definition as returned to the editor.",
+        "properties": {
+          "environment_id": {
+            "default": "auto",
+            "description": "Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.",
+            "pattern": "^(auto|none|[0-9a-f]{32})$",
+            "title": "Environment Id",
+            "type": "string"
+          },
+          "github_repository_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Github Repository Id"
+          },
+          "harness": {
+            "default": "hermes",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Harness",
+            "type": "string"
+          },
+          "max_runs_per_hour": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 50,
+            "title": "Max Runs Per Hour"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "minLength": 1
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "mode": {
+            "default": "modal",
+            "enum": [
+              "modal",
+              "demo"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "maxLength": 120,
+            "title": "Model",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 2,
+            "title": "Name",
+            "type": "string"
+          },
+          "plugins": {
+            "items": {
+              "enum": [
+                "linear",
+                "github",
+                "slack",
+                "notion"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "title": "Plugins",
+            "type": "array"
+          },
+          "prompt": {
+            "minLength": 3,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "queue_events": {
+            "default": false,
+            "title": "Queue Events",
+            "type": "boolean"
+          },
+          "repo_url": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Repo Url",
+            "type": "string"
+          },
+          "self_management": {
+            "$ref": "#/components/schemas/ProductAutomationSelfManagement"
+          },
+          "triggers": {
+            "items": {
+              "$ref": "#/components/schemas/ProductAutomationTrigger"
+            },
+            "minItems": 1,
+            "title": "Triggers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "prompt",
+          "triggers",
+          "max_runs_per_hour",
+          "queue_events",
+          "metadata",
+          "self_management",
+          "repo_url",
+          "github_repository_id",
+          "environment_id",
+          "plugins",
+          "model",
+          "harness",
+          "mode"
+        ],
+        "title": "ProductAutomationDefinition",
+        "type": "object"
+      },
+      "ProductAutomationEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Action",
+            "type": "string"
+          },
+          "assignee_id": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Assignee Id",
+            "type": "string"
+          },
+          "branch": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Branch",
+            "type": "string"
+          },
+          "channel_id": {
+            "default": "",
+            "maxLength": 32,
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "conclusion": {
+            "default": "",
+            "maxLength": 60,
+            "title": "Conclusion",
+            "type": "string"
+          },
+          "epic": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Epic",
+            "type": "string"
+          },
+          "event": {
+            "default": "*",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Event",
+            "type": "string"
+          },
+          "include_thread_replies": {
+            "default": false,
+            "title": "Include Thread Replies",
+            "type": "boolean"
+          },
+          "label": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Label",
+            "type": "string"
+          },
+          "label_id": {
+            "default": "",
+            "maxLength": 36,
+            "title": "Label Id",
+            "type": "string"
+          },
+          "payload_pattern": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Payload Pattern",
+            "type": "string"
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "maximum": 4.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
+          "project": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Project",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "session",
+              "slack",
+              "github",
+              "gitlab",
+              "linear",
+              "jira",
+              "pylon",
+              "pagerduty",
+              "webhook"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "reaction": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Reaction",
+            "type": "string"
+          },
+          "repository": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository Id"
+          },
+          "sender_type": {
+            "default": "any",
+            "enum": [
+              "any",
+              "human",
+              "bot"
+            ],
+            "title": "Sender Type",
+            "type": "string"
+          },
+          "service_id": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Service Id",
+            "type": "string"
+          },
+          "session_id": {
+            "default": "",
+            "maxLength": 36,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Status",
+            "type": "string"
+          },
+          "team_id": {
+            "default": "",
+            "maxLength": 36,
+            "title": "Team Id",
+            "type": "string"
+          },
+          "text_contains": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Text Contains",
+            "type": "string"
+          },
+          "text_starts_with": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Text Starts With",
+            "type": "string"
+          },
+          "urgency": {
+            "default": "",
+            "maxLength": 30,
+            "title": "Urgency",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "session_id",
+          "event",
+          "repository",
+          "repository_id",
+          "team_id",
+          "assignee_id",
+          "label_id",
+          "label",
+          "channel_id",
+          "text_contains",
+          "text_starts_with",
+          "reaction",
+          "include_thread_replies",
+          "sender_type",
+          "action",
+          "status",
+          "priority",
+          "conclusion",
+          "branch",
+          "project",
+          "epic",
+          "service_id",
+          "urgency",
+          "payload_pattern"
+        ],
+        "title": "ProductAutomationEvent",
+        "type": "object"
+      },
+      "ProductAutomationEventDelivery": {
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "detail",
+          "received_at"
+        ],
+        "title": "ProductAutomationEventDelivery",
+        "type": "object"
+      },
+      "ProductAutomationHistoryEntry": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "engine": {
+            "title": "Engine",
+            "type": "string"
+          },
+          "occurrence": {
+            "title": "Occurrence",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          }
+        },
+        "required": [
+          "occurrence",
+          "revision",
+          "outcome",
+          "created_at",
+          "engine",
+          "status",
+          "session_id",
+          "turn_id",
+          "detail"
+        ],
+        "title": "ProductAutomationHistoryEntry",
+        "type": "object"
+      },
+      "ProductAutomationHistoryPage": {
+        "properties": {
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/ProductAutomationHistoryEntry"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "untrusted_reference": {
+            "title": "Untrusted Reference",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "history",
+          "next_cursor",
+          "untrusted_reference"
+        ],
+        "title": "ProductAutomationHistoryPage",
+        "type": "object"
+      },
+      "ProductAutomationInventory": {
+        "properties": {
+          "automations": {
+            "items": {
+              "$ref": "#/components/schemas/ProductAutomationSummary"
+            },
+            "title": "Automations",
+            "type": "array"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ProductAutomationInventoryCapabilities"
+          },
+          "event_choices": {
+            "additionalProperties": {
+              "items": {
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "title": "Event Choices",
+            "type": "object"
+          },
+          "migration": {
+            "const": "opt_in",
+            "title": "Migration",
+            "type": "string"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "source": {
+            "const": "canonical_product",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "automations",
+          "next_offset",
+          "source",
+          "migration",
+          "event_choices",
+          "capabilities"
+        ],
+        "title": "ProductAutomationInventory",
+        "type": "object"
+      },
+      "ProductAutomationInventoryCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "read": {
+            "title": "Read",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "create",
+          "read"
+        ],
+        "title": "ProductAutomationInventoryCapabilities",
+        "type": "object"
+      },
+      "ProductAutomationMutationResult": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legacy_paused": {
+            "title": "Legacy Paused",
+            "type": "boolean"
+          },
+          "native_state": {
+            "title": "Native State",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "previous_harness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Harness"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "sync_state": {
+            "title": "Sync State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "outcome",
+          "legacy_paused",
+          "native_state",
+          "sync_state",
+          "previous_harness"
+        ],
+        "title": "ProductAutomationMutationResult",
+        "type": "object"
+      },
+      "ProductAutomationNativeState": {
+        "properties": {
+          "core": {
+            "title": "Core",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "last_error": {
+            "title": "Last Error",
+            "type": "string"
+          },
+          "source_revision": {
+            "title": "Source Revision",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "paused",
+              "active",
+              "deleted"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "sync_state": {
+            "title": "Sync State",
+            "type": "string"
+          },
+          "synced_generation": {
+            "title": "Synced Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "core",
+          "generation",
+          "state",
+          "sync_state",
+          "synced_generation",
+          "source_revision",
+          "last_error"
+        ],
+        "title": "ProductAutomationNativeState",
+        "type": "object"
+      },
+      "ProductAutomationPreview": {
+        "properties": {
+          "activation": {
+            "title": "Activation",
+            "type": "string"
+          },
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ProductAutomationCapabilities"
+          },
+          "catchup_seconds": {
+            "title": "Catchup Seconds",
+            "type": "integer"
+          },
+          "definition": {
+            "$ref": "#/components/schemas/ProductAutomationDefinition"
+          },
+          "execution_visibility": {
+            "title": "Execution Visibility",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legacy_fence": {
+            "title": "Legacy Fence",
+            "type": "string"
+          },
+          "legacy_paused": {
+            "title": "Legacy Paused",
+            "type": "boolean"
+          },
+          "migration_changes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Migration Changes",
+            "type": "array"
+          },
+          "native": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductAutomationNativeState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "overlap": {
+            "title": "Overlap",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "sharing_notice": {
+            "title": "Sharing Notice",
+            "type": "string"
+          },
+          "supported": {
+            "title": "Supported",
+            "type": "boolean"
+          },
+          "target_core": {
+            "title": "Target Core",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "owner_id",
+          "revision",
+          "definition",
+          "legacy_paused",
+          "native",
+          "blockers",
+          "supported",
+          "activation",
+          "target_core",
+          "overlap",
+          "catchup_seconds",
+          "execution_visibility",
+          "sharing_notice",
+          "legacy_fence",
+          "migration_changes",
+          "capabilities"
+        ],
+        "title": "ProductAutomationPreview",
+        "type": "object"
+      },
+      "ProductAutomationRunResult": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          }
+        },
+        "required": [
+          "status",
+          "session_id",
+          "turn_id"
+        ],
+        "title": "ProductAutomationRunResult",
+        "type": "object"
+      },
+      "ProductAutomationSelfManagement": {
+        "additionalProperties": false,
+        "properties": {
+          "instructions": {
+            "default": false,
+            "title": "Instructions",
+            "type": "boolean"
+          },
+          "schedule": {
+            "default": false,
+            "title": "Schedule",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instructions",
+          "schedule"
+        ],
+        "title": "ProductAutomationSelfManagement",
+        "type": "object"
+      },
+      "ProductAutomationSummary": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legacy_paused": {
+            "title": "Legacy Paused",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "native": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductAutomationNativeState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "owned": {
+            "title": "Owned",
+            "type": "boolean"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "triggers": {
+            "items": {
+              "$ref": "#/components/schemas/ProductAutomationTrigger"
+            },
+            "title": "Triggers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "name",
+          "owner_id",
+          "owned",
+          "legacy_paused",
+          "triggers",
+          "native"
+        ],
+        "title": "ProductAutomationSummary",
+        "type": "object"
+      },
+      "ProductAutomationTestContext": {
+        "additionalProperties": true,
+        "description": "Normalized provider context; its other keys depend on the provider.",
+        "properties": {
+          "matched_trigger_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matched Trigger Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "matched_trigger_ids"
+        ],
+        "title": "ProductAutomationTestContext",
+        "type": "object"
+      },
+      "ProductAutomationTestResult": {
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductAutomationTestContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "matches": {
+            "title": "Matches",
+            "type": "boolean"
+          },
+          "started": {
+            "const": false,
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "matches",
+          "context",
+          "started"
+        ],
+        "title": "ProductAutomationTestResult",
+        "type": "object"
+      },
+      "ProductAutomationTiming": {
+        "additionalProperties": false,
+        "properties": {
+          "cron": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Cron",
+            "type": "string"
+          },
+          "frequency": {
+            "default": "weekdays",
+            "enum": [
+              "hourly",
+              "daily",
+              "weekdays",
+              "weekly",
+              "cron",
+              "once"
+            ],
+            "title": "Frequency",
+            "type": "string"
+          },
+          "run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run At"
+          },
+          "time": {
+            "default": "09:00",
+            "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+            "title": "Time",
+            "type": "string"
+          },
+          "timezone": {
+            "default": "America/Los_Angeles",
+            "maxLength": 100,
+            "title": "Timezone",
+            "type": "string"
+          },
+          "weekday": {
+            "default": 1,
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Weekday",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "frequency",
+          "time",
+          "weekday",
+          "timezone",
+          "cron",
+          "run_at"
+        ],
+        "title": "ProductAutomationTiming",
+        "type": "object"
+      },
+      "ProductAutomationTrigger": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductAutomationEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "pattern": "^[A-Za-z0-9_-]{1,40}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductAutomationTiming"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "schedule",
+          "event"
+        ],
+        "title": "ProductAutomationTrigger",
+        "type": "object"
+      },
+      "ProductAutomationWebhookExample": {
+        "properties": {
+          "event_header": {
+            "title": "Event Header",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "trigger_id": {
+            "title": "Trigger Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger_id",
+          "payload",
+          "event_header"
+        ],
+        "title": "ProductAutomationWebhookExample",
+        "type": "object"
+      },
+      "ProductAutomationWebhookInfo": {
+        "properties": {
+          "deliveries": {
+            "items": {
+              "$ref": "#/components/schemas/ProductAutomationEventDelivery"
+            },
+            "title": "Deliveries",
+            "type": "array"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProductAutomationWebhookProvider"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "providers",
+          "ready",
+          "deliveries"
+        ],
+        "title": "ProductAutomationWebhookInfo",
+        "type": "object"
+      },
+      "ProductAutomationWebhookProvider": {
+        "properties": {
+          "examples": {
+            "items": {
+              "$ref": "#/components/schemas/ProductAutomationWebhookExample"
+            },
+            "title": "Examples",
+            "type": "array"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "ready",
+          "url",
+          "examples"
+        ],
+        "title": "ProductAutomationWebhookProvider",
+        "type": "object"
+      },
+      "ProductAutomationWebhookResult": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "registered_at_provider": {
+            "title": "Registered At Provider",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "provider",
+          "paused",
+          "configured",
+          "registered_at_provider",
+          "secret"
+        ],
+        "title": "ProductAutomationWebhookResult",
+        "type": "object"
+      },
       "ProductSaveSecret": {
         "additionalProperties": false,
         "properties": {
@@ -2695,6 +3887,33 @@
           "revision"
         ],
         "title": "ProductUpdateSecret",
+        "type": "object"
+      },
+      "ProductUserRoleResult": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "role",
+          "revision"
+        ],
+        "title": "ProductUserRoleResult",
         "type": "object"
       },
       "PullRequestAuthor": {
@@ -9259,7 +10478,7 @@
     },
     "/api/product/automations": {
       "get": {
-        "operationId": "listing_api_product_automations_get",
+        "operationId": "listProductAutomations",
         "parameters": [
           {
             "in": "query",
@@ -9289,7 +10508,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationInventory"
+                }
               }
             },
             "description": "Successful Response"
@@ -9308,7 +10529,7 @@
         "summary": "Listing"
       },
       "post": {
-        "operationId": "create_api_product_automations_post",
+        "operationId": "createProductAutomation",
         "requestBody": {
           "content": {
             "application/json": {
@@ -9323,7 +10544,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationMutationResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9344,7 +10567,7 @@
     },
     "/api/product/automations/{identity}": {
       "put": {
-        "operationId": "edit_api_product_automations__identity__put",
+        "operationId": "updateProductAutomation",
         "parameters": [
           {
             "in": "path",
@@ -9370,7 +10593,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationMutationResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9391,7 +10616,7 @@
     },
     "/api/product/automations/{identity}/history": {
       "get": {
-        "operationId": "history_api_product_automations__identity__history_get",
+        "operationId": "listProductAutomationHistory",
         "parameters": [
           {
             "in": "path",
@@ -9429,7 +10654,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationHistoryPage"
+                }
               }
             },
             "description": "Successful Response"
@@ -9450,7 +10677,7 @@
     },
     "/api/product/automations/{identity}/migrate": {
       "post": {
-        "operationId": "migrate_api_product_automations__identity__migrate_post",
+        "operationId": "migrateProductAutomation",
         "parameters": [
           {
             "in": "path",
@@ -9476,7 +10703,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationMutationResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9497,7 +10726,7 @@
     },
     "/api/product/automations/{identity}/preview": {
       "get": {
-        "operationId": "preview_api_product_automations__identity__preview_get",
+        "operationId": "getProductAutomationPreview",
         "parameters": [
           {
             "in": "path",
@@ -9513,7 +10742,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationPreview"
+                }
               }
             },
             "description": "Successful Response"
@@ -9534,7 +10765,7 @@
     },
     "/api/product/automations/{identity}/run": {
       "post": {
-        "operationId": "run_now_api_product_automations__identity__run_post",
+        "operationId": "runProductAutomation",
         "parameters": [
           {
             "in": "path",
@@ -9560,7 +10791,9 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationRunResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9581,7 +10814,7 @@
     },
     "/api/product/automations/{identity}/test-event": {
       "post": {
-        "operationId": "test_event_api_product_automations__identity__test_event_post",
+        "operationId": "testProductAutomationEvent",
         "parameters": [
           {
             "in": "path",
@@ -9607,7 +10840,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationTestResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9628,7 +10863,7 @@
     },
     "/api/product/automations/{identity}/webhook": {
       "get": {
-        "operationId": "info_api_product_automations__identity__webhook_get",
+        "operationId": "getProductAutomationWebhook",
         "parameters": [
           {
             "in": "path",
@@ -9644,7 +10879,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationWebhookInfo"
+                }
               }
             },
             "description": "Successful Response"
@@ -9663,7 +10900,7 @@
         "summary": "Info"
       },
       "post": {
-        "operationId": "configure_api_product_automations__identity__webhook_post",
+        "operationId": "configureProductAutomationWebhook",
         "parameters": [
           {
             "in": "path",
@@ -9689,7 +10926,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationWebhookResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9710,7 +10949,7 @@
     },
     "/api/product/automations/{identity}/{action}": {
       "post": {
-        "operationId": "state_api_product_automations__identity___action__post",
+        "operationId": "setProductAutomationState",
         "parameters": [
           {
             "in": "path",
@@ -9750,7 +10989,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductAutomationMutationResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -14214,7 +15455,7 @@
     },
     "/api/settings/users/role": {
       "put": {
-        "operationId": "role_api_settings_users_role_put",
+        "operationId": "updateProductUserRole",
         "requestBody": {
           "content": {
             "application/json": {
@@ -14229,7 +15470,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductUserRoleResult"
+                }
               }
             },
             "description": "Successful Response"

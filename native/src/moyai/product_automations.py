@@ -21,7 +21,8 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey
 
 with workflow.unsafe.imports_passed_through():
-    from app.automation_definitions import Definition, Trigger
+    from app.automation_definitions import Definition, SelfManagement, Timing, Trigger
+    from app.automation_sources import EventTrigger
     from app.connector_errors import ConnectorError
     from cryptography.fernet import InvalidToken
     from fastapi import APIRouter, HTTPException, Query, Request
@@ -100,6 +101,147 @@ class Save(Mutation):
 
 class Migration(Mutation):
     activate: bool = False
+
+
+# Response models. The generated frontend client is built from these; every
+# key a handler returns must be declared here or FastAPI drops it.
+_OUTPUT = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class ProductAutomationEvent(EventTrigger):
+    model_config = _OUTPUT
+
+
+class ProductAutomationTiming(Timing):
+    model_config = _OUTPUT
+
+
+class ProductAutomationTrigger(Trigger):
+    model_config = _OUTPUT
+    schedule: ProductAutomationTiming | None = None
+    event: ProductAutomationEvent | None = None
+
+
+class ProductAutomationSelfManagement(SelfManagement):
+    model_config = _OUTPUT
+
+
+class ProductAutomationDefinition(Definition):
+    """A saved canonical definition as returned to the editor."""
+
+    model_config = _OUTPUT
+    triggers: list[ProductAutomationTrigger] = Field(min_length=1)
+    self_management: ProductAutomationSelfManagement = Field(default_factory=ProductAutomationSelfManagement)
+
+
+class ProductAutomationNativeState(BaseModel):
+    model_config = _OUTPUT
+    core: str
+    generation: int
+    state: Literal["paused", "active", "deleted"]
+    sync_state: str
+    synced_generation: int
+    source_revision: int
+    last_error: str
+
+
+class ProductAutomationSummary(BaseModel):
+    model_config = _OUTPUT
+    id: str
+    revision: int
+    name: str
+    owner_id: str
+    owned: bool
+    legacy_paused: bool
+    triggers: list[ProductAutomationTrigger]
+    native: ProductAutomationNativeState | None
+
+
+class ProductAutomationInventoryCapabilities(BaseModel):
+    model_config = _OUTPUT
+    create: bool
+    read: bool
+
+
+class ProductAutomationInventory(BaseModel):
+    model_config = _OUTPUT
+    automations: list[ProductAutomationSummary]
+    next_offset: int | None
+    source: Literal["canonical_product"]
+    migration: Literal["opt_in"]
+    event_choices: dict[str, list[tuple[str, str]]]
+    capabilities: ProductAutomationInventoryCapabilities
+
+
+class ProductAutomationCapabilities(BaseModel):
+    model_config = _OUTPUT
+    update: bool
+    migrate: bool
+    enable: bool
+    pause: bool
+    retire: bool
+    run: bool
+    webhook: bool
+    test_event: bool
+
+
+class ProductAutomationPreview(BaseModel):
+    model_config = _OUTPUT
+    id: str
+    owner_id: str
+    revision: int
+    definition: ProductAutomationDefinition
+    legacy_paused: bool
+    native: ProductAutomationNativeState | None
+    blockers: list[str]
+    supported: bool
+    activation: str
+    target_core: str
+    overlap: str
+    catchup_seconds: int
+    execution_visibility: str
+    sharing_notice: str
+    legacy_fence: str
+    migration_changes: list[str]
+    capabilities: ProductAutomationCapabilities
+
+
+class ProductAutomationHistoryEntry(BaseModel):
+    model_config = _OUTPUT
+    occurrence: str
+    revision: int
+    outcome: str
+    created_at: str
+    engine: str
+    status: str
+    session_id: str | None
+    turn_id: str | None
+    detail: str
+
+
+class ProductAutomationHistoryPage(BaseModel):
+    model_config = _OUTPUT
+    history: list[ProductAutomationHistoryEntry]
+    next_cursor: str | None
+    untrusted_reference: bool
+
+
+class ProductAutomationMutationResult(BaseModel):
+    model_config = _OUTPUT
+    id: str
+    revision: int
+    outcome: str
+    legacy_paused: bool
+    native_state: str
+    sync_state: str
+    previous_harness: str | None = None
+
+
+class ProductAutomationRunResult(BaseModel):
+    model_config = _OUTPUT
+    status: str
+    session_id: str | None = None
+    turn_id: str | None = None
 
 
 def _digest(value: Any) -> str:
@@ -1337,40 +1479,64 @@ def routes(service: ProductAutomationService | None) -> APIRouter:
     async def principal(request: Request, *, mutation: bool = False):
         return await service.identity.authenticate(request, mutation=mutation)
 
-    @router.get("")
-    async def listing(request: Request, limit: int = Query(50, ge=1, le=50), offset: int = Query(0, ge=0)):
+    @router.get("", operation_id="listProductAutomations")
+    async def listing(
+        request: Request, limit: int = Query(50, ge=1, le=50), offset: int = Query(0, ge=0),
+    ) -> ProductAutomationInventory:
         actor = await principal(request)
-        return await service.listing(actor.grant, limit=limit, offset=offset, shared_library=True)
+        return ProductAutomationInventory.model_validate(
+            await service.listing(actor.grant, limit=limit, offset=offset, shared_library=True),
+        )
 
-    @router.get("/{identity}/preview")
-    async def preview(identity: str, request: Request):
-        return await service.preview((await principal(request)).grant, identity, shared_library=True)
+    @router.get("/{identity}/preview", operation_id="getProductAutomationPreview")
+    async def preview(identity: str, request: Request) -> ProductAutomationPreview:
+        return ProductAutomationPreview.model_validate(
+            await service.preview((await principal(request)).grant, identity, shared_library=True),
+        )
 
-    @router.get("/{identity}/history")
-    async def history(identity: str, request: Request, limit: int = Query(20, ge=1, le=100), cursor: str = ""):
-        return await service.history((await principal(request)).grant, identity, limit=limit, cursor=cursor, shared_library=True)
+    @router.get("/{identity}/history", operation_id="listProductAutomationHistory")
+    async def history(
+        identity: str, request: Request, limit: int = Query(20, ge=1, le=100), cursor: str = "",
+    ) -> ProductAutomationHistoryPage:
+        return ProductAutomationHistoryPage.model_validate(await service.history(
+            (await principal(request)).grant, identity, limit=limit, cursor=cursor, shared_library=True,
+        ))
 
-    @router.post("")
-    async def create(body: Save, request: Request):
-        return await service.mutate((await principal(request, mutation=True)).grant, "create", None, body)
+    @router.post("", operation_id="createProductAutomation")
+    async def create(body: Save, request: Request) -> ProductAutomationMutationResult:
+        return ProductAutomationMutationResult.model_validate(
+            await service.mutate((await principal(request, mutation=True)).grant, "create", None, body),
+        )
 
-    @router.put("/{identity}")
-    async def edit(identity: str, body: Save, request: Request):
-        return await service.mutate((await principal(request, mutation=True)).grant, "update", identity, body)
+    @router.put("/{identity}", operation_id="updateProductAutomation")
+    async def edit(identity: str, body: Save, request: Request) -> ProductAutomationMutationResult:
+        return ProductAutomationMutationResult.model_validate(
+            await service.mutate((await principal(request, mutation=True)).grant, "update", identity, body),
+        )
 
-    @router.post("/{identity}/migrate")
-    async def migrate(identity: str, body: Migration, request: Request):
-        return await service.mutate((await principal(request, mutation=True)).grant, "migrate", identity, body)
+    @router.post("/{identity}/migrate", operation_id="migrateProductAutomation")
+    async def migrate(identity: str, body: Migration, request: Request) -> ProductAutomationMutationResult:
+        return ProductAutomationMutationResult.model_validate(
+            await service.mutate((await principal(request, mutation=True)).grant, "migrate", identity, body),
+        )
 
-    @router.post("/{identity}/run", status_code=202)
-    async def run_now(identity: str, body: Mutation, request: Request):
-        return await service.run_now((await principal(request, mutation=True)).grant, identity, body)
+    @router.post("/{identity}/run", status_code=202, operation_id="runProductAutomation")
+    async def run_now(identity: str, body: Mutation, request: Request) -> ProductAutomationRunResult:
+        return ProductAutomationRunResult.model_validate(
+            await service.run_now((await principal(request, mutation=True)).grant, identity, body),
+        )
 
-    @router.post("/{identity}/{action}")
-    async def state(identity: str, action: Literal["enable", "pause", "retire"], body: Mutation, request: Request):
-        return await service.mutate((await principal(request, mutation=True)).grant, action, identity, body)
+    @router.post("/{identity}/{action}", operation_id="setProductAutomationState")
+    async def state(
+        identity: str, action: Literal["enable", "pause", "retire"], body: Mutation, request: Request,
+    ) -> ProductAutomationMutationResult:
+        return ProductAutomationMutationResult.model_validate(
+            await service.mutate((await principal(request, mutation=True)).grant, action, identity, body),
+        )
 
     if service.events is not None:
+        # Event routes must precede /{identity}/{action} so POST .../webhook and
+        # .../test-event never reach the action route.
         from .product_automation_events import routes as event_routes
         root = APIRouter()
         root.include_router(event_routes(service.events))

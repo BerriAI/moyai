@@ -157,8 +157,28 @@ async def test_native_runtime_api_tools_and_worker_replay(
             assert saved.status_code == 200, saved.text
             preview = await client.get(f"/api/product/automations/{saved.json()['id']}/preview")
             assert preview.status_code == 200 and preview.json()["legacy_paused"]
+            # Response models filter output: every key the service returns must survive.
+            assert set(saved.json()) == {
+                "id", "revision", "outcome", "legacy_paused", "native_state", "sync_state", "previous_harness",
+            }
+            assert set(preview.json()) == {
+                "id", "owner_id", "revision", "definition", "legacy_paused", "native", "blockers", "supported",
+                "activation", "target_core", "overlap", "catchup_seconds", "execution_visibility",
+                "sharing_notice", "legacy_fence", "migration_changes", "capabilities",
+            }
+            assert preview.json()["definition"] == fixtures.definition().model_dump(mode="json") | {
+                "model": preview.json()["definition"]["model"],
+            }
+            history = await client.get(f"/api/product/automations/{saved.json()['id']}/history")
+            assert history.json() == {"history": [], "next_cursor": None, "untrusted_reference": True}
             listing = await client.get("/api/product/automations")
             assert len(listing.json()["automations"]) == 1
+            assert set(listing.json()) == {
+                "automations", "next_offset", "source", "migration", "event_choices", "capabilities",
+            }
+            assert set(listing.json()["automations"][0]) == {
+                "id", "revision", "name", "owner_id", "owned", "legacy_paused", "triggers", "native",
+            }
 
         session = await runtime.database.create_session(ctx.product.actor, NewSession(visibility=visibility))
         turn = await runtime.database.submit(
