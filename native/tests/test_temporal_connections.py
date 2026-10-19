@@ -37,6 +37,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
     discovery_activities: set[str] = set()
     dispatched_connections: list[str] = []
     calls: list[str] = []
+    catalog_checks: list[str] = []
     replaying = False
 
     def require_activity():
@@ -61,6 +62,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
 
     if product:
         async def check(scope, grant):
+            catalog_checks.append(scope.turn_id)
             await runtime.database.authorize_scope(scope)
 
         service = SimpleNamespace(
@@ -84,7 +86,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             return provider_tools()
 
         monkeypatch.setattr(ProductGitHubToolset, "_native", native)
-        runtime.product_connections = SimpleNamespace(toolset=resolve)
+        runtime.product_connections = SimpleNamespace(toolset=resolve, check=check)
     else:
         class Provider:
             def __init__(self, **kwargs):
@@ -184,6 +186,19 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             )
             result = await asyncio.wait_for(handle.result(), timeout=60)
             history = await handle.fetch_history()
+            if product:
+                followup = await runtime.database.submit(actor, session.id, NewMessage(
+                    prompt="Confirm the repository read completed.", request_key="connection-followup",
+                    connections=[connection.id, unrelated.id],
+                ))
+                await runtime.database.claim_next()
+                next_handle = await runtime.client.start_workflow(
+                    TurnWorkflow.run, followup.id, id=followup.workflow_id,
+                    task_queue=runtime.settings.temporal_queue,
+                )
+                assert (await asyncio.wait_for(next_handle.result(), timeout=60))["status"] == "completed"
+                next_history = await next_handle.fetch_history()
+                assert followup.id in catalog_checks
         assert result["status"] == "completed"
         assert calls == ["test/selected"] * 2
         assert any(name.endswith("__get_tools") for name in constructions)
@@ -195,6 +210,11 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
+        if product:
+            await Replayer(
+                interceptors=[ActivityCapacity()],
+                workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            ).replay_workflow(next_history)
 
     assert calls == ["test/selected"] * 2
     async with runtime.database.sessions() as db:

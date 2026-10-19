@@ -103,6 +103,13 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
     def resolve(ctx: RunContext[RunScope]) -> AbstractToolset[RunScope] | None:
         if not ctx.deps.grants:
             return None
+        if (
+            any(grant.kind == "github" for grant in ctx.deps.grants)
+            and all(grant.policy.get("product") for grant in ctx.deps.grants)
+        ):
+            from .product_connections import ProductCatalogToolset
+
+            return ProductCatalogToolset(catalog, ctx, lambda name: build(ctx, name))
         return CatalogToolset(catalog, ctx, lambda name: build(ctx, name))
 
     # Per-run factories execute in workflow code in the durable SDK. Resolve
