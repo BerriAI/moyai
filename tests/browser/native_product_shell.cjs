@@ -2359,8 +2359,8 @@ for(const width of [1440,320])test(`chat image viewer supports keyboard and fits
   assert.equal(await original.getAttribute('href'),'/test-images/wide.svg');assert.equal(await original.getAttribute('target'),'_blank');
   if(process.env.MOYAI_IMAGE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.MOYAI_IMAGE_SCREENSHOTS,`chat-image-viewer-${width}.png`)});
   await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
-  // Radix restores focus in a task scheduled after the dialog unmounts.
-  await page.waitForFunction(element=>element===document.activeElement,await trigger.elementHandle());
+  await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Enlarge image: Workspace preview');
+  assert.equal(await trigger.evaluate(el=>el===document.activeElement),true);
   await trigger.click();await dialog.waitFor();await dialog.getByRole('button',{name:'Close',exact:true}).click();
   await dialog.waitFor({state:'detached'});
 });
