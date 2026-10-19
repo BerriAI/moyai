@@ -11,9 +11,30 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, User
 from sqlalchemy import select
 
 from moyai.api import COOKIE, create_app
+from moyai.api_views import PendingRequests
 from moyai.contracts import NewMessage, NewSession
 from moyai.models import Event, Message, Session, Turn, User
 from moyai.questions import expire_optional_questions, text_results
+
+
+@pytest.mark.parametrize("string_arguments", [False, True])
+def test_question_response_uses_the_validated_harness_schema(string_arguments):
+    arguments = {"questions": [{
+        "header": "Color", "question": "Blue or green?",
+        "options": [{"label": "Blue"}, {"label": "Green", "description": "Use green."}],
+    }]}
+    pending = PendingRequests.model_validate({
+        "calls": [{"tool_name": "ask_user_question", "tool_call_id": "color",
+                   "args": json.dumps(arguments) if string_arguments else arguments, "part_kind": "tool-call"},
+                  {"tool_name": "credentials_request", "tool_call_id": "credential",
+                   "args": {"provider": "github"}, "part_kind": "tool-call"}],
+        "approvals": [], "metadata": {},
+    }).model_dump(mode="json")
+    assert pending["questions"] == [{"id": "color", "questions": [{
+        **arguments["questions"][0], "multi_select": False,
+        "options": [{"label": "Blue", "description": None}, {"label": "Green", "description": "Use green."}],
+    }]}]
+    assert len(pending["calls"]) == 2
 
 
 async def waiting(runtime, actor, *, optional=False, extra=None):
@@ -200,6 +221,13 @@ async def test_http_reply_is_requester_only_and_exposes_a_safe_composer_target(r
             client.headers["x-moyai-csrf"] = csrf
             view = (await client.get(f"/api/sessions/{session.id}")).json()
             assert bool(view["can_reply_with_text"]) is (user.id == actor.id)
+            if user.id == actor.id:
+                assert view["pending"]["questions"][0]["id"] == "color"
+                assert view["pending"]["questions"][0]["questions"][0]["options"][0] == {
+                    "label": "Blue", "description": None,
+                }
+            else:
+                assert view["pending"] is None
             response = await client.post(f"/api/sessions/{session.id}/messages", json={
                 "prompt": "Blue", "request_key": "typed-http", "reply_to": original.id,
             })

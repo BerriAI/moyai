@@ -47,7 +47,7 @@ import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } fr
 import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
-import { QuestionChoices, type Question } from "./question-choices"
+import { QuestionChoices } from "./question-choices"
 import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./browser-login"
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
@@ -1169,12 +1169,12 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
     restoreFocus.current = null
     if (target.isConnected && document.activeElement === document.body) target.focus()
   }, [busy, submitted])
-  const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
+  const questions = pending.questions
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
   const logins = pending.calls.filter(call => call.tool_name === "request_browser_login")
   const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request", "request_browser_login"].includes(call.tool_name))
-  const isComplete = (nextValues: typeof values, nextCustom: typeof custom, nextLogins = browserLogins) => questions.every(({ call, questions }) => questions.every(question => {
-    const key = `${call.tool_call_id}:${question.header}`
+  const isComplete = (nextValues: typeof values, nextCustom: typeof custom, nextLogins = browserLogins) => questions.every(({ id, questions }) => questions.every(question => {
+    const key = `${id}:${question.header}`
     return Boolean(nextCustom[key]?.trim() || nextValues[key]?.length)
   })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
     && logins.every(call => Boolean(nextLogins[call.tool_call_id]))
@@ -1195,8 +1195,8 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
     restoreFocus.current = document.activeElement instanceof HTMLElement && form.current?.contains(document.activeElement)
       ? document.activeElement : null
     setBusy(true); setError("")
-    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
-      const key = `${call.tool_call_id}:${question.header}`
+    const answers = Object.fromEntries(questions.map(({ id, questions }) => [id, { answers: questions.map(question => {
+      const key = `${id}:${question.header}`
       return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
     }) }]))
     try { await createSessionAnswer({ path: { session_id: sessionId }, body: { turn_id: turnId, request_key: requestKey.current, approvals, answers, ...(logins.length ? { browser_logins: nextLogins } : {}) } }) }
@@ -1228,8 +1228,8 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
         setBrowserLogins(next)
         if (!requiresContinue && isComplete(values, custom, next)) void submit(values, custom, next)
       }} />)}
-    {questions.map(({ call, questions }) => questions.map(question => {
-      const key = `${call.tool_call_id}:${question.header}`
+    {questions.map(({ id, questions }) => questions.map(question => {
+      const key = `${id}:${question.header}`
       return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={disabled}
         onSelect={selected => {
           if (submitting.current) return

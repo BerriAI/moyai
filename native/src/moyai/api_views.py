@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel, computed_field
+from pydantic_ai.messages import ToolCallPart
+from pydantic_ai_harness.ask_user import AskUserRequest
 
 from .general_preferences import GeneralPreferences
 
@@ -247,6 +249,17 @@ class PendingRequests(ApiView):
     approvals: list[PendingToolCall]
     # Per tool_call_id metadata; its shape depends on the tool (e.g. browser sign-in).
     metadata: dict[str, dict[str, JsonValue]]
+
+    @computed_field
+    @property
+    def questions(self) -> list[AskUserRequest]:
+        """Use the same validated questions for presentation and answer checking."""
+        return [
+            AskUserRequest.from_tool_call(ToolCallPart(
+                call.tool_name, call.args, tool_call_id=call.tool_call_id,
+            ))
+            for call in self.calls if call.tool_name == "ask_user_question"
+        ]
 
 
 class CredentialRequestRef(ApiView):

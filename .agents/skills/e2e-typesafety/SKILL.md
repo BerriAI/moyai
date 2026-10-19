@@ -79,9 +79,9 @@ Those allowlists only shrink. Don't add to them to make a test pass.
    `moyai__x__Session`. Reuse the existing model when the payload is the same;
    otherwise name it distinctly (`HistorySession`).
 8. **Errors are `ApiError`, by design.** Error bodies are `{"detail": str}` or
-   the 422 shape from `safe_validation`; `send()` in `native/web/api.ts` turns
-   every failure into `ApiError` (status + user-facing message) before the
-   generated client sees it. Don't declare error bodies with `responses={...}`:
+   the 422 shape from `safe_validation`; `send()` and `sendJson()` in
+   `native/web/api.ts` turn HTTP and JSON parsing failures into `ApiError`
+   (status + user-facing message). Don't declare error bodies with `responses={...}`:
    the SDK would type an error object it never throws.
 9. **Response models are also a security boundary.** FastAPI filters output to
    the declared model, so internal fields can't leak by accident. Don't bypass
@@ -111,7 +111,7 @@ producer validates every frame against it (see `LiveEvent` in `api_views.py` and
 automations, Slack…). If you add a router behind a new runtime condition, make
 sure the dump still mounts it, or its types silently disappear.
 
-`native/web/api-client.ts` points the generated client at `send()` in
+`native/web/api-client.ts` points the generated client at `sendJson()` in
 `native/web/api.ts`, the same transport as legacy `api<T>`: CSRF headers, a
 single attempt (never replay a write), `ApiError` with friendly messages, and
 the `moyai:signed-out` event on 401. Change transport behavior there, once.
@@ -167,3 +167,6 @@ the reference migration.
 - The changed routes appear in `openapi.json` with concrete schemas (no `{}` /
   `additionalProperties: true` where a model belongs).
 - No new hand-written payload types, `api<T>` calls or casts in `native/web`.
+- Transport changes exercise actual generated SDK calls, including malformed
+  responses, writes, uploads, aborts and streams; legacy `api<T>` tests alone
+  do not cover the generated client's parsing behavior.

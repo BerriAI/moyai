@@ -13,6 +13,13 @@ function reset(overrides={}) {
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect this repository.'}], requests:[], streams:[], ...overrides};
 }
 function session(id=sessionId) {return {id,title:'Current native work',owner_id:state.ownerId??'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{}),...(state.sessionOverrides?.[id]||{}),...(state.titles?.[id]===undefined?{}:{title:state.titles[id]})};}
+function pendingView(pending) {
+  return pending && {...pending,questions:pending.calls.filter(call=>call.tool_name==='ask_user_question').map(call=>({
+    id:call.tool_call_id,questions:(typeof call.args==='string'?JSON.parse(call.args):call.args).questions.map(question=>({
+      ...question,multi_select:question.multi_select??false,options:question.options.map(option=>({description:null,...option})),
+    })),
+  }))};
+}
 async function handle(req,res,next) {
   const url=new URL(req.url,'http://localhost');
   if(!url.pathname.startsWith('/api/'))return next();
@@ -169,7 +176,7 @@ async function handle(req,res,next) {
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
     if(state.goalAccepted&&state.goalRefreshError)return json({detail:'Could not refresh the goal.'},503);
     const row=session(url.pathname.split('/')[3]);
-    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:pendingView(state.pending),can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
       result.messages=(state.messagesBySession?.[row.id]||state.messages).slice(0,state.paginate?200:undefined);
     if(state.slackDelivery)result.slack_delivery={rejected_files:0,file_error_codes:[],...state.slackDelivery};
@@ -1340,6 +1347,27 @@ test('a streaming answer stays above another requester’s already visible queue
   await page.locator('.live-message').getByText('Hi there.',{exact:true}).waitFor();
   assert.deepEqual(await page.locator('.transcript .message .message-content').allTextContents(),['hello','Hi there.','My next task.']);
   assert.equal(await page.locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
+});
+
+for(const width of [1440,768,320])test(`unreadable API successes recover without losing the draft at ${width}px`,async t=>{
+  reset();const page=await pageFor(t,'#'+sessionId,width);
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Preserve this unsent draft.');
+  await waitFor(()=>clients.size>0,'SSE connected');
+  const route=`GET:/api/sessions/${sessionId}`,alert=page.locator('.composer-wrap [role="alert"]');
+  for(const [body,type] of [['<html>private proxy details</html>','text/html'],['{private broken JSON','application/json'],['','application/json']]){
+    state.httpErrors={[route]:{status:200,body,type}};
+    emit({},undefined,'refresh');
+    await alert.getByText(/Moyai returned an unreadable response/).waitFor();
+    assert.equal(await input.innerText(),'Preserve this unsent draft.');
+    assert.equal(await page.getByText(/private proxy details|private broken JSON|SyntaxError/).count(),0);
+    delete state.httpErrors[route];
+    emit({},undefined,'refresh');
+    await alert.waitFor({state:'hidden'});
+  }
+  assert.equal(await input.innerText(),'Preserve this unsent draft.');
+  assert.equal(state.requests.filter(req=>req.method==='POST'&&req.path.endsWith('/messages')).length,0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });
 
 for(const width of [1440,768,320])test(`transient global and conversation errors recover independently at ${width}px`,async t=>{

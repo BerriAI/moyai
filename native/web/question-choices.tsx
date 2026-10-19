@@ -3,14 +3,8 @@ import { Check, Pencil } from "lucide-react"
 import { Checkbox as CheckboxPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
+import type { Question } from "./generated/api"
 import "./question-choices.css"
-
-export type Question = {
-  header: string
-  question: string
-  multi_select?: boolean
-  options: { label: string; description?: string }[]
-}
 
 type Props = {
   question: Question

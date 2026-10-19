@@ -6,6 +6,76 @@ const source = ts.transpileModule(fs.readFileSync('native/web/api.ts','utf8'),{
   compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022},
 }).outputText;
 const loaded = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const sdkSource = require('esbuild').buildSync({
+  stdin: { contents: `
+    export { getMe, createSessionMessage, uploadFile, streamSessionEvents } from './native/web/generated/api';
+    export { client } from './native/web/generated/api/client.gen';
+    export { ApiError, setCsrf } from './native/web/api';
+  `, resolveDir: process.cwd() },
+  bundle: true, write: false, format: 'esm', platform: 'node',
+}).outputFiles[0].text;
+const sdkLoaded = import(`data:text/javascript;base64,${Buffer.from(sdkSource).toString('base64')}`)
+  .then(sdk=>{sdk.client.setConfig({baseUrl:'https://moyai.test'});return sdk;});
+
+test('generated SDK rejects unreadable successful responses without exposing their contents',async t=>{
+  const {getMe,ApiError}=await sdkLoaded;
+  for(const [body,type,headers] of [
+    ['<html>private proxy details</html>','text/html',{}],
+    ['{broken private details','application/json',{}],
+    ['','application/json',{}],
+    ['','application/json',{'Content-Length':'0'}],
+  ]){
+    t.mock.method(global,'fetch',async()=>new Response(body,{headers:{'Content-Type':type,...headers}}));
+    await assert.rejects(getMe(),error=>error instanceof ApiError && error.status===200
+      && error.message==='Moyai returned an unreadable response. Please try again.');
+  }
+});
+
+test('generated SDK keeps JSON values, CSRF and one-attempt write semantics',async t=>{
+  const {getMe,createSessionMessage,setCsrf}=await sdkLoaded;
+  setCsrf('sdk-csrf');
+  t.mock.method(global,'fetch',async request=>{
+    assert.equal(request.url,'https://moyai.test/api/me');
+    assert.equal(request.headers.get('X-Moyai-CSRF'),'sdk-csrf');
+    assert.equal(request.headers.get('X-CSRF-Token'),'sdk-csrf');
+    return new Response('{"csrf":"saved"}',{headers:{'Content-Type':'application/json'}});
+  });
+  assert.deepEqual((await getMe()).data,{csrf:'saved'});
+  const request=t.mock.method(global,'fetch',async request=>{
+    assert.equal(request.method,'POST');
+    assert.deepEqual(await request.json(),{prompt:'hello',model:'test-model'});
+    return new Response('{invalid',{headers:{'Content-Type':'application/json'}});
+  });
+  await assert.rejects(createSessionMessage({path:{session_id:'session'},body:{prompt:'hello',model:'test-model'}}),{status:200});
+  assert.equal(request.mock.callCount(),1);
+});
+
+test('generated SDK preserves binary upload bodies and aborts during response consumption',async t=>{
+  const {uploadFile,getMe}=await sdkLoaded;
+  const bytes=new Uint8Array([0,1,255]);
+  t.mock.method(global,'fetch',async request=>{
+    assert.equal(request.url,'https://moyai.test/api/uploads?name=image.png');
+    assert.equal(request.headers.get('Content-Type'),'image/png');
+    assert.deepEqual(new Uint8Array(await request.arrayBuffer()),bytes);
+    return new Response('{"id":"uploaded"}',{headers:{'Content-Type':'application/json'}});
+  });
+  assert.deepEqual((await uploadFile({query:{name:'image.png'},body:new Blob([bytes]),headers:{'Content-Type':'image/png'}})).data,{id:'uploaded'});
+  const abort=new DOMException('Aborted','AbortError');
+  t.mock.method(global,'fetch',async()=>new Response(new ReadableStream({start(controller){controller.error(abort);}})));
+  await assert.rejects(getMe(),error=>error.name==='AbortError');
+});
+
+test('generated SDK leaves event streams available for incremental consumption',async t=>{
+  const {streamSessionEvents}=await sdkLoaded;
+  const frame={type:'response_start',run_id:'turn',step:0};
+  t.mock.method(global,'fetch',async()=>new Response(`data: ${JSON.stringify(frame)}\n\n`,{
+    headers:{'Content-Type':'text/event-stream; charset=utf-8'},
+  }));
+  const {stream}=await streamSessionEvents({path:{session_id:'session'},sseMaxRetryAttempts:1});
+  const frames=[];
+  for await(const event of stream)frames.push(event);
+  assert.deepEqual(frames,[frame]);
+});
 
 test('non-JSON errors retain HTTP status without showing raw proxy or backend contents',async t=>{
   const {api,ApiError}=await loaded;
