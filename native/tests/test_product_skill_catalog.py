@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from moyai.product_skill_catalog import ProductSkillCatalog
+from moyai.product_skill_catalog import ProductSkillCatalog, ProductSkillDetail, ProductSkillLibrary
 from moyai.security import Security
 
 product = identity_fixtures.product
@@ -68,10 +68,12 @@ async def test_source_library_files_and_ciphertext_are_preserved_without_convers
         before = (await db.execute(text("SELECT * FROM skills ORDER BY id"))).all()
     listing = await product.catalog.listing(product.principal.grant)
     assert {row["id"] for row in listing["skills"]} == {product.personal, product.organization}
+    assert len(ProductSkillLibrary.model_validate(listing).skills) == 2
     assert not listing["can_publish"] and not listing["capabilities"]["update"]
     assert all(not row["can_manage"] for row in listing["skills"])
     detail = await product.catalog.detail(product.principal.grant, product.personal, revision=3)
     assert detail["instructions"] == "Original owner-skill"
+    assert ProductSkillDetail.model_validate(detail).files[0].path == "references/runbook.md"
     assert detail["files"][0]["path"] == "references/runbook.md"
     assert await product.catalog.file(
         product.principal.grant, product.personal, "references/runbook.md", revision=3,

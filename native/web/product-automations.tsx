@@ -22,6 +22,7 @@ import {
   type AutomationTiming, type AutomationTrigger, type AutomationEvent, type ProductAutomation, type AutomationRunResult,
   type AutomationWebhookResult, type AutomationEnvironment, type AutomationConnection,
 } from "./product-automation-data"
+import { listOrganizationConnections } from "./generated/api"
 import "./product-automations.css"
 
 const base = "/product/automations"
@@ -257,7 +258,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
     signal => getProductAutomationPreview({ path: { identity: id! }, signal }).then(({ data }) => data))
   const models = useRead("/me", signal => getMe({ signal }).then(({ data }) => data))
   const environments = useRead<AutomationEnvironment[]>(mode !== "review" ? "/product/environments" : null)
-  const connections = useRead<AutomationConnection[]>(mode !== "review" ? "/product/connections" : null)
+  const connections = useRead<AutomationConnection[]>(mode !== "review" ? "/product/connections" : null, signal => listOrganizationConnections({ signal }).then(({ data }) => data))
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [historyVersion, setHistoryVersion] = useState(0)
   const [confirm, setConfirm] = useState<"migrate" | "enable" | "pause" | "run" | "retire" | null>(null)
   const [runResult, setRunResult] = useState<AutomationRunResult | null>(null)

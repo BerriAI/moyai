@@ -171,6 +171,1022 @@ export type AutomationInput = {
 };
 
 /**
+ * BillingCapabilities
+ */
+export type BillingCapabilities = {
+    /**
+     * Bill Mutations
+     */
+    bill_mutations: boolean;
+    /**
+     * Identity Linking
+     */
+    identity_linking: boolean;
+    /**
+     * Provider Sync
+     */
+    provider_sync: boolean;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+};
+
+/**
+ * BillingCostSummary
+ */
+export type BillingCostSummary = {
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Incomplete
+     */
+    incomplete: boolean;
+    /**
+     * Infrastructure
+     */
+    infrastructure: string | null;
+    /**
+     * Llm
+     */
+    llm: string | null;
+    /**
+     * Total
+     */
+    total: string | null;
+};
+
+/**
+ * BillingCoverage
+ */
+export type BillingCoverage = {
+    /**
+     * Complete
+     */
+    complete: boolean;
+    /**
+     * Deduplicated Observations
+     */
+    deduplicated_observations: number;
+    /**
+     * Legacy Observations
+     */
+    legacy_observations: number;
+    /**
+     * Mapping Version
+     */
+    mapping_version: string;
+    /**
+     * Native Observations
+     */
+    native_observations: number;
+    /**
+     * Private Details Omitted
+     */
+    private_details_omitted: number;
+    /**
+     * Source Observations
+     */
+    source_observations: number;
+    /**
+     * Undated Charges
+     */
+    undated_charges: number;
+    /**
+     * Unreconciled Native Observations
+     */
+    unreconciled_native_observations: number;
+};
+
+/**
+ * BillingDailyTotals
+ */
+export type BillingDailyTotals = {
+    /**
+     * Active Users
+     */
+    active_users: number;
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Cumulative Pricing Status
+     */
+    cumulative_pricing_status: 'partial' | 'priced' | 'unpriced' | 'empty';
+    /**
+     * Cumulative Spend
+     */
+    cumulative_spend: string | null;
+    /**
+     * Date
+     */
+    date: string;
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Estimated Costs
+     */
+    estimated_costs: number;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Missing Costs
+     */
+    missing_costs: number;
+    /**
+     * Models
+     */
+    models: Array<BillingModelTotals>;
+    /**
+     * Observations
+     */
+    observations: number;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Pending Costs
+     */
+    pending_costs: number;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'partial' | 'priced' | 'unpriced' | 'empty';
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Sessions
+     */
+    sessions: number;
+    /**
+     * Spend
+     */
+    spend: string | null;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Unattributed Charges
+     */
+    unattributed_charges: number;
+    /**
+     * Undated Coverage
+     */
+    undated_coverage: number | null;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+};
+
+/**
+ * BillingInfrastructure
+ */
+export type BillingInfrastructure = {
+    /**
+     * Bills
+     */
+    bills: Array<BillingInfrastructureBill>;
+    /**
+     * Coverage Reason
+     */
+    coverage_reason: string | null;
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Incomplete
+     */
+    incomplete: boolean;
+    /**
+     * Pending
+     */
+    pending: boolean;
+    /**
+     * Providers
+     */
+    providers: Array<BillingInfrastructureProvider>;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+    /**
+     * Spend
+     */
+    spend: string | null;
+};
+
+/**
+ * BillingInfrastructureBill
+ */
+export type BillingInfrastructureBill = {
+    /**
+     * Amount
+     */
+    amount: string | null;
+    /**
+     * Kind
+     */
+    kind: string | null;
+    /**
+     * Month
+     */
+    month: string | null;
+    /**
+     * Provider
+     */
+    provider: string | null;
+    /**
+     * Revision
+     */
+    revision: number | null;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+};
+
+/**
+ * BillingInfrastructureProvider
+ */
+export type BillingInfrastructureProvider = {
+    /**
+     * Covered Days
+     */
+    covered_days: number | null;
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Last Synced At
+     */
+    last_synced_at: string | null;
+    /**
+     * Missing Days
+     */
+    missing_days: number | null;
+    /**
+     * Name
+     */
+    name: string | null;
+    /**
+     * Provider
+     */
+    provider: string | null;
+    /**
+     * Spend
+     */
+    spend: string | null;
+    sync: BillingInfrastructureSync | null;
+    /**
+     * Sync Enabled
+     */
+    sync_enabled: boolean;
+};
+
+/**
+ * BillingInfrastructureSync
+ */
+export type BillingInfrastructureSync = {
+    /**
+     * Status
+     */
+    status: string;
+};
+
+/**
+ * BillingModelTotals
+ */
+export type BillingModelTotals = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Estimated Costs
+     */
+    estimated_costs: number;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Missing Costs
+     */
+    missing_costs: number;
+    /**
+     * Model
+     */
+    model: string | null;
+    /**
+     * Observations
+     */
+    observations: number;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Pending Costs
+     */
+    pending_costs: number;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'partial' | 'priced' | 'unpriced' | 'empty';
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Sessions
+     */
+    sessions: number;
+    /**
+     * Spend
+     */
+    spend: string | null;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Unattributed Charges
+     */
+    unattributed_charges: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+};
+
+/**
+ * BillingReport
+ */
+export type BillingReport = {
+    /**
+     * Activity
+     */
+    activity: {
+        [key: string]: unknown;
+    } | null;
+    capabilities: BillingCapabilities;
+    cost_summary: BillingCostSummary;
+    coverage: BillingCoverage;
+    /**
+     * Currency
+     */
+    currency: string;
+    /**
+     * Daily
+     */
+    daily: Array<BillingDailyTotals>;
+    /**
+     * End
+     */
+    end: string;
+    /**
+     * End Before
+     */
+    end_before: string;
+    /**
+     * Identities
+     */
+    identities: Array<{
+        [key: string]: unknown;
+    }>;
+    infrastructure: BillingInfrastructure | null;
+    /**
+     * Limit
+     */
+    limit: number;
+    /**
+     * Methodology
+     */
+    methodology: {
+        [key: string]: string;
+    };
+    /**
+     * Models
+     */
+    models: Array<BillingModelTotals>;
+    /**
+     * Offset
+     */
+    offset: number;
+    /**
+     * Preset
+     */
+    preset: string;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Request Details
+     */
+    request_details: Array<BillingRequestDetail>;
+    /**
+     * Request Total
+     */
+    request_total: number;
+    /**
+     * Root Models
+     */
+    root_models: Array<string>;
+    /**
+     * Scope
+     */
+    scope: 'personal' | 'organization';
+    /**
+     * Sessions
+     */
+    sessions: Array<BillingSessionTotals>;
+    /**
+     * Start
+     */
+    start: string;
+    /**
+     * Start At
+     */
+    start_at: string;
+    /**
+     * Timezone
+     */
+    timezone: string;
+    total: BillingTotals;
+    /**
+     * Users
+     */
+    users: Array<BillingUserTotals>;
+};
+
+/**
+ * BillingRequestDetail
+ */
+export type BillingRequestDetail = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Cost
+     */
+    cost: string | null;
+    /**
+     * Cost Status
+     */
+    cost_status: string;
+    /**
+     * Coverage Issues
+     */
+    coverage_issues: Array<string>;
+    /**
+     * Created At
+     */
+    created_at: string | null;
+    /**
+     * Estimated Cost
+     */
+    estimated_cost: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Model
+     */
+    model: string | null;
+    /**
+     * Observed Models
+     */
+    observed_models: Array<string>;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens: number | null;
+    /**
+     * Requests
+     */
+    requests: number | null;
+    /**
+     * Session Id
+     */
+    session_id: string | null;
+    /**
+     * Sources
+     */
+    sources: Array<BillingRequestSource>;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Timestamp Basis
+     */
+    timestamp_basis: string;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * User Id
+     */
+    user_id: string | null;
+};
+
+/**
+ * BillingRequestSource
+ */
+export type BillingRequestSource = {
+    /**
+     * Cost Source
+     */
+    cost_source: string | null;
+    /**
+     * Cost State
+     */
+    cost_state: string;
+    /**
+     * Engine
+     */
+    engine: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Observed At
+     */
+    observed_at: string;
+    /**
+     * Recovery Due
+     */
+    recovery_due: boolean;
+    /**
+     * Recovery Eligible
+     */
+    recovery_eligible: boolean;
+    /**
+     * Recovery Reason
+     */
+    recovery_reason: string;
+    /**
+     * Reported Amount
+     */
+    reported_amount: string | null;
+    /**
+     * Request Status
+     */
+    request_status: string;
+};
+
+/**
+ * BillingSessionTotals
+ */
+export type BillingSessionTotals = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Estimated Costs
+     */
+    estimated_costs: number;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Missing Costs
+     */
+    missing_costs: number;
+    /**
+     * Observations
+     */
+    observations: number;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Pending Costs
+     */
+    pending_costs: number;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'partial' | 'priced' | 'unpriced' | 'empty';
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Run Id
+     */
+    run_id: string | null;
+    /**
+     * Session Id
+     */
+    session_id: string | null;
+    /**
+     * Sessions
+     */
+    sessions: number;
+    /**
+     * Spend
+     */
+    spend: string | null;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Unattributed Charges
+     */
+    unattributed_charges: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+    /**
+     * User Id
+     */
+    user_id: string | null;
+    /**
+     * User Name
+     */
+    user_name: string;
+};
+
+/**
+ * BillingTotals
+ *
+ * Recorded quantities for a set of charges; amounts are exact decimal strings.
+ */
+export type BillingTotals = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Estimated Costs
+     */
+    estimated_costs: number;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Missing Costs
+     */
+    missing_costs: number;
+    /**
+     * Observations
+     */
+    observations: number;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Pending Costs
+     */
+    pending_costs: number;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'partial' | 'priced' | 'unpriced' | 'empty';
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Sessions
+     */
+    sessions: number;
+    /**
+     * Spend
+     */
+    spend: string | null;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Unattributed Charges
+     */
+    unattributed_charges: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+};
+
+/**
+ * BillingUserTotals
+ */
+export type BillingUserTotals = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Email
+     */
+    email: string;
+    /**
+     * Estimated
+     */
+    estimated: string | null;
+    /**
+     * Estimated Costs
+     */
+    estimated_costs: number;
+    /**
+     * Id
+     */
+    id: string | null;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Kind
+     */
+    kind: string;
+    /**
+     * Missing Costs
+     */
+    missing_costs: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Observations
+     */
+    observations: number;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Pending Costs
+     */
+    pending_costs: number;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'partial' | 'priced' | 'unpriced' | 'empty';
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Sessions
+     */
+    sessions: number;
+    /**
+     * Spend
+     */
+    spend: string | null;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Unattributed Charges
+     */
+    unattributed_charges: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+};
+
+/**
  * BrowserActionResult
  */
 export type BrowserActionResult = {
@@ -576,6 +1592,261 @@ export type ContinuationRequest = {
 };
 
 /**
+ * CredentialAccessInputField
+ */
+export type CredentialAccessInputField = {
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Required
+     */
+    required: boolean;
+    /**
+     * Secret
+     */
+    secret: boolean;
+};
+
+/**
+ * CredentialAccessRequest
+ */
+export type CredentialAccessRequest = {
+    /**
+     * Env Var
+     */
+    env_var: string;
+    /**
+     * Format
+     */
+    format: string;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Input Fields
+     */
+    input_fields: Array<CredentialAccessInputField>;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Provider
+     */
+    provider: string;
+    /**
+     * Reason
+     */
+    reason: string;
+    /**
+     * Request Id
+     */
+    request_id: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Setup Instructions
+     */
+    setup_instructions: string;
+    /**
+     * Setup Url
+     */
+    setup_url: string;
+    /**
+     * Status
+     */
+    status: string;
+};
+
+/**
+ * CredentialAccessRequestDetail
+ */
+export type CredentialAccessRequestDetail = {
+    /**
+     * Can Resolve
+     */
+    can_resolve: boolean;
+    /**
+     * Credentials
+     */
+    credentials: Array<CredentialSecretMetadata>;
+    /**
+     * Env Var
+     */
+    env_var: string;
+    /**
+     * Format
+     */
+    format: string;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Input Fields
+     */
+    input_fields: Array<CredentialAccessInputField>;
+    /**
+     * Lifetimes
+     */
+    lifetimes: Array<string>;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Note
+     */
+    note: string;
+    /**
+     * Provider
+     */
+    provider: string;
+    /**
+     * Reason
+     */
+    reason: string;
+    /**
+     * Request Id
+     */
+    request_id: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Scopes
+     */
+    scopes: Array<string>;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Setup Instructions
+     */
+    setup_instructions: string;
+    /**
+     * Setup Url
+     */
+    setup_url: string;
+    /**
+     * Status
+     */
+    status: string;
+};
+
+/**
+ * CredentialAccessRequestList
+ */
+export type CredentialAccessRequestList = {
+    /**
+     * Requests
+     */
+    requests: Array<CredentialAccessRequest>;
+};
+
+/**
+ * CredentialCapabilities
+ */
+export type CredentialCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Lifetimes
+     */
+    lifetimes: Array<string>;
+    /**
+     * Native Aws Login
+     */
+    native_aws_login: boolean;
+    /**
+     * Native Execution
+     */
+    native_execution: boolean;
+    /**
+     * Native Formats
+     */
+    native_formats: Array<string>;
+    /**
+     * Native Provider Http
+     */
+    native_provider_http: boolean;
+    /**
+     * Organization
+     */
+    organization: boolean;
+    /**
+     * Scopes
+     */
+    scopes: Array<string>;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * CredentialInventory
+ */
+export type CredentialInventory = {
+    capabilities: CredentialCapabilities;
+    /**
+     * Note
+     */
+    note: string;
+    /**
+     * Providers
+     */
+    providers: Array<CredentialProvider>;
+    /**
+     * Root Id
+     */
+    root_id: string;
+    /**
+     * Secrets
+     */
+    secrets: Array<CredentialSecretMetadata>;
+};
+
+/**
+ * CredentialProvider
+ */
+export type CredentialProvider = {
+    /**
+     * Id
+     */
+    id: 'fireworks' | 'openai' | 'anthropic' | 'together' | 'groq' | 'generic';
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Setup Url
+     */
+    setup_url: string;
+};
+
+/**
  * CredentialRequestRef
  */
 export type CredentialRequestRef = {
@@ -583,6 +1854,124 @@ export type CredentialRequestRef = {
      * Request Id
      */
     request_id: string;
+};
+
+/**
+ * CredentialResolveResult
+ */
+export type CredentialResolveResult = {
+    /**
+     * Note
+     */
+    note: string | null;
+    /**
+     * Resolved
+     */
+    resolved: boolean;
+    /**
+     * Resumed
+     */
+    resumed: boolean;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string | null;
+};
+
+/**
+ * CredentialRevokeResult
+ */
+export type CredentialRevokeResult = {
+    /**
+     * Revoked
+     */
+    revoked: boolean;
+};
+
+/**
+ * CredentialSaveResult
+ */
+export type CredentialSaveResult = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Saved
+     */
+    saved: boolean;
+};
+
+/**
+ * CredentialSecretMetadata
+ *
+ * Saved credential metadata; the encrypted value is never returned.
+ */
+export type CredentialSecretMetadata = {
+    /**
+     * Can Manage
+     */
+    can_manage: boolean;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Env Var
+     */
+    env_var: string;
+    /**
+     * Expires At
+     */
+    expires_at: string;
+    /**
+     * Format
+     */
+    format: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Invalid Reason
+     */
+    invalid_reason: string;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Lifetime
+     */
+    lifetime: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Provider
+     */
+    provider: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Root Id
+     */
+    root_id: string;
+    /**
+     * Scope
+     */
+    scope: string;
+    /**
+     * Status
+     */
+    status: string;
 };
 
 /**
@@ -1223,6 +2612,176 @@ export type Note = {
      * Title
      */
     title: string;
+};
+
+/**
+ * OrganizationConnection
+ *
+ * One organization account; credentials stay on the server.
+ */
+export type OrganizationConnection = {
+    /**
+     * App Registered
+     */
+    app_registered: boolean | null;
+    /**
+     * Check Status
+     */
+    check_status: string | null;
+    /**
+     * Checked At
+     */
+    checked_at: string | null;
+    /**
+     * Connected
+     */
+    connected: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Id
+     */
+    id: 'github' | 'linear' | 'notion' | 'slack';
+    /**
+     * Identity
+     */
+    identity: string;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Oauth Configured
+     */
+    oauth_configured: boolean;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+    /**
+     * Repositories
+     */
+    repositories: Array<OrganizationConnectionRepository> | null;
+    /**
+     * Scope
+     */
+    scope: 'organization';
+    /**
+     * Tools
+     */
+    tools: Array<OrganizationConnectionTool>;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+};
+
+/**
+ * OrganizationConnectionCheck
+ */
+export type OrganizationConnectionCheck = {
+    /**
+     * Healthy
+     */
+    healthy: boolean;
+    /**
+     * Label
+     */
+    label: string;
+};
+
+/**
+ * OrganizationConnectionConnected
+ */
+export type OrganizationConnectionConnected = {
+    /**
+     * Connected
+     */
+    connected: boolean;
+    /**
+     * Label
+     */
+    label: string;
+};
+
+/**
+ * OrganizationConnectionDisconnected
+ */
+export type OrganizationConnectionDisconnected = {
+    /**
+     * Connected
+     */
+    connected: boolean;
+};
+
+/**
+ * OrganizationConnectionOAuthStart
+ */
+export type OrganizationConnectionOAuthStart = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * OrganizationConnectionPolicy
+ */
+export type OrganizationConnectionPolicy = {
+    /**
+     * Check Status
+     */
+    check_status: string | null;
+    /**
+     * Checked At
+     */
+    checked_at: string | null;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+};
+
+/**
+ * OrganizationConnectionRepository
+ */
+export type OrganizationConnectionRepository = {
+    /**
+     * Full Name
+     */
+    full_name: string;
+    /**
+     * Id
+     */
+    id: number;
+};
+
+/**
+ * OrganizationConnectionTool
+ */
+export type OrganizationConnectionTool = {
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Requires Approval
+     */
+    requires_approval: boolean;
+    /**
+     * Write
+     */
+    write: boolean;
 };
 
 /**
@@ -2074,6 +3633,283 @@ export type ProductAutomationWebhookResult = {
 };
 
 /**
+ * ProductMemoryCapabilities
+ */
+export type ProductMemoryCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Preferences
+     */
+    preferences: boolean;
+    /**
+     * Read
+     */
+    read: boolean;
+    /**
+     * Review
+     */
+    review: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * ProductMemoryForgetResult
+ */
+export type ProductMemoryForgetResult = {
+    /**
+     * Forgotten
+     */
+    forgotten: boolean;
+};
+
+/**
+ * ProductMemoryLibrary
+ */
+export type ProductMemoryLibrary = {
+    capabilities: ProductMemoryCapabilities;
+    /**
+     * Memories
+     */
+    memories: Array<ProductMemoryNote>;
+    /**
+     * Note
+     */
+    note: string;
+    preferences: ProductMemoryPreferences | null;
+    review: ProductMemoryReviewStatus | null;
+    runtime: ProductMemoryRuntime;
+    scope: ProductMemoryScope | null;
+    /**
+     * Source
+     */
+    source: 'canonical';
+    /**
+     * Supported Scopes
+     */
+    supported_scopes: Array<string> | null;
+};
+
+/**
+ * ProductMemoryNote
+ */
+export type ProductMemoryNote = {
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Expires At
+     */
+    expires_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Key
+     */
+    key: string;
+    /**
+     * Kind
+     */
+    kind: 'preference' | 'feedback' | 'project' | 'reference';
+    /**
+     * Repo Url
+     */
+    repo_url: string;
+    /**
+     * Review Required
+     */
+    review_required: boolean | null;
+    /**
+     * Revision
+     */
+    revision: number;
+    source: ProductMemorySource;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * ProductMemoryPreferences
+ */
+export type ProductMemoryPreferences = {
+    /**
+     * Auto Save
+     */
+    auto_save: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
+ * ProductMemoryReviewRun
+ */
+export type ProductMemoryReviewRun = {
+    /**
+     * Saved Count
+     */
+    saved_count: number;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * ProductMemoryReviewStatus
+ */
+export type ProductMemoryReviewStatus = {
+    /**
+     * Backend
+     */
+    backend: 'native_temporal' | 'legacy_retained';
+    /**
+     * Configured
+     */
+    configured: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    latest: ProductMemoryReviewRun | null;
+    legacy_latest: ProductMemoryReviewRun | null;
+    /**
+     * Legacy Pending
+     */
+    legacy_pending: number;
+    /**
+     * Pending
+     */
+    pending: number;
+};
+
+/**
+ * ProductMemoryRuntime
+ */
+export type ProductMemoryRuntime = {
+    /**
+     * Auto Save
+     */
+    auto_save: boolean;
+    /**
+     * Background Review
+     */
+    background_review: boolean;
+    /**
+     * Note
+     */
+    note: string | null;
+    /**
+     * Recall
+     */
+    recall: boolean;
+};
+
+/**
+ * ProductMemorySaveResult
+ */
+export type ProductMemorySaveResult = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Saved
+     */
+    saved: boolean;
+};
+
+/**
+ * ProductMemoryScope
+ */
+export type ProductMemoryScope = {
+    /**
+     * Kind
+     */
+    kind: 'personal';
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+};
+
+/**
+ * ProductMemorySource
+ *
+ * Saved provenance. Fields beyond these vary by source and are passed through.
+ */
+export type ProductMemorySource = {
+    /**
+     * Engine
+     */
+    engine: string | null;
+    /**
+     * Evidence
+     */
+    evidence: string | null;
+    /**
+     * Quote
+     */
+    quote: string | null;
+    /**
+     * Run Id
+     */
+    run_id: string | null;
+    /**
+     * Scope
+     */
+    scope: string | null;
+    /**
+     * Session Id
+     */
+    session_id: string | null;
+    /**
+     * Type
+     */
+    type: string;
+    /**
+     * Url
+     */
+    url: string | null;
+    [key: string]: unknown;
+};
+
+/**
  * ProductSaveSecret
  */
 export type ProductSaveSecret = {
@@ -2117,6 +3953,206 @@ export type ProductSaveSecret = {
      * Scope
      */
     scope: 'session' | 'personal' | 'organization';
+};
+
+/**
+ * ProductSkillCapabilities
+ */
+export type ProductSkillCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Load
+     */
+    load: boolean;
+    /**
+     * Read
+     */
+    read: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * ProductSkillDetail
+ */
+export type ProductSkillDetail = {
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Can Manage
+     */
+    can_manage: boolean;
+    capabilities: ProductSkillCapabilities;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Files
+     */
+    files: Array<ProductSkillFile>;
+    /**
+     * Icon
+     */
+    icon: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Instructions
+     */
+    instructions: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Note
+     */
+    note: string;
+    /**
+     * Reference
+     */
+    reference: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Scope
+     */
+    scope: string;
+    /**
+     * Source
+     */
+    source: 'canonical';
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * ProductSkillFile
+ */
+export type ProductSkillFile = {
+    /**
+     * Characters
+     */
+    characters: number;
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * Sha256
+     */
+    sha256: string;
+    /**
+     * Size
+     */
+    size: number;
+};
+
+/**
+ * ProductSkillLibrary
+ */
+export type ProductSkillLibrary = {
+    /**
+     * Can Publish
+     */
+    can_publish: boolean;
+    capabilities: ProductSkillCapabilities;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Note
+     */
+    note: string;
+    /**
+     * Skills
+     */
+    skills: Array<ProductSkillSummary>;
+    /**
+     * Source
+     */
+    source: 'canonical';
+};
+
+/**
+ * ProductSkillSummary
+ */
+export type ProductSkillSummary = {
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Can Manage
+     */
+    can_manage: boolean;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Icon
+     */
+    icon: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Reference
+     */
+    reference: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Scope
+     */
+    scope: string;
+    /**
+     * Source
+     */
+    source: 'canonical';
+    /**
+     * Updated At
+     */
+    updated_at: string;
 };
 
 /**
@@ -5067,7 +7103,7 @@ export type WebhookSetupWritable = {
     secret?: string;
 };
 
-export type ReportApiAdminSpendGetData = {
+export type GetAdminSpendReportData = {
     body?: never;
     path?: never;
     query?: {
@@ -5123,25 +7159,25 @@ export type ReportApiAdminSpendGetData = {
     url: '/api/admin/spend';
 };
 
-export type ReportApiAdminSpendGetErrors = {
+export type GetAdminSpendReportErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ReportApiAdminSpendGetError = ReportApiAdminSpendGetErrors[keyof ReportApiAdminSpendGetErrors];
+export type GetAdminSpendReportError = GetAdminSpendReportErrors[keyof GetAdminSpendReportErrors];
 
-export type ReportApiAdminSpendGetResponses = {
+export type GetAdminSpendReportResponses = {
     /**
-     * Response Report Api Admin Spend Get
-     *
      * Successful Response
      */
-    200: unknown;
+    200: BillingReport;
 };
 
-export type InfrastructureApiAdminSpendInfrastructureGetData = {
+export type GetAdminSpendReportResponse = GetAdminSpendReportResponses[keyof GetAdminSpendReportResponses];
+
+export type GetAdminInfrastructureSpendData = {
     body?: never;
     path?: never;
     query?: {
@@ -5161,27 +7197,23 @@ export type InfrastructureApiAdminSpendInfrastructureGetData = {
     url: '/api/admin/spend/infrastructure';
 };
 
-export type InfrastructureApiAdminSpendInfrastructureGetErrors = {
+export type GetAdminInfrastructureSpendErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type InfrastructureApiAdminSpendInfrastructureGetError = InfrastructureApiAdminSpendInfrastructureGetErrors[keyof InfrastructureApiAdminSpendInfrastructureGetErrors];
+export type GetAdminInfrastructureSpendError = GetAdminInfrastructureSpendErrors[keyof GetAdminInfrastructureSpendErrors];
 
-export type InfrastructureApiAdminSpendInfrastructureGetResponses = {
+export type GetAdminInfrastructureSpendResponses = {
     /**
-     * Response Infrastructure Api Admin Spend Infrastructure Get
-     *
      * Successful Response
      */
-    200: {
-        [key: string]: unknown;
-    };
+    200: BillingInfrastructure;
 };
 
-export type InfrastructureApiAdminSpendInfrastructureGetResponse = InfrastructureApiAdminSpendInfrastructureGetResponses[keyof InfrastructureApiAdminSpendInfrastructureGetResponses];
+export type GetAdminInfrastructureSpendResponse = GetAdminInfrastructureSpendResponses[keyof GetAdminInfrastructureSpendResponses];
 
 export type GetAuthConfigData = {
     body?: never;
@@ -5439,7 +7471,7 @@ export type UpdateConnectionResponses = {
 
 export type UpdateConnectionResponse = UpdateConnectionResponses[keyof UpdateConnectionResponses];
 
-export type DisconnectApiConnectionsProviderDeleteData = {
+export type DisconnectOrganizationConnectionData = {
     body?: never;
     path: {
         /**
@@ -5451,23 +7483,25 @@ export type DisconnectApiConnectionsProviderDeleteData = {
     url: '/api/connections/{provider}';
 };
 
-export type DisconnectApiConnectionsProviderDeleteErrors = {
+export type DisconnectOrganizationConnectionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DisconnectApiConnectionsProviderDeleteError = DisconnectApiConnectionsProviderDeleteErrors[keyof DisconnectApiConnectionsProviderDeleteErrors];
+export type DisconnectOrganizationConnectionError = DisconnectOrganizationConnectionErrors[keyof DisconnectOrganizationConnectionErrors];
 
-export type DisconnectApiConnectionsProviderDeleteResponses = {
+export type DisconnectOrganizationConnectionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: OrganizationConnectionDisconnected;
 };
 
-export type ConnectApiConnectionsProviderPostData = {
+export type DisconnectOrganizationConnectionResponse = DisconnectOrganizationConnectionResponses[keyof DisconnectOrganizationConnectionResponses];
+
+export type ConnectOrganizationConnectionData = {
     body: TokenConnection;
     path: {
         /**
@@ -5479,23 +7513,25 @@ export type ConnectApiConnectionsProviderPostData = {
     url: '/api/connections/{provider}';
 };
 
-export type ConnectApiConnectionsProviderPostErrors = {
+export type ConnectOrganizationConnectionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ConnectApiConnectionsProviderPostError = ConnectApiConnectionsProviderPostErrors[keyof ConnectApiConnectionsProviderPostErrors];
+export type ConnectOrganizationConnectionError = ConnectOrganizationConnectionErrors[keyof ConnectOrganizationConnectionErrors];
 
-export type ConnectApiConnectionsProviderPostResponses = {
+export type ConnectOrganizationConnectionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: OrganizationConnectionConnected;
 };
 
-export type CheckApiConnectionsProviderCheckPostData = {
+export type ConnectOrganizationConnectionResponse = ConnectOrganizationConnectionResponses[keyof ConnectOrganizationConnectionResponses];
+
+export type CheckOrganizationConnectionData = {
     body?: never;
     path: {
         /**
@@ -5507,23 +7543,25 @@ export type CheckApiConnectionsProviderCheckPostData = {
     url: '/api/connections/{provider}/check';
 };
 
-export type CheckApiConnectionsProviderCheckPostErrors = {
+export type CheckOrganizationConnectionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CheckApiConnectionsProviderCheckPostError = CheckApiConnectionsProviderCheckPostErrors[keyof CheckApiConnectionsProviderCheckPostErrors];
+export type CheckOrganizationConnectionError = CheckOrganizationConnectionErrors[keyof CheckOrganizationConnectionErrors];
 
-export type CheckApiConnectionsProviderCheckPostResponses = {
+export type CheckOrganizationConnectionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: OrganizationConnectionCheck;
 };
 
-export type OauthApiConnectionsProviderOauthPostData = {
+export type CheckOrganizationConnectionResponse = CheckOrganizationConnectionResponses[keyof CheckOrganizationConnectionResponses];
+
+export type StartOrganizationConnectionOAuthData = {
     body?: never;
     path: {
         /**
@@ -5535,23 +7573,25 @@ export type OauthApiConnectionsProviderOauthPostData = {
     url: '/api/connections/{provider}/oauth';
 };
 
-export type OauthApiConnectionsProviderOauthPostErrors = {
+export type StartOrganizationConnectionOAuthErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type OauthApiConnectionsProviderOauthPostError = OauthApiConnectionsProviderOauthPostErrors[keyof OauthApiConnectionsProviderOauthPostErrors];
+export type StartOrganizationConnectionOAuthError = StartOrganizationConnectionOAuthErrors[keyof StartOrganizationConnectionOAuthErrors];
 
-export type OauthApiConnectionsProviderOauthPostResponses = {
+export type StartOrganizationConnectionOAuthResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: OrganizationConnectionOAuthStart;
 };
 
-export type PolicyApiConnectionsProviderPolicyPatchData = {
+export type StartOrganizationConnectionOAuthResponse = StartOrganizationConnectionOAuthResponses[keyof StartOrganizationConnectionOAuthResponses];
+
+export type UpdateOrganizationConnectionPolicyData = {
     body: PolicyChange;
     path: {
         /**
@@ -5563,23 +7603,25 @@ export type PolicyApiConnectionsProviderPolicyPatchData = {
     url: '/api/connections/{provider}/policy';
 };
 
-export type PolicyApiConnectionsProviderPolicyPatchErrors = {
+export type UpdateOrganizationConnectionPolicyErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PolicyApiConnectionsProviderPolicyPatchError = PolicyApiConnectionsProviderPolicyPatchErrors[keyof PolicyApiConnectionsProviderPolicyPatchErrors];
+export type UpdateOrganizationConnectionPolicyError = UpdateOrganizationConnectionPolicyErrors[keyof UpdateOrganizationConnectionPolicyErrors];
 
-export type PolicyApiConnectionsProviderPolicyPatchResponses = {
+export type UpdateOrganizationConnectionPolicyResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: OrganizationConnectionPolicy;
 };
 
-export type InventoryApiCredentialsGetData = {
+export type UpdateOrganizationConnectionPolicyResponse = UpdateOrganizationConnectionPolicyResponses[keyof UpdateOrganizationConnectionPolicyResponses];
+
+export type ListCredentialsData = {
     body?: never;
     path?: never;
     query?: {
@@ -5591,23 +7633,25 @@ export type InventoryApiCredentialsGetData = {
     url: '/api/credentials';
 };
 
-export type InventoryApiCredentialsGetErrors = {
+export type ListCredentialsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type InventoryApiCredentialsGetError = InventoryApiCredentialsGetErrors[keyof InventoryApiCredentialsGetErrors];
+export type ListCredentialsError = ListCredentialsErrors[keyof ListCredentialsErrors];
 
-export type InventoryApiCredentialsGetResponses = {
+export type ListCredentialsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: CredentialInventory;
 };
 
-export type PendingRequestsApiCredentialsRequestsGetData = {
+export type ListCredentialsResponse = ListCredentialsResponses[keyof ListCredentialsResponses];
+
+export type ListCredentialRequestsData = {
     body?: never;
     path?: never;
     query: {
@@ -5619,23 +7663,25 @@ export type PendingRequestsApiCredentialsRequestsGetData = {
     url: '/api/credentials/requests';
 };
 
-export type PendingRequestsApiCredentialsRequestsGetErrors = {
+export type ListCredentialRequestsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PendingRequestsApiCredentialsRequestsGetError = PendingRequestsApiCredentialsRequestsGetErrors[keyof PendingRequestsApiCredentialsRequestsGetErrors];
+export type ListCredentialRequestsError = ListCredentialRequestsErrors[keyof ListCredentialRequestsErrors];
 
-export type PendingRequestsApiCredentialsRequestsGetResponses = {
+export type ListCredentialRequestsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: CredentialAccessRequestList;
 };
 
-export type DescribeRequestApiCredentialsRequestsIdentityGetData = {
+export type ListCredentialRequestsResponse = ListCredentialRequestsResponses[keyof ListCredentialRequestsResponses];
+
+export type GetCredentialRequestData = {
     body?: never;
     path: {
         /**
@@ -5647,23 +7693,25 @@ export type DescribeRequestApiCredentialsRequestsIdentityGetData = {
     url: '/api/credentials/requests/{identity}';
 };
 
-export type DescribeRequestApiCredentialsRequestsIdentityGetErrors = {
+export type GetCredentialRequestErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DescribeRequestApiCredentialsRequestsIdentityGetError = DescribeRequestApiCredentialsRequestsIdentityGetErrors[keyof DescribeRequestApiCredentialsRequestsIdentityGetErrors];
+export type GetCredentialRequestError = GetCredentialRequestErrors[keyof GetCredentialRequestErrors];
 
-export type DescribeRequestApiCredentialsRequestsIdentityGetResponses = {
+export type GetCredentialRequestResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: CredentialAccessRequestDetail;
 };
 
-export type ResolveRequestApiCredentialsRequestsIdentityPostData = {
+export type GetCredentialRequestResponse = GetCredentialRequestResponses[keyof GetCredentialRequestResponses];
+
+export type ResolveCredentialRequestData = {
     body: ResolveWritable;
     path: {
         /**
@@ -5675,46 +7723,50 @@ export type ResolveRequestApiCredentialsRequestsIdentityPostData = {
     url: '/api/credentials/requests/{identity}';
 };
 
-export type ResolveRequestApiCredentialsRequestsIdentityPostErrors = {
+export type ResolveCredentialRequestErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ResolveRequestApiCredentialsRequestsIdentityPostError = ResolveRequestApiCredentialsRequestsIdentityPostErrors[keyof ResolveRequestApiCredentialsRequestsIdentityPostErrors];
+export type ResolveCredentialRequestError = ResolveCredentialRequestErrors[keyof ResolveCredentialRequestErrors];
 
-export type ResolveRequestApiCredentialsRequestsIdentityPostResponses = {
+export type ResolveCredentialRequestResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: CredentialResolveResult;
 };
 
-export type CreateApiCredentialsSecretsPostData = {
+export type ResolveCredentialRequestResponse = ResolveCredentialRequestResponses[keyof ResolveCredentialRequestResponses];
+
+export type CreateCredentialData = {
     body: ProductSaveSecretWritable;
     path?: never;
     query?: never;
     url: '/api/credentials/secrets';
 };
 
-export type CreateApiCredentialsSecretsPostErrors = {
+export type CreateCredentialErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateApiCredentialsSecretsPostError = CreateApiCredentialsSecretsPostErrors[keyof CreateApiCredentialsSecretsPostErrors];
+export type CreateCredentialError = CreateCredentialErrors[keyof CreateCredentialErrors];
 
-export type CreateApiCredentialsSecretsPostResponses = {
+export type CreateCredentialResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: CredentialSaveResult;
 };
 
-export type RevokeApiCredentialsSecretsIdentityDeleteData = {
+export type CreateCredentialResponse = CreateCredentialResponses[keyof CreateCredentialResponses];
+
+export type RevokeCredentialData = {
     body?: never;
     path: {
         /**
@@ -5726,23 +7778,25 @@ export type RevokeApiCredentialsSecretsIdentityDeleteData = {
     url: '/api/credentials/secrets/{identity}';
 };
 
-export type RevokeApiCredentialsSecretsIdentityDeleteErrors = {
+export type RevokeCredentialErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RevokeApiCredentialsSecretsIdentityDeleteError = RevokeApiCredentialsSecretsIdentityDeleteErrors[keyof RevokeApiCredentialsSecretsIdentityDeleteErrors];
+export type RevokeCredentialError = RevokeCredentialErrors[keyof RevokeCredentialErrors];
 
-export type RevokeApiCredentialsSecretsIdentityDeleteResponses = {
+export type RevokeCredentialResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: CredentialRevokeResult;
 };
 
-export type UpdateApiCredentialsSecretsIdentityPatchData = {
+export type RevokeCredentialResponse = RevokeCredentialResponses[keyof RevokeCredentialResponses];
+
+export type UpdateCredentialData = {
     body: ProductUpdateSecretWritable;
     path: {
         /**
@@ -5754,21 +7808,23 @@ export type UpdateApiCredentialsSecretsIdentityPatchData = {
     url: '/api/credentials/secrets/{identity}';
 };
 
-export type UpdateApiCredentialsSecretsIdentityPatchErrors = {
+export type UpdateCredentialErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type UpdateApiCredentialsSecretsIdentityPatchError = UpdateApiCredentialsSecretsIdentityPatchErrors[keyof UpdateApiCredentialsSecretsIdentityPatchErrors];
+export type UpdateCredentialError = UpdateCredentialErrors[keyof UpdateCredentialErrors];
 
-export type UpdateApiCredentialsSecretsIdentityPatchResponses = {
+export type UpdateCredentialResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: CredentialSecretMetadata;
 };
+
+export type UpdateCredentialResponse = UpdateCredentialResponses[keyof UpdateCredentialResponses];
 
 export type ResolveEffectData = {
     body: EffectResolution;
@@ -6389,19 +8445,23 @@ export type SetProductAutomationStateResponses = {
 
 export type SetProductAutomationStateResponse = SetProductAutomationStateResponses[keyof SetProductAutomationStateResponses];
 
-export type AccountsApiProductConnectionsGetData = {
+export type ListOrganizationConnectionsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/product/connections';
 };
 
-export type AccountsApiProductConnectionsGetResponses = {
+export type ListOrganizationConnectionsResponses = {
     /**
+     * Response Listorganizationconnections
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<OrganizationConnection>;
 };
+
+export type ListOrganizationConnectionsResponse = ListOrganizationConnectionsResponses[keyof ListOrganizationConnectionsResponses];
 
 export type EnvironmentsApiProductEnvironmentsGetData = {
     body?: never;
@@ -6449,67 +8509,73 @@ export type FoldersApiProductFoldersGetResponses = {
     200: unknown;
 };
 
-export type ListingApiProductMemoryGetData = {
+export type ListProductMemoriesData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/product/memory';
 };
 
-export type ListingApiProductMemoryGetResponses = {
+export type ListProductMemoriesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductMemoryLibrary;
 };
 
-export type CreateApiProductMemoryPostData = {
+export type ListProductMemoriesResponse = ListProductMemoriesResponses[keyof ListProductMemoriesResponses];
+
+export type CreateProductMemoryData = {
     body: Note;
     path?: never;
     query?: never;
     url: '/api/product/memory';
 };
 
-export type CreateApiProductMemoryPostErrors = {
+export type CreateProductMemoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateApiProductMemoryPostError = CreateApiProductMemoryPostErrors[keyof CreateApiProductMemoryPostErrors];
+export type CreateProductMemoryError = CreateProductMemoryErrors[keyof CreateProductMemoryErrors];
 
-export type CreateApiProductMemoryPostResponses = {
+export type CreateProductMemoryResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: ProductMemorySaveResult;
 };
 
-export type PreferencesApiProductMemoryPreferencesPutData = {
+export type CreateProductMemoryResponse = CreateProductMemoryResponses[keyof CreateProductMemoryResponses];
+
+export type UpdateProductMemoryPreferencesData = {
     body: Preferences;
     path?: never;
     query?: never;
     url: '/api/product/memory/preferences';
 };
 
-export type PreferencesApiProductMemoryPreferencesPutErrors = {
+export type UpdateProductMemoryPreferencesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PreferencesApiProductMemoryPreferencesPutError = PreferencesApiProductMemoryPreferencesPutErrors[keyof PreferencesApiProductMemoryPreferencesPutErrors];
+export type UpdateProductMemoryPreferencesError = UpdateProductMemoryPreferencesErrors[keyof UpdateProductMemoryPreferencesErrors];
 
-export type PreferencesApiProductMemoryPreferencesPutResponses = {
+export type UpdateProductMemoryPreferencesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductMemoryPreferences;
 };
 
-export type ForgetApiProductMemoryNoteIdDeleteData = {
+export type UpdateProductMemoryPreferencesResponse = UpdateProductMemoryPreferencesResponses[keyof UpdateProductMemoryPreferencesResponses];
+
+export type DeleteProductMemoryData = {
     body: Revision;
     path: {
         /**
@@ -6521,23 +8587,25 @@ export type ForgetApiProductMemoryNoteIdDeleteData = {
     url: '/api/product/memory/{note_id}';
 };
 
-export type ForgetApiProductMemoryNoteIdDeleteErrors = {
+export type DeleteProductMemoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ForgetApiProductMemoryNoteIdDeleteError = ForgetApiProductMemoryNoteIdDeleteErrors[keyof ForgetApiProductMemoryNoteIdDeleteErrors];
+export type DeleteProductMemoryError = DeleteProductMemoryErrors[keyof DeleteProductMemoryErrors];
 
-export type ForgetApiProductMemoryNoteIdDeleteResponses = {
+export type DeleteProductMemoryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductMemoryForgetResult;
 };
 
-export type UpdateNoteApiProductMemoryNoteIdPutData = {
+export type DeleteProductMemoryResponse = DeleteProductMemoryResponses[keyof DeleteProductMemoryResponses];
+
+export type UpdateProductMemoryData = {
     body: Note;
     path: {
         /**
@@ -6549,21 +8617,23 @@ export type UpdateNoteApiProductMemoryNoteIdPutData = {
     url: '/api/product/memory/{note_id}';
 };
 
-export type UpdateNoteApiProductMemoryNoteIdPutErrors = {
+export type UpdateProductMemoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type UpdateNoteApiProductMemoryNoteIdPutError = UpdateNoteApiProductMemoryNoteIdPutErrors[keyof UpdateNoteApiProductMemoryNoteIdPutErrors];
+export type UpdateProductMemoryError = UpdateProductMemoryErrors[keyof UpdateProductMemoryErrors];
 
-export type UpdateNoteApiProductMemoryNoteIdPutResponses = {
+export type UpdateProductMemoryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductMemorySaveResult;
 };
+
+export type UpdateProductMemoryResponse = UpdateProductMemoryResponses[keyof UpdateProductMemoryResponses];
 
 export type SearchApiProductSearchGetData = {
     body?: never;
@@ -6982,7 +9052,7 @@ export type ListingApiProductSessionsRunIdWorkspaceGetResponses = {
     200: unknown;
 };
 
-export type ListingApiProductSkillsGetData = {
+export type ListProductSkillsData = {
     body?: never;
     path?: never;
     query?: {
@@ -7002,23 +9072,25 @@ export type ListingApiProductSkillsGetData = {
     url: '/api/product/skills';
 };
 
-export type ListingApiProductSkillsGetErrors = {
+export type ListProductSkillsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ListingApiProductSkillsGetError = ListingApiProductSkillsGetErrors[keyof ListingApiProductSkillsGetErrors];
+export type ListProductSkillsError = ListProductSkillsErrors[keyof ListProductSkillsErrors];
 
-export type ListingApiProductSkillsGetResponses = {
+export type ListProductSkillsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductSkillLibrary;
 };
 
-export type DetailApiProductSkillsSkillIdGetData = {
+export type ListProductSkillsResponse = ListProductSkillsResponses[keyof ListProductSkillsResponses];
+
+export type GetProductSkillData = {
     body?: never;
     path: {
         /**
@@ -7035,21 +9107,23 @@ export type DetailApiProductSkillsSkillIdGetData = {
     url: '/api/product/skills/{skill_id}';
 };
 
-export type DetailApiProductSkillsSkillIdGetErrors = {
+export type GetProductSkillErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DetailApiProductSkillsSkillIdGetError = DetailApiProductSkillsSkillIdGetErrors[keyof DetailApiProductSkillsSkillIdGetErrors];
+export type GetProductSkillError = GetProductSkillErrors[keyof GetProductSkillErrors];
 
-export type DetailApiProductSkillsSkillIdGetResponses = {
+export type GetProductSkillResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductSkillDetail;
 };
+
+export type GetProductSkillResponse = GetProductSkillResponses[keyof GetProductSkillResponses];
 
 export type FileApiProductSkillsSkillIdFilesPathGetData = {
     body?: never;
@@ -8515,7 +10589,7 @@ export type AutomationLogsApiSettingsAutomationsIdentityLogsGetResponses = {
     200: unknown;
 };
 
-export type ReportApiSettingsBillingGetData = {
+export type GetBillingReportData = {
     body?: never;
     path?: never;
     query?: {
@@ -8571,23 +10645,23 @@ export type ReportApiSettingsBillingGetData = {
     url: '/api/settings/billing';
 };
 
-export type ReportApiSettingsBillingGetErrors = {
+export type GetBillingReportErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ReportApiSettingsBillingGetError = ReportApiSettingsBillingGetErrors[keyof ReportApiSettingsBillingGetErrors];
+export type GetBillingReportError = GetBillingReportErrors[keyof GetBillingReportErrors];
 
-export type ReportApiSettingsBillingGetResponses = {
+export type GetBillingReportResponses = {
     /**
-     * Response Report Api Settings Billing Get
-     *
      * Successful Response
      */
-    200: unknown;
+    200: BillingReport;
 };
+
+export type GetBillingReportResponse = GetBillingReportResponses[keyof GetBillingReportResponses];
 
 export type GeneralApiSettingsGeneralGetData = {
     body?: never;
@@ -9210,7 +11284,7 @@ export type ListInvocableSkillsResponses = {
 
 export type ListInvocableSkillsResponse = ListInvocableSkillsResponses[keyof ListInvocableSkillsResponses];
 
-export type ReportApiSpendGetData = {
+export type GetSpendReportData = {
     body?: never;
     path?: never;
     query?: {
@@ -9266,23 +11340,23 @@ export type ReportApiSpendGetData = {
     url: '/api/spend';
 };
 
-export type ReportApiSpendGetErrors = {
+export type GetSpendReportErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ReportApiSpendGetError = ReportApiSpendGetErrors[keyof ReportApiSpendGetErrors];
+export type GetSpendReportError = GetSpendReportErrors[keyof GetSpendReportErrors];
 
-export type ReportApiSpendGetResponses = {
+export type GetSpendReportResponses = {
     /**
-     * Response Report Api Spend Get
-     *
      * Successful Response
      */
-    200: unknown;
+    200: BillingReport;
 };
+
+export type GetSpendReportResponse = GetSpendReportResponses[keyof GetSpendReportResponses];
 
 export type StartSwarmData = {
     body: NewSwarm;

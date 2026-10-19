@@ -279,6 +279,2075 @@
         "title": "AutomationInput",
         "type": "object"
       },
+      "BillingCapabilities": {
+        "properties": {
+          "bill_mutations": {
+            "title": "Bill Mutations",
+            "type": "boolean"
+          },
+          "identity_linking": {
+            "title": "Identity Linking",
+            "type": "boolean"
+          },
+          "provider_sync": {
+            "title": "Provider Sync",
+            "type": "boolean"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read_only",
+          "bill_mutations",
+          "provider_sync",
+          "identity_linking"
+        ],
+        "title": "BillingCapabilities",
+        "type": "object"
+      },
+      "BillingCostSummary": {
+        "properties": {
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "incomplete": {
+            "title": "Incomplete",
+            "type": "boolean"
+          },
+          "infrastructure": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Infrastructure"
+          },
+          "llm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          }
+        },
+        "required": [
+          "llm",
+          "infrastructure",
+          "total",
+          "estimated",
+          "incomplete"
+        ],
+        "title": "BillingCostSummary",
+        "type": "object"
+      },
+      "BillingCoverage": {
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "deduplicated_observations": {
+            "title": "Deduplicated Observations",
+            "type": "integer"
+          },
+          "legacy_observations": {
+            "title": "Legacy Observations",
+            "type": "integer"
+          },
+          "mapping_version": {
+            "title": "Mapping Version",
+            "type": "string"
+          },
+          "native_observations": {
+            "title": "Native Observations",
+            "type": "integer"
+          },
+          "private_details_omitted": {
+            "title": "Private Details Omitted",
+            "type": "integer"
+          },
+          "source_observations": {
+            "title": "Source Observations",
+            "type": "integer"
+          },
+          "undated_charges": {
+            "title": "Undated Charges",
+            "type": "integer"
+          },
+          "unreconciled_native_observations": {
+            "title": "Unreconciled Native Observations",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "undated_charges",
+          "private_details_omitted",
+          "source_observations",
+          "legacy_observations",
+          "native_observations",
+          "deduplicated_observations",
+          "unreconciled_native_observations",
+          "mapping_version",
+          "complete"
+        ],
+        "title": "BillingCoverage",
+        "type": "object"
+      },
+      "BillingDailyTotals": {
+        "properties": {
+          "active_users": {
+            "title": "Active Users",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "cumulative_pricing_status": {
+            "enum": [
+              "partial",
+              "priced",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Cumulative Pricing Status",
+            "type": "string"
+          },
+          "cumulative_spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cumulative Spend"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "estimated_costs": {
+            "title": "Estimated Costs",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "missing_costs": {
+            "title": "Missing Costs",
+            "type": "integer"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/BillingModelTotals"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "pending_costs": {
+            "title": "Pending Costs",
+            "type": "integer"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "partial",
+              "priced",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "unattributed_charges": {
+            "title": "Unattributed Charges",
+            "type": "integer"
+          },
+          "undated_coverage": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Undated Coverage"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "unknown_requests",
+          "observations",
+          "priced_requests",
+          "pending_costs",
+          "missing_costs",
+          "estimated_costs",
+          "spend",
+          "cost_usd_exact",
+          "estimated",
+          "cost_coverage",
+          "pricing_status",
+          "sessions",
+          "unattributed_charges",
+          "unpriced_requests",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens",
+          "date",
+          "active_users",
+          "models",
+          "cumulative_spend",
+          "cumulative_pricing_status",
+          "undated_coverage"
+        ],
+        "title": "BillingDailyTotals",
+        "type": "object"
+      },
+      "BillingInfrastructure": {
+        "properties": {
+          "bills": {
+            "items": {
+              "$ref": "#/components/schemas/BillingInfrastructureBill"
+            },
+            "title": "Bills",
+            "type": "array"
+          },
+          "coverage_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Reason"
+          },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "incomplete": {
+            "title": "Incomplete",
+            "type": "boolean"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "boolean"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/BillingInfrastructureProvider"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend"
+          }
+        },
+        "required": [
+          "spend",
+          "estimated",
+          "providers",
+          "bills",
+          "incomplete",
+          "pending",
+          "read_only",
+          "coverage_reason"
+        ],
+        "title": "BillingInfrastructure",
+        "type": "object"
+      },
+      "BillingInfrastructureBill": {
+        "properties": {
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "month": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Month"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "provider",
+          "month",
+          "amount",
+          "kind",
+          "revision",
+          "updated_at"
+        ],
+        "title": "BillingInfrastructureBill",
+        "type": "object"
+      },
+      "BillingInfrastructureProvider": {
+        "properties": {
+          "covered_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Covered Days"
+          },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
+          },
+          "missing_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Missing Days"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend"
+          },
+          "sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BillingInfrastructureSync"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sync_enabled": {
+            "title": "Sync Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider",
+          "name",
+          "spend",
+          "estimated",
+          "missing_days",
+          "covered_days",
+          "last_synced_at",
+          "sync_enabled",
+          "sync"
+        ],
+        "title": "BillingInfrastructureProvider",
+        "type": "object"
+      },
+      "BillingInfrastructureSync": {
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "BillingInfrastructureSync",
+        "type": "object"
+      },
+      "BillingModelTotals": {
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "estimated_costs": {
+            "title": "Estimated Costs",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "missing_costs": {
+            "title": "Missing Costs",
+            "type": "integer"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "pending_costs": {
+            "title": "Pending Costs",
+            "type": "integer"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "partial",
+              "priced",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "unattributed_charges": {
+            "title": "Unattributed Charges",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "unknown_requests",
+          "observations",
+          "priced_requests",
+          "pending_costs",
+          "missing_costs",
+          "estimated_costs",
+          "spend",
+          "cost_usd_exact",
+          "estimated",
+          "cost_coverage",
+          "pricing_status",
+          "sessions",
+          "unattributed_charges",
+          "unpriced_requests",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens",
+          "model"
+        ],
+        "title": "BillingModelTotals",
+        "type": "object"
+      },
+      "BillingReport": {
+        "properties": {
+          "activity": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/BillingCapabilities"
+          },
+          "cost_summary": {
+            "$ref": "#/components/schemas/BillingCostSummary"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/BillingCoverage"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/BillingDailyTotals"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "end": {
+            "title": "End",
+            "type": "string"
+          },
+          "end_before": {
+            "title": "End Before",
+            "type": "string"
+          },
+          "identities": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Identities",
+            "type": "array"
+          },
+          "infrastructure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BillingInfrastructure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "methodology": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Methodology",
+            "type": "object"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/BillingModelTotals"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "preset": {
+            "title": "Preset",
+            "type": "string"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "request_details": {
+            "items": {
+              "$ref": "#/components/schemas/BillingRequestDetail"
+            },
+            "title": "Request Details",
+            "type": "array"
+          },
+          "request_total": {
+            "title": "Request Total",
+            "type": "integer"
+          },
+          "root_models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Root Models",
+            "type": "array"
+          },
+          "scope": {
+            "enum": [
+              "personal",
+              "organization"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/BillingSessionTotals"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "start": {
+            "title": "Start",
+            "type": "string"
+          },
+          "start_at": {
+            "title": "Start At",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "total": {
+            "$ref": "#/components/schemas/BillingTotals"
+          },
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/BillingUserTotals"
+            },
+            "title": "Users",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scope",
+          "start",
+          "end",
+          "start_at",
+          "end_before",
+          "preset",
+          "timezone",
+          "currency",
+          "total",
+          "priced_requests",
+          "daily",
+          "users",
+          "sessions",
+          "models",
+          "request_details",
+          "request_total",
+          "limit",
+          "offset",
+          "root_models",
+          "identities",
+          "infrastructure",
+          "cost_summary",
+          "coverage",
+          "capabilities",
+          "methodology",
+          "activity"
+        ],
+        "title": "BillingReport",
+        "type": "object"
+      },
+      "BillingRequestDetail": {
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost"
+          },
+          "cost_status": {
+            "title": "Cost Status",
+            "type": "string"
+          },
+          "coverage_issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Coverage Issues",
+            "type": "array"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "estimated_cost": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "observed_models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed Models",
+            "type": "array"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requests"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/BillingRequestSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp_basis": {
+            "title": "Timestamp Basis",
+            "type": "string"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "id",
+          "user_id",
+          "session_id",
+          "model",
+          "observed_models",
+          "created_at",
+          "timestamp_basis",
+          "status",
+          "cost",
+          "estimated_cost",
+          "cost_status",
+          "requests",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens",
+          "coverage_issues",
+          "sources"
+        ],
+        "title": "BillingRequestDetail",
+        "type": "object"
+      },
+      "BillingRequestSource": {
+        "properties": {
+          "cost_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Source"
+          },
+          "cost_state": {
+            "title": "Cost State",
+            "type": "string"
+          },
+          "engine": {
+            "title": "Engine",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "recovery_due": {
+            "title": "Recovery Due",
+            "type": "boolean"
+          },
+          "recovery_eligible": {
+            "title": "Recovery Eligible",
+            "type": "boolean"
+          },
+          "recovery_reason": {
+            "title": "Recovery Reason",
+            "type": "string"
+          },
+          "reported_amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported Amount"
+          },
+          "request_status": {
+            "title": "Request Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "engine",
+          "id",
+          "cost_state",
+          "reported_amount",
+          "cost_source",
+          "request_status",
+          "observed_at",
+          "recovery_eligible",
+          "recovery_due",
+          "recovery_reason"
+        ],
+        "title": "BillingRequestSource",
+        "type": "object"
+      },
+      "BillingSessionTotals": {
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "estimated_costs": {
+            "title": "Estimated Costs",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "missing_costs": {
+            "title": "Missing Costs",
+            "type": "integer"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "pending_costs": {
+            "title": "Pending Costs",
+            "type": "integer"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "partial",
+              "priced",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "unattributed_charges": {
+            "title": "Unattributed Charges",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "user_name": {
+            "title": "User Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "requests",
+          "unknown_requests",
+          "observations",
+          "priced_requests",
+          "pending_costs",
+          "missing_costs",
+          "estimated_costs",
+          "spend",
+          "cost_usd_exact",
+          "estimated",
+          "cost_coverage",
+          "pricing_status",
+          "sessions",
+          "unattributed_charges",
+          "unpriced_requests",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens",
+          "user_id",
+          "user_name",
+          "run_id",
+          "session_id",
+          "title"
+        ],
+        "title": "BillingSessionTotals",
+        "type": "object"
+      },
+      "BillingTotals": {
+        "description": "Recorded quantities for a set of charges; amounts are exact decimal strings.",
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "estimated_costs": {
+            "title": "Estimated Costs",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "missing_costs": {
+            "title": "Missing Costs",
+            "type": "integer"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "pending_costs": {
+            "title": "Pending Costs",
+            "type": "integer"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "partial",
+              "priced",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "unattributed_charges": {
+            "title": "Unattributed Charges",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "unknown_requests",
+          "observations",
+          "priced_requests",
+          "pending_costs",
+          "missing_costs",
+          "estimated_costs",
+          "spend",
+          "cost_usd_exact",
+          "estimated",
+          "cost_coverage",
+          "pricing_status",
+          "sessions",
+          "unattributed_charges",
+          "unpriced_requests",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens"
+        ],
+        "title": "BillingTotals",
+        "type": "object"
+      },
+      "BillingUserTotals": {
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
+          "estimated_costs": {
+            "title": "Estimated Costs",
+            "type": "integer"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "missing_costs": {
+            "title": "Missing Costs",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "pending_costs": {
+            "title": "Pending Costs",
+            "type": "integer"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "partial",
+              "priced",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "spend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spend"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "unattributed_charges": {
+            "title": "Unattributed Charges",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "unknown_requests",
+          "observations",
+          "priced_requests",
+          "pending_costs",
+          "missing_costs",
+          "estimated_costs",
+          "spend",
+          "cost_usd_exact",
+          "estimated",
+          "cost_coverage",
+          "pricing_status",
+          "sessions",
+          "unattributed_charges",
+          "unpriced_requests",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens",
+          "id",
+          "name",
+          "email",
+          "kind"
+        ],
+        "title": "BillingUserTotals",
+        "type": "object"
+      },
       "BrowserActionResult": {
         "properties": {
           "navigation_error": {
@@ -1031,6 +3100,372 @@
         "title": "ContinuationRequest",
         "type": "object"
       },
+      "CredentialAccessInputField": {
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "secret",
+          "required"
+        ],
+        "title": "CredentialAccessInputField",
+        "type": "object"
+      },
+      "CredentialAccessRequest": {
+        "properties": {
+          "env_var": {
+            "title": "Env Var",
+            "type": "string"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "input_fields": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialAccessInputField"
+            },
+            "title": "Input Fields",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "setup_instructions": {
+            "title": "Setup Instructions",
+            "type": "string"
+          },
+          "setup_url": {
+            "title": "Setup Url",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "generation",
+          "status",
+          "revision",
+          "session_id",
+          "provider",
+          "name",
+          "format",
+          "env_var",
+          "reason",
+          "setup_url",
+          "setup_instructions",
+          "input_fields"
+        ],
+        "title": "CredentialAccessRequest",
+        "type": "object"
+      },
+      "CredentialAccessRequestDetail": {
+        "properties": {
+          "can_resolve": {
+            "title": "Can Resolve",
+            "type": "boolean"
+          },
+          "credentials": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialSecretMetadata"
+            },
+            "title": "Credentials",
+            "type": "array"
+          },
+          "env_var": {
+            "title": "Env Var",
+            "type": "string"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "input_fields": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialAccessInputField"
+            },
+            "title": "Input Fields",
+            "type": "array"
+          },
+          "lifetimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Lifetimes",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "setup_instructions": {
+            "title": "Setup Instructions",
+            "type": "string"
+          },
+          "setup_url": {
+            "title": "Setup Url",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "generation",
+          "status",
+          "revision",
+          "session_id",
+          "provider",
+          "name",
+          "format",
+          "env_var",
+          "reason",
+          "setup_url",
+          "setup_instructions",
+          "input_fields",
+          "credentials",
+          "scopes",
+          "lifetimes",
+          "can_resolve",
+          "note"
+        ],
+        "title": "CredentialAccessRequestDetail",
+        "type": "object"
+      },
+      "CredentialAccessRequestList": {
+        "properties": {
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialAccessRequest"
+            },
+            "title": "Requests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requests"
+        ],
+        "title": "CredentialAccessRequestList",
+        "type": "object"
+      },
+      "CredentialCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "lifetimes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Lifetimes",
+            "type": "array"
+          },
+          "native_aws_login": {
+            "title": "Native Aws Login",
+            "type": "boolean"
+          },
+          "native_execution": {
+            "title": "Native Execution",
+            "type": "boolean"
+          },
+          "native_formats": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Native Formats",
+            "type": "array"
+          },
+          "native_provider_http": {
+            "title": "Native Provider Http",
+            "type": "boolean"
+          },
+          "organization": {
+            "title": "Organization",
+            "type": "boolean"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "create",
+          "update",
+          "delete",
+          "scopes",
+          "lifetimes",
+          "organization",
+          "native_execution",
+          "native_formats",
+          "native_provider_http",
+          "native_aws_login"
+        ],
+        "title": "CredentialCapabilities",
+        "type": "object"
+      },
+      "CredentialInventory": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/CredentialCapabilities"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialProvider"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "root_id": {
+            "title": "Root Id",
+            "type": "string"
+          },
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialSecretMetadata"
+            },
+            "title": "Secrets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers",
+          "root_id",
+          "secrets",
+          "capabilities",
+          "note"
+        ],
+        "title": "CredentialInventory",
+        "type": "object"
+      },
+      "CredentialProvider": {
+        "properties": {
+          "id": {
+            "enum": [
+              "fireworks",
+              "openai",
+              "anthropic",
+              "together",
+              "groq",
+              "generic"
+            ],
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "setup_url": {
+            "title": "Setup Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "setup_url"
+        ],
+        "title": "CredentialProvider",
+        "type": "object"
+      },
       "CredentialRequestRef": {
         "properties": {
           "request_id": {
@@ -1042,6 +3477,168 @@
           "request_id"
         ],
         "title": "CredentialRequestRef",
+        "type": "object"
+      },
+      "CredentialResolveResult": {
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "boolean"
+          },
+          "resumed": {
+            "title": "Resumed",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          }
+        },
+        "required": [
+          "resolved",
+          "resumed",
+          "session_id",
+          "turn_id",
+          "note"
+        ],
+        "title": "CredentialResolveResult",
+        "type": "object"
+      },
+      "CredentialRevokeResult": {
+        "properties": {
+          "revoked": {
+            "title": "Revoked",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revoked"
+        ],
+        "title": "CredentialRevokeResult",
+        "type": "object"
+      },
+      "CredentialSaveResult": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "saved": {
+            "title": "Saved",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "saved"
+        ],
+        "title": "CredentialSaveResult",
+        "type": "object"
+      },
+      "CredentialSecretMetadata": {
+        "description": "Saved credential metadata; the encrypted value is never returned.",
+        "properties": {
+          "can_manage": {
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "env_var": {
+            "title": "Env Var",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "invalid_reason": {
+            "title": "Invalid Reason",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "lifetime": {
+            "title": "Lifetime",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "root_id": {
+            "title": "Root Id",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "label",
+          "scope",
+          "created_at",
+          "name",
+          "format",
+          "env_var",
+          "lifetime",
+          "root_id",
+          "expires_at",
+          "invalid_reason",
+          "revision",
+          "status",
+          "can_manage"
+        ],
+        "title": "CredentialSecretMetadata",
         "type": "object"
       },
       "EffectResolution": {
@@ -2242,6 +4839,283 @@
           "request_id"
         ],
         "title": "Note",
+        "type": "object"
+      },
+      "OrganizationConnection": {
+        "description": "One organization account; credentials stay on the server.",
+        "properties": {
+          "app_registered": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Registered"
+          },
+          "check_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Status"
+          },
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "enum": [
+              "github",
+              "linear",
+              "notion",
+              "slack"
+            ],
+            "title": "Id",
+            "type": "string"
+          },
+          "identity": {
+            "title": "Identity",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "oauth_configured": {
+            "title": "Oauth Configured",
+            "type": "boolean"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "repositories": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OrganizationConnectionRepository"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repositories"
+          },
+          "scope": {
+            "const": "organization",
+            "title": "Scope",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/OrganizationConnectionTool"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "enabled",
+          "read_only",
+          "checked_at",
+          "check_status",
+          "id",
+          "connected",
+          "scope",
+          "oauth_configured",
+          "label",
+          "updated_at",
+          "identity",
+          "tools",
+          "repositories",
+          "app_registered"
+        ],
+        "title": "OrganizationConnection",
+        "type": "object"
+      },
+      "OrganizationConnectionCheck": {
+        "properties": {
+          "healthy": {
+            "title": "Healthy",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "healthy",
+          "label"
+        ],
+        "title": "OrganizationConnectionCheck",
+        "type": "object"
+      },
+      "OrganizationConnectionConnected": {
+        "properties": {
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connected",
+          "label"
+        ],
+        "title": "OrganizationConnectionConnected",
+        "type": "object"
+      },
+      "OrganizationConnectionDisconnected": {
+        "properties": {
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "connected"
+        ],
+        "title": "OrganizationConnectionDisconnected",
+        "type": "object"
+      },
+      "OrganizationConnectionOAuthStart": {
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "OrganizationConnectionOAuthStart",
+        "type": "object"
+      },
+      "OrganizationConnectionPolicy": {
+        "properties": {
+          "check_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Status"
+          },
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "read_only",
+          "checked_at",
+          "check_status"
+        ],
+        "title": "OrganizationConnectionPolicy",
+        "type": "object"
+      },
+      "OrganizationConnectionRepository": {
+        "properties": {
+          "full_name": {
+            "title": "Full Name",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "full_name"
+        ],
+        "title": "OrganizationConnectionRepository",
+        "type": "object"
+      },
+      "OrganizationConnectionTool": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "requires_approval": {
+            "title": "Requires Approval",
+            "type": "boolean"
+          },
+          "write": {
+            "title": "Write",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "write",
+          "requires_approval",
+          "description"
+        ],
+        "title": "OrganizationConnectionTool",
         "type": "object"
       },
       "PendingEffect": {
@@ -3693,6 +6567,501 @@
         "title": "ProductAutomationWebhookResult",
         "type": "object"
       },
+      "ProductMemoryCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "preferences": {
+            "title": "Preferences",
+            "type": "boolean"
+          },
+          "read": {
+            "title": "Read",
+            "type": "boolean"
+          },
+          "review": {
+            "title": "Review",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read",
+          "create",
+          "update",
+          "delete",
+          "preferences",
+          "review"
+        ],
+        "title": "ProductMemoryCapabilities",
+        "type": "object"
+      },
+      "ProductMemoryForgetResult": {
+        "properties": {
+          "forgotten": {
+            "title": "Forgotten",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "forgotten"
+        ],
+        "title": "ProductMemoryForgetResult",
+        "type": "object"
+      },
+      "ProductMemoryLibrary": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/ProductMemoryCapabilities"
+          },
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/ProductMemoryNote"
+            },
+            "title": "Memories",
+            "type": "array"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "preferences": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductMemoryPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductMemoryReviewStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/ProductMemoryRuntime"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductMemoryScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "const": "canonical",
+            "title": "Source",
+            "type": "string"
+          },
+          "supported_scopes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Scopes"
+          }
+        },
+        "required": [
+          "source",
+          "scope",
+          "supported_scopes",
+          "preferences",
+          "memories",
+          "capabilities",
+          "runtime",
+          "review",
+          "note"
+        ],
+        "title": "ProductMemoryLibrary",
+        "type": "object"
+      },
+      "ProductMemoryNote": {
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "preference",
+              "feedback",
+              "project",
+              "reference"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "repo_url": {
+            "title": "Repo Url",
+            "type": "string"
+          },
+          "review_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Required"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ProductMemorySource"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "title",
+          "content",
+          "kind",
+          "repo_url",
+          "source",
+          "revision",
+          "created_at",
+          "updated_at",
+          "expires_at",
+          "review_required"
+        ],
+        "title": "ProductMemoryNote",
+        "type": "object"
+      },
+      "ProductMemoryPreferences": {
+        "properties": {
+          "auto_save": {
+            "title": "Auto Save",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "auto_save",
+          "revision"
+        ],
+        "title": "ProductMemoryPreferences",
+        "type": "object"
+      },
+      "ProductMemoryReviewRun": {
+        "properties": {
+          "saved_count": {
+            "title": "Saved Count",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "updated_at",
+          "saved_count"
+        ],
+        "title": "ProductMemoryReviewRun",
+        "type": "object"
+      },
+      "ProductMemoryReviewStatus": {
+        "properties": {
+          "backend": {
+            "enum": [
+              "native_temporal",
+              "legacy_retained"
+            ],
+            "title": "Backend",
+            "type": "string"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductMemoryReviewRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "legacy_latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductMemoryReviewRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "legacy_pending": {
+            "title": "Legacy Pending",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "configured",
+          "pending",
+          "latest",
+          "backend",
+          "legacy_pending",
+          "legacy_latest"
+        ],
+        "title": "ProductMemoryReviewStatus",
+        "type": "object"
+      },
+      "ProductMemoryRuntime": {
+        "properties": {
+          "auto_save": {
+            "title": "Auto Save",
+            "type": "boolean"
+          },
+          "background_review": {
+            "title": "Background Review",
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "recall": {
+            "title": "Recall",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "recall",
+          "auto_save",
+          "background_review",
+          "note"
+        ],
+        "title": "ProductMemoryRuntime",
+        "type": "object"
+      },
+      "ProductMemorySaveResult": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "saved": {
+            "title": "Saved",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "saved",
+          "id",
+          "revision"
+        ],
+        "title": "ProductMemorySaveResult",
+        "type": "object"
+      },
+      "ProductMemoryScope": {
+        "properties": {
+          "kind": {
+            "const": "personal",
+            "title": "Kind",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "owner_id"
+        ],
+        "title": "ProductMemoryScope",
+        "type": "object"
+      },
+      "ProductMemorySource": {
+        "additionalProperties": true,
+        "description": "Saved provenance. Fields beyond these vary by source and are passed through.",
+        "properties": {
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          },
+          "quote": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "type",
+          "quote",
+          "evidence",
+          "scope",
+          "run_id",
+          "session_id",
+          "engine",
+          "url"
+        ],
+        "title": "ProductMemorySource",
+        "type": "object"
+      },
       "ProductSaveSecret": {
         "additionalProperties": false,
         "properties": {
@@ -3792,6 +7161,280 @@
           "client_id"
         ],
         "title": "ProductSaveSecret",
+        "type": "object"
+      },
+      "ProductSkillCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "load": {
+            "title": "Load",
+            "type": "boolean"
+          },
+          "read": {
+            "title": "Read",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read",
+          "create",
+          "update",
+          "delete",
+          "load"
+        ],
+        "title": "ProductSkillCapabilities",
+        "type": "object"
+      },
+      "ProductSkillDetail": {
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ProductSkillCapabilities"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/ProductSkillFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "icon": {
+            "title": "Icon",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "instructions": {
+            "title": "Instructions",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "source": {
+            "const": "canonical",
+            "title": "Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "scope",
+          "icon",
+          "revision",
+          "archived",
+          "created_at",
+          "updated_at",
+          "reference",
+          "can_manage",
+          "source",
+          "instructions",
+          "files",
+          "capabilities",
+          "note"
+        ],
+        "title": "ProductSkillDetail",
+        "type": "object"
+      },
+      "ProductSkillFile": {
+        "properties": {
+          "characters": {
+            "title": "Characters",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "size",
+          "characters",
+          "sha256"
+        ],
+        "title": "ProductSkillFile",
+        "type": "object"
+      },
+      "ProductSkillLibrary": {
+        "properties": {
+          "can_publish": {
+            "title": "Can Publish",
+            "type": "boolean"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ProductSkillCapabilities"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/ProductSkillSummary"
+            },
+            "title": "Skills",
+            "type": "array"
+          },
+          "source": {
+            "const": "canonical",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "skills",
+          "can_publish",
+          "capabilities",
+          "source",
+          "note",
+          "has_more",
+          "next_offset"
+        ],
+        "title": "ProductSkillLibrary",
+        "type": "object"
+      },
+      "ProductSkillSummary": {
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "icon": {
+            "title": "Icon",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "source": {
+            "const": "canonical",
+            "title": "Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "scope",
+          "icon",
+          "revision",
+          "archived",
+          "created_at",
+          "updated_at",
+          "reference",
+          "can_manage",
+          "source"
+        ],
+        "title": "ProductSkillSummary",
         "type": "object"
       },
       "ProductUpdateSecret": {
@@ -8862,7 +12505,7 @@
   "paths": {
     "/api/admin/spend": {
       "get": {
-        "operationId": "report_api_admin_spend_get",
+        "operationId": "getAdminSpendReport",
         "parameters": [
           {
             "in": "query",
@@ -9050,7 +12693,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Report Api Admin Spend Get"
+                  "$ref": "#/components/schemas/BillingReport"
                 }
               }
             },
@@ -9075,7 +12718,7 @@
     },
     "/api/admin/spend/infrastructure": {
       "get": {
-        "operationId": "infrastructure_api_admin_spend_infrastructure_get",
+        "operationId": "getAdminInfrastructureSpend",
         "parameters": [
           {
             "in": "query",
@@ -9131,9 +12774,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Infrastructure Api Admin Spend Infrastructure Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BillingInfrastructure"
                 }
               }
             },
@@ -9497,7 +13138,7 @@
     },
     "/api/connections/{provider}": {
       "delete": {
-        "operationId": "disconnect_api_connections__provider__delete",
+        "operationId": "disconnectOrganizationConnection",
         "parameters": [
           {
             "in": "path",
@@ -9519,7 +13160,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionDisconnected"
+                }
               }
             },
             "description": "Successful Response"
@@ -9538,7 +13181,7 @@
         "summary": "Disconnect"
       },
       "post": {
-        "operationId": "connect_api_connections__provider__post",
+        "operationId": "connectOrganizationConnection",
         "parameters": [
           {
             "in": "path",
@@ -9570,7 +13213,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionConnected"
+                }
               }
             },
             "description": "Successful Response"
@@ -9591,7 +13236,7 @@
     },
     "/api/connections/{provider}/check": {
       "post": {
-        "operationId": "check_api_connections__provider__check_post",
+        "operationId": "checkOrganizationConnection",
         "parameters": [
           {
             "in": "path",
@@ -9613,7 +13258,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionCheck"
+                }
               }
             },
             "description": "Successful Response"
@@ -9634,7 +13281,7 @@
     },
     "/api/connections/{provider}/oauth": {
       "post": {
-        "operationId": "oauth_api_connections__provider__oauth_post",
+        "operationId": "startOrganizationConnectionOAuth",
         "parameters": [
           {
             "in": "path",
@@ -9656,7 +13303,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionOAuthStart"
+                }
               }
             },
             "description": "Successful Response"
@@ -9677,7 +13326,7 @@
     },
     "/api/connections/{provider}/policy": {
       "patch": {
-        "operationId": "policy_api_connections__provider__policy_patch",
+        "operationId": "updateOrganizationConnectionPolicy",
         "parameters": [
           {
             "in": "path",
@@ -9709,7 +13358,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionPolicy"
+                }
               }
             },
             "description": "Successful Response"
@@ -9730,7 +13381,7 @@
     },
     "/api/credentials": {
       "get": {
-        "operationId": "inventory_api_credentials_get",
+        "operationId": "listCredentials",
         "parameters": [
           {
             "in": "query",
@@ -9747,7 +13398,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialInventory"
+                }
               }
             },
             "description": "Successful Response"
@@ -9768,7 +13421,7 @@
     },
     "/api/credentials/requests": {
       "get": {
-        "operationId": "pending_requests_api_credentials_requests_get",
+        "operationId": "listCredentialRequests",
         "parameters": [
           {
             "in": "query",
@@ -9784,7 +13437,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialAccessRequestList"
+                }
               }
             },
             "description": "Successful Response"
@@ -9805,7 +13460,7 @@
     },
     "/api/credentials/requests/{identity}": {
       "get": {
-        "operationId": "describe_request_api_credentials_requests__identity__get",
+        "operationId": "getCredentialRequest",
         "parameters": [
           {
             "in": "path",
@@ -9821,7 +13476,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialAccessRequestDetail"
+                }
               }
             },
             "description": "Successful Response"
@@ -9840,7 +13497,7 @@
         "summary": "Describe Request"
       },
       "post": {
-        "operationId": "resolve_request_api_credentials_requests__identity__post",
+        "operationId": "resolveCredentialRequest",
         "parameters": [
           {
             "in": "path",
@@ -9866,7 +13523,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialResolveResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9887,7 +13546,7 @@
     },
     "/api/credentials/secrets": {
       "post": {
-        "operationId": "create_api_credentials_secrets_post",
+        "operationId": "createCredential",
         "requestBody": {
           "content": {
             "application/json": {
@@ -9902,7 +13561,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialSaveResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9923,7 +13584,7 @@
     },
     "/api/credentials/secrets/{identity}": {
       "delete": {
-        "operationId": "revoke_api_credentials_secrets__identity__delete",
+        "operationId": "revokeCredential",
         "parameters": [
           {
             "in": "path",
@@ -9939,7 +13600,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialRevokeResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9958,7 +13621,7 @@
         "summary": "Revoke"
       },
       "patch": {
-        "operationId": "update_api_credentials_secrets__identity__patch",
+        "operationId": "updateCredential",
         "parameters": [
           {
             "in": "path",
@@ -9984,7 +13647,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialSecretMetadata"
+                }
               }
             },
             "description": "Successful Response"
@@ -11012,12 +14677,18 @@
     },
     "/api/product/connections": {
       "get": {
-        "operationId": "accounts_api_product_connections_get",
+        "operationId": "listOrganizationConnections",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OrganizationConnection"
+                  },
+                  "title": "Response Listorganizationconnections",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -11096,12 +14767,14 @@
     },
     "/api/product/memory": {
       "get": {
-        "operationId": "listing_api_product_memory_get",
+        "operationId": "listProductMemories",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductMemoryLibrary"
+                }
               }
             },
             "description": "Successful Response"
@@ -11110,7 +14783,7 @@
         "summary": "Listing"
       },
       "post": {
-        "operationId": "create_api_product_memory_post",
+        "operationId": "createProductMemory",
         "requestBody": {
           "content": {
             "application/json": {
@@ -11125,7 +14798,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductMemorySaveResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -11146,7 +14821,7 @@
     },
     "/api/product/memory/preferences": {
       "put": {
-        "operationId": "preferences_api_product_memory_preferences_put",
+        "operationId": "updateProductMemoryPreferences",
         "requestBody": {
           "content": {
             "application/json": {
@@ -11161,7 +14836,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductMemoryPreferences"
+                }
               }
             },
             "description": "Successful Response"
@@ -11182,7 +14859,7 @@
     },
     "/api/product/memory/{note_id}": {
       "delete": {
-        "operationId": "forget_api_product_memory__note_id__delete",
+        "operationId": "deleteProductMemory",
         "parameters": [
           {
             "in": "path",
@@ -11208,7 +14885,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductMemoryForgetResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -11227,7 +14906,7 @@
         "summary": "Forget"
       },
       "put": {
-        "operationId": "update_note_api_product_memory__note_id__put",
+        "operationId": "updateProductMemory",
         "parameters": [
           {
             "in": "path",
@@ -11253,7 +14932,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductMemorySaveResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -11950,7 +15631,7 @@
     },
     "/api/product/skills": {
       "get": {
-        "operationId": "listing_api_product_skills_get",
+        "operationId": "listProductSkills",
         "parameters": [
           {
             "in": "query",
@@ -11991,7 +15672,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductSkillLibrary"
+                }
               }
             },
             "description": "Successful Response"
@@ -12012,7 +15695,7 @@
     },
     "/api/product/skills/{skill_id}": {
       "get": {
-        "operationId": "detail_api_product_skills__skill_id__get",
+        "operationId": "getProductSkill",
         "parameters": [
           {
             "in": "path",
@@ -12045,7 +15728,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductSkillDetail"
+                }
               }
             },
             "description": "Successful Response"
@@ -14275,7 +17960,7 @@
     },
     "/api/settings/billing": {
       "get": {
-        "operationId": "report_api_settings_billing_get",
+        "operationId": "getBillingReport",
         "parameters": [
           {
             "in": "query",
@@ -14463,7 +18148,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Report Api Settings Billing Get"
+                  "$ref": "#/components/schemas/BillingReport"
                 }
               }
             },
@@ -15661,7 +19346,7 @@
     },
     "/api/spend": {
       "get": {
-        "operationId": "report_api_spend_get",
+        "operationId": "getSpendReport",
         "parameters": [
           {
             "in": "query",
@@ -15849,7 +19534,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response Report Api Spend Get"
+                  "$ref": "#/components/schemas/BillingReport"
                 }
               }
             },

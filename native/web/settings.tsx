@@ -16,6 +16,15 @@ import { updateProductUserRole } from "./generated/api"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
 import type { GeneralPreferences } from "./general-preferences"
+import {
+  checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
+  disconnectOrganizationConnection, getProductSkill, listCredentials, listOrganizationConnections, listProductMemories,
+  listProductSkills, revokeCredential, startOrganizationConnectionOAuth, updateCredential, updateOrganizationConnectionPolicy,
+  updateProductMemory, updateProductMemoryPreferences,
+  type CredentialInventory, type CredentialProvider, type CredentialSecretMetadata, type Note as ProductMemoryWriteBody,
+  type OrganizationConnection, type ProductMemoryNote as ProductMemoryNoteData, type ProductSaveSecretWritable,
+  type ProductSkillDetail, type ProductSkillLibrary, type ProductSkillSummary, type ProductUpdateSecretWritable,
+} from "./generated/api"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
@@ -24,36 +33,13 @@ type Capabilities = { read?: boolean; create?: boolean; update?: boolean; delete
 type Collection = { capabilities?: Capabilities; reason?: string }
 type Skill = { id: string; name: string; description: string; content: string; scope: string; enabled: boolean; editable: boolean; updated_at?: string }
 type Secret = { id: string; name: string; description: string; scope: string; editable?: boolean; updated_at?: string }
-type ProductSecret = {
-  id: string; provider: string; label: string; name: string; format: string; env_var?: string; scope: string; lifetime?: string
-  root_id?: string; created_at?: string; expires_at?: string; revision: number; status: string; can_manage: boolean
-}
-type ProductCredentialInventory = {
-  secrets: ProductSecret[]; providers: { id: string; name: string; setup_url?: string }[]; root_id?: string; note?: string
-  capabilities?: { create: boolean; update: boolean; delete: boolean; scopes: string[]; lifetimes: string[]; native_execution: boolean }
-}
 type CredentialDraft = {
-  provider: string; label: string; name: string; format: "env" | "file"; env_var: string
+  provider: CredentialProvider["id"]; label: string; name: string; format: "env" | "file"; env_var: string
   scope: string; lifetime: string; root_id: string; expires_at: string; value: string
 }
 type Memory = { namespace: string; path: string; content: string; version?: string; truncated?: boolean }
-type ProductMemoryNote = {
-  id: string; key: string; title: string; content: string; kind: string; repo_url: string; repository_id?: number | null
-  revision: number; created_at?: string; updated_at?: string; expires_at?: string | null; truncated?: boolean; review_required?: boolean
-  source?: { type?: string; quote?: string; evidence?: string; scope?: string; run_id?: string; session_id?: string; engine?: string; url?: string }
-}
-type ProductMemoryData = {
-  source: "canonical"; scope: { kind: "personal"; owner_id: string } | null; note?: string; capabilities: Capabilities
-  preferences: { enabled: boolean; auto_save: boolean; revision: number } | null; memories: ProductMemoryNote[]
-  review?: { enabled?: boolean; configured?: boolean; pending?: number; latest?: { status: string; updated_at?: string; saved_count?: number } | null } | null
-  runtime?: { recall: boolean; auto_save: boolean; background_review: boolean; note?: string }
-}
-type ProductSkill = {
-  id: string; name: string; description: string; scope: string; icon?: string; revision: number; archived: boolean
-  reference: string; created_at?: string; updated_at?: string; can_manage: boolean
-}
-type ProductSkillDetail = ProductSkill & { instructions: string; files: { path: string; size: number; characters?: number; sha256?: string }[] }
-type ProductSkillLibrary = Collection & { source: string; skills: ProductSkill[]; can_publish: boolean; note?: string; has_more: boolean; next_offset: number | null }
+/** UI view of a saved note: editing stays disabled for a truncated preview, and a confirmed repository ID is kept on resave. */
+type ProductMemoryNote = ProductMemoryNoteData & { repository_id?: number | null; truncated?: boolean }
 type Automation = { id: string; name: string; prompt: string; session_id: string; model: string; interval_minutes: number; paused: boolean; state: string; updated_at?: string }
 type Account = { id: string; username: string; display_name: string; role: string; enabled: boolean; email?: string; revision?: number }
 type Connection = ConnectionView
@@ -67,11 +53,6 @@ function connectionInput(values: FormValues, policy: ConnectionPolicy): Connecti
     name: String(values.name ?? ""), kind, credential: String(values.credential ?? ""),
     shared: values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy,
   }
-}
-type ProductConnection = {
-  id: string; connected: boolean; scope: string; oauth_configured: boolean; label: string; identity: string
-  enabled: boolean; read_only: boolean; checked_at?: string; check_status?: string; app_registered?: boolean
-  tools: { name?: string; description: string }[]; repositories?: { id: number; full_name: string }[]
 }
 type PersonalSlack = {
   available: boolean; connected: boolean; oauth_configured: boolean; label?: string; health?: string
@@ -99,7 +80,7 @@ const scopeOptions = [{ value: "all", label: "All scopes" }, { value: "personal"
 const scopes = (user: SettingsUser, capabilities?: Capabilities) => scopeOptions.filter(option => option.value === "personal" || (user.role === "admin" && capabilities?.shared === true && option.value === "shared"))
 const contains = (query: string, ...values: (string | undefined)[]) => values.join(" ").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
 const count = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "Unavailable"
-const dateTime = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Not recorded"
+const dateTime = (value?: string | null) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Not recorded"
 const errorText = (error: unknown) => error instanceof ApiError && error.status === 404
   ? "This settings endpoint is not available on this server."
   : error instanceof Error ? error.message : "The request could not be completed."
@@ -285,8 +266,8 @@ function SecretsPage({ user }: { user: SettingsUser }) {
 }
 
 export function ProductSecretRows({ secrets, providers, capabilities, onEdit, onRevoke }: {
-  secrets: ProductSecret[]; providers: { id: string; name: string }[]; capabilities?: ProductCredentialInventory["capabilities"]
-  onEdit?: (secret: ProductSecret) => void; onRevoke?: (secret: ProductSecret) => void
+  secrets: CredentialSecretMetadata[]; providers: { id: string; name: string }[]; capabilities?: CredentialInventory["capabilities"]
+  onEdit?: (secret: CredentialSecretMetadata) => void; onRevoke?: (secret: CredentialSecretMetadata) => void
 }) {
   return <RecordTable label="Original saved credentials" headings={["Credential", "Scope", "Lifetime", "Status", "Value", "Actions"]}>{secrets.map(secret => <TableRow key={secret.id}>
     <TableCell><strong>{secret.label}</strong><small>{secret.provider === "generic" ? secret.name : providers.find(provider => provider.id === secret.provider)?.name || secret.provider}</small>
@@ -306,12 +287,17 @@ export function productCredentialRoot(session: { id: string; source: string }): 
   if (session.source === "native" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(session.id)) return `native:${session.id}`
   throw new Error("Choose an available session from the list.")
 }
-export function productCredentialBody(draft: CredentialDraft, existing: ProductSecret | undefined, clientId: string) {
-  if (!["personal", "organization"].includes(draft.scope)) throw new Error("Choose who can use this credential.")
-  if (!["persistent", "session"].includes(draft.lifetime)) throw new Error("Choose this session or future sessions.")
+const credentialScope = (value: string): value is "personal" | "organization" => value === "personal" || value === "organization"
+const credentialLifetime = (value: string): value is "persistent" | "session" => value === "persistent" || value === "session"
+export function productCredentialBody(draft: CredentialDraft, existing: CredentialSecretMetadata, clientId: string): ProductUpdateSecretWritable
+export function productCredentialBody(draft: CredentialDraft, existing: undefined, clientId: string): ProductSaveSecretWritable
+export function productCredentialBody(draft: CredentialDraft, existing: CredentialSecretMetadata | undefined, clientId: string): ProductUpdateSecretWritable | ProductSaveSecretWritable {
+  const { scope, lifetime } = draft
+  if (!credentialScope(scope)) throw new Error("Choose who can use this credential.")
+  if (!credentialLifetime(lifetime)) throw new Error("Choose this session or future sessions.")
   if (draft.lifetime === "session" && !/^(?:[0-9a-f]{32}|native:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.test(draft.root_id)) throw new Error("Choose a session for session-only access.")
   if (!draft.label.trim() || draft.label.trim().length > 80) throw new Error("Use a credential name between 1 and 80 characters.")
-  const fields = { label: draft.label.trim(), scope: draft.scope, lifetime: draft.lifetime, root_id: draft.lifetime === "session" ? draft.root_id : "", expires_at: draft.expires_at }
+  const fields = { label: draft.label.trim(), scope, lifetime, root_id: lifetime === "session" ? draft.root_id : "", expires_at: draft.expires_at }
   if (existing) {
     if (existing.format === "aws-sso") throw new Error("Renew AWS SSO access through its sign-in flow.")
     return { revision: existing.revision, ...fields, ...(draft.value ? { value: draft.value } : {}) }
@@ -320,9 +306,9 @@ export function productCredentialBody(draft: CredentialDraft, existing: ProductS
   return { provider: draft.provider, ...fields, value: draft.value, client_id: clientId, ...(draft.provider === "generic" ? { name: draft.name.trim(), format: draft.format, env_var: draft.format === "file" ? draft.env_var.trim() : "" } : {}) }
 }
 function ProductSecretsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<ProductCredentialInventory>("/credentials")
+  const resource = useResource("/credentials", signal => listCredentials({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
-  const [editor, setEditor] = useState<{ secret?: ProductSecret; onePassword?: boolean } | null>(null), [revoke, setRevoke] = useState<ProductSecret | null>(null)
+  const [editor, setEditor] = useState<{ secret?: CredentialSecretMetadata; onePassword?: boolean } | null>(null), [revoke, setRevoke] = useState<CredentialSecretMetadata | null>(null)
   return <LoadState resource={resource}>{data => {
     const rows = data.secrets.filter(secret => contains(search, secret.label, secret.name, secret.provider) && (scope === "all" || (secret.scope === "organization" ? "organization" : "personal") === scope))
     return <><p className="ns-notice"><Shield size={16} />This is the original credential inventory. Saved values are never returned to this page.</p>
@@ -339,18 +325,18 @@ function ProductSecretsPage({ user }: { user: SettingsUser }) {
       {rows.length ? <ProductSecretRows secrets={rows} providers={data.providers} capabilities={data.capabilities} onEdit={secret => setEditor({ secret, onePassword: secret.name === "1password-shared" && secret.format === "env" })} onRevoke={setRevoke} /> : <Empty filtered={Boolean(search) || scope !== "all"} noun="saved credentials" onClear={() => { setSearch(""); setScope("all") }} />}
       {editor && (editor.secret ? data.capabilities?.update && editor.secret.can_manage : data.capabilities?.create) && <ProductCredentialEditor key={editor.secret?.id || (editor.onePassword ? "1password" : "new")} user={user} inventory={data} existing={editor.secret} onePassword={editor.onePassword} onClose={() => setEditor(null)} onSaved={resource.refresh} />}
       {revoke && data.capabilities?.delete && revoke.can_manage && <Confirm title={`Revoke ${revoke.label}?`} description="Future tasks cannot use this saved access. The credential is not revoked at its provider, and existing conversations are retained." label="Revoke access"
-        onConfirm={async () => { await api(`/credentials/secrets/${encodeURIComponent(revoke.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRevoke(null)} />}
+        onConfirm={async () => { await revokeCredential({ path: { identity: revoke.id } }); resource.refresh() }} onClose={() => setRevoke(null)} />}
     </>
   }}</LoadState>
 }
 
 function ProductCredentialEditor({ user, inventory, existing, onePassword, onClose, onSaved }: {
-  user: SettingsUser; inventory: ProductCredentialInventory; existing?: ProductSecret; onePassword?: boolean; onClose: () => void; onSaved: () => void
+  user: SettingsUser; inventory: CredentialInventory; existing?: CredentialSecretMetadata; onePassword?: boolean; onClose: () => void; onSaved: () => void
 }) {
   const mutation = useMutation(), id = useId(), clientId = useRef(crypto.randomUUID())
   const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   const [draft, setDraft] = useState<CredentialDraft>({
-    provider: existing?.provider || (onePassword ? "generic" : inventory.providers[0]?.id || "generic"),
+    provider: existing ? inventory.providers.find(item => item.id === existing.provider)?.id ?? "generic" : onePassword ? "generic" : inventory.providers[0]?.id ?? "generic",
     label: existing?.label || (onePassword ? "1Password Shared" : ""), name: existing?.name || (onePassword ? "1password-shared" : ""),
     format: existing?.format === "file" ? "file" : "env", env_var: existing?.env_var || "", scope: existing ? existing.scope === "session" ? "personal" : existing.scope : "",
     lifetime: existing?.lifetime || (existing ? existing.scope === "session" ? "session" : "persistent" : ""), root_id: existing?.root_id || "", expires_at: existing?.expires_at || "", value: "",
@@ -389,13 +375,16 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
         value = selected ? await selected.text() : ""
         if (value.includes("\0")) throw new Error("Choose a UTF-8 text credential file without NUL characters.")
       }
-      const body = productCredentialBody({ ...draft, value, expires_at: expiry ? onceUtcInstant(expiry) : "" }, existing, clientId.current)
+      const saved = { ...draft, value, expires_at: expiry ? onceUtcInstant(expiry) : "" }
+      const save = existing
+        ? (body => () => updateCredential({ path: { identity: existing.id }, body }))(productCredentialBody(saved, existing, clientId.current))
+        : (body => () => createCredential({ body }))(productCredentialBody(saved, undefined, clientId.current))
       if (!supportedScopes.includes(draft.scope) || (draft.scope === "organization" && user.role !== "admin")) throw new Error("This sign-in cannot save credentials in the selected scope.")
       if (!inventory.capabilities?.lifetimes.includes(draft.lifetime)) throw new Error("This credential lifetime is not supported.")
-      await api(`/credentials/secrets${existing ? `/${encodeURIComponent(existing.id)}` : ""}`, existing ? "PATCH" : "POST", body)
+      await save()
     }, () => { setDraft(previous => ({ ...previous, value: "" })); setVariables([]); if (file.current) file.current.value = ""; onSaved(); onClose() }) }}>
       {onePassword && <p className="ns-notice">Use a dedicated 1Password service account scoped to the Shared vault. Vault permissions are enforced by 1Password. Choose Organization only when teammates should use this access.</p>}
-      <div className="ns-field"><label htmlFor={`${id}-provider`}>Service</label><Choice id={`${id}-provider`} label="Credential service" value={draft.provider} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} options={inventory.providers.map(item => ({ value: item.id, label: item.name }))} onChange={value => { change({ provider: value, value: "", name: "", format: "env", env_var: "" }); setVariables([{ key: "", value: "", id: crypto.randomUUID() }]) }} /></div>
+      <div className="ns-field"><label htmlFor={`${id}-provider`}>Service</label><Choice id={`${id}-provider`} label="Credential service" value={draft.provider} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} options={inventory.providers.map(item => ({ value: item.id, label: item.name }))} onChange={value => { const selected = inventory.providers.find(item => item.id === value); if (!selected) return; change({ provider: selected.id, value: "", name: "", format: "env", env_var: "" }); setVariables([{ key: "", value: "", id: crypto.randomUUID() }]) }} /></div>
       {setup && <a className="ns-link" href={setup} target="_blank" rel="noreferrer">Provider setup guide</a>}
       <div className="ns-field"><label htmlFor={`${id}-label`}>Display name</label><Input id={`${id}-label`} autoFocus required maxLength={80} disabled={mutation.busy} value={draft.label} onChange={event => change({ label: event.target.value })} /></div>
       {generic && <>
@@ -459,7 +448,7 @@ function MemoryPage() {
   </>
 }
 
-const productMemoryKinds = [{ value: "preference", label: "Preference" }, { value: "feedback", label: "Correction" }, { value: "project", label: "Project context" }, { value: "reference", label: "Reference" }]
+const productMemoryKinds: { value: ProductMemoryNote["kind"]; label: string }[] = [{ value: "preference", label: "Preference" }, { value: "feedback", label: "Correction" }, { value: "project", label: "Project context" }, { value: "reference", label: "Reference" }]
 export function productMemorySourceLink(source: ProductMemoryNote["source"]): string | undefined {
   if (!source?.session_id || !source.url) return
   const hash = source.engine === "legacy" && /^[0-9a-f]{32}$/.test(source.session_id) ? `#run=${source.session_id}`
@@ -488,23 +477,25 @@ export function ProductMemoryNotes({ notes, capabilities, onEdit, onRemove }: {
   })}</div>
 }
 
-export function productMemoryWrite(note: ProductMemoryNote | undefined, values: FormValues, requestId: string) {
+export function productMemoryWrite(note: ProductMemoryNote | undefined, values: FormValues, requestId: string): ProductMemoryWriteBody {
+  const kind = productMemoryKinds.find(item => item.value === values.kind)?.value
+  if (!kind) throw new Error("Choose a memory type.")
   const normalizeRepository = (value: string) => value.trim().replace(/\/$/, "").replace(/\.git$/, "").toLowerCase()
   const sameRepository = note && normalizeRepository(note.repo_url) === normalizeRepository(String(values.repo_url || ""))
   return {
     key: note?.key || `note-${requestId.toLowerCase()}`, title: String(values.title), content: String(values.content),
-    kind: String(values.kind), repo_url: String(values.repo_url || ""), revision: note?.revision ?? 0, request_id: requestId,
+    kind, repo_url: String(values.repo_url || ""), revision: note?.revision ?? 0, request_id: requestId,
     ...(note?.repository_id && sameRepository ? { repository_id: note.repository_id } : {}),
   }
 }
 function ProductMemoryPage() {
-  const resource = useResource<ProductMemoryData>("/product/memory")
+  const resource = useResource("/product/memory", signal => listProductMemories({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState("")
   const [editor, setEditor] = useState<{ note?: ProductMemoryNote; requestId: string } | null>(null)
   const [remove, setRemove] = useState<ProductMemoryNote | null>(null)
   const mutation = useMutation()
-  const request = async (path: string, method: string, body: unknown) => {
-    try { return await api(path, method, body) }
+  const request = async (call: () => Promise<unknown>) => {
+    try { return await call() }
     catch (reason) {
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) { setEditor(null); setRemove(null); resource.refresh() }
       throw reason
@@ -524,9 +515,9 @@ function ProductMemoryPage() {
       <section className="ns-record"><div className="ns-record-copy"><h2>Memory preferences</h2><p>Saved setting: {prefs.enabled ? "enabled" : "paused"}. Pausing keeps your notes and stops future recall and automatic saving.</p>
         <Choice label="How new memories are saved" value={prefs.auto_save ? "auto" : "manual"} disabled={!data.capabilities.preferences || mutation.busy || !prefs.enabled}
           options={[{ value: "auto", label: "Save useful context automatically" }, { value: "manual", label: "Only save manually" }]}
-          onChange={value => void mutation.run(() => request("/product/memory/preferences", "PUT", { enabled: prefs.enabled, auto_save: value === "auto", revision: prefs.revision }), resource.refresh)} />
+          onChange={value => void mutation.run(() => request(() => updateProductMemoryPreferences({ body: { enabled: prefs.enabled, auto_save: value === "auto", revision: prefs.revision } })), resource.refresh)} />
         {data.review?.latest && <small>Recorded review: {data.review.latest.status} · {dateTime(data.review.latest.updated_at)}</small>}
-      </div>{data.capabilities.preferences && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => request("/product/memory/preferences", "PUT", { enabled: !prefs.enabled, auto_save: prefs.auto_save, revision: prefs.revision }), resource.refresh)}>{prefs.enabled ? "Pause memory" : "Resume memory"}</Button>}</section>
+      </div>{data.capabilities.preferences && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => request(() => updateProductMemoryPreferences({ body: { enabled: !prefs.enabled, auto_save: prefs.auto_save, revision: prefs.revision } })), resource.refresh)}>{prefs.enabled ? "Pause memory" : "Resume memory"}</Button>}</section>
       {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} action={data.capabilities.create && <Button onClick={() => setEditor({ requestId: crypto.randomUUID() })}><Plus />Add memory</Button>} />
       {rows.length ? <ProductMemoryNotes notes={rows} capabilities={data.capabilities} onEdit={note => setEditor({ note, requestId: crypto.randomUUID() })} onRemove={setRemove} /> : <Empty filtered={Boolean(search)} noun="memories" onClear={() => setSearch("")} />}
@@ -535,9 +526,12 @@ function ProductMemoryPage() {
         fields={[{ name: "title", label: "Title", required: true, minLength: 3, maxLength: 120 }, { name: "kind", label: "Type", type: "select", options: productMemoryKinds },
           { name: "content", label: "What should Moyai remember?", type: "textarea", required: true, minLength: 3 },
           { name: "repo_url", label: "Repository (optional)", type: "url", maxLength: 240, hint: "Use a GitHub repository URL, or leave blank for context across your sessions. Editing project context or a reference refreshes its expiry." }]}
-        onSave={async values => { await request(`/product/memory${editor.note ? `/${encodeURIComponent(editor.note.id)}` : ""}`, editor.note ? "PUT" : "POST", productMemoryWrite(editor.note, values, editor.requestId)); resource.refresh() }} onClose={() => setEditor(null)} />}
+        onSave={async values => {
+          const body = productMemoryWrite(editor.note, values, editor.requestId), note = editor.note
+          await request(() => note ? updateProductMemory({ path: { note_id: note.id }, body }) : createProductMemory({ body })); resource.refresh()
+        }} onClose={() => setEditor(null)} />}
       {remove && data.capabilities.delete && <Confirm title={`Delete ${remove.title}?`} description="This stops future recall of the note. Existing conversations and backups are retained." label="Delete memory"
-        onConfirm={async () => { await request(`/product/memory/${encodeURIComponent(remove.id)}`, "DELETE", { revision: remove.revision }); resource.refresh() }} onClose={() => setRemove(null)} />}
+        onConfirm={async () => { await request(() => deleteProductMemory({ path: { note_id: remove.id }, body: { revision: remove.revision } })); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
@@ -548,15 +542,15 @@ export function productSkillFileUrl(id: string, path: string, revision: number):
   if (parts.some(part => !part || part === "." || part === "..")) return
   return `/api/product/skills/${encodeURIComponent(id)}/files/${parts.map(encodeURIComponent).join("/")}?revision=${revision}`
 }
-export function ProductSkillRows({ skills, onView }: { skills: ProductSkill[]; onView: (skill: ProductSkill) => void }) {
+export function ProductSkillRows({ skills, onView }: { skills: ProductSkillSummary[]; onView: (skill: ProductSkillSummary) => void }) {
   return <div className="ns-records">{skills.map(skill => <article className="ns-record" key={skill.id}><FileText className="ns-record-icon" aria-hidden="true" />
     <div className="ns-record-copy"><div className="ns-record-title"><h2>{skill.name}</h2><span className="ns-badge">{skill.scope === "organization" ? "Organization" : "Personal"}</span>{skill.archived && <span className="ns-badge">Archived</span>}</div>
       <p>{skill.description}</p><small>Saved reference: /{skill.reference} · Updated {dateTime(skill.updated_at)}</small></div>
     <Button size="sm" variant="outline" onClick={() => onView(skill)}>View instructions<span className="visually-hidden"> for {skill.name}</span></Button>
   </article>)}</div>
 }
-function ProductSkillDialog({ skill, onClose }: { skill: ProductSkill; onClose: () => void }) {
-  const resource = useResource<ProductSkillDetail>(`/product/skills/${encodeURIComponent(skill.id)}`)
+function ProductSkillDialog({ skill, onClose }: { skill: ProductSkillSummary; onClose: () => void }) {
+  const resource = useResource<ProductSkillDetail>(`/product/skills/${encodeURIComponent(skill.id)}`, signal => getProductSkill({ path: { skill_id: skill.id }, signal }).then(({ data }) => data))
   const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus() }}>
     <DialogHeader><DialogTitle>{skill.name}</DialogTitle><DialogDescription>Type / in chat to select this skill. Its original instructions and supporting files are retained.</DialogDescription></DialogHeader>
@@ -571,16 +565,16 @@ function ProductSkillsPage() {
   const [archived, setArchived] = useState(false), [search, setSearch] = useState(""), [scope, setScope] = useState("all")
   const [pages, setPages] = useState(1), [revision, setRevision] = useState(0)
   const [state, setState] = useState<{ archived: boolean; data?: ProductSkillLibrary; loading: boolean; error: string }>({ archived, loading: true, error: "" })
-  const [selected, setSelected] = useState<ProductSkill | null>(null)
+  const [selected, setSelected] = useState<ProductSkillSummary | null>(null)
   useEffect(() => {
     const controller = new AbortController()
     setState(previous => ({ archived, data: previous.archived === archived ? previous.data : undefined, loading: true, error: "" }))
     void (async () => {
       try {
         let offset = 0, result: ProductSkillLibrary | undefined
-        const rows = new Map<string, ProductSkill>()
+        const rows = new Map<string, ProductSkillSummary>()
         for (let page = 0; page < pages; page++) {
-          const next = await api<ProductSkillLibrary>(`/product/skills?archived=${archived}&limit=100&offset=${offset}`, "GET", undefined, controller.signal)
+          const { data: next } = await listProductSkills({ query: { archived, limit: 100, offset }, signal: controller.signal })
           if (controller.signal.aborted) return
           if (next.source !== "canonical") throw new Error("The server did not return the original skill library.")
           for (const skill of next.skills) rows.set(skill.id, skill)
@@ -618,7 +612,7 @@ export function productRedirect(value: string, origin: string): string {
   if (url.username || url.password || /[\\\u0000-\u0020\u007f]/.test(value) || (url.protocol !== "https:" && url.origin !== origin)) throw new Error("The connection service returned an invalid destination.")
   return url.href
 }
-export function ProductConnectionRows({ connections, admin, onManage }: { connections: ProductConnection[]; admin: boolean; onManage: (connection: ProductConnection) => void }) {
+export function ProductConnectionRows({ connections, admin, onManage }: { connections: OrganizationConnection[]; admin: boolean; onManage: (connection: OrganizationConnection) => void }) {
   return <div className="ns-records">{connections.map(connection => <article className="ns-record" key={connection.id}><Link2 className="ns-record-icon" aria-hidden="true" />
     <div className="ns-record-copy"><div className="ns-record-title"><h2>{productProviders[connection.id] || connection.id}</h2><span className="ns-badge">{connection.connected ? connection.enabled ? "Connected" : "Paused" : "Not connected"}</span><span className="ns-badge">Organization</span></div>
       <p>{connection.label || "No account connected"}</p><small>{connection.identity || "No provider identity"} · {connection.read_only ? "Read-only policy" : "Read and write policy"}</small>
@@ -627,11 +621,11 @@ export function ProductConnectionRows({ connections, admin, onManage }: { connec
   </article>)}</div>
 }
 function ProductConnectionsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<ProductConnection[]>("/product/connections")
+  const resource = useResource("/product/connections", signal => listOrganizationConnections({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
-  const [selected, setSelected] = useState<{ connection: ProductConnection; mode: "manage" | "connect" | "repositories" } | null>(null)
+  const [selected, setSelected] = useState<{ connection: OrganizationConnection; mode: "manage" | "connect" | "repositories" } | null>(null)
   const opener = useRef<HTMLElement | null>(null)
-  const open = (connection: ProductConnection) => { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setSelected({ connection, mode: "manage" }) }
+  const open = (connection: OrganizationConnection) => { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setSelected({ connection, mode: "manage" }) }
   return <>
     <LoadState resource={resource}>{data => {
       const rows = data.filter(row => contains(search, row.id, row.label, row.identity) && (filter === "all" || row.id === filter))
@@ -647,7 +641,7 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
   </>
 }
 function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onClose, onUpdated }: {
-  connection: ProductConnection; mode: "manage" | "connect" | "repositories"; admin: boolean
+  connection: OrganizationConnection; mode: "manage" | "connect" | "repositories"; admin: boolean
   opener: React.MutableRefObject<HTMLElement | null>; onMode: (mode: "manage" | "connect" | "repositories") => void; onClose: () => void; onUpdated: () => void
 }) {
   const mutation = useMutation()
@@ -663,7 +657,7 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
     {mode === "manage" && <>
       <p>{connection.connected ? `${connection.label} · ${connection.identity}` : "No organization account is connected."}</p>
       {connection.tools.length > 0 && <details><summary>Provider operation descriptions</summary><ul className="ns-supporting-files">{connection.tools.map((tool, index) => <li key={tool.name || index}>{tool.name && <code>{tool.name} · </code>}{tool.description}</li>)}</ul></details>}
-      {admin ? <form onSubmit={event => { event.preventDefault(); void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}/policy`, "PATCH", { enabled, read_only: readOnly }), onUpdated) }}>
+      {admin ? <form onSubmit={event => { event.preventDefault(); void mutation.run(() => updateOrganizationConnectionPolicy({ path: { provider: connection.id }, body: { enabled, read_only: readOnly } }), onUpdated) }}>
         <div className="ns-fields"><label className="check-label"><Checkbox checked={enabled} disabled={mutation.busy} onCheckedChange={value => setEnabled(value === true)} />Available to organization sessions</label>
           <div className="ns-field"><label>Allowed actions<Choice label="Allowed connection actions" value={readOnly ? "read" : "write"} onChange={value => setReadOnly(value === "read")} disabled={mutation.busy} options={[{ value: "read", label: "Read only" }, { value: "write", label: "Read and write" }]} /></label></div>
           <p className="ns-field-hint">Pausing access or changing it to read only blocks new writes. Actions already sent cannot be recalled.</p></div>
@@ -671,13 +665,13 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
       </form> : <p className="ns-muted">{connection.enabled ? "Available to sessions." : "Paused for organization sessions."} Ask an administrator to change this policy.</p>}
       {admin && <div className="ns-row-actions">
         <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("connect")}>{connection.connected ? "Reconnect" : "Connect"} {name}</Button>
-        {connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}/check`, "POST"), () => setNotice("The provider confirmed this connection."))}>Check connection</Button>}
+        {connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => checkOrganizationConnection({ path: { provider: connection.id } }), () => setNotice("The provider confirmed this connection."))}>Check connection</Button>}
         {connection.id === "github" && connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("repositories")}>Choose repositories</Button>}
         {connection.connected && <Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button>}
       </div>}
       {disconnect && admin && <div className="ns-empty"><h3>Disconnect {name} for the organization?</h3><p>Future tasks cannot use this account. Actions already sent and provider credentials are not recalled.</p><div className="ns-dialog-actions">
         <Button autoFocus variant="outline" disabled={mutation.busy} onClick={() => setDisconnect(false)}>Cancel</Button>
-        <Button variant="destructive" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}`, "DELETE"), onUpdated)}>Disconnect for everyone</Button>
+        <Button variant="destructive" disabled={mutation.busy} onClick={() => void mutation.run(() => disconnectOrganizationConnection({ path: { provider: connection.id } }), onUpdated)}>Disconnect for everyone</Button>
       </div></div>}
     </>}
     {mode === "connect" && admin && <ProductConnectionSetup connection={connection} onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />}
@@ -685,15 +679,15 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
     <Button variant="outline" disabled={mutation.busy || nestedBusy} onClick={onClose}>Close</Button>
   </DialogContent></Dialog>
 }
-function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { connection: ProductConnection; onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
+function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { connection: OrganizationConnection; onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
   const mutation = useMutation()
   const [token, setToken] = useState(""), [organization, setOrganization] = useState(""), [appId, setAppId] = useState("")
   const file = useRef<HTMLInputElement>(null)
   useEffect(() => { onBusyChange(mutation.busy); return () => onBusyChange(false) }, [mutation.busy, onBusyChange])
   const name = productProviders[connection.id] || connection.id
-  const redirect = (path: string, body?: object) => {
+  const redirect = (start: () => Promise<{ url?: string; connected?: boolean }>) => {
     let result: { url?: string; connected?: boolean }
-    return mutation.run(async () => { result = await api(path, "POST", body) }, () => {
+    return mutation.run(async () => { result = await start() }, () => {
       if (result.connected) onDone()
       else if (result.url) window.location.assign(productRedirect(result.url, location.origin))
     })
@@ -701,7 +695,7 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
   return <div className="ns-fields">
     {connection.id === "github" ? <>
       <p>Connect the organization’s GitHub App. Its installation controls which repositories can be selected.</p>
-      {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect("/connections/github/oauth")}>Continue with GitHub</Button> : <>
+      {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect(() => api("/connections/github/oauth", "POST"))}>Continue with GitHub</Button> : <>
         <form className="ns-fields" onSubmit={event => { event.preventDefault(); let destination: string; void mutation.run(async () => {
           const selected = file.current?.files?.[0]
           if (!selected || selected.size > 20_000) throw new Error("Choose a PEM private key file under 20 KB.")
@@ -714,15 +708,15 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
           <div className="ns-field"><label>PEM private key<Input ref={file} type="file" accept=".pem" required disabled={mutation.busy} /></label><p className="ns-field-hint">Choose the key from GitHub App settings. It is never displayed here or placed in chat.</p></div>
           <Button type="submit" disabled={mutation.busy}>Verify app and continue</Button>
         </form>
-        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect("/connections/github/oauth", { organization: organization.trim() }) }}>
+        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect(() => api("/connections/github/oauth", "POST", { organization: organization.trim() })) }}>
           <h3>Register an organization App</h3><div className="ns-field"><label>GitHub organization<Input required maxLength={39} pattern="[A-Za-z0-9][A-Za-z0-9-]{0,38}" disabled={mutation.busy} value={organization} onChange={event => setOrganization(event.target.value)} /></label></div>
           <Button type="submit" variant="outline" disabled={mutation.busy}>Continue to GitHub registration</Button>
         </form>
       </>}
     </> : <>
-      {connection.oauth_configured ? <Button disabled={mutation.busy} onClick={() => void redirect(`/connections/${encodeURIComponent(connection.id)}/oauth`)}>Continue with {name}</Button>
+      {connection.oauth_configured ? <Button disabled={mutation.busy} onClick={() => void redirect(() => startOrganizationConnectionOAuth({ path: { provider: connection.id } }).then(({ data }) => data))}>Continue with {name}</Button>
         : <p className="ns-muted">OAuth is not configured for this provider. An administrator can connect using a supported access token.</p>}
-      <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}`, "POST", { token }), () => { setToken(""); onDone() }) }}>
+      <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(() => connectOrganizationConnection({ path: { provider: connection.id }, body: { token } }), () => { setToken(""); onDone() }) }}>
         <div className="ns-field"><label>Access token<Input type="password" autoComplete="off" required minLength={1} maxLength={100000} disabled={mutation.busy} value={token} onChange={event => setToken(event.target.value)} /></label><p className="ns-field-hint">The provider validates the token. It is stored encrypted and is never returned to this page.</p></div>
         <Button type="submit" disabled={mutation.busy}>Connect {name} using token</Button>
       </form>
