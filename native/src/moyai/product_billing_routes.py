@@ -213,6 +213,10 @@ class ProductBillingService:
             if engine.dialect.name == "postgresql":
                 await connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
                 await connection.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+            elif engine.dialect.name == "sqlite":
+                # sqlite3's legacy transaction mode does not begin on SELECT.
+                # Retained period rows and later aliases need one snapshot.
+                await connection.execute(text("BEGIN"))
             # Source SQLite is physically read-only. Native SQLite operations
             # are only SELECTs; do not change pooled writer connection PRAGMAs.
             yield BillingReader(connection, schema=schema, max_records=self.max_records)
