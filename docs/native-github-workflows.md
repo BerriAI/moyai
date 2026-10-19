@@ -1,12 +1,20 @@
 # GitHub workflows in the Pydantic core
 
 The selected organization GitHub connection exposes scoped native Pydantic tools.
-Discover their current schemas through the normal connection catalog. Names in a
-conversation have a `github_<connection>_` prefix.
+Discover their current schemas through the normal connection catalog. Checkout is
+one `github_checkout` tool: pass `repository` or `repository_id`, and the server
+selects the matching connection admitted to this task. If both are supplied, they
+must identify the same repository. Other operations retain a
+`github_<connection>_` prefix.
+
+Checkout retains the selected connection's access checks and tool policy. It
+cannot use an organization repository that was not selected for this task.
+Recorded calls to the old prefixed checkout tools retain their original scope;
+new discovery exposes only the shared checkout.
 
 | Task | Tool |
 | --- | --- |
-| Check out a branch, exact commit, or PR in a fresh directory | `checkout` |
+| Check out a repository's branch, exact commit, or PR in a fresh directory | `github_checkout` |
 | Publish files as a regular PR with optional base/head branches | `create_pull_request` |
 | Create a named branch at an exact commit | `create_branch` |
 | Publish files to a new or acknowledged Moyai-owned branch without a PR | `publish_branch` |

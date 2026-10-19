@@ -53,6 +53,11 @@ def connection_search(
                 continue
             name_words = words(tool.name)
             score = sum((3 if word in name_words else 1) * math.log(2 + len(tools) / frequencies[word]) for word in overlap)
+            operation = re.sub(r"^[a-z]+_[a-z0-9]{8}_", "", tool.name).removeprefix("github_")
+            if words(operation) <= terms:
+                # An exact requested operation must survive repository-label
+                # boosts, including shared tools such as github_checkout.
+                score += 40
             repository = re.match(r"Connected GitHub repository: (.*?)\. ", tool.description or "")
             if repository:
                 score += 20 * len(terms & words(repository[1]))

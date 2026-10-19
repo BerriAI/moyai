@@ -45,6 +45,19 @@ def test_repository_and_distinct_requested_actions_survive_a_crowded_catalog():
     assert connection_search(context(), ["nonexistentxyz"], tools) == []
 
 
+def test_shared_checkout_ranks_above_unrelated_repository_operations():
+    tools = [ToolDefinition(
+        name=f"github_{index:08x}_{operation}",
+        description="Connected GitHub repository: BerriAI/moyai. Work on this repository.",
+    ) for index in range(20) for operation in ("publication_status", "create_review", "publish_branch")]
+    tools.append(ToolDefinition(
+        name="github_checkout",
+        description="Check out a connected GitHub repository's branch, commit or PR.",
+    ))
+    for query in ("moyai checkout", "BerriAI/moyai checkout", "github checkout"):
+        assert connection_search(context(), [query], tools)[0] == "github_checkout"
+
+
 async def test_repeated_listing_reuses_only_definitions_and_validates_live_calls():
     catalog, ctx, builds, calls = ConnectionCatalog(), context(), [], []
     allowed = True
