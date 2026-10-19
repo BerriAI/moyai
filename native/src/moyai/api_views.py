@@ -138,6 +138,28 @@ class TurnView(ApiView):
     finished_at: str | None
 
 
+class GoalView(ApiView):
+    objective: str
+    status: Literal["active", "paused", "complete", "blocked", "budget_limited"]
+    owner_id: str
+    generation: int
+    tokens_used: int
+    token_budget: int | None
+    turns: int
+    blocked_count: int
+    reason: str
+    created_at: str
+
+
+class GoalCommandResult(ApiView):
+    goal: GoalView | None
+    help: str | None = None
+
+
+class GoalStartedResult(TurnView):
+    goal: GoalView
+
+
 class SessionTurn(TurnView):
     guidance_at: str | None
     is_self: bool
@@ -315,6 +337,7 @@ class LiveEvent(RootModel[Annotated[
 
 
 class SessionDetail(ApiView):
+    goal: GoalView | None = None
     session: SessionDetailSession
     turns: list[SessionTurn]
     has_unsettled_effects: bool

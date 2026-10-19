@@ -1505,13 +1505,13 @@ export type AutomationDefinition = {
     /**
      * Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed.
      */
-    self_management?: SelfManagement;
+    self_management?: SelfManagementInput;
     /**
      * Triggers
      *
      * Every trigger must supply a stable id; do not generate different IDs on retries.
      */
-    triggers: Array<Trigger>;
+    triggers: Array<TriggerInput>;
 };
 
 /**
@@ -3498,7 +3498,7 @@ export type EffectResolveResult = {
 /**
  * EventTrigger
  */
-export type EventTrigger = {
+export type EventTriggerInput = {
     /**
      * Action
      */
@@ -3599,6 +3599,112 @@ export type EventTrigger = {
      * Urgency
      */
     urgency?: string;
+};
+
+/**
+ * EventTrigger
+ */
+export type EventTriggerOutput = {
+    /**
+     * Action
+     */
+    action: string;
+    /**
+     * Assignee Id
+     */
+    assignee_id: string;
+    /**
+     * Branch
+     */
+    branch: string;
+    /**
+     * Channel Id
+     */
+    channel_id: string;
+    /**
+     * Conclusion
+     */
+    conclusion: string;
+    /**
+     * Epic
+     */
+    epic: string;
+    /**
+     * Event
+     */
+    event: string;
+    /**
+     * Include Thread Replies
+     */
+    include_thread_replies: boolean;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Label Id
+     */
+    label_id: string;
+    /**
+     * Payload Pattern
+     */
+    payload_pattern: string;
+    /**
+     * Priority
+     */
+    priority: number | null;
+    /**
+     * Project
+     */
+    project: string;
+    /**
+     * Provider
+     */
+    provider: 'session' | 'slack' | 'github' | 'gitlab' | 'linear' | 'jira' | 'pylon' | 'pagerduty' | 'webhook';
+    /**
+     * Reaction
+     */
+    reaction: string;
+    /**
+     * Repository
+     */
+    repository: string;
+    /**
+     * Repository Id
+     */
+    repository_id: number | null;
+    /**
+     * Sender Type
+     */
+    sender_type: 'any' | 'human' | 'bot';
+    /**
+     * Service Id
+     */
+    service_id: string;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Team Id
+     */
+    team_id: string;
+    /**
+     * Text Contains
+     */
+    text_contains: string;
+    /**
+     * Text Starts With
+     */
+    text_starts_with: string;
+    /**
+     * Urgency
+     */
+    urgency: string;
 };
 
 /**
@@ -3715,6 +3821,128 @@ export type GitHubSetupRedirect = {
      * Url
      */
     url: string;
+};
+
+/**
+ * GoalCommandResult
+ */
+export type GoalCommandResult = {
+    goal: GoalView | null;
+    /**
+     * Help
+     */
+    help: string | null;
+};
+
+/**
+ * GoalStartedResult
+ */
+export type GoalStartedResult = {
+    /**
+     * Accepted At
+     */
+    accepted_at: string | null;
+    /**
+     * Actor Id
+     */
+    actor_id: string;
+    /**
+     * Connections
+     */
+    connections: Array<string>;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Enqueue Id
+     */
+    enqueue_id: string | null;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    goal: GoalView;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Mode
+     */
+    mode: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Parent Turn
+     */
+    parent_turn: string | null;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Usage
+     */
+    usage: {
+        [key: string]: JsonValue;
+    };
+};
+
+/**
+ * GoalView
+ */
+export type GoalView = {
+    /**
+     * Blocked Count
+     */
+    blocked_count: number;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Objective
+     */
+    objective: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Reason
+     */
+    reason: string;
+    /**
+     * Status
+     */
+    status: 'active' | 'paused' | 'complete' | 'blocked' | 'budget_limited';
+    /**
+     * Token Budget
+     */
+    token_budget: number | null;
+    /**
+     * Tokens Used
+     */
+    tokens_used: number;
+    /**
+     * Turns
+     */
+    turns: number;
 };
 
 /**
@@ -5222,117 +5450,14 @@ export type ProductAutomationDefinition = {
      * Repo Url
      */
     repo_url: string;
-    self_management: ProductAutomationSelfManagement;
+    /**
+     * Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed.
+     */
+    self_management: SelfManagementOutput;
     /**
      * Triggers
      */
-    triggers: Array<ProductAutomationTrigger>;
-};
-
-/**
- * ProductAutomationEvent
- */
-export type ProductAutomationEvent = {
-    /**
-     * Action
-     */
-    action: string;
-    /**
-     * Assignee Id
-     */
-    assignee_id: string;
-    /**
-     * Branch
-     */
-    branch: string;
-    /**
-     * Channel Id
-     */
-    channel_id: string;
-    /**
-     * Conclusion
-     */
-    conclusion: string;
-    /**
-     * Epic
-     */
-    epic: string;
-    /**
-     * Event
-     */
-    event: string;
-    /**
-     * Include Thread Replies
-     */
-    include_thread_replies: boolean;
-    /**
-     * Label
-     */
-    label: string;
-    /**
-     * Label Id
-     */
-    label_id: string;
-    /**
-     * Payload Pattern
-     */
-    payload_pattern: string;
-    /**
-     * Priority
-     */
-    priority: number | null;
-    /**
-     * Project
-     */
-    project: string;
-    /**
-     * Provider
-     */
-    provider: 'session' | 'slack' | 'github' | 'gitlab' | 'linear' | 'jira' | 'pylon' | 'pagerduty' | 'webhook';
-    /**
-     * Reaction
-     */
-    reaction: string;
-    /**
-     * Repository
-     */
-    repository: string;
-    /**
-     * Repository Id
-     */
-    repository_id: number | null;
-    /**
-     * Sender Type
-     */
-    sender_type: 'any' | 'human' | 'bot';
-    /**
-     * Service Id
-     */
-    service_id: string;
-    /**
-     * Session Id
-     */
-    session_id: string;
-    /**
-     * Status
-     */
-    status: string;
-    /**
-     * Team Id
-     */
-    team_id: string;
-    /**
-     * Text Contains
-     */
-    text_contains: string;
-    /**
-     * Text Starts With
-     */
-    text_starts_with: string;
-    /**
-     * Urgency
-     */
-    urgency: string;
+    triggers: Array<TriggerOutput>;
 };
 
 /**
@@ -5611,20 +5736,6 @@ export type ProductAutomationRunResult = {
 };
 
 /**
- * ProductAutomationSelfManagement
- */
-export type ProductAutomationSelfManagement = {
-    /**
-     * Instructions
-     */
-    instructions: boolean;
-    /**
-     * Schedule
-     */
-    schedule: boolean;
-};
-
-/**
  * ProductAutomationSummary
  */
 export type ProductAutomationSummary = {
@@ -5688,45 +5799,15 @@ export type ProductAutomationTestResult = {
 };
 
 /**
- * ProductAutomationTiming
- */
-export type ProductAutomationTiming = {
-    /**
-     * Cron
-     */
-    cron: string;
-    /**
-     * Frequency
-     */
-    frequency: 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'cron' | 'once';
-    /**
-     * Run At
-     */
-    run_at: string | null;
-    /**
-     * Time
-     */
-    time: string;
-    /**
-     * Timezone
-     */
-    timezone: string;
-    /**
-     * Weekday
-     */
-    weekday: number;
-};
-
-/**
  * ProductAutomationTrigger
  */
 export type ProductAutomationTrigger = {
-    event: ProductAutomationEvent | null;
+    event: EventTriggerOutput | null;
     /**
      * Id
      */
     id: string;
-    schedule: ProductAutomationTiming | null;
+    schedule: TimingOutput | null;
 };
 
 /**
@@ -7972,7 +8053,7 @@ export type SecretInput = {
 /**
  * SelfManagement
  */
-export type SelfManagement = {
+export type SelfManagementInput = {
     /**
      * Instructions
      */
@@ -7981,6 +8062,20 @@ export type SelfManagement = {
      * Schedule
      */
     schedule?: boolean;
+};
+
+/**
+ * SelfManagement
+ */
+export type SelfManagementOutput = {
+    /**
+     * Instructions
+     */
+    instructions: boolean;
+    /**
+     * Schedule
+     */
+    schedule: boolean;
 };
 
 /**
@@ -8017,6 +8112,7 @@ export type SessionDetail = {
      * Effects
      */
     effects: Array<SessionEffect>;
+    goal: GoalView | null;
     /**
      * Has Unsettled Effects
      */
@@ -9836,7 +9932,7 @@ export type TextEvent = {
 /**
  * Timing
  */
-export type Timing = {
+export type TimingInput = {
     /**
      * Cron
      */
@@ -9861,6 +9957,36 @@ export type Timing = {
      * Weekday
      */
     weekday?: number;
+};
+
+/**
+ * Timing
+ */
+export type TimingOutput = {
+    /**
+     * Cron
+     */
+    cron: string;
+    /**
+     * Frequency
+     */
+    frequency: 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'cron' | 'once';
+    /**
+     * Run At
+     */
+    run_at: string | null;
+    /**
+     * Time
+     */
+    time: string;
+    /**
+     * Timezone
+     */
+    timezone: string;
+    /**
+     * Weekday
+     */
+    weekday: number;
 };
 
 /**
@@ -9926,13 +10052,25 @@ export type ToolResultActivity = {
 /**
  * Trigger
  */
-export type Trigger = {
-    event?: EventTrigger | null;
+export type TriggerInput = {
+    event?: EventTriggerInput | null;
     /**
      * Id
      */
     id?: string;
-    schedule?: Timing | null;
+    schedule?: TimingInput | null;
+};
+
+/**
+ * Trigger
+ */
+export type TriggerOutput = {
+    event: EventTriggerOutput | null;
+    /**
+     * Id
+     */
+    id: string;
+    schedule: TimingOutput | null;
 };
 
 /**
@@ -13752,9 +13890,11 @@ export type CreateSessionMessageError = CreateSessionMessageErrors[keyof CreateS
 
 export type CreateSessionMessageResponses = {
     /**
+     * Response Createsessionmessage
+     *
      * Successful Response
      */
-    202: TurnView;
+    202: TurnView | GoalStartedResult | GoalCommandResult;
 };
 
 export type CreateSessionMessageResponse = CreateSessionMessageResponses[keyof CreateSessionMessageResponses];

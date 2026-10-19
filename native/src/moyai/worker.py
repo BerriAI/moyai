@@ -120,6 +120,13 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
             raise ProductDrainError("Maintenance admission is not bound to this runtime.")
         await drain.notify(runtime)
     batch_size = runtime.settings.temporal_dispatch_batch_size
+    try:
+        async with asyncio.timeout(2):
+            await runtime.database.goals.reconcile()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Goal continuation remains pending.", exc_info=True)
     if state.starting_through is None:
         # Freeze each scan round before claiming more work. Later arrivals
         # cannot extend it indefinitely and starve retries near the beginning.

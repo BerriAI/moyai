@@ -324,7 +324,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             "action": "browser", "command": {"action": "tabs"}, "deadline": time.time() + 25,
         })
         await authorize(runtime, session_id, user)
-        return value
+        return BrowserTabs.model_validate(value)
 
     @router.post("/api/sessions/{session_id}/browser", operation_id="controlBrowser")
     async def control(session_id: str, body: BrowserRequest, user: User = Depends(actor)) -> BrowserActionResult:
@@ -344,6 +344,6 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             raise HTTPException(503, "Browser outcome is uncertain. Inspect before another action.") from error
         await settle(runtime.database, session_id, identity)
         await authorize(runtime, session_id, user)
-        return value
+        return BrowserActionResult.model_validate(value)
 
     return router

@@ -38,6 +38,9 @@ from .contracts import (
 from .delegation_authority import DelegatedAuthority, saved_authority, session_context
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .dispatch_wakeups import notify_dispatch
+from .goal_models import Goal
+from .goals import Goals
+from .goals import dispatchable as goal_dispatchable
 from .models import (
     Base,
     ComputerOperation,
@@ -113,6 +116,7 @@ class Database:
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.answers = AnswerSettlement(self)
         self.swarms = SwarmService(self)
+        self.goals = Goals(self)
         if settings.sqlalchemy_url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
             def configure_sqlite(connection, _record):
@@ -574,7 +578,7 @@ class Database:
             transaction.add(turn)
             await transaction.flush()
             if turn.status == "steering":
-                self._record_guidance(transaction, turn, session.revision)
+                await self._record_guidance(transaction, turn, session.revision)
             from .performance import admission
             admission(
                 transaction, turn, received_at or admitted_at or turn.created_at,
@@ -582,6 +586,7 @@ class Database:
             )
             self._bind_product_grant(transaction, turn, product_grant)
             await self.swarms.bind(transaction, mission, turn, generated=swarm_generated)
+            await self.goals.bind(transaction, turn)
             for position, image_id in enumerate(body.attachments):
                 # Reserve the upload's destination atomically before publishing
                 # it into a conversation, including concurrent first attachment.
@@ -709,6 +714,7 @@ class Database:
                     or_(Session.active_turn.is_(None), Session.active_turn == Turn.id),
                     Session.deleted.is_(False),
                     dispatchable(),
+                    goal_dispatchable(),
                 ).order_by(Turn.created_at, Turn.id).limit(limit - len(claimed_turns))
                   .with_for_update(of=Session, skip_locked=True))).all()
                 if not candidates:
@@ -724,7 +730,7 @@ class Database:
                     if claimed is None:
                         continue
                     admitted = await db.scalar(update(Turn).where(
-                        Turn.id == turn.id, Turn.status == "queued",
+                        Turn.id == turn.id, Turn.status == "queued", goal_dispatchable(),
                     ).values(status="starting").returning(Turn.id))
                     if admitted is not None:
                         await db.execute(update(Session).where(Session.id == turn.session_id).values(
@@ -769,10 +775,10 @@ class Database:
                     raise HTTPException(409, "This message needs its own run. It will start after the active task.")
                 turn.parent_turn = active.id
                 turn.status = "steering"
-                self._record_guidance(db, turn, session.revision)
+                await self._record_guidance(db, turn, session.revision)
             return turn
 
-    def _record_guidance(self, db: AsyncSession, turn: Turn, revision: int) -> None:
+    async def _record_guidance(self, db: AsyncSession, turn: Turn, revision: int) -> None:
         # Event IDs order admissions while holding the session fence, including
         # "Send now" for an older queued message. Message creation time cannot
         # order those corrections. A repeated promotion can have a new receipt.
@@ -781,6 +787,7 @@ class Database:
             identity=f"guidance:{turn.id}:{revision}",
             content=self.security.seal({"parent_turn": turn.parent_turn}),
         ))
+        await self.goals.invalidate_for_guidance(db, turn)
 
     async def dispatch_boundary(self) -> tuple[str, str] | None:
         async with self.sessions() as db:
@@ -865,6 +872,9 @@ class Database:
                 delegation_generated=generated_delegation is not None,
                 execution_context=context if delegation else None,
             )
+            goal = await self.goals.authorize(db, turn)
+            if goal is not None:
+                scope.goal_generation = goal.generation
             if scope.delegation_generated and delegation is not None:
                 inherited = (await saved_authority(self, db, delegation)).grants
                 if inherited != grants:
@@ -944,6 +954,7 @@ class Database:
             await self._check_product_turn(db, turn, scope.product_grant)
             cast(Any, actor).product_grant = scope.product_grant
             await self.swarms.authorize(db, turn, scope=scope)
+            await self.goals.authorize(db, turn)
             session = await self.execution_session(db, scope.session_id, actor)
             if (
                 session.active_turn != turn.id or session.status != "running" or turn.status != "running"
@@ -1026,6 +1037,9 @@ class Database:
             await db.execute(update(Session).where(
                 Session.id == session_id
             ).values(status="stopped"))
+            goal = await db.get(Goal, session_id, populate_existing=True)
+            if goal is not None and goal.status == "active":
+                self.goals.change(goal, "paused", "Paused by Stop.")
             await db.execute(update(Turn).where(
                 Turn.session_id == session_id,
                 Turn.status.in_(["queued", "starting", "running", "waiting", "steering",
@@ -1059,6 +1073,9 @@ class Database:
                     db, mission, "attention", "A team conversation was deleted. Restore it before resuming.",
                 )
             session.deleted = True
+            goal = await db.get(Goal, session_id, populate_existing=True)
+            if goal is not None and goal.status == "active":
+                self.goals.change(goal, "paused", "The conversation was deleted.")
             session.updated_at = now()
             # An answer already being saved retains its confirmed outcome.
             if session.status != "saving":
@@ -1276,6 +1293,7 @@ class Database:
                 await record_source(self, db, f"user:{turn.id}", reply)
             if member is not None:
                 await self.swarms.bind(db, mission, turn, generated=True)
+            await self.goals.bind(db, turn, resumed_from=previous.id)
             delegated = await db.get(DelegatedTurn, previous.id)
             if delegated is not None:
                 db.add(DelegatedTurn(turn_id=turn.id, session_id=delegated.session_id))

@@ -2705,13 +2705,13 @@
             "type": "string"
           },
           "self_management": {
-            "$ref": "#/components/schemas/SelfManagement",
+            "$ref": "#/components/schemas/SelfManagement-Input",
             "description": "Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed."
           },
           "triggers": {
             "description": "Every trigger must supply a stable id; do not generate different IDs on retries.",
             "items": {
-              "$ref": "#/components/schemas/Trigger"
+              "$ref": "#/components/schemas/Trigger-Input"
             },
             "maxItems": 16,
             "minItems": 1,
@@ -6349,7 +6349,7 @@
         "title": "EffectResolveResult",
         "type": "object"
       },
-      "EventTrigger": {
+      "EventTrigger-Input": {
         "additionalProperties": false,
         "properties": {
           "action": {
@@ -6531,6 +6531,216 @@
         },
         "required": [
           "provider"
+        ],
+        "title": "EventTrigger",
+        "type": "object"
+      },
+      "EventTrigger-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Action",
+            "type": "string"
+          },
+          "assignee_id": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Assignee Id",
+            "type": "string"
+          },
+          "branch": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Branch",
+            "type": "string"
+          },
+          "channel_id": {
+            "default": "",
+            "maxLength": 32,
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "conclusion": {
+            "default": "",
+            "maxLength": 60,
+            "title": "Conclusion",
+            "type": "string"
+          },
+          "epic": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Epic",
+            "type": "string"
+          },
+          "event": {
+            "default": "*",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Event",
+            "type": "string"
+          },
+          "include_thread_replies": {
+            "default": false,
+            "title": "Include Thread Replies",
+            "type": "boolean"
+          },
+          "label": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Label",
+            "type": "string"
+          },
+          "label_id": {
+            "default": "",
+            "maxLength": 36,
+            "title": "Label Id",
+            "type": "string"
+          },
+          "payload_pattern": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Payload Pattern",
+            "type": "string"
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "maximum": 4.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
+          "project": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Project",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "session",
+              "slack",
+              "github",
+              "gitlab",
+              "linear",
+              "jira",
+              "pylon",
+              "pagerduty",
+              "webhook"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "reaction": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Reaction",
+            "type": "string"
+          },
+          "repository": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository Id"
+          },
+          "sender_type": {
+            "default": "any",
+            "enum": [
+              "any",
+              "human",
+              "bot"
+            ],
+            "title": "Sender Type",
+            "type": "string"
+          },
+          "service_id": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Service Id",
+            "type": "string"
+          },
+          "session_id": {
+            "default": "",
+            "maxLength": 36,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Status",
+            "type": "string"
+          },
+          "team_id": {
+            "default": "",
+            "maxLength": 36,
+            "title": "Team Id",
+            "type": "string"
+          },
+          "text_contains": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Text Contains",
+            "type": "string"
+          },
+          "text_starts_with": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Text Starts With",
+            "type": "string"
+          },
+          "urgency": {
+            "default": "",
+            "maxLength": 30,
+            "title": "Urgency",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "session_id",
+          "event",
+          "repository",
+          "repository_id",
+          "team_id",
+          "assignee_id",
+          "label_id",
+          "label",
+          "channel_id",
+          "text_contains",
+          "text_starts_with",
+          "reaction",
+          "include_thread_replies",
+          "sender_type",
+          "action",
+          "status",
+          "priority",
+          "conclusion",
+          "branch",
+          "project",
+          "epic",
+          "service_id",
+          "urgency",
+          "payload_pattern"
         ],
         "title": "EventTrigger",
         "type": "object"
@@ -6731,6 +6941,232 @@
           "url"
         ],
         "title": "GitHubSetupRedirect",
+        "type": "object"
+      },
+      "GoalCommandResult": {
+        "properties": {
+          "goal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GoalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "help": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Help"
+          }
+        },
+        "required": [
+          "goal",
+          "help"
+        ],
+        "title": "GoalCommandResult",
+        "type": "object"
+      },
+      "GoalStartedResult": {
+        "properties": {
+          "accepted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted At"
+          },
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "connections": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Connections",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "enqueue_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enqueue Id"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "goal": {
+            "$ref": "#/components/schemas/GoalView"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "parent_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Turn"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "usage": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Usage",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "actor_id",
+          "model",
+          "status",
+          "mode",
+          "parent_turn",
+          "enqueue_id",
+          "connections",
+          "accepted_at",
+          "usage",
+          "error",
+          "created_at",
+          "finished_at",
+          "goal"
+        ],
+        "title": "GoalStartedResult",
+        "type": "object"
+      },
+      "GoalView": {
+        "properties": {
+          "blocked_count": {
+            "title": "Blocked Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "paused",
+              "complete",
+              "blocked",
+              "budget_limited"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "token_budget": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Budget"
+          },
+          "tokens_used": {
+            "title": "Tokens Used",
+            "type": "integer"
+          },
+          "turns": {
+            "title": "Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "objective",
+          "status",
+          "owner_id",
+          "generation",
+          "tokens_used",
+          "token_budget",
+          "turns",
+          "blocked_count",
+          "reason",
+          "created_at"
+        ],
+        "title": "GoalView",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -9266,11 +9702,12 @@
             "type": "string"
           },
           "self_management": {
-            "$ref": "#/components/schemas/ProductAutomationSelfManagement"
+            "$ref": "#/components/schemas/SelfManagement-Output",
+            "description": "Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed."
           },
           "triggers": {
             "items": {
-              "$ref": "#/components/schemas/ProductAutomationTrigger"
+              "$ref": "#/components/schemas/Trigger-Output"
             },
             "minItems": 1,
             "title": "Triggers",
@@ -9294,216 +9731,6 @@
           "mode"
         ],
         "title": "ProductAutomationDefinition",
-        "type": "object"
-      },
-      "ProductAutomationEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "default": "",
-            "maxLength": 80,
-            "title": "Action",
-            "type": "string"
-          },
-          "assignee_id": {
-            "default": "",
-            "maxLength": 128,
-            "title": "Assignee Id",
-            "type": "string"
-          },
-          "branch": {
-            "default": "",
-            "maxLength": 200,
-            "title": "Branch",
-            "type": "string"
-          },
-          "channel_id": {
-            "default": "",
-            "maxLength": 32,
-            "title": "Channel Id",
-            "type": "string"
-          },
-          "conclusion": {
-            "default": "",
-            "maxLength": 60,
-            "title": "Conclusion",
-            "type": "string"
-          },
-          "epic": {
-            "default": "",
-            "maxLength": 100,
-            "title": "Epic",
-            "type": "string"
-          },
-          "event": {
-            "default": "*",
-            "maxLength": 80,
-            "minLength": 1,
-            "title": "Event",
-            "type": "string"
-          },
-          "include_thread_replies": {
-            "default": false,
-            "title": "Include Thread Replies",
-            "type": "boolean"
-          },
-          "label": {
-            "default": "",
-            "maxLength": 100,
-            "title": "Label",
-            "type": "string"
-          },
-          "label_id": {
-            "default": "",
-            "maxLength": 36,
-            "title": "Label Id",
-            "type": "string"
-          },
-          "payload_pattern": {
-            "default": "",
-            "maxLength": 500,
-            "title": "Payload Pattern",
-            "type": "string"
-          },
-          "priority": {
-            "anyOf": [
-              {
-                "maximum": 4.0,
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Priority"
-          },
-          "project": {
-            "default": "",
-            "maxLength": 100,
-            "title": "Project",
-            "type": "string"
-          },
-          "provider": {
-            "enum": [
-              "session",
-              "slack",
-              "github",
-              "gitlab",
-              "linear",
-              "jira",
-              "pylon",
-              "pagerduty",
-              "webhook"
-            ],
-            "title": "Provider",
-            "type": "string"
-          },
-          "reaction": {
-            "default": "",
-            "maxLength": 100,
-            "title": "Reaction",
-            "type": "string"
-          },
-          "repository": {
-            "default": "",
-            "maxLength": 200,
-            "title": "Repository",
-            "type": "string"
-          },
-          "repository_id": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Repository Id"
-          },
-          "sender_type": {
-            "default": "any",
-            "enum": [
-              "any",
-              "human",
-              "bot"
-            ],
-            "title": "Sender Type",
-            "type": "string"
-          },
-          "service_id": {
-            "default": "",
-            "maxLength": 100,
-            "title": "Service Id",
-            "type": "string"
-          },
-          "session_id": {
-            "default": "",
-            "maxLength": 36,
-            "title": "Session Id",
-            "type": "string"
-          },
-          "status": {
-            "default": "",
-            "maxLength": 100,
-            "title": "Status",
-            "type": "string"
-          },
-          "team_id": {
-            "default": "",
-            "maxLength": 36,
-            "title": "Team Id",
-            "type": "string"
-          },
-          "text_contains": {
-            "default": "",
-            "maxLength": 200,
-            "title": "Text Contains",
-            "type": "string"
-          },
-          "text_starts_with": {
-            "default": "",
-            "maxLength": 200,
-            "title": "Text Starts With",
-            "type": "string"
-          },
-          "urgency": {
-            "default": "",
-            "maxLength": 30,
-            "title": "Urgency",
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider",
-          "session_id",
-          "event",
-          "repository",
-          "repository_id",
-          "team_id",
-          "assignee_id",
-          "label_id",
-          "label",
-          "channel_id",
-          "text_contains",
-          "text_starts_with",
-          "reaction",
-          "include_thread_replies",
-          "sender_type",
-          "action",
-          "status",
-          "priority",
-          "conclusion",
-          "branch",
-          "project",
-          "epic",
-          "service_id",
-          "urgency",
-          "payload_pattern"
-        ],
-        "title": "ProductAutomationEvent",
         "type": "object"
       },
       "ProductAutomationEventDelivery": {
@@ -9950,27 +10177,6 @@
         "title": "ProductAutomationRunResult",
         "type": "object"
       },
-      "ProductAutomationSelfManagement": {
-        "additionalProperties": false,
-        "properties": {
-          "instructions": {
-            "default": false,
-            "title": "Instructions",
-            "type": "boolean"
-          },
-          "schedule": {
-            "default": false,
-            "title": "Schedule",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "instructions",
-          "schedule"
-        ],
-        "title": "ProductAutomationSelfManagement",
-        "type": "object"
-      },
       "ProductAutomationSummary": {
         "properties": {
           "id": {
@@ -10076,78 +10282,13 @@
         "title": "ProductAutomationTestResult",
         "type": "object"
       },
-      "ProductAutomationTiming": {
-        "additionalProperties": false,
-        "properties": {
-          "cron": {
-            "default": "",
-            "maxLength": 200,
-            "title": "Cron",
-            "type": "string"
-          },
-          "frequency": {
-            "default": "weekdays",
-            "enum": [
-              "hourly",
-              "daily",
-              "weekdays",
-              "weekly",
-              "cron",
-              "once"
-            ],
-            "title": "Frequency",
-            "type": "string"
-          },
-          "run_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Run At"
-          },
-          "time": {
-            "default": "09:00",
-            "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-            "title": "Time",
-            "type": "string"
-          },
-          "timezone": {
-            "default": "America/Los_Angeles",
-            "maxLength": 100,
-            "title": "Timezone",
-            "type": "string"
-          },
-          "weekday": {
-            "default": 1,
-            "maximum": 6.0,
-            "minimum": 0.0,
-            "title": "Weekday",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "frequency",
-          "time",
-          "weekday",
-          "timezone",
-          "cron",
-          "run_at"
-        ],
-        "title": "ProductAutomationTiming",
-        "type": "object"
-      },
       "ProductAutomationTrigger": {
         "additionalProperties": false,
         "properties": {
           "event": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ProductAutomationEvent"
+                "$ref": "#/components/schemas/EventTrigger-Output"
               },
               {
                 "type": "null"
@@ -10162,7 +10303,7 @@
           "schedule": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ProductAutomationTiming"
+                "$ref": "#/components/schemas/Timing-Output"
               },
               {
                 "type": "null"
@@ -14269,7 +14410,7 @@
         "title": "SecretInput",
         "type": "object"
       },
-      "SelfManagement": {
+      "SelfManagement-Input": {
         "additionalProperties": false,
         "properties": {
           "instructions": {
@@ -14283,6 +14424,27 @@
             "type": "boolean"
           }
         },
+        "title": "SelfManagement",
+        "type": "object"
+      },
+      "SelfManagement-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "instructions": {
+            "default": false,
+            "title": "Instructions",
+            "type": "boolean"
+          },
+          "schedule": {
+            "default": false,
+            "title": "Schedule",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instructions",
+          "schedule"
+        ],
         "title": "SelfManagement",
         "type": "object"
       },
@@ -14372,6 +14534,16 @@
             "title": "Effects",
             "type": "array"
           },
+          "goal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GoalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "has_unsettled_effects": {
             "title": "Has Unsettled Effects",
             "type": "boolean"
@@ -14454,6 +14626,7 @@
           }
         },
         "required": [
+          "goal",
           "session",
           "turns",
           "has_unsettled_effects",
@@ -17338,7 +17511,7 @@
         "title": "TextEvent",
         "type": "object"
       },
-      "Timing": {
+      "Timing-Input": {
         "additionalProperties": false,
         "properties": {
           "cron": {
@@ -17392,6 +17565,71 @@
             "type": "integer"
           }
         },
+        "title": "Timing",
+        "type": "object"
+      },
+      "Timing-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "cron": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Cron",
+            "type": "string"
+          },
+          "frequency": {
+            "default": "weekdays",
+            "enum": [
+              "hourly",
+              "daily",
+              "weekdays",
+              "weekly",
+              "cron",
+              "once"
+            ],
+            "title": "Frequency",
+            "type": "string"
+          },
+          "run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run At"
+          },
+          "time": {
+            "default": "09:00",
+            "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+            "title": "Time",
+            "type": "string"
+          },
+          "timezone": {
+            "default": "America/Los_Angeles",
+            "maxLength": 100,
+            "title": "Timezone",
+            "type": "string"
+          },
+          "weekday": {
+            "default": 1,
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Weekday",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "frequency",
+          "time",
+          "weekday",
+          "timezone",
+          "cron",
+          "run_at"
+        ],
         "title": "Timing",
         "type": "object"
       },
@@ -17496,13 +17734,13 @@
         "title": "ToolResultActivity",
         "type": "object"
       },
-      "Trigger": {
+      "Trigger-Input": {
         "additionalProperties": false,
         "properties": {
           "event": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/EventTrigger"
+                "$ref": "#/components/schemas/EventTrigger-Input"
               },
               {
                 "type": "null"
@@ -17517,7 +17755,7 @@
           "schedule": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/Timing"
+                "$ref": "#/components/schemas/Timing-Input"
               },
               {
                 "type": "null"
@@ -17525,6 +17763,43 @@
             ]
           }
         },
+        "title": "Trigger",
+        "type": "object"
+      },
+      "Trigger-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EventTrigger-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "pattern": "^[A-Za-z0-9_-]{1,40}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timing-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "schedule",
+          "event"
+        ],
         "title": "Trigger",
         "type": "object"
       },
@@ -18581,7 +18856,6 @@
             "required": false,
             "schema": {
               "default": 0,
-              "maximum": 100000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -23195,7 +23469,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TurnView"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TurnView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GoalStartedResult"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GoalCommandResult"
+                    }
+                  ],
+                  "title": "Response Createsessionmessage"
                 }
               }
             },
@@ -24196,7 +24481,6 @@
             "required": false,
             "schema": {
               "default": 0,
-              "maximum": 100000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -25664,7 +25948,6 @@
             "required": false,
             "schema": {
               "default": 0,
-              "maximum": 100000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"

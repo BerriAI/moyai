@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from sqlalchemy import func, or_, select
 
 from .contracts import ExecutionContext
@@ -677,7 +677,9 @@ def routes(runtime: Runtime, actor, *, service: PullRequestService | None = None
         body: PullRequestStatusRequest, response: Response, user: User = Depends(actor),
     ) -> dict[str, list[PullRequestStatus]]:
         response.headers["Cache-Control"] = "no-store"
-        return await service.statuses(user, list(dict.fromkeys(body.session_ids)))
+        return TypeAdapter(dict[str, list[PullRequestStatus]]).validate_python(
+            await service.statuses(user, list(dict.fromkeys(body.session_ids)))
+        )
 
     @router.get("/api/sessions/{session_id}/pull-request", operation_id="getPullRequest")
     async def detail(
@@ -685,6 +687,8 @@ def routes(runtime: Runtime, actor, *, service: PullRequestService | None = None
         refresh: bool = False, tab: Tab = "overview", user: User = Depends(actor),
     ) -> PullRequestDetail:
         response.headers["Cache-Control"] = "no-store"
-        return await service.detail(user, session_id, url, tab, refresh)
+        return TypeAdapter(PullRequestDetail).validate_python(
+            await service.detail(user, session_id, url, tab, refresh)
+        )
 
     return router

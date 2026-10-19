@@ -54,7 +54,8 @@ DELEGATION_SCHEMA_VERSION = "2026-10-16-interactive-delegation-v18"
 SLACK_ACTIVITY_SCHEMA_VERSION = "2026-10-17-slack-activity-v19"
 SLACK_TURN_SOURCE_SCHEMA_VERSION = "2026-10-17-slack-turn-source-v20"
 MESSAGE_SOURCE_SCHEMA_VERSION = "2026-10-18-message-sources-v21"
-PRODUCT_SCHEMA_VERSION = MESSAGE_SOURCE_SCHEMA_VERSION
+GOAL_SCHEMA_VERSION = "2026-10-17-goals-v22"
+PRODUCT_SCHEMA_VERSION = GOAL_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -133,6 +134,7 @@ MIGRATIONS = (
     (SLACK_ACTIVITY_SCHEMA_VERSION, frozenset({"moyai_slack_activity"})),
     (SLACK_TURN_SOURCE_SCHEMA_VERSION, SLACK_TURN_SOURCE_TABLES),
     (MESSAGE_SOURCE_SCHEMA_VERSION, frozenset({"moyai_message_sources", "moyai_delivery_schedule"})),
+    (GOAL_SCHEMA_VERSION, frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})),
 )
 
 
@@ -174,6 +176,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "billing_storage_models",
         "swarm_models",
         "delegation_models",
+        "goal_models",
     ):
         import_module(f"{__package__}.{module}")
     included = frozenset().union(*(item[1] for item in MIGRATIONS[:versions.index(version) + 1]))

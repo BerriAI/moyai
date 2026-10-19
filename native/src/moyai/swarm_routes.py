@@ -78,18 +78,22 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 "prompt": await runtime.skill_invocations.normalize(body.prompt, user, admission),
             })
         session, turn = await service.start(user, body, received_at=request.state.moyai_received_at)
-        return SwarmStarted(session={**session_view(session), "swarm_id": session.id}, turn=turn_view(turn))
+        return SwarmStarted.model_validate({
+            "session": {**session_view(session), "swarm_id": session.id}, "turn": turn_view(turn),
+        })
 
     @router.get("/api/sessions/{session_id}/swarm", operation_id="getSwarm")
     async def board(
         session_id: str, after: int | None = Query(default=None, ge=0, le=2_147_483_647),
         user: User = Depends(actor),
     ) -> SwarmBoard | None:
-        return await service.view(user, session_id, after=after)
+        value = await service.view(user, session_id, after=after)
+        return SwarmBoard.model_validate(value) if value is not None else None
 
     @router.post("/api/swarms/{mission_id}/control", operation_id="controlSwarm")
     async def control(mission_id: str, body: SwarmControl, user: User = Depends(actor)) -> SwarmBoard | None:
         await service.control(user, mission_id, body)
-        return await service.view(user, mission_id)
+        value = await service.view(user, mission_id)
+        return SwarmBoard.model_validate(value) if value is not None else None
 
     return router

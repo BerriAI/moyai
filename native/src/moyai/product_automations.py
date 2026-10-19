@@ -21,8 +21,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey
 
 with workflow.unsafe.imports_passed_through():
-    from app.automation_definitions import Definition, SelfManagement, Timing, Trigger
-    from app.automation_sources import EventTrigger
+    from app.automation_definitions import Definition, Trigger
     from app.connector_errors import ConnectorError
     from cryptography.fernet import InvalidToken
     from fastapi import APIRouter, HTTPException, Query, Request
@@ -108,21 +107,7 @@ class Migration(Mutation):
 _OUTPUT = ConfigDict(json_schema_serialization_defaults_required=True)
 
 
-class ProductAutomationEvent(EventTrigger):
-    model_config = _OUTPUT
-
-
-class ProductAutomationTiming(Timing):
-    model_config = _OUTPUT
-
-
 class ProductAutomationTrigger(Trigger):
-    model_config = _OUTPUT
-    schedule: ProductAutomationTiming | None = None
-    event: ProductAutomationEvent | None = None
-
-
-class ProductAutomationSelfManagement(SelfManagement):
     model_config = _OUTPUT
 
 
@@ -130,8 +115,6 @@ class ProductAutomationDefinition(Definition):
     """A saved canonical definition as returned to the editor."""
 
     model_config = _OUTPUT
-    triggers: list[ProductAutomationTrigger] = Field(min_length=1)
-    self_management: ProductAutomationSelfManagement = Field(default_factory=ProductAutomationSelfManagement)
 
 
 class ProductAutomationNativeState(BaseModel):

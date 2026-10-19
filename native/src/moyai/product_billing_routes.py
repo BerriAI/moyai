@@ -344,7 +344,7 @@ class ProductBillingService:
         observation_links: tuple[ObservationLink, ...] = (),
         rules: LegacyBillingRules | None = None,
         infrastructure_reporter: Callable[[date, date], dict[str, Any]] | None = None,
-        max_records: int = MAX_RECORDS,
+        max_records: int | None = None,
     ):
         if source_engine.dialect.name == "sqlite" and not (
             source_engine.url.query.get("mode") == "ro" and source_engine.url.query.get("uri") == "true"
@@ -353,7 +353,7 @@ class ProductBillingService:
         for selected in (schema, native_schema):
             if selected is not None and not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,62}", selected):
                 raise ValueError("Invalid accounting schema.")
-        if not 1 <= max_records <= MAX_RECORDS:
+        if max_records is not None and not 1 <= max_records <= MAX_RECORDS:
             raise ValueError("Invalid accounting read bound.")
         self.identity, self.source_engine, self.native_engine = identity, source_engine, native_engine
         self.schema, self.native_schema = schema, native_schema
@@ -417,8 +417,9 @@ class ProductBillingService:
 
     async def _labels(self, reader: BillingReader, mappings: IdentityMappings) -> dict[str, dict[str, Any]]:
         users = await reader.table("users", ("id", "kind", "name", "email"), ("id", "kind"))
-        values = list((await reader.connection.execute(select(users).limit(self.max_records + 1))).mappings())
-        if len(values) > self.max_records:
+        bound = self.max_records or MAX_RECORDS
+        values = list((await reader.connection.execute(select(users).limit(bound + 1))).mappings())
+        if len(values) > bound:
             raise BillingReadError("too_many_accounting_identities")
         result = {}
         for row in values:
@@ -540,7 +541,7 @@ class ProductBillingService:
         include_root_cohorts: bool = False,
         identities: ReportIdentities | None = None,
     ) -> dict[str, Any]:
-        if not 1 <= limit <= 500 or not 0 <= offset <= self.max_records * 2:
+        if not 1 <= limit <= 500 or offset < 0:
             raise HTTPException(422, "Choose a valid report page.")
         period = _period(preset, start, end)
         mappings = identities.accounting_mappings(self.mappings) if identities is not None else self.mappings
@@ -585,21 +586,36 @@ class ProductBillingService:
                 else:
                     by_day[charge.occurred_at.date().isoformat()].append(charge)
             total = _totals(charges)
-            daily, accumulated = [], []
+            daily = []
+            cumulative_spend: Decimal | None = None
+            cumulative_partial = cumulative_has_usage = False
             for day, values in by_day.items():
-                accumulated.extend(values)
                 daily_models: dict[str | None, list[BillingCharge]] = defaultdict(list)
                 for value in values:
                     daily_models[value.model].append(value)
-                cumulative = _totals(accumulated)
+                day_total = _totals(values)
+                cumulative_spend = exact_sum(
+                    amount for amount in (
+                        cumulative_spend, Decimal(day_total["spend"]) if day_total["spend"] is not None else None,
+                    ) if amount is not None
+                )
+                cumulative_has_usage = cumulative_has_usage or bool(values)
+                cumulative_partial = cumulative_partial or bool(
+                    day_total["pending_costs"] or day_total["missing_costs"] or day_total["unknown_requests"]
+                    or day_total["estimated"] is not None
+                )
+                cumulative_status = (
+                    ("partial" if cumulative_partial else "priced") if cumulative_spend is not None
+                    else "unpriced" if cumulative_has_usage else "empty"
+                )
                 daily.append({
-                    "date": day, **_totals(values),
+                    "date": day, **day_total,
                     "active_users": len({row.actor_id for row in values if row.actor_id}),
                     "models": [{"model": key, **_totals(items)} for key, items in daily_models.items()],
-                    "cumulative_spend": cumulative["spend"],
+                    "cumulative_spend": _amount(cumulative_spend),
                     "cumulative_pricing_status": (
-                        "partial" if cumulative["spend"] is not None else "unpriced"
-                    ) if undated else cumulative["pricing_status"],
+                        "partial" if cumulative_spend is not None else "unpriced"
+                    ) if undated else cumulative_status,
                 })
                 if undated:
                     daily[-1].update(
@@ -706,7 +722,7 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
         root_model: str | None = Query(None, max_length=200),
         turn_status: str | None = Query(None, max_length=30),
         include_activity: bool = False,
-        limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=MAX_RECORDS * 2),
+        limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
         format: Literal["json", "csv"] = "json",
         export: Literal["daily", "users", "models", "sessions", "requests", "turns"] = "daily",
     ) -> Any:

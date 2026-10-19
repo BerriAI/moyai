@@ -17,6 +17,20 @@ reconciliation, identity mappings and cost recovery remain unchanged. Operationa
 admission/turn tables retain their current purpose. This work does not recover
 lost costs or change which history the native usage UI displays.
 
+## Report reads
+
+Usage, billing and CSV reports fetch accounting observations in batches of 2,000
+within their read-only snapshots. The batch size is not a report limit: a date
+range with more than 50,000 records includes every matching charge. Exact-ID
+counterparts are still loaded before reconciliation and date attribution.
+Request-detail pagination does not change aggregate totals.
+
+Reconciliation retains the report's evidence in memory; batching bounds the
+database fetch buffer, not total report memory. The 15-second report timeout,
+database statement timeout, reconciliation-round limit and ambiguous-identity
+checks still fail visibly without substituting partial totals. Explicit
+`max_records` bounds remain available for diagnostic readers.
+
 ## Provision
 
 Use the existing PostgreSQL connection and explicit distinct schemas:

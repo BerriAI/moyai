@@ -67,14 +67,20 @@ class ProductRoleLifecycle:
         self.watch_task: asyncio.Task[None] | None = None
         self.retire: Any = None
         self.quiescence = ProductQuiescence(self)
+        self.admission: Any = None
+        self.admission_busy = False
 
     @property
-    def healthy(self) -> bool:
+    def operational(self) -> bool:
         if not self.ready or self.failed or self.closing or self.quiescence.requested:
             return False
         if self.handoff is not None and not self.handoff.healthy:
             return False
         return self.broker is None or not self.broker.draining
+
+    @property
+    def healthy(self) -> bool:
+        return self.operational and (self.admission is None or not self.admission.sealed)
 
     def headers(self) -> dict[str, str]:
         product = self.runtime.product
@@ -161,13 +167,28 @@ class ProductRoleLifecycle:
         while True:
             try:
                 await source_io(product.store.database.check_owner)
+                if self.admission is not None:
+                    from app.database import DatabaseBusyError
+                    try:
+                        await self.admission.refresh()
+                    except DatabaseBusyError:
+                        # Hot adoption may wait for the canonical writer/pool.
+                        # Contention is not loss of this process's owner. The
+                        # controller cannot seal/promote an unregistered member.
+                        if not self.admission_busy:
+                            log.warning("Fleet admission is waiting for database capacity.")
+                        self.admission_busy = True
+                    else:
+                        self.admission_busy = False
+                        if self.admission.sealed and not self.quiescence.requested:
+                            self.quiescence.begin(self.quiescence.identity(), self.admission.request_id)
                 if self.broker is not None and self.broker.failed:
                     raise RuntimeError("Broker ownership ended.")
                 if self.handoff is not None and not self.handoff.healthy and (
                     not self.quiescence.requested or self.handoff.status == "failed"
                 ):
                     raise RuntimeError("Coordinator ownership ended.")
-                if self.worker is not None and not self.worker.is_running:
+                if self.worker is not None and not self.worker.is_running and not self.quiescence.requested:
                     raise RuntimeError("Native worker polling ended.")
             except asyncio.CancelledError:
                 raise
@@ -189,7 +210,11 @@ class ProductRoleLifecycle:
     async def lifespan(self):
         product = self.runtime.product
         assert product is not None
-        async with AsyncExitStack() as stack:
+        from .fleet_admission import FleetAdmission
+        self.admission = FleetAdmission(self)
+        # Keep the startup gate until all partial role resources are cleaned up
+        # on failure; on success, release it only after readiness and watch exist.
+        async with self.admission.startup(), AsyncExitStack() as stack:
             async with asyncio.timeout(product.settings.temporal_startup_timeout_seconds):
                 await self.runtime.connect()
             if self.role == "worker":
@@ -219,6 +244,7 @@ class ProductRoleLifecycle:
             self.watch_task = asyncio.create_task(self.watch(), name="native-role-owner")
             stack.push_async_callback(self.close_watch)
             try:
+                await self.admission.complete_startup()
                 yield
             finally:
                 self.closing, self.ready = True, False

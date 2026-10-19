@@ -56,6 +56,7 @@ class Settings(BaseSettings):
         default="", pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$",
         validation_alias="MOYAI_WORKER_BUILD_ID",
     )
+    worker_adoption_bridge: bool = Field(default=False, validation_alias="MOYAI_WORKER_ADOPTION_BRIDGE")
     temporal_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="TEMPORAL_API_KEY")
     temporal_tls: bool = Field(default=False, validation_alias="TEMPORAL_TLS")
     compress_temporal_payloads: bool = Field(
@@ -130,6 +131,8 @@ class Settings(BaseSettings):
     def worker_version_is_complete(self) -> Settings:
         if bool(self.worker_deployment) != bool(self.worker_build_id):
             raise ValueError("Worker deployment name and build ID must be configured together.")
+        if self.worker_adoption_bridge and (self.product_mode != "existing" or not self.worker_deployment):
+            raise ValueError("Worker adoption bridging requires an existing product and an explicit worker version.")
         return self
 
     @property

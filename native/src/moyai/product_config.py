@@ -146,6 +146,7 @@ class ProductConfig:
                 temporal_dispatch_batch_size=source.temporal_dispatch_batch_size,
                 worker_deployment=source.moyai_worker_deployment,
                 worker_build_id=source.moyai_worker_build_id,
+                worker_adoption_bridge=source.moyai_worker_adoption_bridge,
                 public_url=source.public_url,
                 secure_cookies=urlsplit(source.public_url).scheme == "https",
                 gateway_url=source.litellm_api_base,

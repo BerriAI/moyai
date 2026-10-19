@@ -1,6 +1,6 @@
 import type {
-  EventTrigger, ProductAutomationDefinition, ProductAutomationHistoryEntry, ProductAutomationPreview,
-  ProductAutomationSummary, ProductAutomationTiming, ProductAutomationTrigger,
+  EventTriggerInput, ProductAutomationDefinition, ProductAutomationHistoryEntry, ProductAutomationPreview,
+  ProductAutomationSummary, TimingOutput, ProductAutomationTrigger,
   OrganizationConnection,
 } from "./generated/api"
 
@@ -10,9 +10,9 @@ export type {
   ProductAutomationWebhookResult as AutomationWebhookResult, ProductAutomationTestResult as AutomationTestResult,
 } from "./generated/api"
 
-export type AutomationTiming = ProductAutomationTiming
+export type AutomationTiming = TimingOutput
 /** Editor state: a saved event, or a partially filled one; the service validates every field. */
-export type AutomationEvent = EventTrigger & { event: string; [key: string]: unknown }
+export type AutomationEvent = EventTriggerInput & { event: string; [key: string]: unknown }
 export type AutomationTrigger = Pick<ProductAutomationTrigger, "id"> & { schedule?: AutomationTiming | null; event?: AutomationEvent | null }
 export type AutomationDefinition = Omit<ProductAutomationDefinition, "triggers"> & { triggers: AutomationTrigger[] }
 export type ProductAutomation = ProductAutomationSummary

@@ -101,6 +101,9 @@ def verify_product_schema(config: ProductConfig) -> dict[str, int]:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             connection.execute("SET LOCAL statement_timeout = '5s'")
             prepare_schema(connection, config.product_schema, "verify")
+            if config.legacy_settings().moyai_worker_adoption_bridge:
+                from .worker_adoption import verify_bridge_before_runtime
+                verify_bridge_before_runtime(config, connection)
             return schema_support()
     except (psycopg.Error, DatabaseError, ValueError):
         raise ProductDeploymentError(
