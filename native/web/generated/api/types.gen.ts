@@ -5,6 +5,1380 @@ export type ClientOptions = {
 };
 
 /**
+ * AnalyticsCapabilities
+ */
+export type AnalyticsCapabilities = {
+    /**
+     * Pr Analytics
+     */
+    pr_analytics: boolean;
+    /**
+     * Reported Costs
+     */
+    reported_costs: boolean;
+    /**
+     * Unified Billing
+     */
+    unified_billing: boolean;
+};
+
+/**
+ * AnalyticsComputerTiming
+ */
+export type AnalyticsComputerTiming = {
+    cold: AnalyticsTimingDistribution;
+    /**
+     * Failed
+     */
+    failed: number;
+    /**
+     * Pending
+     */
+    pending: number;
+    /**
+     * Requested
+     */
+    requested: number;
+    restore: AnalyticsTimingDistribution;
+    reuse: AnalyticsTimingDistribution;
+};
+
+/**
+ * AnalyticsCoverage
+ */
+export type AnalyticsCoverage = {
+    /**
+     * Activity Capture Gap Turns
+     */
+    activity_capture_gap_turns?: number;
+    /**
+     * Activity Legacy Turns
+     */
+    activity_legacy_turns?: number;
+    /**
+     * Activity Unknown Request Turns
+     */
+    activity_unknown_request_turns?: number;
+    /**
+     * Capture Gap Turns
+     */
+    capture_gap_turns: number;
+    /**
+     * Ledger Requests
+     */
+    ledger_requests: number;
+    /**
+     * Legacy Observations
+     */
+    legacy_observations?: number;
+    /**
+     * Legacy Turns
+     */
+    legacy_turns: number;
+    /**
+     * Linked Cost Limited
+     */
+    linked_cost_limited: boolean;
+    /**
+     * Native Observations
+     */
+    native_observations?: number;
+    /**
+     * Pr Merge Date Unknown
+     */
+    pr_merge_date_unknown: number;
+    /**
+     * Pr Receipts
+     */
+    pr_receipts: number;
+    /**
+     * Pr Status Checked
+     */
+    pr_status_checked: number;
+    /**
+     * Pr Status Unknown
+     */
+    pr_status_unknown: number;
+    /**
+     * Pr Tracking
+     */
+    pr_tracking: string;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Private Activity Details Omitted
+     */
+    private_activity_details_omitted?: number;
+    /**
+     * Private Details Omitted
+     */
+    private_details_omitted?: number;
+    /**
+     * Unclassified Confirmed Create Calls
+     */
+    unclassified_confirmed_create_calls: number;
+    /**
+     * Undispatched Failed Turns
+     */
+    undispatched_failed_turns: number;
+    /**
+     * Unknown Request Turns
+     */
+    unknown_request_turns: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests?: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+};
+
+/**
+ * AnalyticsDailyUsage
+ */
+export type AnalyticsDailyUsage = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Capture Gap Turns
+     */
+    capture_gap_turns: number;
+    /**
+     * Completed
+     */
+    completed: number;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Usd
+     */
+    cost_usd: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Cumulative Cost Usd
+     */
+    cumulative_cost_usd: number | null;
+    /**
+     * Cumulative Cost Usd Exact
+     */
+    cumulative_cost_usd_exact: string | null;
+    /**
+     * Cumulative Pricing Status
+     */
+    cumulative_pricing_status: 'priced' | 'partial' | 'unpriced' | 'empty';
+    /**
+     * Date
+     */
+    date: string;
+    /**
+     * Failed
+     */
+    failed: number;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Latency Samples
+     */
+    latency_samples: number;
+    /**
+     * Legacy Turns
+     */
+    legacy_turns: number;
+    /**
+     * Mean Latency Ms
+     */
+    mean_latency_ms: number | null;
+    /**
+     * Models
+     */
+    models: Array<AnalyticsModelUsage>;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * P50 Latency Ms
+     */
+    p50_latency_ms: number | null;
+    /**
+     * P95 Latency Ms
+     */
+    p95_latency_ms: number | null;
+    pr_status_counts: AnalyticsPrStatusCounts;
+    /**
+     * Pr Status Coverage
+     */
+    pr_status_coverage: number | null;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Priced Turns
+     */
+    priced_turns: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'priced' | 'partial' | 'unpriced' | 'empty';
+    /**
+     * Prs Closed
+     */
+    prs_closed: number;
+    /**
+     * Prs Created
+     */
+    prs_created: number;
+    /**
+     * Prs Draft
+     */
+    prs_draft: number;
+    /**
+     * Prs Merged
+     */
+    prs_merged: number;
+    /**
+     * Prs Merged Current
+     */
+    prs_merged_current: number;
+    /**
+     * Prs Open
+     */
+    prs_open: number;
+    /**
+     * Prs Unknown
+     */
+    prs_unknown: number;
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens?: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Sessions
+     */
+    sessions: number;
+    /**
+     * Sessions Active
+     */
+    sessions_active: number;
+    /**
+     * Sessions Created
+     */
+    sessions_created: number;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Turns
+     */
+    turns: number;
+    /**
+     * Unknown Request Turns
+     */
+    unknown_request_turns: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests?: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Unpriced Turns
+     */
+    unpriced_turns: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+};
+
+/**
+ * AnalyticsLimits
+ */
+export type AnalyticsLimits = {
+    /**
+     * Max Baseline Bytes Per Cohort
+     */
+    max_baseline_bytes_per_cohort: number;
+    /**
+     * Max Inferences
+     */
+    max_inferences: number;
+    /**
+     * Max Pr Status Reads
+     */
+    max_pr_status_reads: number;
+    /**
+     * Max Turns
+     */
+    max_turns: number;
+};
+
+/**
+ * AnalyticsMethodology
+ */
+export type AnalyticsMethodology = {
+    /**
+     * Computer Readiness
+     */
+    computer_readiness: string;
+    /**
+     * Cost
+     */
+    cost: string;
+    /**
+     * Cost Per Merged Pr
+     */
+    cost_per_merged_pr: string;
+    /**
+     * Coverage
+     */
+    coverage: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Prs Created
+     */
+    prs_created: string;
+    /**
+     * Prs Merged
+     */
+    prs_merged: string;
+    /**
+     * Requests
+     */
+    requests: string;
+    /**
+     * Sessions
+     */
+    sessions: string;
+    /**
+     * Startup
+     */
+    startup: string;
+    /**
+     * Startup Breakdown
+     */
+    startup_breakdown: string;
+    /**
+     * Timing Cards
+     */
+    timing_cards: string;
+    /**
+     * Timing Coverage
+     */
+    timing_coverage: string;
+    /**
+     * Users
+     */
+    users: string;
+};
+
+/**
+ * AnalyticsModelUsage
+ */
+export type AnalyticsModelUsage = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Capture Gap Turns
+     */
+    capture_gap_turns: number;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Usd
+     */
+    cost_usd: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Legacy Turns
+     */
+    legacy_turns: number;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Priced Turns
+     */
+    priced_turns?: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'priced' | 'partial' | 'unpriced' | 'empty';
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens?: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Unknown Request Turns
+     */
+    unknown_request_turns: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests?: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Unpriced Turns
+     */
+    unpriced_turns?: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+};
+
+/**
+ * AnalyticsPRStatusCounts
+ */
+export type AnalyticsPrStatusCounts = {
+    /**
+     * Closed
+     */
+    closed: number;
+    /**
+     * Draft
+     */
+    draft: number;
+    /**
+     * Merged
+     */
+    merged: number;
+    /**
+     * Open
+     */
+    open: number;
+    /**
+     * Unknown
+     */
+    unknown: number;
+};
+
+/**
+ * AnalyticsPerformance
+ */
+export type AnalyticsPerformance = {
+    /**
+     * Accounted Turns
+     */
+    accounted_turns: number;
+    /**
+     * Api Received Samples
+     */
+    api_received_samples: number;
+    breakdown: AnalyticsTimingBreakdown;
+    cards: AnalyticsTimingCards;
+    computer: AnalyticsComputerTiming;
+    dispatch: AnalyticsTimingDistribution;
+    /**
+     * Eligible Turns
+     */
+    eligible_turns: number;
+    /**
+     * Missing Dispatch Samples
+     */
+    missing_dispatch_samples: number;
+    /**
+     * Trend
+     */
+    trend: Array<AnalyticsTimingInterval>;
+};
+
+/**
+ * AnalyticsReport
+ */
+export type AnalyticsReport = {
+    /**
+     * By Model
+     */
+    by_model: Array<AnalyticsModelUsage>;
+    /**
+     * By User
+     */
+    by_user: Array<AnalyticsUserAggregate>;
+    capabilities: AnalyticsCapabilities;
+    /**
+     * Cost Note
+     */
+    cost_note: string;
+    coverage: AnalyticsCoverage;
+    /**
+     * Currency
+     */
+    currency: 'USD';
+    /**
+     * End
+     */
+    end: string;
+    /**
+     * Latency Note
+     */
+    latency_note: string;
+    /**
+     * Limit
+     */
+    limit: number;
+    limits: AnalyticsLimits;
+    methodology: AnalyticsMethodology;
+    /**
+     * Models
+     */
+    models: Array<string>;
+    /**
+     * Offset
+     */
+    offset: number;
+    performance: AnalyticsPerformance;
+    /**
+     * Preset
+     */
+    preset: '24h' | '7d' | '30d' | 'custom';
+    /**
+     * Rows
+     */
+    rows: Array<AnalyticsTurn>;
+    /**
+     * Series
+     */
+    series: Array<AnalyticsDailyUsage>;
+    /**
+     * Start
+     */
+    start: string;
+    summary: AnalyticsSummary;
+    /**
+     * Timezone
+     */
+    timezone: 'UTC';
+    /**
+     * Total
+     */
+    total: number;
+    /**
+     * Users
+     */
+    users: Array<AnalyticsReportUser>;
+};
+
+/**
+ * AnalyticsReportUser
+ */
+export type AnalyticsReportUser = {
+    /**
+     * Auth Version
+     */
+    auth_version?: number;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Email
+     */
+    email?: string | null;
+    /**
+     * Enabled
+     */
+    enabled?: boolean;
+    /**
+     * Filterable
+     */
+    filterable?: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Role
+     */
+    role?: string;
+    /**
+     * Username
+     */
+    username: string;
+};
+
+/**
+ * AnalyticsSummary
+ */
+export type AnalyticsSummary = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Capture Gap Turns
+     */
+    capture_gap_turns: number;
+    /**
+     * Completed
+     */
+    completed: number;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Per Merged Pr Usd
+     */
+    cost_per_merged_pr_usd: number | null;
+    /**
+     * Cost Usd
+     */
+    cost_usd: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Failed
+     */
+    failed: number;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Latency Samples
+     */
+    latency_samples: number;
+    /**
+     * Legacy Turns
+     */
+    legacy_turns: number;
+    /**
+     * Mean Latency Ms
+     */
+    mean_latency_ms: number | null;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * P50 Latency Ms
+     */
+    p50_latency_ms: number | null;
+    /**
+     * P95 Latency Ms
+     */
+    p95_latency_ms: number | null;
+    pr_status_counts: AnalyticsPrStatusCounts;
+    /**
+     * Pr Status Coverage
+     */
+    pr_status_coverage: number | null;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Priced Turns
+     */
+    priced_turns: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'priced' | 'partial' | 'unpriced' | 'empty';
+    /**
+     * Prs Closed
+     */
+    prs_closed: number;
+    /**
+     * Prs Created
+     */
+    prs_created: number;
+    /**
+     * Prs Draft
+     */
+    prs_draft: number;
+    /**
+     * Prs Merged
+     */
+    prs_merged: number;
+    /**
+     * Prs Merged Current
+     */
+    prs_merged_current: number;
+    /**
+     * Prs Open
+     */
+    prs_open: number;
+    /**
+     * Prs Unknown
+     */
+    prs_unknown: number;
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens?: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Sessions
+     */
+    sessions: number;
+    /**
+     * Sessions Active
+     */
+    sessions_active: number;
+    /**
+     * Sessions Created
+     */
+    sessions_created: number;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Turns
+     */
+    turns: number;
+    /**
+     * Unknown Request Turns
+     */
+    unknown_request_turns: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests?: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Unpriced Turns
+     */
+    unpriced_turns: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+};
+
+/**
+ * AnalyticsTimingBreakdown
+ */
+export type AnalyticsTimingBreakdown = {
+    api_to_dispatch_ms: AnalyticsTimingDistribution;
+    api_to_worker_ms: AnalyticsTimingDistribution;
+    broker_to_dispatch_ms: AnalyticsTimingDistribution;
+    /**
+     * Samples
+     */
+    samples: number;
+    worker_to_broker_ms: AnalyticsTimingDistribution;
+};
+
+/**
+ * AnalyticsTimingCard
+ */
+export type AnalyticsTimingCard = {
+    /**
+     * Excluded
+     */
+    excluded: number;
+    /**
+     * Max Ms
+     */
+    max_ms: number | null;
+    /**
+     * Mean Ms
+     */
+    mean_ms: number | null;
+    /**
+     * Missing
+     */
+    missing: number;
+    /**
+     * P50 Ms
+     */
+    p50_ms: number | null;
+    /**
+     * P95 Ms
+     */
+    p95_ms: number | null;
+    /**
+     * Pending
+     */
+    pending: number;
+    /**
+     * Reasons
+     */
+    reasons: {
+        [key: string]: number;
+    };
+    /**
+     * Samples
+     */
+    samples: number;
+    /**
+     * Total
+     */
+    total: number;
+};
+
+/**
+ * AnalyticsTimingCards
+ */
+export type AnalyticsTimingCards = {
+    broker: AnalyticsTimingCard;
+    computer: AnalyticsTimingCard;
+    queue: AnalyticsTimingCard;
+    startup: AnalyticsTimingCard;
+};
+
+/**
+ * AnalyticsTimingDistribution
+ */
+export type AnalyticsTimingDistribution = {
+    /**
+     * Max Ms
+     */
+    max_ms: number | null;
+    /**
+     * Mean Ms
+     */
+    mean_ms: number | null;
+    /**
+     * P50 Ms
+     */
+    p50_ms: number | null;
+    /**
+     * P95 Ms
+     */
+    p95_ms: number | null;
+    /**
+     * Samples
+     */
+    samples: number;
+};
+
+/**
+ * AnalyticsTimingInterval
+ */
+export type AnalyticsTimingInterval = {
+    broker: AnalyticsTimingCard;
+    computer: AnalyticsTimingCard;
+    /**
+     * End
+     */
+    end: string;
+    queue: AnalyticsTimingCard;
+    /**
+     * Start
+     */
+    start: string;
+    startup: AnalyticsTimingCard;
+};
+
+/**
+ * AnalyticsTurn
+ */
+export type AnalyticsTurn = {
+    /**
+     * Accepted At
+     */
+    accepted_at: string | null;
+    /**
+     * Actor Id
+     */
+    actor_id?: string;
+    /**
+     * Api Received At
+     */
+    api_received_at: string | null;
+    /**
+     * Api To Dispatch Ms
+     */
+    api_to_dispatch_ms: number | null;
+    /**
+     * Api To Worker Ms
+     */
+    api_to_worker_ms: number | null;
+    /**
+     * Broker Preparation Ms
+     */
+    broker_preparation_ms: number | null;
+    /**
+     * Broker Received At
+     */
+    broker_received_at: string | null;
+    /**
+     * Broker Timing Status
+     */
+    broker_timing_status: string;
+    /**
+     * Broker To Dispatch Ms
+     */
+    broker_to_dispatch_ms: number | null;
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens: number | null;
+    /**
+     * Capture Gap Turns
+     */
+    capture_gap_turns: number;
+    /**
+     * Computer Mode
+     */
+    computer_mode: string | null;
+    /**
+     * Computer Ready At
+     */
+    computer_ready_at: string | null;
+    /**
+     * Computer Ready Ms
+     */
+    computer_ready_ms: number | null;
+    /**
+     * Computer Requested At
+     */
+    computer_requested_at: string | null;
+    /**
+     * Computer Status
+     */
+    computer_status: string | null;
+    /**
+     * Computer Timing Status
+     */
+    computer_timing_status: string;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage: number | null;
+    /**
+     * Cost Models
+     */
+    cost_models: Array<string>;
+    /**
+     * Cost Usd
+     */
+    cost_usd: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Dispatch Attempt Id
+     */
+    dispatch_attempt_id: string | null;
+    /**
+     * Dispatch Route
+     */
+    dispatch_route: string | null;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    /**
+     * First Dispatch At
+     */
+    first_dispatch_at: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Input Tokens
+     */
+    input_tokens: number | null;
+    /**
+     * Latency Ms
+     */
+    latency_ms: number | null;
+    /**
+     * Legacy Turns
+     */
+    legacy_turns: number;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Output Tokens
+     */
+    output_tokens: number | null;
+    /**
+     * Priced Requests
+     */
+    priced_requests: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status: 'priced' | 'partial' | 'unpriced' | 'empty';
+    /**
+     * Queue Ms
+     */
+    queue_ms: number | null;
+    /**
+     * Queue Pickup Ms
+     */
+    queue_pickup_ms: number | null;
+    /**
+     * Queue Timing Status
+     */
+    queue_timing_status: string;
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens?: number | null;
+    /**
+     * Requests
+     */
+    requests: number;
+    /**
+     * Startup Timing Status
+     */
+    startup_timing_status: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Timing Observed
+     */
+    timing_observed: boolean;
+    /**
+     * Timing Start Source
+     */
+    timing_start_source: string | null;
+    /**
+     * Timing Surface
+     */
+    timing_surface: string | null;
+    /**
+     * Token Coverage
+     */
+    token_coverage: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples: number;
+    /**
+     * Tool Calls
+     */
+    tool_calls: number;
+    /**
+     * Total Ms
+     */
+    total_ms: number | null;
+    /**
+     * Total Tokens
+     */
+    total_tokens: number | null;
+    /**
+     * Unknown Request Turns
+     */
+    unknown_request_turns: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests?: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests: number;
+    /**
+     * Usage Role
+     */
+    usage_role: 'steering_input' | 'inference_turn';
+    /**
+     * Usage Samples
+     */
+    usage_samples: number;
+    /**
+     * User Id
+     */
+    user_id: string;
+    /**
+     * Worker Picked Up At
+     */
+    worker_picked_up_at: string | null;
+    /**
+     * Worker To Broker Ms
+     */
+    worker_to_broker_ms: number | null;
+};
+
+/**
+ * AnalyticsUserAggregate
+ *
+ * A per-user row. Unified billing can add spend-only rows without activity.
+ */
+export type AnalyticsUserAggregate = {
+    /**
+     * Cache Read Tokens
+     */
+    cache_read_tokens?: number | null;
+    /**
+     * Cache Write Tokens
+     */
+    cache_write_tokens?: number | null;
+    /**
+     * Capture Gap Turns
+     */
+    capture_gap_turns?: number;
+    /**
+     * Completed
+     */
+    completed?: number;
+    /**
+     * Cost Coverage
+     */
+    cost_coverage?: number | null;
+    /**
+     * Cost Per Merged Pr Usd
+     */
+    cost_per_merged_pr_usd?: number | null;
+    /**
+     * Cost Usd
+     */
+    cost_usd?: number | null;
+    /**
+     * Cost Usd Exact
+     */
+    cost_usd_exact?: string | null;
+    /**
+     * Failed
+     */
+    failed?: number;
+    /**
+     * Input Tokens
+     */
+    input_tokens?: number | null;
+    /**
+     * Latency Samples
+     */
+    latency_samples?: number;
+    /**
+     * Legacy Turns
+     */
+    legacy_turns?: number;
+    /**
+     * Mean Latency Ms
+     */
+    mean_latency_ms?: number | null;
+    /**
+     * Output Tokens
+     */
+    output_tokens?: number | null;
+    /**
+     * P50 Latency Ms
+     */
+    p50_latency_ms?: number | null;
+    /**
+     * P95 Latency Ms
+     */
+    p95_latency_ms?: number | null;
+    pr_status_counts?: AnalyticsPrStatusCounts;
+    /**
+     * Pr Status Coverage
+     */
+    pr_status_coverage?: number | null;
+    /**
+     * Priced Requests
+     */
+    priced_requests?: number;
+    /**
+     * Priced Turns
+     */
+    priced_turns?: number;
+    /**
+     * Pricing Status
+     */
+    pricing_status?: 'priced' | 'partial' | 'unpriced' | 'empty';
+    /**
+     * Prs Closed
+     */
+    prs_closed?: number;
+    /**
+     * Prs Created
+     */
+    prs_created?: number;
+    /**
+     * Prs Draft
+     */
+    prs_draft?: number;
+    /**
+     * Prs Merged
+     */
+    prs_merged?: number;
+    /**
+     * Prs Merged Current
+     */
+    prs_merged_current?: number;
+    /**
+     * Prs Open
+     */
+    prs_open?: number;
+    /**
+     * Prs Unknown
+     */
+    prs_unknown?: number;
+    /**
+     * Reasoning Tokens
+     */
+    reasoning_tokens?: number | null;
+    /**
+     * Requests
+     */
+    requests?: number;
+    /**
+     * Sessions
+     */
+    sessions?: number;
+    /**
+     * Sessions Active
+     */
+    sessions_active?: number;
+    /**
+     * Sessions Created
+     */
+    sessions_created?: number;
+    /**
+     * Token Coverage
+     */
+    token_coverage?: number | null;
+    /**
+     * Token Samples
+     */
+    token_samples?: number;
+    /**
+     * Total Tokens
+     */
+    total_tokens?: number | null;
+    /**
+     * Turns
+     */
+    turns?: number;
+    /**
+     * Unknown Request Turns
+     */
+    unknown_request_turns?: number;
+    /**
+     * Unknown Requests
+     */
+    unknown_requests?: number;
+    /**
+     * Unpriced Requests
+     */
+    unpriced_requests?: number;
+    /**
+     * Unpriced Turns
+     */
+    unpriced_turns?: number;
+    /**
+     * Usage Samples
+     */
+    usage_samples?: number;
+    /**
+     * User Id
+     */
+    user_id: string;
+};
+
+/**
  * ApprovalReply
  */
 export type ApprovalReply = {
@@ -5855,6 +7229,514 @@ export type SessionWorkspace = {
 };
 
 /**
+ * SettingsAccount
+ */
+export type SettingsAccount = {
+    /**
+     * Auth Version
+     */
+    auth_version: number;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Role
+     */
+    role: string;
+    /**
+     * Username
+     */
+    username: string;
+};
+
+/**
+ * SettingsAccountList
+ */
+export type SettingsAccountList = {
+    capabilities: SettingsCrudCapabilities;
+    /**
+     * Users
+     */
+    users: Array<SettingsAccount>;
+};
+
+/**
+ * SettingsAutomation
+ */
+export type SettingsAutomation = {
+    /**
+     * Connections
+     */
+    connections: Array<string>;
+    /**
+     * Editable
+     */
+    editable: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Interval Minutes
+     */
+    interval_minutes: number;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Paused
+     */
+    paused: boolean;
+    /**
+     * Prompt
+     */
+    prompt: string;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * State
+     */
+    state: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * SettingsAutomationCapabilities
+ */
+export type SettingsAutomationCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Execution Backend
+     */
+    execution_backend: 'temporal';
+    /**
+     * Reason
+     */
+    reason: string;
+    /**
+     * Run
+     */
+    run: boolean;
+    /**
+     * Runtime Available
+     */
+    runtime_available: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * SettingsAutomationList
+ */
+export type SettingsAutomationList = {
+    /**
+     * Automations
+     */
+    automations: Array<SettingsAutomation>;
+    capabilities: SettingsAutomationCapabilities;
+    /**
+     * Reason
+     */
+    reason: string;
+};
+
+/**
+ * SettingsAutomationLog
+ */
+export type SettingsAutomationLog = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string | null;
+};
+
+/**
+ * SettingsAutomationLogs
+ */
+export type SettingsAutomationLogs = {
+    /**
+     * Logs
+     */
+    logs: Array<SettingsAutomationLog>;
+};
+
+/**
+ * SettingsCrudCapabilities
+ */
+export type SettingsCrudCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * SettingsDeleted
+ */
+export type SettingsDeleted = {
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+};
+
+/**
+ * SettingsEngine
+ */
+export type SettingsEngine = {
+    /**
+     * Agent
+     */
+    agent: string;
+    /**
+     * Durability
+     */
+    durability: string;
+    /**
+     * Harness
+     */
+    harness: string;
+    /**
+     * Sandbox
+     */
+    sandbox: string;
+};
+
+/**
+ * SettingsMemoryFile
+ */
+export type SettingsMemoryFile = {
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Namespace
+     */
+    namespace: string;
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+    /**
+     * Version
+     */
+    version: string;
+};
+
+/**
+ * SettingsMemoryList
+ */
+export type SettingsMemoryList = {
+    capabilities: SettingsCrudCapabilities;
+    /**
+     * Default Namespace
+     */
+    default_namespace: string;
+    /**
+     * Memories
+     */
+    memories: Array<SettingsMemoryFile>;
+    /**
+     * Namespace
+     */
+    namespace: string;
+    /**
+     * Namespaces
+     */
+    namespaces: Array<SettingsMemoryNamespace>;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+};
+
+/**
+ * SettingsMemoryNamespace
+ */
+export type SettingsMemoryNamespace = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Label
+     */
+    label: string;
+};
+
+/**
+ * SettingsMemoryWrite
+ */
+export type SettingsMemoryWrite = {
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Namespace
+     */
+    namespace: string;
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * Version
+     */
+    version: string | null;
+};
+
+/**
+ * SettingsOverview
+ */
+export type SettingsOverview = {
+    capabilities: SettingsOverviewCapabilities;
+    /**
+     * Counts
+     */
+    counts: {
+        [key: string]: number;
+    };
+    engine: SettingsEngine;
+    user: SettingsOverviewUser;
+};
+
+/**
+ * SettingsOverviewCapabilities
+ */
+export type SettingsOverviewCapabilities = {
+    automations: SettingsAutomationCapabilities;
+    memory: SettingsCrudCapabilities;
+    /**
+     * Performance
+     */
+    performance: boolean;
+    secrets: SettingsSecretCapabilities;
+    skills: SettingsSharedCapabilities;
+    /**
+     * Usage
+     */
+    usage: boolean;
+    /**
+     * Users
+     */
+    users: boolean;
+};
+
+/**
+ * SettingsOverviewUser
+ */
+export type SettingsOverviewUser = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Role
+     */
+    role: string;
+};
+
+/**
+ * SettingsSecret
+ */
+export type SettingsSecret = {
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Editable
+     */
+    editable: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Scope
+     */
+    scope: 'personal' | 'shared';
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * SettingsSecretCapabilities
+ */
+export type SettingsSecretCapabilities = {
+    /**
+     * Agent Access
+     */
+    agent_access: boolean;
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Shared
+     */
+    shared: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * SettingsSecretList
+ */
+export type SettingsSecretList = {
+    capabilities: SettingsSecretCapabilities;
+    /**
+     * Reason
+     */
+    reason: string;
+    /**
+     * Secrets
+     */
+    secrets: Array<SettingsSecret>;
+};
+
+/**
+ * SettingsSharedCapabilities
+ */
+export type SettingsSharedCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Delete
+     */
+    delete: boolean;
+    /**
+     * Shared
+     */
+    shared: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+};
+
+/**
+ * SettingsSkill
+ */
+export type SettingsSkill = {
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Editable
+     */
+    editable: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Scope
+     */
+    scope: 'personal' | 'shared' | 'bundled';
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+};
+
+/**
+ * SettingsSkillList
+ */
+export type SettingsSkillList = {
+    capabilities: SettingsSharedCapabilities;
+    /**
+     * Skills
+     */
+    skills: Array<SettingsSkill>;
+};
+
+/**
  * SignInStart
  */
 export type SignInStart = {
@@ -10468,44 +12350,48 @@ export type GetWorkspaceResponses = {
 
 export type GetWorkspaceResponse = GetWorkspaceResponses[keyof GetWorkspaceResponses];
 
-export type AutomationsApiSettingsAutomationsGetData = {
+export type ListSettingsAutomationsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/settings/automations';
 };
 
-export type AutomationsApiSettingsAutomationsGetResponses = {
+export type ListSettingsAutomationsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsAutomationList;
 };
 
-export type CreateAutomationApiSettingsAutomationsPostData = {
+export type ListSettingsAutomationsResponse = ListSettingsAutomationsResponses[keyof ListSettingsAutomationsResponses];
+
+export type CreateSettingsAutomationData = {
     body: AutomationInput;
     path?: never;
     query?: never;
     url: '/api/settings/automations';
 };
 
-export type CreateAutomationApiSettingsAutomationsPostErrors = {
+export type CreateSettingsAutomationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateAutomationApiSettingsAutomationsPostError = CreateAutomationApiSettingsAutomationsPostErrors[keyof CreateAutomationApiSettingsAutomationsPostErrors];
+export type CreateSettingsAutomationError = CreateSettingsAutomationErrors[keyof CreateSettingsAutomationErrors];
 
-export type CreateAutomationApiSettingsAutomationsPostResponses = {
+export type CreateSettingsAutomationResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: SettingsAutomation;
 };
 
-export type DeleteAutomationApiSettingsAutomationsIdentityDeleteData = {
+export type CreateSettingsAutomationResponse = CreateSettingsAutomationResponses[keyof CreateSettingsAutomationResponses];
+
+export type DeleteSettingsAutomationData = {
     body?: never;
     path: {
         /**
@@ -10517,23 +12403,25 @@ export type DeleteAutomationApiSettingsAutomationsIdentityDeleteData = {
     url: '/api/settings/automations/{identity}';
 };
 
-export type DeleteAutomationApiSettingsAutomationsIdentityDeleteErrors = {
+export type DeleteSettingsAutomationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DeleteAutomationApiSettingsAutomationsIdentityDeleteError = DeleteAutomationApiSettingsAutomationsIdentityDeleteErrors[keyof DeleteAutomationApiSettingsAutomationsIdentityDeleteErrors];
+export type DeleteSettingsAutomationError = DeleteSettingsAutomationErrors[keyof DeleteSettingsAutomationErrors];
 
-export type DeleteAutomationApiSettingsAutomationsIdentityDeleteResponses = {
+export type DeleteSettingsAutomationResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsDeleted;
 };
 
-export type EditAutomationApiSettingsAutomationsIdentityPatchData = {
+export type DeleteSettingsAutomationResponse = DeleteSettingsAutomationResponses[keyof DeleteSettingsAutomationResponses];
+
+export type UpdateSettingsAutomationData = {
     body: AutomationEdit;
     path: {
         /**
@@ -10545,23 +12433,25 @@ export type EditAutomationApiSettingsAutomationsIdentityPatchData = {
     url: '/api/settings/automations/{identity}';
 };
 
-export type EditAutomationApiSettingsAutomationsIdentityPatchErrors = {
+export type UpdateSettingsAutomationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditAutomationApiSettingsAutomationsIdentityPatchError = EditAutomationApiSettingsAutomationsIdentityPatchErrors[keyof EditAutomationApiSettingsAutomationsIdentityPatchErrors];
+export type UpdateSettingsAutomationError = UpdateSettingsAutomationErrors[keyof UpdateSettingsAutomationErrors];
 
-export type EditAutomationApiSettingsAutomationsIdentityPatchResponses = {
+export type UpdateSettingsAutomationResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsAutomation;
 };
 
-export type AutomationLogsApiSettingsAutomationsIdentityLogsGetData = {
+export type UpdateSettingsAutomationResponse = UpdateSettingsAutomationResponses[keyof UpdateSettingsAutomationResponses];
+
+export type ListSettingsAutomationLogsData = {
     body?: never;
     path: {
         /**
@@ -10573,21 +12463,23 @@ export type AutomationLogsApiSettingsAutomationsIdentityLogsGetData = {
     url: '/api/settings/automations/{identity}/logs';
 };
 
-export type AutomationLogsApiSettingsAutomationsIdentityLogsGetErrors = {
+export type ListSettingsAutomationLogsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type AutomationLogsApiSettingsAutomationsIdentityLogsGetError = AutomationLogsApiSettingsAutomationsIdentityLogsGetErrors[keyof AutomationLogsApiSettingsAutomationsIdentityLogsGetErrors];
+export type ListSettingsAutomationLogsError = ListSettingsAutomationLogsErrors[keyof ListSettingsAutomationLogsErrors];
 
-export type AutomationLogsApiSettingsAutomationsIdentityLogsGetResponses = {
+export type ListSettingsAutomationLogsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsAutomationLogs;
 };
+
+export type ListSettingsAutomationLogsResponse = ListSettingsAutomationLogsResponses[keyof ListSettingsAutomationLogsResponses];
 
 export type GetBillingReportData = {
     body?: never;
@@ -10663,44 +12555,48 @@ export type GetBillingReportResponses = {
 
 export type GetBillingReportResponse = GetBillingReportResponses[keyof GetBillingReportResponses];
 
-export type GeneralApiSettingsGeneralGetData = {
+export type GetSettingsGeneralData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/settings/general';
 };
 
-export type GeneralApiSettingsGeneralGetResponses = {
+export type GetSettingsGeneralResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: GeneralPreferencesOutput;
 };
 
-export type UpdateGeneralApiSettingsGeneralPatchData = {
+export type GetSettingsGeneralResponse = GetSettingsGeneralResponses[keyof GetSettingsGeneralResponses];
+
+export type UpdateSettingsGeneralData = {
     body: GeneralPreferencesInput;
     path?: never;
     query?: never;
     url: '/api/settings/general';
 };
 
-export type UpdateGeneralApiSettingsGeneralPatchErrors = {
+export type UpdateSettingsGeneralErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type UpdateGeneralApiSettingsGeneralPatchError = UpdateGeneralApiSettingsGeneralPatchErrors[keyof UpdateGeneralApiSettingsGeneralPatchErrors];
+export type UpdateSettingsGeneralError = UpdateSettingsGeneralErrors[keyof UpdateSettingsGeneralErrors];
 
-export type UpdateGeneralApiSettingsGeneralPatchResponses = {
+export type UpdateSettingsGeneralResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: GeneralPreferencesOutput;
 };
 
-export type DeleteMemoryApiSettingsMemoryDeleteData = {
+export type UpdateSettingsGeneralResponse = UpdateSettingsGeneralResponses[keyof UpdateSettingsGeneralResponses];
+
+export type DeleteSettingsMemoryData = {
     body?: never;
     path?: never;
     query: {
@@ -10720,23 +12616,25 @@ export type DeleteMemoryApiSettingsMemoryDeleteData = {
     url: '/api/settings/memory';
 };
 
-export type DeleteMemoryApiSettingsMemoryDeleteErrors = {
+export type DeleteSettingsMemoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DeleteMemoryApiSettingsMemoryDeleteError = DeleteMemoryApiSettingsMemoryDeleteErrors[keyof DeleteMemoryApiSettingsMemoryDeleteErrors];
+export type DeleteSettingsMemoryError = DeleteSettingsMemoryErrors[keyof DeleteSettingsMemoryErrors];
 
-export type DeleteMemoryApiSettingsMemoryDeleteResponses = {
+export type DeleteSettingsMemoryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsDeleted;
 };
 
-export type MemoryApiSettingsMemoryGetData = {
+export type DeleteSettingsMemoryResponse = DeleteSettingsMemoryResponses[keyof DeleteSettingsMemoryResponses];
+
+export type ListSettingsMemoryData = {
     body?: never;
     path?: never;
     query?: {
@@ -10748,23 +12646,25 @@ export type MemoryApiSettingsMemoryGetData = {
     url: '/api/settings/memory';
 };
 
-export type MemoryApiSettingsMemoryGetErrors = {
+export type ListSettingsMemoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type MemoryApiSettingsMemoryGetError = MemoryApiSettingsMemoryGetErrors[keyof MemoryApiSettingsMemoryGetErrors];
+export type ListSettingsMemoryError = ListSettingsMemoryErrors[keyof ListSettingsMemoryErrors];
 
-export type MemoryApiSettingsMemoryGetResponses = {
+export type ListSettingsMemoryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsMemoryList;
 };
 
-export type WriteMemoryApiSettingsMemoryPutData = {
+export type ListSettingsMemoryResponse = ListSettingsMemoryResponses[keyof ListSettingsMemoryResponses];
+
+export type WriteSettingsMemoryData = {
     body: MemoryInput;
     path?: never;
     query?: {
@@ -10780,37 +12680,41 @@ export type WriteMemoryApiSettingsMemoryPutData = {
     url: '/api/settings/memory';
 };
 
-export type WriteMemoryApiSettingsMemoryPutErrors = {
+export type WriteSettingsMemoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type WriteMemoryApiSettingsMemoryPutError = WriteMemoryApiSettingsMemoryPutErrors[keyof WriteMemoryApiSettingsMemoryPutErrors];
+export type WriteSettingsMemoryError = WriteSettingsMemoryErrors[keyof WriteSettingsMemoryErrors];
 
-export type WriteMemoryApiSettingsMemoryPutResponses = {
+export type WriteSettingsMemoryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsMemoryWrite;
 };
 
-export type OverviewApiSettingsOverviewGetData = {
+export type WriteSettingsMemoryResponse = WriteSettingsMemoryResponses[keyof WriteSettingsMemoryResponses];
+
+export type GetSettingsOverviewData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/settings/overview';
 };
 
-export type OverviewApiSettingsOverviewGetResponses = {
+export type GetSettingsOverviewResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsOverview;
 };
 
-export type ReportApiSettingsPerformanceGetData = {
+export type GetSettingsOverviewResponse = GetSettingsOverviewResponses[keyof GetSettingsOverviewResponses];
+
+export type GetSettingsPerformanceData = {
     body?: never;
     path?: never;
     query?: {
@@ -10858,60 +12762,66 @@ export type ReportApiSettingsPerformanceGetData = {
     url: '/api/settings/performance';
 };
 
-export type ReportApiSettingsPerformanceGetErrors = {
+export type GetSettingsPerformanceErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ReportApiSettingsPerformanceGetError = ReportApiSettingsPerformanceGetErrors[keyof ReportApiSettingsPerformanceGetErrors];
+export type GetSettingsPerformanceError = GetSettingsPerformanceErrors[keyof GetSettingsPerformanceErrors];
 
-export type ReportApiSettingsPerformanceGetResponses = {
+export type GetSettingsPerformanceResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: AnalyticsReport;
 };
 
-export type SecretsApiSettingsSecretsGetData = {
+export type GetSettingsPerformanceResponse = GetSettingsPerformanceResponses[keyof GetSettingsPerformanceResponses];
+
+export type ListSettingsSecretsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/settings/secrets';
 };
 
-export type SecretsApiSettingsSecretsGetResponses = {
+export type ListSettingsSecretsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsSecretList;
 };
 
-export type CreateSecretApiSettingsSecretsPostData = {
+export type ListSettingsSecretsResponse = ListSettingsSecretsResponses[keyof ListSettingsSecretsResponses];
+
+export type CreateSettingsSecretData = {
     body: SecretInputWritable;
     path?: never;
     query?: never;
     url: '/api/settings/secrets';
 };
 
-export type CreateSecretApiSettingsSecretsPostErrors = {
+export type CreateSettingsSecretErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateSecretApiSettingsSecretsPostError = CreateSecretApiSettingsSecretsPostErrors[keyof CreateSecretApiSettingsSecretsPostErrors];
+export type CreateSettingsSecretError = CreateSettingsSecretErrors[keyof CreateSettingsSecretErrors];
 
-export type CreateSecretApiSettingsSecretsPostResponses = {
+export type CreateSettingsSecretResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: SettingsSecret;
 };
 
-export type DeleteSecretApiSettingsSecretsIdentityDeleteData = {
+export type CreateSettingsSecretResponse = CreateSettingsSecretResponses[keyof CreateSettingsSecretResponses];
+
+export type DeleteSettingsSecretData = {
     body?: never;
     path: {
         /**
@@ -10923,23 +12833,25 @@ export type DeleteSecretApiSettingsSecretsIdentityDeleteData = {
     url: '/api/settings/secrets/{identity}';
 };
 
-export type DeleteSecretApiSettingsSecretsIdentityDeleteErrors = {
+export type DeleteSettingsSecretErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DeleteSecretApiSettingsSecretsIdentityDeleteError = DeleteSecretApiSettingsSecretsIdentityDeleteErrors[keyof DeleteSecretApiSettingsSecretsIdentityDeleteErrors];
+export type DeleteSettingsSecretError = DeleteSettingsSecretErrors[keyof DeleteSettingsSecretErrors];
 
-export type DeleteSecretApiSettingsSecretsIdentityDeleteResponses = {
+export type DeleteSettingsSecretResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsDeleted;
 };
 
-export type EditSecretApiSettingsSecretsIdentityPatchData = {
+export type DeleteSettingsSecretResponse = DeleteSettingsSecretResponses[keyof DeleteSettingsSecretResponses];
+
+export type UpdateSettingsSecretData = {
     body: SecretEditWritable;
     path: {
         /**
@@ -10951,60 +12863,66 @@ export type EditSecretApiSettingsSecretsIdentityPatchData = {
     url: '/api/settings/secrets/{identity}';
 };
 
-export type EditSecretApiSettingsSecretsIdentityPatchErrors = {
+export type UpdateSettingsSecretErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditSecretApiSettingsSecretsIdentityPatchError = EditSecretApiSettingsSecretsIdentityPatchErrors[keyof EditSecretApiSettingsSecretsIdentityPatchErrors];
+export type UpdateSettingsSecretError = UpdateSettingsSecretErrors[keyof UpdateSettingsSecretErrors];
 
-export type EditSecretApiSettingsSecretsIdentityPatchResponses = {
+export type UpdateSettingsSecretResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsSecret;
 };
 
-export type SkillsApiSettingsSkillsGetData = {
+export type UpdateSettingsSecretResponse = UpdateSettingsSecretResponses[keyof UpdateSettingsSecretResponses];
+
+export type ListSettingsSkillsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/settings/skills';
 };
 
-export type SkillsApiSettingsSkillsGetResponses = {
+export type ListSettingsSkillsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsSkillList;
 };
 
-export type CreateSkillApiSettingsSkillsPostData = {
+export type ListSettingsSkillsResponse = ListSettingsSkillsResponses[keyof ListSettingsSkillsResponses];
+
+export type CreateSettingsSkillData = {
     body: SkillInput;
     path?: never;
     query?: never;
     url: '/api/settings/skills';
 };
 
-export type CreateSkillApiSettingsSkillsPostErrors = {
+export type CreateSettingsSkillErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateSkillApiSettingsSkillsPostError = CreateSkillApiSettingsSkillsPostErrors[keyof CreateSkillApiSettingsSkillsPostErrors];
+export type CreateSettingsSkillError = CreateSettingsSkillErrors[keyof CreateSettingsSkillErrors];
 
-export type CreateSkillApiSettingsSkillsPostResponses = {
+export type CreateSettingsSkillResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: SettingsSkill;
 };
 
-export type DeleteSkillApiSettingsSkillsIdentityDeleteData = {
+export type CreateSettingsSkillResponse = CreateSettingsSkillResponses[keyof CreateSettingsSkillResponses];
+
+export type DeleteSettingsSkillData = {
     body?: never;
     path: {
         /**
@@ -11016,23 +12934,25 @@ export type DeleteSkillApiSettingsSkillsIdentityDeleteData = {
     url: '/api/settings/skills/{identity}';
 };
 
-export type DeleteSkillApiSettingsSkillsIdentityDeleteErrors = {
+export type DeleteSettingsSkillErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DeleteSkillApiSettingsSkillsIdentityDeleteError = DeleteSkillApiSettingsSkillsIdentityDeleteErrors[keyof DeleteSkillApiSettingsSkillsIdentityDeleteErrors];
+export type DeleteSettingsSkillError = DeleteSettingsSkillErrors[keyof DeleteSettingsSkillErrors];
 
-export type DeleteSkillApiSettingsSkillsIdentityDeleteResponses = {
+export type DeleteSettingsSkillResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsDeleted;
 };
 
-export type EditSkillApiSettingsSkillsIdentityPatchData = {
+export type DeleteSettingsSkillResponse = DeleteSettingsSkillResponses[keyof DeleteSettingsSkillResponses];
+
+export type UpdateSettingsSkillData = {
     body: SkillInput;
     path: {
         /**
@@ -11044,23 +12964,25 @@ export type EditSkillApiSettingsSkillsIdentityPatchData = {
     url: '/api/settings/skills/{identity}';
 };
 
-export type EditSkillApiSettingsSkillsIdentityPatchErrors = {
+export type UpdateSettingsSkillErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditSkillApiSettingsSkillsIdentityPatchError = EditSkillApiSettingsSkillsIdentityPatchErrors[keyof EditSkillApiSettingsSkillsIdentityPatchErrors];
+export type UpdateSettingsSkillError = UpdateSettingsSkillErrors[keyof UpdateSettingsSkillErrors];
 
-export type EditSkillApiSettingsSkillsIdentityPatchResponses = {
+export type UpdateSettingsSkillResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsSkill;
 };
 
-export type ReportApiSettingsUsageGetData = {
+export type UpdateSettingsSkillResponse = UpdateSettingsSkillResponses[keyof UpdateSettingsSkillResponses];
+
+export type GetSettingsUsageData = {
     body?: never;
     path?: never;
     query?: {
@@ -11108,58 +13030,64 @@ export type ReportApiSettingsUsageGetData = {
     url: '/api/settings/usage';
 };
 
-export type ReportApiSettingsUsageGetErrors = {
+export type GetSettingsUsageErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ReportApiSettingsUsageGetError = ReportApiSettingsUsageGetErrors[keyof ReportApiSettingsUsageGetErrors];
+export type GetSettingsUsageError = GetSettingsUsageErrors[keyof GetSettingsUsageErrors];
 
-export type ReportApiSettingsUsageGetResponses = {
+export type GetSettingsUsageResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: AnalyticsReport;
 };
 
-export type UsersApiSettingsUsersGetData = {
+export type GetSettingsUsageResponse = GetSettingsUsageResponses[keyof GetSettingsUsageResponses];
+
+export type ListSettingsUsersData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/settings/users';
 };
 
-export type UsersApiSettingsUsersGetResponses = {
+export type ListSettingsUsersResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsAccountList;
 };
 
-export type CreateUserApiSettingsUsersPostData = {
+export type ListSettingsUsersResponse = ListSettingsUsersResponses[keyof ListSettingsUsersResponses];
+
+export type CreateSettingsUserData = {
     body: UserInputWritable;
     path?: never;
     query?: never;
     url: '/api/settings/users';
 };
 
-export type CreateUserApiSettingsUsersPostErrors = {
+export type CreateSettingsUserErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateUserApiSettingsUsersPostError = CreateUserApiSettingsUsersPostErrors[keyof CreateUserApiSettingsUsersPostErrors];
+export type CreateSettingsUserError = CreateSettingsUserErrors[keyof CreateSettingsUserErrors];
 
-export type CreateUserApiSettingsUsersPostResponses = {
+export type CreateSettingsUserResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: SettingsAccount;
 };
+
+export type CreateSettingsUserResponse = CreateSettingsUserResponses[keyof CreateSettingsUserResponses];
 
 export type UpdateProductUserRoleData = {
     body: RoleEdit;
@@ -11186,7 +13114,7 @@ export type UpdateProductUserRoleResponses = {
 
 export type UpdateProductUserRoleResponse = UpdateProductUserRoleResponses[keyof UpdateProductUserRoleResponses];
 
-export type DeleteUserApiSettingsUsersIdentityDeleteData = {
+export type DeleteSettingsUserData = {
     body?: never;
     path: {
         /**
@@ -11198,23 +13126,25 @@ export type DeleteUserApiSettingsUsersIdentityDeleteData = {
     url: '/api/settings/users/{identity}';
 };
 
-export type DeleteUserApiSettingsUsersIdentityDeleteErrors = {
+export type DeleteSettingsUserErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DeleteUserApiSettingsUsersIdentityDeleteError = DeleteUserApiSettingsUsersIdentityDeleteErrors[keyof DeleteUserApiSettingsUsersIdentityDeleteErrors];
+export type DeleteSettingsUserError = DeleteSettingsUserErrors[keyof DeleteSettingsUserErrors];
 
-export type DeleteUserApiSettingsUsersIdentityDeleteResponses = {
+export type DeleteSettingsUserResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsAccount;
 };
 
-export type EditUserApiSettingsUsersIdentityPatchData = {
+export type DeleteSettingsUserResponse = DeleteSettingsUserResponses[keyof DeleteSettingsUserResponses];
+
+export type UpdateSettingsUserData = {
     body: UserEditWritable;
     path: {
         /**
@@ -11226,21 +13156,23 @@ export type EditUserApiSettingsUsersIdentityPatchData = {
     url: '/api/settings/users/{identity}';
 };
 
-export type EditUserApiSettingsUsersIdentityPatchErrors = {
+export type UpdateSettingsUserErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditUserApiSettingsUsersIdentityPatchError = EditUserApiSettingsUsersIdentityPatchErrors[keyof EditUserApiSettingsUsersIdentityPatchErrors];
+export type UpdateSettingsUserError = UpdateSettingsUserErrors[keyof UpdateSettingsUserErrors];
 
-export type EditUserApiSettingsUsersIdentityPatchResponses = {
+export type UpdateSettingsUserResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SettingsAccount;
 };
+
+export type UpdateSettingsUserResponse = UpdateSettingsUserResponses[keyof UpdateSettingsUserResponses];
 
 export type ListInvocableSkillsData = {
     body?: never;

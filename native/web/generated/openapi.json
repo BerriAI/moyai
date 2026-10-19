@@ -1,6 +1,2511 @@
 {
   "components": {
     "schemas": {
+      "AnalyticsCapabilities": {
+        "properties": {
+          "pr_analytics": {
+            "title": "Pr Analytics",
+            "type": "boolean"
+          },
+          "reported_costs": {
+            "title": "Reported Costs",
+            "type": "boolean"
+          },
+          "unified_billing": {
+            "title": "Unified Billing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "pr_analytics",
+          "reported_costs",
+          "unified_billing"
+        ],
+        "title": "AnalyticsCapabilities",
+        "type": "object"
+      },
+      "AnalyticsComputerTiming": {
+        "properties": {
+          "cold": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "requested": {
+            "title": "Requested",
+            "type": "integer"
+          },
+          "restore": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          },
+          "reuse": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          }
+        },
+        "required": [
+          "cold",
+          "restore",
+          "reuse",
+          "requested",
+          "failed",
+          "pending"
+        ],
+        "title": "AnalyticsComputerTiming",
+        "type": "object"
+      },
+      "AnalyticsCoverage": {
+        "properties": {
+          "activity_capture_gap_turns": {
+            "title": "Activity Capture Gap Turns",
+            "type": "integer"
+          },
+          "activity_legacy_turns": {
+            "title": "Activity Legacy Turns",
+            "type": "integer"
+          },
+          "activity_unknown_request_turns": {
+            "title": "Activity Unknown Request Turns",
+            "type": "integer"
+          },
+          "capture_gap_turns": {
+            "title": "Capture Gap Turns",
+            "type": "integer"
+          },
+          "ledger_requests": {
+            "title": "Ledger Requests",
+            "type": "integer"
+          },
+          "legacy_observations": {
+            "title": "Legacy Observations",
+            "type": "integer"
+          },
+          "legacy_turns": {
+            "title": "Legacy Turns",
+            "type": "integer"
+          },
+          "linked_cost_limited": {
+            "title": "Linked Cost Limited",
+            "type": "boolean"
+          },
+          "native_observations": {
+            "title": "Native Observations",
+            "type": "integer"
+          },
+          "pr_merge_date_unknown": {
+            "title": "Pr Merge Date Unknown",
+            "type": "integer"
+          },
+          "pr_receipts": {
+            "title": "Pr Receipts",
+            "type": "integer"
+          },
+          "pr_status_checked": {
+            "title": "Pr Status Checked",
+            "type": "integer"
+          },
+          "pr_status_unknown": {
+            "title": "Pr Status Unknown",
+            "type": "integer"
+          },
+          "pr_tracking": {
+            "title": "Pr Tracking",
+            "type": "string"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "private_activity_details_omitted": {
+            "title": "Private Activity Details Omitted",
+            "type": "integer"
+          },
+          "private_details_omitted": {
+            "title": "Private Details Omitted",
+            "type": "integer"
+          },
+          "unclassified_confirmed_create_calls": {
+            "title": "Unclassified Confirmed Create Calls",
+            "type": "integer"
+          },
+          "undispatched_failed_turns": {
+            "title": "Undispatched Failed Turns",
+            "type": "integer"
+          },
+          "unknown_request_turns": {
+            "title": "Unknown Request Turns",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "legacy_turns",
+          "ledger_requests",
+          "unknown_request_turns",
+          "capture_gap_turns",
+          "undispatched_failed_turns",
+          "linked_cost_limited",
+          "priced_requests",
+          "unpriced_requests",
+          "pr_receipts",
+          "pr_status_checked",
+          "pr_status_unknown",
+          "pr_merge_date_unknown",
+          "unclassified_confirmed_create_calls",
+          "pr_tracking"
+        ],
+        "title": "AnalyticsCoverage",
+        "type": "object"
+      },
+      "AnalyticsDailyUsage": {
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "capture_gap_turns": {
+            "title": "Capture Gap Turns",
+            "type": "integer"
+          },
+          "completed": {
+            "title": "Completed",
+            "type": "integer"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "cumulative_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cumulative Cost Usd"
+          },
+          "cumulative_cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cumulative Cost Usd Exact"
+          },
+          "cumulative_pricing_status": {
+            "enum": [
+              "priced",
+              "partial",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Cumulative Pricing Status",
+            "type": "string"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "latency_samples": {
+            "title": "Latency Samples",
+            "type": "integer"
+          },
+          "legacy_turns": {
+            "title": "Legacy Turns",
+            "type": "integer"
+          },
+          "mean_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Latency Ms"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsModelUsage"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "p50_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Latency Ms"
+          },
+          "p95_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Latency Ms"
+          },
+          "pr_status_counts": {
+            "$ref": "#/components/schemas/AnalyticsPRStatusCounts"
+          },
+          "pr_status_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Status Coverage"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "priced_turns": {
+            "title": "Priced Turns",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "priced",
+              "partial",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "prs_closed": {
+            "title": "Prs Closed",
+            "type": "integer"
+          },
+          "prs_created": {
+            "title": "Prs Created",
+            "type": "integer"
+          },
+          "prs_draft": {
+            "title": "Prs Draft",
+            "type": "integer"
+          },
+          "prs_merged": {
+            "title": "Prs Merged",
+            "type": "integer"
+          },
+          "prs_merged_current": {
+            "title": "Prs Merged Current",
+            "type": "integer"
+          },
+          "prs_open": {
+            "title": "Prs Open",
+            "type": "integer"
+          },
+          "prs_unknown": {
+            "title": "Prs Unknown",
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "sessions_active": {
+            "title": "Sessions Active",
+            "type": "integer"
+          },
+          "sessions_created": {
+            "title": "Sessions Created",
+            "type": "integer"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "turns": {
+            "title": "Turns",
+            "type": "integer"
+          },
+          "unknown_request_turns": {
+            "title": "Unknown Request Turns",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "unpriced_turns": {
+            "title": "Unpriced Turns",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "cost_usd",
+          "cost_usd_exact",
+          "priced_requests",
+          "unpriced_requests",
+          "cost_coverage",
+          "pricing_status",
+          "legacy_turns",
+          "unknown_request_turns",
+          "capture_gap_turns",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "turns",
+          "completed",
+          "failed",
+          "latency_samples",
+          "mean_latency_ms",
+          "p50_latency_ms",
+          "p95_latency_ms",
+          "priced_turns",
+          "unpriced_turns",
+          "sessions",
+          "sessions_active",
+          "sessions_created",
+          "prs_created",
+          "prs_merged",
+          "pr_status_counts",
+          "prs_open",
+          "prs_draft",
+          "prs_closed",
+          "prs_unknown",
+          "prs_merged_current",
+          "pr_status_coverage",
+          "date",
+          "models",
+          "cumulative_cost_usd",
+          "cumulative_cost_usd_exact",
+          "cumulative_pricing_status"
+        ],
+        "title": "AnalyticsDailyUsage",
+        "type": "object"
+      },
+      "AnalyticsLimits": {
+        "properties": {
+          "max_baseline_bytes_per_cohort": {
+            "title": "Max Baseline Bytes Per Cohort",
+            "type": "integer"
+          },
+          "max_inferences": {
+            "title": "Max Inferences",
+            "type": "integer"
+          },
+          "max_pr_status_reads": {
+            "title": "Max Pr Status Reads",
+            "type": "integer"
+          },
+          "max_turns": {
+            "title": "Max Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_turns",
+          "max_inferences",
+          "max_pr_status_reads",
+          "max_baseline_bytes_per_cohort"
+        ],
+        "title": "AnalyticsLimits",
+        "type": "object"
+      },
+      "AnalyticsMethodology": {
+        "properties": {
+          "computer_readiness": {
+            "title": "Computer Readiness",
+            "type": "string"
+          },
+          "cost": {
+            "title": "Cost",
+            "type": "string"
+          },
+          "cost_per_merged_pr": {
+            "title": "Cost Per Merged Pr",
+            "type": "string"
+          },
+          "coverage": {
+            "title": "Coverage",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "prs_created": {
+            "title": "Prs Created",
+            "type": "string"
+          },
+          "prs_merged": {
+            "title": "Prs Merged",
+            "type": "string"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "string"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "string"
+          },
+          "startup": {
+            "title": "Startup",
+            "type": "string"
+          },
+          "startup_breakdown": {
+            "title": "Startup Breakdown",
+            "type": "string"
+          },
+          "timing_cards": {
+            "title": "Timing Cards",
+            "type": "string"
+          },
+          "timing_coverage": {
+            "title": "Timing Coverage",
+            "type": "string"
+          },
+          "users": {
+            "title": "Users",
+            "type": "string"
+          }
+        },
+        "required": [
+          "startup",
+          "startup_breakdown",
+          "computer_readiness",
+          "timing_coverage",
+          "timing_cards",
+          "users",
+          "sessions",
+          "prs_created",
+          "prs_merged",
+          "cost",
+          "requests",
+          "coverage",
+          "model",
+          "cost_per_merged_pr"
+        ],
+        "title": "AnalyticsMethodology",
+        "type": "object"
+      },
+      "AnalyticsModelUsage": {
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "capture_gap_turns": {
+            "title": "Capture Gap Turns",
+            "type": "integer"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "legacy_turns": {
+            "title": "Legacy Turns",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "priced_turns": {
+            "title": "Priced Turns",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "priced",
+              "partial",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "unknown_request_turns": {
+            "title": "Unknown Request Turns",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "unpriced_turns": {
+            "title": "Unpriced Turns",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "cost_usd",
+          "cost_usd_exact",
+          "priced_requests",
+          "unpriced_requests",
+          "cost_coverage",
+          "pricing_status",
+          "legacy_turns",
+          "unknown_request_turns",
+          "capture_gap_turns",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "model"
+        ],
+        "title": "AnalyticsModelUsage",
+        "type": "object"
+      },
+      "AnalyticsPRStatusCounts": {
+        "properties": {
+          "closed": {
+            "title": "Closed",
+            "type": "integer"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "integer"
+          },
+          "merged": {
+            "title": "Merged",
+            "type": "integer"
+          },
+          "open": {
+            "title": "Open",
+            "type": "integer"
+          },
+          "unknown": {
+            "title": "Unknown",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "open",
+          "draft",
+          "closed",
+          "merged",
+          "unknown"
+        ],
+        "title": "AnalyticsPRStatusCounts",
+        "type": "object"
+      },
+      "AnalyticsPerformance": {
+        "properties": {
+          "accounted_turns": {
+            "title": "Accounted Turns",
+            "type": "integer"
+          },
+          "api_received_samples": {
+            "title": "Api Received Samples",
+            "type": "integer"
+          },
+          "breakdown": {
+            "$ref": "#/components/schemas/AnalyticsTimingBreakdown"
+          },
+          "cards": {
+            "$ref": "#/components/schemas/AnalyticsTimingCards"
+          },
+          "computer": {
+            "$ref": "#/components/schemas/AnalyticsComputerTiming"
+          },
+          "dispatch": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          },
+          "eligible_turns": {
+            "title": "Eligible Turns",
+            "type": "integer"
+          },
+          "missing_dispatch_samples": {
+            "title": "Missing Dispatch Samples",
+            "type": "integer"
+          },
+          "trend": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsTimingInterval"
+            },
+            "title": "Trend",
+            "type": "array"
+          }
+        },
+        "required": [
+          "eligible_turns",
+          "api_received_samples",
+          "dispatch",
+          "missing_dispatch_samples",
+          "breakdown",
+          "computer",
+          "accounted_turns",
+          "cards",
+          "trend"
+        ],
+        "title": "AnalyticsPerformance",
+        "type": "object"
+      },
+      "AnalyticsReport": {
+        "properties": {
+          "by_model": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsModelUsage"
+            },
+            "title": "By Model",
+            "type": "array"
+          },
+          "by_user": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsUserAggregate"
+            },
+            "title": "By User",
+            "type": "array"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/AnalyticsCapabilities"
+          },
+          "cost_note": {
+            "title": "Cost Note",
+            "type": "string"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/AnalyticsCoverage"
+          },
+          "currency": {
+            "const": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "end": {
+            "title": "End",
+            "type": "string"
+          },
+          "latency_note": {
+            "title": "Latency Note",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/AnalyticsLimits"
+          },
+          "methodology": {
+            "$ref": "#/components/schemas/AnalyticsMethodology"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "performance": {
+            "$ref": "#/components/schemas/AnalyticsPerformance"
+          },
+          "preset": {
+            "enum": [
+              "24h",
+              "7d",
+              "30d",
+              "custom"
+            ],
+            "title": "Preset",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsTurn"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "series": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsDailyUsage"
+            },
+            "title": "Series",
+            "type": "array"
+          },
+          "start": {
+            "title": "Start",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AnalyticsSummary"
+          },
+          "timezone": {
+            "const": "UTC",
+            "title": "Timezone",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsReportUser"
+            },
+            "title": "Users",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rows",
+          "summary",
+          "series",
+          "by_user",
+          "by_model",
+          "models",
+          "users",
+          "total",
+          "limit",
+          "offset",
+          "start",
+          "end",
+          "preset",
+          "timezone",
+          "currency",
+          "performance",
+          "coverage",
+          "methodology",
+          "capabilities",
+          "limits",
+          "cost_note",
+          "latency_note"
+        ],
+        "title": "AnalyticsReport",
+        "type": "object"
+      },
+      "AnalyticsReportUser": {
+        "properties": {
+          "auth_version": {
+            "title": "Auth Version",
+            "type": "integer"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "filterable": {
+            "title": "Filterable",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "display_name"
+        ],
+        "title": "AnalyticsReportUser",
+        "type": "object"
+      },
+      "AnalyticsSummary": {
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "capture_gap_turns": {
+            "title": "Capture Gap Turns",
+            "type": "integer"
+          },
+          "completed": {
+            "title": "Completed",
+            "type": "integer"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_per_merged_pr_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Merged Pr Usd"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "latency_samples": {
+            "title": "Latency Samples",
+            "type": "integer"
+          },
+          "legacy_turns": {
+            "title": "Legacy Turns",
+            "type": "integer"
+          },
+          "mean_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Latency Ms"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "p50_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Latency Ms"
+          },
+          "p95_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Latency Ms"
+          },
+          "pr_status_counts": {
+            "$ref": "#/components/schemas/AnalyticsPRStatusCounts"
+          },
+          "pr_status_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Status Coverage"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "priced_turns": {
+            "title": "Priced Turns",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "priced",
+              "partial",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "prs_closed": {
+            "title": "Prs Closed",
+            "type": "integer"
+          },
+          "prs_created": {
+            "title": "Prs Created",
+            "type": "integer"
+          },
+          "prs_draft": {
+            "title": "Prs Draft",
+            "type": "integer"
+          },
+          "prs_merged": {
+            "title": "Prs Merged",
+            "type": "integer"
+          },
+          "prs_merged_current": {
+            "title": "Prs Merged Current",
+            "type": "integer"
+          },
+          "prs_open": {
+            "title": "Prs Open",
+            "type": "integer"
+          },
+          "prs_unknown": {
+            "title": "Prs Unknown",
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "sessions_active": {
+            "title": "Sessions Active",
+            "type": "integer"
+          },
+          "sessions_created": {
+            "title": "Sessions Created",
+            "type": "integer"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "turns": {
+            "title": "Turns",
+            "type": "integer"
+          },
+          "unknown_request_turns": {
+            "title": "Unknown Request Turns",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "unpriced_turns": {
+            "title": "Unpriced Turns",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requests",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "cost_usd",
+          "cost_usd_exact",
+          "priced_requests",
+          "unpriced_requests",
+          "cost_coverage",
+          "pricing_status",
+          "legacy_turns",
+          "unknown_request_turns",
+          "capture_gap_turns",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "turns",
+          "completed",
+          "failed",
+          "latency_samples",
+          "mean_latency_ms",
+          "p50_latency_ms",
+          "p95_latency_ms",
+          "priced_turns",
+          "unpriced_turns",
+          "sessions",
+          "sessions_active",
+          "sessions_created",
+          "prs_created",
+          "prs_merged",
+          "pr_status_counts",
+          "prs_open",
+          "prs_draft",
+          "prs_closed",
+          "prs_unknown",
+          "prs_merged_current",
+          "pr_status_coverage",
+          "cost_per_merged_pr_usd"
+        ],
+        "title": "AnalyticsSummary",
+        "type": "object"
+      },
+      "AnalyticsTimingBreakdown": {
+        "properties": {
+          "api_to_dispatch_ms": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          },
+          "api_to_worker_ms": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          },
+          "broker_to_dispatch_ms": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          },
+          "worker_to_broker_ms": {
+            "$ref": "#/components/schemas/AnalyticsTimingDistribution"
+          }
+        },
+        "required": [
+          "samples",
+          "api_to_dispatch_ms",
+          "api_to_worker_ms",
+          "worker_to_broker_ms",
+          "broker_to_dispatch_ms"
+        ],
+        "title": "AnalyticsTimingBreakdown",
+        "type": "object"
+      },
+      "AnalyticsTimingCard": {
+        "properties": {
+          "excluded": {
+            "title": "Excluded",
+            "type": "integer"
+          },
+          "max_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Ms"
+          },
+          "mean_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Ms"
+          },
+          "missing": {
+            "title": "Missing",
+            "type": "integer"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "reasons": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Reasons",
+            "type": "object"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "samples",
+          "mean_ms",
+          "p50_ms",
+          "p95_ms",
+          "max_ms",
+          "pending",
+          "missing",
+          "excluded",
+          "total",
+          "reasons"
+        ],
+        "title": "AnalyticsTimingCard",
+        "type": "object"
+      },
+      "AnalyticsTimingCards": {
+        "properties": {
+          "broker": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          },
+          "computer": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          },
+          "startup": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          }
+        },
+        "required": [
+          "startup",
+          "queue",
+          "broker",
+          "computer"
+        ],
+        "title": "AnalyticsTimingCards",
+        "type": "object"
+      },
+      "AnalyticsTimingDistribution": {
+        "properties": {
+          "max_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Ms"
+          },
+          "mean_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Ms"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "samples",
+          "mean_ms",
+          "p50_ms",
+          "p95_ms",
+          "max_ms"
+        ],
+        "title": "AnalyticsTimingDistribution",
+        "type": "object"
+      },
+      "AnalyticsTimingInterval": {
+        "properties": {
+          "broker": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          },
+          "computer": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          },
+          "end": {
+            "title": "End",
+            "type": "string"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          },
+          "start": {
+            "title": "Start",
+            "type": "string"
+          },
+          "startup": {
+            "$ref": "#/components/schemas/AnalyticsTimingCard"
+          }
+        },
+        "required": [
+          "startup",
+          "queue",
+          "broker",
+          "computer",
+          "start",
+          "end"
+        ],
+        "title": "AnalyticsTimingInterval",
+        "type": "object"
+      },
+      "AnalyticsTurn": {
+        "properties": {
+          "accepted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted At"
+          },
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "api_received_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Received At"
+          },
+          "api_to_dispatch_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api To Dispatch Ms"
+          },
+          "api_to_worker_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api To Worker Ms"
+          },
+          "broker_preparation_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker Preparation Ms"
+          },
+          "broker_received_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker Received At"
+          },
+          "broker_timing_status": {
+            "title": "Broker Timing Status",
+            "type": "string"
+          },
+          "broker_to_dispatch_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker To Dispatch Ms"
+          },
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "capture_gap_turns": {
+            "title": "Capture Gap Turns",
+            "type": "integer"
+          },
+          "computer_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computer Mode"
+          },
+          "computer_ready_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computer Ready At"
+          },
+          "computer_ready_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computer Ready Ms"
+          },
+          "computer_requested_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computer Requested At"
+          },
+          "computer_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computer Status"
+          },
+          "computer_timing_status": {
+            "title": "Computer Timing Status",
+            "type": "string"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cost Models",
+            "type": "array"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "dispatch_attempt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatch Attempt Id"
+          },
+          "dispatch_route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatch Route"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "first_dispatch_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Dispatch At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "legacy_turns": {
+            "title": "Legacy Turns",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "priced",
+              "partial",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "queue_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Ms"
+          },
+          "queue_pickup_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Pickup Ms"
+          },
+          "queue_timing_status": {
+            "title": "Queue Timing Status",
+            "type": "string"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "startup_timing_status": {
+            "title": "Startup Timing Status",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timing_observed": {
+            "title": "Timing Observed",
+            "type": "boolean"
+          },
+          "timing_start_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timing Start Source"
+          },
+          "timing_surface": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timing Surface"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "total_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Ms"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "unknown_request_turns": {
+            "title": "Unknown Request Turns",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "usage_role": {
+            "enum": [
+              "steering_input",
+              "inference_turn"
+            ],
+            "title": "Usage Role",
+            "type": "string"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          },
+          "worker_picked_up_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Picked Up At"
+          },
+          "worker_to_broker_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker To Broker Ms"
+          }
+        },
+        "required": [
+          "requests",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "cost_usd",
+          "cost_usd_exact",
+          "priced_requests",
+          "unpriced_requests",
+          "cost_coverage",
+          "pricing_status",
+          "legacy_turns",
+          "unknown_request_turns",
+          "capture_gap_turns",
+          "token_samples",
+          "usage_samples",
+          "token_coverage",
+          "timing_observed",
+          "timing_start_source",
+          "timing_surface",
+          "api_received_at",
+          "worker_picked_up_at",
+          "broker_received_at",
+          "first_dispatch_at",
+          "dispatch_attempt_id",
+          "dispatch_route",
+          "api_to_dispatch_ms",
+          "queue_pickup_ms",
+          "broker_preparation_ms",
+          "api_to_worker_ms",
+          "worker_to_broker_ms",
+          "broker_to_dispatch_ms",
+          "computer_requested_at",
+          "computer_ready_at",
+          "computer_mode",
+          "computer_status",
+          "computer_ready_ms",
+          "startup_timing_status",
+          "queue_timing_status",
+          "broker_timing_status",
+          "computer_timing_status",
+          "id",
+          "user_id",
+          "model",
+          "status",
+          "cost_models",
+          "usage_role",
+          "created_at",
+          "accepted_at",
+          "finished_at",
+          "tool_calls",
+          "queue_ms",
+          "latency_ms",
+          "total_ms"
+        ],
+        "title": "AnalyticsTurn",
+        "type": "object"
+      },
+      "AnalyticsUserAggregate": {
+        "description": "A per-user row. Unified billing can add spend-only rows without activity.",
+        "properties": {
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write Tokens"
+          },
+          "capture_gap_turns": {
+            "title": "Capture Gap Turns",
+            "type": "integer"
+          },
+          "completed": {
+            "title": "Completed",
+            "type": "integer"
+          },
+          "cost_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Coverage"
+          },
+          "cost_per_merged_pr_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Merged Pr Usd"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "cost_usd_exact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd Exact"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "latency_samples": {
+            "title": "Latency Samples",
+            "type": "integer"
+          },
+          "legacy_turns": {
+            "title": "Legacy Turns",
+            "type": "integer"
+          },
+          "mean_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Latency Ms"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "p50_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Latency Ms"
+          },
+          "p95_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Latency Ms"
+          },
+          "pr_status_counts": {
+            "$ref": "#/components/schemas/AnalyticsPRStatusCounts"
+          },
+          "pr_status_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Status Coverage"
+          },
+          "priced_requests": {
+            "title": "Priced Requests",
+            "type": "integer"
+          },
+          "priced_turns": {
+            "title": "Priced Turns",
+            "type": "integer"
+          },
+          "pricing_status": {
+            "enum": [
+              "priced",
+              "partial",
+              "unpriced",
+              "empty"
+            ],
+            "title": "Pricing Status",
+            "type": "string"
+          },
+          "prs_closed": {
+            "title": "Prs Closed",
+            "type": "integer"
+          },
+          "prs_created": {
+            "title": "Prs Created",
+            "type": "integer"
+          },
+          "prs_draft": {
+            "title": "Prs Draft",
+            "type": "integer"
+          },
+          "prs_merged": {
+            "title": "Prs Merged",
+            "type": "integer"
+          },
+          "prs_merged_current": {
+            "title": "Prs Merged Current",
+            "type": "integer"
+          },
+          "prs_open": {
+            "title": "Prs Open",
+            "type": "integer"
+          },
+          "prs_unknown": {
+            "title": "Prs Unknown",
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Tokens"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "sessions_active": {
+            "title": "Sessions Active",
+            "type": "integer"
+          },
+          "sessions_created": {
+            "title": "Sessions Created",
+            "type": "integer"
+          },
+          "token_coverage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Coverage"
+          },
+          "token_samples": {
+            "title": "Token Samples",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens"
+          },
+          "turns": {
+            "title": "Turns",
+            "type": "integer"
+          },
+          "unknown_request_turns": {
+            "title": "Unknown Request Turns",
+            "type": "integer"
+          },
+          "unknown_requests": {
+            "title": "Unknown Requests",
+            "type": "integer"
+          },
+          "unpriced_requests": {
+            "title": "Unpriced Requests",
+            "type": "integer"
+          },
+          "unpriced_turns": {
+            "title": "Unpriced Turns",
+            "type": "integer"
+          },
+          "usage_samples": {
+            "title": "Usage Samples",
+            "type": "integer"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "title": "AnalyticsUserAggregate",
+        "type": "object"
+      },
       "ApprovalReply": {
         "properties": {
           "answers": {
@@ -10857,6 +13362,741 @@
         "title": "SessionWorkspace",
         "type": "object"
       },
+      "SettingsAccount": {
+        "properties": {
+          "auth_version": {
+            "title": "Auth Version",
+            "type": "integer"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "role",
+          "enabled",
+          "auth_version"
+        ],
+        "title": "SettingsAccount",
+        "type": "object"
+      },
+      "SettingsAccountList": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/SettingsCrudCapabilities"
+          },
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsAccount"
+            },
+            "title": "Users",
+            "type": "array"
+          }
+        },
+        "required": [
+          "users",
+          "capabilities"
+        ],
+        "title": "SettingsAccountList",
+        "type": "object"
+      },
+      "SettingsAutomation": {
+        "properties": {
+          "connections": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Connections",
+            "type": "array"
+          },
+          "editable": {
+            "title": "Editable",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "interval_minutes": {
+            "title": "Interval Minutes",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prompt",
+          "session_id",
+          "model",
+          "connections",
+          "interval_minutes",
+          "paused",
+          "state",
+          "updated_at",
+          "editable"
+        ],
+        "title": "SettingsAutomation",
+        "type": "object"
+      },
+      "SettingsAutomationCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "execution_backend": {
+            "const": "temporal",
+            "title": "Execution Backend",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "run": {
+            "title": "Run",
+            "type": "boolean"
+          },
+          "runtime_available": {
+            "title": "Runtime Available",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "create",
+          "update",
+          "delete",
+          "run",
+          "runtime_available",
+          "execution_backend",
+          "reason"
+        ],
+        "title": "SettingsAutomationCapabilities",
+        "type": "object"
+      },
+      "SettingsAutomationList": {
+        "properties": {
+          "automations": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsAutomation"
+            },
+            "title": "Automations",
+            "type": "array"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/SettingsAutomationCapabilities"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "automations",
+          "capabilities",
+          "reason"
+        ],
+        "title": "SettingsAutomationList",
+        "type": "object"
+      },
+      "SettingsAutomationLog": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          }
+        },
+        "required": [
+          "id",
+          "turn_id",
+          "status",
+          "created_at"
+        ],
+        "title": "SettingsAutomationLog",
+        "type": "object"
+      },
+      "SettingsAutomationLogs": {
+        "properties": {
+          "logs": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsAutomationLog"
+            },
+            "title": "Logs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "logs"
+        ],
+        "title": "SettingsAutomationLogs",
+        "type": "object"
+      },
+      "SettingsCrudCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "create",
+          "update",
+          "delete"
+        ],
+        "title": "SettingsCrudCapabilities",
+        "type": "object"
+      },
+      "SettingsDeleted": {
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "title": "SettingsDeleted",
+        "type": "object"
+      },
+      "SettingsEngine": {
+        "properties": {
+          "agent": {
+            "title": "Agent",
+            "type": "string"
+          },
+          "durability": {
+            "title": "Durability",
+            "type": "string"
+          },
+          "harness": {
+            "title": "Harness",
+            "type": "string"
+          },
+          "sandbox": {
+            "title": "Sandbox",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent",
+          "harness",
+          "durability",
+          "sandbox"
+        ],
+        "title": "SettingsEngine",
+        "type": "object"
+      },
+      "SettingsMemoryFile": {
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "path",
+          "content",
+          "version",
+          "truncated"
+        ],
+        "title": "SettingsMemoryFile",
+        "type": "object"
+      },
+      "SettingsMemoryList": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/SettingsCrudCapabilities"
+          },
+          "default_namespace": {
+            "title": "Default Namespace",
+            "type": "string"
+          },
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsMemoryFile"
+            },
+            "title": "Memories",
+            "type": "array"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "namespaces": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsMemoryNamespace"
+            },
+            "title": "Namespaces",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "memories",
+          "namespaces",
+          "default_namespace",
+          "namespace",
+          "truncated",
+          "capabilities"
+        ],
+        "title": "SettingsMemoryList",
+        "type": "object"
+      },
+      "SettingsMemoryNamespace": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "title": "SettingsMemoryNamespace",
+        "type": "object"
+      },
+      "SettingsMemoryWrite": {
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "namespace",
+          "path",
+          "content",
+          "version"
+        ],
+        "title": "SettingsMemoryWrite",
+        "type": "object"
+      },
+      "SettingsOverview": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/SettingsOverviewCapabilities"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/SettingsEngine"
+          },
+          "user": {
+            "$ref": "#/components/schemas/SettingsOverviewUser"
+          }
+        },
+        "required": [
+          "user",
+          "counts",
+          "capabilities",
+          "engine"
+        ],
+        "title": "SettingsOverview",
+        "type": "object"
+      },
+      "SettingsOverviewCapabilities": {
+        "properties": {
+          "automations": {
+            "$ref": "#/components/schemas/SettingsAutomationCapabilities"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/SettingsCrudCapabilities"
+          },
+          "performance": {
+            "title": "Performance",
+            "type": "boolean"
+          },
+          "secrets": {
+            "$ref": "#/components/schemas/SettingsSecretCapabilities"
+          },
+          "skills": {
+            "$ref": "#/components/schemas/SettingsSharedCapabilities"
+          },
+          "usage": {
+            "title": "Usage",
+            "type": "boolean"
+          },
+          "users": {
+            "title": "Users",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "skills",
+          "memory",
+          "secrets",
+          "automations",
+          "users",
+          "performance",
+          "usage"
+        ],
+        "title": "SettingsOverviewCapabilities",
+        "type": "object"
+      },
+      "SettingsOverviewUser": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "title": "SettingsOverviewUser",
+        "type": "object"
+      },
+      "SettingsSecret": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "editable": {
+            "title": "Editable",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "personal",
+              "shared"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "scope",
+          "editable",
+          "updated_at"
+        ],
+        "title": "SettingsSecret",
+        "type": "object"
+      },
+      "SettingsSecretCapabilities": {
+        "properties": {
+          "agent_access": {
+            "title": "Agent Access",
+            "type": "boolean"
+          },
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "shared": {
+            "title": "Shared",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "create",
+          "update",
+          "delete",
+          "shared",
+          "agent_access"
+        ],
+        "title": "SettingsSecretCapabilities",
+        "type": "object"
+      },
+      "SettingsSecretList": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/SettingsSecretCapabilities"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsSecret"
+            },
+            "title": "Secrets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "secrets",
+          "capabilities",
+          "reason"
+        ],
+        "title": "SettingsSecretList",
+        "type": "object"
+      },
+      "SettingsSharedCapabilities": {
+        "properties": {
+          "create": {
+            "title": "Create",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "shared": {
+            "title": "Shared",
+            "type": "boolean"
+          },
+          "update": {
+            "title": "Update",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "create",
+          "update",
+          "delete",
+          "shared"
+        ],
+        "title": "SettingsSharedCapabilities",
+        "type": "object"
+      },
+      "SettingsSkill": {
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "editable": {
+            "title": "Editable",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "personal",
+              "shared",
+              "bundled"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "content",
+          "scope",
+          "enabled",
+          "editable",
+          "updated_at"
+        ],
+        "title": "SettingsSkill",
+        "type": "object"
+      },
+      "SettingsSkillList": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/SettingsSharedCapabilities"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsSkill"
+            },
+            "title": "Skills",
+            "type": "array"
+          }
+        },
+        "required": [
+          "skills",
+          "capabilities"
+        ],
+        "title": "SettingsSkillList",
+        "type": "object"
+      },
       "SignInStart": {
         "properties": {
           "return_to": {
@@ -17776,12 +21016,14 @@
     },
     "/api/settings/automations": {
       "get": {
-        "operationId": "automations_api_settings_automations_get",
+        "operationId": "listSettingsAutomations",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAutomationList"
+                }
               }
             },
             "description": "Successful Response"
@@ -17793,7 +21035,7 @@
         ]
       },
       "post": {
-        "operationId": "create_automation_api_settings_automations_post",
+        "operationId": "createSettingsAutomation",
         "requestBody": {
           "content": {
             "application/json": {
@@ -17808,7 +21050,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAutomation"
+                }
               }
             },
             "description": "Successful Response"
@@ -17832,7 +21076,7 @@
     },
     "/api/settings/automations/{identity}": {
       "delete": {
-        "operationId": "delete_automation_api_settings_automations__identity__delete",
+        "operationId": "deleteSettingsAutomation",
         "parameters": [
           {
             "in": "path",
@@ -17848,7 +21092,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsDeleted"
+                }
               }
             },
             "description": "Successful Response"
@@ -17870,7 +21116,7 @@
         ]
       },
       "patch": {
-        "operationId": "edit_automation_api_settings_automations__identity__patch",
+        "operationId": "updateSettingsAutomation",
         "parameters": [
           {
             "in": "path",
@@ -17896,7 +21142,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAutomation"
+                }
               }
             },
             "description": "Successful Response"
@@ -17920,7 +21168,7 @@
     },
     "/api/settings/automations/{identity}/logs": {
       "get": {
-        "operationId": "automation_logs_api_settings_automations__identity__logs_get",
+        "operationId": "listSettingsAutomationLogs",
         "parameters": [
           {
             "in": "path",
@@ -17936,7 +21184,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAutomationLogs"
+                }
               }
             },
             "description": "Successful Response"
@@ -18173,12 +21423,14 @@
     },
     "/api/settings/general": {
       "get": {
-        "operationId": "general_api_settings_general_get",
+        "operationId": "getSettingsGeneral",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralPreferences-Output"
+                }
               }
             },
             "description": "Successful Response"
@@ -18190,7 +21442,7 @@
         ]
       },
       "patch": {
-        "operationId": "update_general_api_settings_general_patch",
+        "operationId": "updateSettingsGeneral",
         "requestBody": {
           "content": {
             "application/json": {
@@ -18205,7 +21457,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GeneralPreferences-Output"
+                }
               }
             },
             "description": "Successful Response"
@@ -18229,7 +21483,7 @@
     },
     "/api/settings/memory": {
       "delete": {
-        "operationId": "delete_memory_api_settings_memory_delete",
+        "operationId": "deleteSettingsMemory",
         "parameters": [
           {
             "in": "query",
@@ -18277,7 +21531,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsDeleted"
+                }
               }
             },
             "description": "Successful Response"
@@ -18299,7 +21555,7 @@
         ]
       },
       "get": {
-        "operationId": "memory_api_settings_memory_get",
+        "operationId": "listSettingsMemory",
         "parameters": [
           {
             "in": "query",
@@ -18322,7 +21578,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsMemoryList"
+                }
               }
             },
             "description": "Successful Response"
@@ -18344,7 +21602,7 @@
         ]
       },
       "put": {
-        "operationId": "write_memory_api_settings_memory_put",
+        "operationId": "writeSettingsMemory",
         "parameters": [
           {
             "in": "query",
@@ -18387,7 +21645,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsMemoryWrite"
+                }
               }
             },
             "description": "Successful Response"
@@ -18411,12 +21671,14 @@
     },
     "/api/settings/overview": {
       "get": {
-        "operationId": "overview_api_settings_overview_get",
+        "operationId": "getSettingsOverview",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOverview"
+                }
               }
             },
             "description": "Successful Response"
@@ -18430,7 +21692,7 @@
     },
     "/api/settings/performance": {
       "get": {
-        "operationId": "report_api_settings_performance_get",
+        "operationId": "getSettingsPerformance",
         "parameters": [
           {
             "in": "query",
@@ -18589,8 +21851,11 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
-              }
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsReport"
+                }
+              },
+              "text/csv": {}
             },
             "description": "Successful Response"
           },
@@ -18613,12 +21878,14 @@
     },
     "/api/settings/secrets": {
       "get": {
-        "operationId": "secrets_api_settings_secrets_get",
+        "operationId": "listSettingsSecrets",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSecretList"
+                }
               }
             },
             "description": "Successful Response"
@@ -18630,7 +21897,7 @@
         ]
       },
       "post": {
-        "operationId": "create_secret_api_settings_secrets_post",
+        "operationId": "createSettingsSecret",
         "requestBody": {
           "content": {
             "application/json": {
@@ -18645,7 +21912,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSecret"
+                }
               }
             },
             "description": "Successful Response"
@@ -18669,7 +21938,7 @@
     },
     "/api/settings/secrets/{identity}": {
       "delete": {
-        "operationId": "delete_secret_api_settings_secrets__identity__delete",
+        "operationId": "deleteSettingsSecret",
         "parameters": [
           {
             "in": "path",
@@ -18685,7 +21954,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsDeleted"
+                }
               }
             },
             "description": "Successful Response"
@@ -18707,7 +21978,7 @@
         ]
       },
       "patch": {
-        "operationId": "edit_secret_api_settings_secrets__identity__patch",
+        "operationId": "updateSettingsSecret",
         "parameters": [
           {
             "in": "path",
@@ -18733,7 +22004,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSecret"
+                }
               }
             },
             "description": "Successful Response"
@@ -18757,12 +22030,14 @@
     },
     "/api/settings/skills": {
       "get": {
-        "operationId": "skills_api_settings_skills_get",
+        "operationId": "listSettingsSkills",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSkillList"
+                }
               }
             },
             "description": "Successful Response"
@@ -18774,7 +22049,7 @@
         ]
       },
       "post": {
-        "operationId": "create_skill_api_settings_skills_post",
+        "operationId": "createSettingsSkill",
         "requestBody": {
           "content": {
             "application/json": {
@@ -18789,7 +22064,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -18813,7 +22090,7 @@
     },
     "/api/settings/skills/{identity}": {
       "delete": {
-        "operationId": "delete_skill_api_settings_skills__identity__delete",
+        "operationId": "deleteSettingsSkill",
         "parameters": [
           {
             "in": "path",
@@ -18829,7 +22106,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsDeleted"
+                }
               }
             },
             "description": "Successful Response"
@@ -18851,7 +22130,7 @@
         ]
       },
       "patch": {
-        "operationId": "edit_skill_api_settings_skills__identity__patch",
+        "operationId": "updateSettingsSkill",
         "parameters": [
           {
             "in": "path",
@@ -18877,7 +22156,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -18901,7 +22182,7 @@
     },
     "/api/settings/usage": {
       "get": {
-        "operationId": "report_api_settings_usage_get",
+        "operationId": "getSettingsUsage",
         "parameters": [
           {
             "in": "query",
@@ -19060,8 +22341,11 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
-              }
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsReport"
+                }
+              },
+              "text/csv": {}
             },
             "description": "Successful Response"
           },
@@ -19084,12 +22368,14 @@
     },
     "/api/settings/users": {
       "get": {
-        "operationId": "users_api_settings_users_get",
+        "operationId": "listSettingsUsers",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAccountList"
+                }
               }
             },
             "description": "Successful Response"
@@ -19101,7 +22387,7 @@
         ]
       },
       "post": {
-        "operationId": "create_user_api_settings_users_post",
+        "operationId": "createSettingsUser",
         "requestBody": {
           "content": {
             "application/json": {
@@ -19116,7 +22402,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAccount"
+                }
               }
             },
             "description": "Successful Response"
@@ -19178,7 +22466,7 @@
     },
     "/api/settings/users/{identity}": {
       "delete": {
-        "operationId": "delete_user_api_settings_users__identity__delete",
+        "operationId": "deleteSettingsUser",
         "parameters": [
           {
             "in": "path",
@@ -19194,7 +22482,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAccount"
+                }
               }
             },
             "description": "Successful Response"
@@ -19216,7 +22506,7 @@
         ]
       },
       "patch": {
-        "operationId": "edit_user_api_settings_users__identity__patch",
+        "operationId": "updateSettingsUser",
         "parameters": [
           {
             "in": "path",
@@ -19242,7 +22532,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsAccount"
+                }
               }
             },
             "description": "Successful Response"

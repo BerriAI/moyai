@@ -275,6 +275,8 @@ async def test_report_uses_ledger_without_double_counting_zero_fills_and_exports
             assert "PRIVATE_" not in exported.text
         model_csv = await client.get("/api/settings/usage", params={**params, "format": "csv", "export": "models"})
         assert "'=UNSAFE" in model_csv.text
+    # The AnalyticsReport response model neither drops nor adds keys.
+    assert value == json.loads(json.dumps(await report(runtime, actor, START, END, None, None, None, 1, 0, "json")))
 
 
 async def test_receipt_cohorts_merge_dates_private_credentials_and_session_correlated_cost(runtime, actor):
