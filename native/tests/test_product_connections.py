@@ -65,7 +65,7 @@ def test_slack_oauth_retains_existing_scope_contract(bridge, bot, identity_linki
         assert 'scope' not in params
         return
     expected = {
-        'app_mentions:read', 'chat:write', 'im:write', 'im:history', 'reactions:read',
+        'app_mentions:read', 'chat:write', 'chat:write.customize', 'im:write', 'im:history', 'reactions:read',
         'reactions:write', 'assistant:write', 'files:write', 'files:read',
     }
     if identity_linking:

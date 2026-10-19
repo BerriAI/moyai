@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
@@ -19,7 +19,7 @@ members = [
 [[package]]
 name = "agentchat"
 version = "0.1.0a1"
-source = { git = "https://github.com/BerriAI/agentchat.git?rev=611d544cd1f8ba226468abcaad81df9160a30627#611d544cd1f8ba226468abcaad81df9160a30627" }
+source = { git = "https://github.com/BerriAI/agentchat.git?rev=6985d192b3ba4f3d1cc77379c4e0354078b8a8a7#6985d192b3ba4f3d1cc77379c4e0354078b8a8a7" }
 dependencies = [
     { name = "aiohttp" },
     { name = "slack-sdk" },
@@ -1873,7 +1873,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=611d544cd1f8ba226468abcaad81df9160a30627" },
+    { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=6985d192b3ba4f3d1cc77379c4e0354078b8a8a7" },
     { name = "aiosqlite", specifier = ">=0.20,<1" },
     { name = "asyncpg", specifier = ">=0.30,<1" },
     { name = "boto3", specifier = ">=1.43,<2" },
@@ -3636,8 +3636,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'win32'" },
-    { name = "jeepney", marker = "sys_platform != 'win32'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
