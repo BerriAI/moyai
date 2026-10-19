@@ -110,7 +110,14 @@ class SlackFileDelivery:
             file_content = base64.b64decode(encoded_content, validate=True)
 
         async def request(api_method: str, payload: dict[str, object]) -> dict[str, object]:
-            response = await client.post(api_method, headers=headers, json=payload)
+            if api_method == "files.getUploadURLExternal":
+                response = await client.post(
+                    api_method,
+                    headers=headers,
+                    data={key: str(value) for key, value in payload.items()},
+                )
+            else:
+                response = await client.post(api_method, headers=headers, json=payload)
             response.raise_for_status()
             result: object = response.json()
             if not isinstance(result, dict):
