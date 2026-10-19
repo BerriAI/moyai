@@ -59,6 +59,22 @@ def transport():
     return requests, messages, handle
 
 
+async def replies_without_web_inputs(runtime, turn_id, messages):
+    async with runtime.database.sessions() as db:
+        turn = await db.get(Turn, turn_id)
+        delivery_ids = set(await db.scalars(select(Delivery.id).where(
+            Delivery.session_id == turn.session_id,
+            Delivery.identity.like("product-slack:%:web-input:%"),
+        )))
+
+    def is_web_input(message):
+        metadata = message.get("metadata")
+        payload = metadata.get("event_payload") if isinstance(metadata, dict) else None
+        return isinstance(payload, dict) and payload.get("id") in delivery_ids
+
+    return [message for message in messages.values() if not is_web_input(message)]
+
+
 @pytest.mark.parametrize("product", [False, True])
 async def test_one_reply_is_edited_from_progress_to_final(runtime, active, slack, product):
     await bind(slack, active)
@@ -250,7 +266,7 @@ async def test_product_saving_is_silent_until_completion(runtime, active, slack)
             expected = "Inspecting the relevant code." if status == "saving" else "Final verdict."
             assert next(iter(messages.values()))["text"].startswith(expected)
     assert len(messages) == 2 and len(requests) == 3  # The original web input is mirrored once.
-    assert sum("(from Moyai)" in message["text"] for message in messages.values()) == 1
+    assert len(await replies_without_web_inputs(runtime, active[1].id, messages)) == 1
 
 
 @pytest.mark.parametrize("product", [False, True])

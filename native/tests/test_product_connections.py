@@ -4,7 +4,7 @@ import asyncio
 import json
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
@@ -14,10 +14,11 @@ from app.security import Security
 from fastapi import HTTPException
 from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
 from test_product_identity import settings_for
 
 from moyai.contracts import RunScope
-from moyai.product_connections import ProductConnections
+from moyai.product_connections import ProductConnections, ProductGitHubToolset
 
 
 @pytest.fixture
@@ -65,7 +66,7 @@ def test_slack_oauth_retains_existing_scope_contract(bridge, bot, identity_linki
         assert 'scope' not in params
         return
     expected = {
-        'app_mentions:read', 'chat:write', 'im:write', 'im:history', 'reactions:read',
+        'app_mentions:read', 'chat:write', 'chat:write.customize', 'im:write', 'im:history', 'reactions:read',
         'reactions:write', 'assistant:write', 'files:write', 'files:read',
     }
     if identity_linking:
@@ -78,6 +79,46 @@ def test_slack_oauth_retains_existing_scope_contract(bridge, bot, identity_linki
 async def scope_for(bridge, kind):
     grants = await bridge.resolve_grants("google:owner", [kind])
     return RunScope("native-session", "native-turn", "google:owner", "test", grants)
+
+
+@pytest.mark.parametrize("provider", ["github", "linear", "notion", "slack"])
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_canonical_definitions_do_not_depend_on_turn_identity(bridge, monkeypatch, provider, read_only):
+    if provider == "github":
+        credentials = github_accounts(bridge, 1)
+        bridge.connectors.github.remember_repository(
+            {"id": 1, "full_name": "org/repository", "owner": {"id": 1}}, credentials,
+        )
+
+        async def native(self, *, write=False):
+            tools = FunctionToolset(id="github-provider")
+            tools.add_function(
+                lambda owner, repo: None, name="get_repository",
+                metadata={"annotations": {"readOnlyHint": True}},
+            )
+            return tools
+
+        monkeypatch.setattr(ProductGitHubToolset, "_native", native)
+    else:
+        save(bridge, provider)
+    bridge.store.execute(
+        "INSERT INTO connection_policies(provider,enabled,read_only) VALUES(?,1,?) "
+        "ON CONFLICT(provider) DO UPDATE SET read_only=excluded.read_only",
+        (provider, int(read_only)),
+    )
+    first = await scope_for(bridge, provider)
+    second = replace(first, turn_id="another-turn")
+    definitions = []
+    for scope in (first, second):
+        ctx = RunContext(deps=scope, model=TestModel(), usage=RunUsage())
+        async with bridge.toolset(scope, scope.grants[0]) as tools:
+            values = await tools.get_tools(ctx)
+            assert values
+            assert all(tool.args_validator_func is None for tool in values.values())
+            definitions.append({
+                name: (asdict(tool.tool_def), tool.max_retries) for name, tool in values.items()
+            })
+    assert definitions[0] == definitions[1]
 
 
 async def test_connector_check_reuses_current_native_grants_and_compares_full_policy(bridge, monkeypatch):

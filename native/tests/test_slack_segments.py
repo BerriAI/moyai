@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 from test_product_slack import bind
 from test_slack_progress import bridge as canonical_bridge
-from test_slack_progress import queued, transport
+from test_slack_progress import queued, replies_without_web_inputs, transport
 from test_slack_progress import slack as canonical_slack
 
 from moyai.commentary import Commentary
@@ -67,7 +67,7 @@ async def test_steering_freezes_previous_slot_and_final_replaces_new_slot(runtim
         }])
         await stage_progress(runtime, product=product)
         await pending(runtime, deliver, client)
-        replies = [message for message in messages.values() if "(from Moyai)" not in message["text"]]
+        replies = await replies_without_web_inputs(runtime, active[1].id, messages)
         assert len(replies) == 2
         assert len(messages) == 2
         assert messages[earlier_ts]["text"] == "Checking the file."
@@ -80,7 +80,7 @@ async def test_steering_freezes_previous_slot_and_final_replaces_new_slot(runtim
         else:
             await stage_deliveries(runtime)
         await pending(runtime, deliver, client)
-        replies = [message for message in messages.values() if "(from Moyai)" not in message["text"]]
+        replies = await replies_without_web_inputs(runtime, active[1].id, messages)
         assert len(replies) == 2
         assert len(messages) == (4 if product else 2)
         assert messages[earlier_ts]["text"] == "Checking the file."
@@ -181,7 +181,7 @@ async def test_fast_final_after_steering_posts_once_without_touching_previous_sl
         await pending(runtime, deliver, client)
         assert len(messages) == (4 if product else 2)
         assert next(iter(messages.values()))["text"] == "Preserved progress."
-        replies = [message for message in messages.values() if "(from Moyai)" not in message["text"]]
+        replies = await replies_without_web_inputs(runtime, active[1].id, messages)
         assert len(replies) == 2
         final = replies[-1]
         assert "useful results" in final["text"]

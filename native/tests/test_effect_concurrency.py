@@ -210,7 +210,7 @@ async def qualify_parallel_children(runtime, active, *, legacy=False):
 
 
 @pytest.mark.parametrize("complete_first", [False, True])
-async def test_cancel_retains_uncertain_effect_and_admits_independent_turn(runtime, active, complete_first):
+async def test_cancel_waiting_children_preserves_evidence_and_allows_follow_up(runtime, active, complete_first):
     session, turn, prepared = active
     scenario = ParallelChildren(complete_first=complete_first)
     # Isolate tool lifecycle cancellation from the SDK's streamed-event teardown.
@@ -255,6 +255,9 @@ async def test_cancel_retains_uncertain_effect_and_admits_independent_turn(runti
     settled = await effect_rows(runtime, session.id)
     assert [row.state for row in settled] == [*expected[:-1], "failed"]
     assert all(row.id == old.id for row, old in zip(settled, rows, strict=True))
+    assert [(row.arguments, row.fingerprint, row.resolution) for row in settled] == [
+        (row.arguments, row.fingerprint, row.resolution) for row in rows
+    ]
     assert settled[-1].settled_at is not None
     assert (
         settled[-1].id, settled[-1].session_id, settled[-1].turn_id, settled[-1].actor_id,
@@ -272,6 +275,7 @@ async def test_cancel_retains_uncertain_effect_and_admits_independent_turn(runti
     await receipts.reserve(admitted.scope, "independent-after-cancel", "shell", {"child": 99})
     final = await effect_rows(runtime, session.id)
     assert [row.state for row in final] == [*expected[:-1], "failed", "pending"]
+    assert [row.id for row in final] == [*[row.id for row in rows], "independent-after-cancel"]
     assert final[-1].id == "independent-after-cancel" and final[-1].turn_id == following.id
     assert final[-2].settled_at == settled[-1].settled_at
     await Replayer(

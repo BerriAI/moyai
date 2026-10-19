@@ -169,8 +169,8 @@ async function handle(req,res,next) {
     if(req.method==='PATCH') {
       if(state.holdPreference&&(data.pinned!==undefined||data.folder!==undefined))await state.holdPreference;
       if(state.preferenceError&&(data.pinned!==undefined||data.folder!==undefined))return json({detail:'Could not save sidebar preference.'},503);
-      if(state.holdRename)await state.holdRename;
-      if(state.renameError)return json({detail:'Could not save the session name.'},503);
+      if(state.holdRename&&data.title!==undefined)await state.holdRename;
+      if(state.renameError||state.renameErrors?.includes(data.title))return json({detail:'Could not save the session name.'},503);
       const id=url.pathname.split('/')[3];
       if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
       if(data.pinned!==undefined||data.folder!==undefined) {
@@ -337,12 +337,7 @@ async function clickSidebarPin(page, name) {
   await page.getByRole('button',{name,exact:true}).click({timeout:5000});
 }
 
-async function groupSidebarByFolder(page) {
-  await page.getByRole('combobox',{name:'Group conversations',exact:true}).click();
-  await page.getByRole('option',{name:'By folder',exact:true}).click();
-}
-
-test('status groups reflect current work and keep filed, pinned and participated sessions reachable once',async t=>{
+test('Recent and Participated list sessions once with status and PR metadata',async t=>{
   reset({status:'idle',folders:[{id:'today',name:'Today'}]});
   const waiting='waiting',working='working',review='review',draft='draft',shared='shared',hidden='hidden',child='child';
   state.inventoryRows=[
@@ -358,24 +353,51 @@ test('status groups reflect current work and keep filed, pinned and participated
   const pr=(draft=false)=>({url:'https://github.com/example/project/pull/1',repository:'example/project',number:1,title:'Review the change',state:'open',draft,accessible:true});
   state.prStatuses={[review]:[pr()],[draft]:[pr(true)]};
   const page=await pageFor(t,'#');
-  const group=key=>page.locator(`[data-status-group="${key}"]`);
   const row=id=>page.locator(`[data-session-key="native:${id}"]`);
-  await group('in-review').locator(`[data-session-key="native:${review}"]`).waitFor();
-  assert.equal(await group('needs-you').locator(`[data-session-key="native:${waiting}"]`).isVisible(),true);
-  assert.equal(await group('needs-you').locator(`[data-session-key="native:${sessionId}"]`).isVisible(),true);
-  assert.equal(await group('in-progress').locator(`[data-session-key="native:${working}"]`).isVisible(),true);
-  for(const id of [draft,shared])assert.equal(await group('backlog').locator(`[data-session-key="native:${id}"]`).isVisible(),true);
+  assert.equal(await page.getByRole('combobox',{name:'Group conversations',exact:true}).count(),0);
+  for(const name of [/^Needs you(?:\s|$)/,/^In progress(?:\s|$)/,/^In review(?:\s|$)/,/^Backlog(?:\s|$)/]) {
+    assert.equal(await page.getByRole('button',{name}).count(),0);
+  }
+  const recent=page.getByRole('button',{name:/^Recent /}),participated=page.getByRole('button',{name:/^Participated /});
+  await recent.waitFor();await participated.waitFor();
+  assert.equal(await recent.getAttribute('aria-expanded'),'true');
+  assert.equal(await participated.getAttribute('aria-expanded'),'true');
+  const sectionNames=await page.locator('.session-group-toggle > span').allTextContents();
+  assert.ok(sectionNames.indexOf('Recent')<sectionNames.indexOf('Participated'));
+  const assertRecentAlignment=async target=>{
+    const heading=target.getByRole('button',{name:/^Recent /});
+    const label=heading.locator('span').filter({hasText:/^Recent$/});
+    const firstRow=target.locator('#sessions-recent > .session-branch > .session-row').first();
+    await firstRow.waitFor();
+    const toggle=firstRow.locator('.session-children-toggle');
+    const adornment=await toggle.count()?toggle:firstRow.locator('.session-bullet');
+    const [labelBox,titleBox,metaBox,headingIconBox,adornmentBox]=await Promise.all([
+      label.boundingBox(),
+      firstRow.locator('.session-title').boundingBox(),
+      firstRow.locator('.session-row-meta > .session-meta-item').first().boundingBox(),
+      heading.locator('.session-leading').boundingBox(),
+      adornment.boundingBox(),
+    ]);
+    const center=box=>box.x+box.width/2;
+    assert.ok(Math.abs(labelBox.x-titleBox.x)<=1,'Recent label aligns with session title');
+    assert.ok(Math.abs(labelBox.x-metaBox.x)<=1,'Recent label aligns with session metadata');
+    assert.ok(Math.abs(center(headingIconBox)-center(adornmentBox))<=1,'Recent icon aligns with row adornment');
+  };
+  await assertRecentAlignment(page);
+  const mobilePage=await pageFor(t,'#',320);
+  await mobilePage.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await assertRecentAlignment(mobilePage);
+  assert.equal(await page.locator('#sessions-participated').locator(`[data-session-key="native:${shared}"]`).isVisible(),true);
   assert.equal(await row(hidden).count(),0);
   for(const id of [sessionId,waiting,working,review,draft,shared,child])assert.equal(await row(id).count(),1);
-  await groupSidebarByFolder(page);
-  await page.getByRole('button',{name:/^Today /}).click();
-  assert.equal(await page.locator('#sessions-today').locator(`[data-session-key="native:${sessionId}"]`).isVisible(),true);
-  assert.equal(await row(sessionId).count(),1);
-  await page.getByRole('combobox',{name:'Group conversations',exact:true}).click();
-  await page.getByRole('option',{name:'By status',exact:true}).click();
+  await page.getByRole('button',{name:/^Pinned /}).click();
+  const reviewMeta=row(review).locator('.session-row-meta');
+  await reviewMeta.getByText('PR ready',{exact:true}).waitFor();
+  assert.equal((await reviewMeta.innerText()).includes('ago'),false);
+  assert.equal(await row(waiting).locator('.session-row-meta').innerText(),'Needs input');
   state.inventoryRows.find(item=>item.id===waiting).status='running';
   await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
-  await group('in-progress').locator(`[data-session-key="native:${waiting}"]`).waitFor();
+  await row(waiting).locator('.session-row-meta').getByText('Running',{exact:true}).waitFor();
   assert.equal(await row(waiting).count(),1);
 });
 
@@ -394,15 +416,14 @@ function sidebarDefaultsFixture() {
   return child;
 }
 
-for(const width of [1440,768,320])test(`sidebar starts with status groups open and keeps child routes collapsed at ${width}px`,async t=>{
+for(const width of [1440,768,320])test(`sidebar defaults to Recent and Participated open and keeps child routes collapsed at ${width}px`,async t=>{
   const child=sidebarDefaultsFixture();
   const page=await pageFor(t,'#',width);
   if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
-  for(const name of [/^Needs you /,/^In progress /,/^In review /,/^Backlog /]) {
+  for(const name of [/^Recent /,/^Participated /]) {
     const group=page.getByRole('button',{name});await group.waitFor();
     assert.equal(await group.getAttribute('aria-expanded'),'true');
   }
-  assert.equal(await page.getByRole('button',{name:/^Recent /}).count(),0);
   assert.equal(await page.locator('[data-session-key]').count(),5);
   const expand=page.getByRole('button',{name:'Expand subagents for Current native work',exact:true});
   await expand.waitFor();
@@ -423,7 +444,6 @@ for(const width of [1440,768,320])test(`sidebar starts with status groups open a
 test('explicit sidebar expansion survives reload and polling without opening new branches',async t=>{
   sidebarDefaultsFixture();
   const page=await pageFor(t,'#');
-  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
   await page.getByRole('button',{name:/^Participated /}).click();
   await page.getByRole('button',{name:/^Today /}).click();
@@ -431,7 +451,7 @@ test('explicit sidebar expansion survives reload and polling without opening new
   await page.reload();
   await page.getByRole('button',{name:/^Today /}).waitFor();
   assert.equal(await page.getByRole('button',{name:/^Recent /}).getAttribute('aria-expanded'),'false');
-  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'true');
+  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'false');
   assert.equal(await page.getByRole('button',{name:/^Today /}).getAttribute('aria-expanded'),'true');
   await page.getByRole('button',{name:/^Recent /}).click();
   await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
@@ -456,11 +476,10 @@ for(const stored of ['legacy','malformed','unavailable'])test(`sidebar safely ad
       localStorage.setItem('moyai-subagents:another-user',JSON.stringify({version:1,expanded:['native:'+'a'.repeat(32)]}));
     }
   },stored));
-  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
   await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:/^Recent /}).getAttribute('aria-expanded'),'true');
-  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'false');
+  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'true');
 });
 
 test('background inventory refresh stays quiet while explicit pagination shows loading and recovers from failure',async t=>{
@@ -494,23 +513,23 @@ test('an empty sidebar shows initial loading but remains settled during later ba
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',inventoryRows:[],holds:{'/api/history/sessions':held}});
   const page=await pageFor(t,'#');
-  await page.locator('.session-list').getByText('Loading sessions…',{exact:true}).waitFor();
+  const recent=page.locator('#sessions-recent');
+  await recent.getByText('Loading sessions…',{exact:true}).waitFor();
   release();state.holds={};
-  await page.getByText('No sessions here yet.',{exact:true}).waitFor();
+  await recent.getByText('No sessions here yet.',{exact:true}).waitFor();
   let releaseRefresh;const refreshHeld=new Promise(resolve=>{releaseRefresh=resolve;});t.after(()=>releaseRefresh());
   state.holds={'/api/history/sessions':refreshHeld};
   const count=state.requests.filter(r=>r.path==='/api/history/sessions').length;
   await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
   await waitFor(()=>state.requests.filter(r=>r.path==='/api/history/sessions').length>count);
   assert.equal(await page.getByText('Loading sessions…',{exact:true}).count(),0);
-  assert.equal(await page.getByText('No sessions here yet.',{exact:true}).isVisible(),true);
+  assert.equal(await recent.getByText('No sessions here yet.',{exact:true}).isVisible(),true);
 });
 
 test('sidebar pin and unpin render before a held save without blocking other actions or refreshing catalogs',async t=>{
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',holdPreference:held});
   const page=await pageFor(t);
-  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
   const catalogReads=()=>state.requests.filter(row=>['/api/connections','/api/session-folders','/api/history/sessions'].includes(row.path)).length;
   const reads=catalogReads();
@@ -538,7 +557,6 @@ test('sidebar drag into and out of a folder renders while saves are held and pre
   reset({status:'idle',holdPreference:held,folders:[{id:'today',name:'Today'}],
     inventoryRows:[{...session(id),title:'Folder latency test',pinned:true,folder:'',source:'native'}]});
   const page=await pageFor(t,'#');
-  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:/^Pinned /}).click();
   const row=page.locator(`[data-session-key="native:${id}"]`);
   await row.waitFor();
@@ -561,7 +579,6 @@ test('a rejected sidebar save restores placement and shows an error',async t=>{
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',holdPreference:held,preferenceError:true});
   const page=await pageFor(t);
-  await groupSidebarByFolder(page);
   await clickSidebarPin(page,'Pin Current native work');
   await page.getByRole('button',{name:/^Pinned /}).click();
   await page.getByRole('button',{name:'Unpin Current native work',exact:true}).waitFor({timeout:500});
@@ -621,7 +638,7 @@ test('header editing cancels Escape, ignores blank and unchanged names, and reta
   assert.equal(renameRequests().length,0);
 });
 
-test('header draft survives polls and failed saves, and IME Enter does not commit',async t=>{
+test('header draft survives polls and IME input; failed saves roll back with an explicit retry',async t=>{
   reset({renameError:true});const page=await pageFor(t);const input=await editTitle(page);
   await input.fill('Keep this draft');
   const reads=()=>state.requests.filter(row=>row.path===`/api/sessions/${sessionId}`&&row.method==='GET').length;
@@ -631,9 +648,13 @@ test('header draft survives polls and failed saves, and IME Enter does not commi
   await input.dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
   assert.equal(renameRequests().length,0);
   await input.press('Enter');await page.getByRole('alert').filter({hasText:'Could not save the session name.'}).waitFor();
-  assert.equal(await input.inputValue(),'Keep this draft');
+  await input.waitFor({state:'hidden'});
+  assert.equal(await page.locator('.topbar h1').innerText(),'Background title');
+  assert.equal(await page.title(),'Background title · Moyai');
   state.renameError=false;
-  await input.press('Enter');await page.getByRole('button',{name:'Rename session: Keep this draft',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Retry rename',exact:true}).click();
+  await page.getByRole('button',{name:'Rename session: Keep this draft',exact:true}).waitFor();
+  await waitFor(()=>renameRequests().length===2);
   assert.equal(renameRequests().length,2);
 });
 
@@ -642,15 +663,88 @@ test('pending header save cannot be submitted twice or rename a newly opened ses
   t.after(()=>release());const page=await pageFor(t);const input=await editTitle(page);
   await input.fill('Saved on the first session');await input.press('Enter');
   await waitFor(()=>renameRequests().length===1,'pending title write');
-  await input.press('Enter');await input.press('Tab');
+  await page.getByRole('button',{name:'Rename session: Saved on the first session',exact:true}).waitFor({timeout:500});
+  await input.waitFor({state:'hidden'});
   assert.equal(renameRequests().length,1);
   await page.locator(`.session-row a[href="#${'c'.repeat(32)}"]`).click();
   await page.waitForURL('**/#'+'c'.repeat(32));
   await page.getByRole('button',{name:'Rename session: Current native work',exact:true}).waitFor();
   release();
   await waitFor(()=>state.titles?.[sessionId]==='Saved on the first session','original write committed');
-  await waitFor(()=>state.requests.filter(row=>row.path==='/api/history/sessions').length>1,'sidebar refreshed');
+  await page.locator(`.session-row a[href="#${sessionId}"]`).getByText('Saved on the first session',{exact:true}).waitFor();
   assert.equal(await page.locator('.topbar h1').innerText(),'Current native work');
+  assert.equal(state.titles?.['c'.repeat(32)],undefined);
+});
+
+for(const gesture of ['Enter','blur'])test(`header ${gesture} immediately updates every title while the write is held and does not refresh catalogs`,async t=>{
+  let release;reset({holdRename:new Promise(resolve=>{release=resolve;})});
+  t.after(()=>release());const page=await pageFor(t);const input=await editTitle(page);
+  await page.locator('.session-row.selected .session-title').waitFor();
+  const catalogs=()=>state.requests.filter(req=>['/api/history/sessions','/api/connections','/api/session-folders'].includes(req.path)).length;
+  const before=catalogs();
+  await input.fill('Immediate title');
+  if(gesture==='Enter')await input.press('Enter');
+  else await page.getByRole('textbox',{name:'Message Moyai',exact:true}).click();
+  await page.getByRole('button',{name:'Rename session: Immediate title',exact:true}).waitFor({timeout:500});
+  assert.equal(await page.title(),'Immediate title · Moyai');
+  assert.equal(await page.locator('.session-row.selected .session-title').innerText(),'Immediate title');
+  await waitFor(()=>renameRequests().length===1);
+  assert.equal(state.titles?.[sessionId],undefined,'the server has not saved yet');
+  assert.equal(catalogs(),before,'rename does not refetch the catalog');
+  release();
+  await waitFor(()=>state.titles?.[sessionId]==='Immediate title');
+  await page.getByRole('status').filter({hasText:'Session renamed.'}).waitFor();
+  assert.equal(catalogs(),before,'acknowledgment does not refetch the catalog either');
+});
+
+test('rapid header renames serialize and an earlier failure cannot undo or offer a retry over the newer name',async t=>{
+  let release;reset({holdRename:new Promise(resolve=>{release=resolve;}),renameErrors:['First name']});
+  t.after(()=>release());const page=await pageFor(t);
+  const first=await editTitle(page);await first.fill('First name');await first.press('Enter');
+  await page.getByRole('button',{name:'Rename session: First name',exact:true}).waitFor({timeout:500});
+  const second=await editTitle(page);await second.fill('Second name');await second.press('Enter');
+  await page.getByRole('button',{name:'Rename session: Second name',exact:true}).waitFor({timeout:500});
+  await waitFor(()=>renameRequests().length===1);
+  release();await waitFor(()=>state.titles?.[sessionId]==='Second name');
+  await page.getByRole('status').filter({hasText:'Session renamed.'}).waitFor();
+  assert.deepEqual(renameRequests().map(row=>row.body.title),['First name','Second name']);
+  assert.equal(await page.getByRole('button',{name:'Retry rename',exact:true}).count(),0);
+  assert.equal(await page.locator('.topbar h1').innerText(),'Second name');
+  assert.equal(await page.locator('.session-row.selected .session-title').innerText(),'Second name');
+  await page.reload();await page.getByRole('button',{name:'Rename session: Second name',exact:true}).waitFor();
+});
+
+test('a failed newer rename rolls header, sidebar and browser title back to the last acknowledged name',async t=>{
+  reset({renameErrors:['Rejected name']});const page=await pageFor(t);
+  const first=await editTitle(page);await first.fill('Saved name');await first.press('Enter');
+  await waitFor(()=>state.titles?.[sessionId]==='Saved name');
+  const second=await editTitle(page);await second.fill('Rejected name');await second.press('Enter');
+  await page.getByRole('button',{name:'Retry rename',exact:true}).waitFor();
+  assert.equal(await page.locator('.topbar h1').innerText(),'Saved name');
+  assert.equal(await page.locator('.session-row.selected .session-title').innerText(),'Saved name');
+  assert.equal(await page.title(),'Saved name · Moyai');
+  const third=await editTitle(page);await third.fill('New draft');
+  await third.press('Escape');
+  assert.equal(await page.locator('.topbar h1').innerText(),'Saved name');
+});
+
+test('a rename failure stays actionable after navigating away and editing another session',async t=>{
+  let release;reset({createdSession:true,holdRename:new Promise(resolve=>{release=resolve;}),renameErrors:['Rejected name']});
+  t.after(()=>release());const page=await pageFor(t);
+  const input=await editTitle(page);await input.fill('Rejected name');await input.press('Enter');
+  await waitFor(()=>renameRequests().length===1);
+  await page.locator(`.session-row a[href="#${'c'.repeat(32)}"]`).click();
+  await page.waitForURL('**/#'+'c'.repeat(32));
+  await page.getByRole('button',{name:'Session actions',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Pin',exact:true}).click();
+  await page.getByRole('status').filter({hasText:'Session pinned.'}).waitFor();
+  release();
+  await page.getByRole('button',{name:'Retry rename',exact:true}).waitFor();
+  assert.match(await page.locator('.action-toast[role="alert"]').innerText(),/Rejected name/);
+  assert.equal(await page.locator('.topbar h1').innerText(),'Current native work');
+  state.renameErrors=[];
+  await page.getByRole('button',{name:'Retry rename',exact:true}).click();
+  await waitFor(()=>state.titles?.[sessionId]==='Rejected name');
   assert.equal(state.titles?.['c'.repeat(32)],undefined);
 });
 
@@ -878,7 +972,10 @@ for(const width of [1440,768,320])test(`home keeps the draft and controls reacha
   // fill('') can race its selection listener and leave the old draft intact.
   await input.press('ControlOrMeta+A');
   await input.press('Backspace');
+  assert.equal(await input.textContent(),'');
   await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'visible'});
+  assert.equal(await page.getByRole('button',{name:'Review code',exact:true}).isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
 });
 
 for(const [label,prompt] of [
@@ -935,15 +1032,17 @@ for(const width of [1440,320])test(`selected chat keeps its highlight while acti
 test('sidebar PR icons retain multi-PR selection without numeric badges',async t=>{
   const pr=(number,state)=>({url:`https://github.com/example/project/pull/${number}`,repository:'example/project',
     number,title:`Review change ${number}`,state,draft:false,accessible:true});
-  reset({status:'waiting',prStatuses:{[sessionId]:[pr(12,'open'),pr(13,'open'),pr(14,'merged')]}});
+  reset({status:'idle',prStatuses:{[sessionId]:[pr(12,'open'),pr(13,'open'),pr(14,'merged')]}});
   const page=await pageFor(t,'');
   await page.locator(`[data-session-key="native:${sessionId}"]`).hover();
   await page.locator('.session-pr-ready').waitFor();
+  const metadata=page.locator(`[data-session-key="native:${sessionId}"] .session-row-meta`);
   assert.equal(await page.locator('.session-pr-ready').innerText(),'PRs ready');
   assert.equal(await page.locator('.session-pr-merged').innerText(),'PR merged');
+  assert.equal(await metadata.locator('.session-meta-separator').count(),1);
+  assert.equal(await page.locator('.session-pr-ready .session-meta-separator').count(),0);
   assert.equal(await page.locator('.session-pr-count').count(),0);
   assert.equal(await page.locator('.session-pr-ready svg').count(),1);
-  assert.equal(await page.locator('.session-meta-status.needs-input').innerText(),'Needs input');
   await page.locator('.session-pr-ready').click();
   await page.getByRole('button',{name:'Review change 12 example/project#12',exact:true}).waitFor();
   await page.getByRole('button',{name:'Review change 13 example/project#13',exact:true}).waitFor();
@@ -1553,6 +1652,9 @@ test('a saved rename succeeds while its catalog refresh failure stays globally o
   await title.press('Enter');
   await title.waitFor({state:'hidden'});
   await page.getByRole('heading',{name:'Saved despite catalog outage',exact:true}).waitFor();
+  await waitFor(()=>state.titles?.[sessionId]==='Saved despite catalog outage');
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.locator('.global-error').waitFor();
   assert.match(await page.locator('.global-error').innerText(),/Catalog unavailable/);
   assert.equal(await page.locator('.action-toast[role="alert"]').count(),0,'the successful rename is not a failed action');
   assert.equal(state.requests.filter(req=>req.method==='PATCH'&&req.body?.title==='Saved despite catalog outage').length,1);
@@ -1992,7 +2094,7 @@ test('source collisions and identically named legacy folders survive paged inven
     [{...session(collision),source:'legacy',key:'legacy:'+collision,title:'Legacy collision',read_only:true,folder:'Original folder',folder_id:'old-folder',pinned:false}],
     [{...session(collision),source:'native',key:'native:'+collision,title:'Native collision',folder:'',pinned:false}],
   ];
-  const page=await pageFor(t,'#run='+legacyId);await groupSidebarByFolder(page);const history=page.locator(`[data-session-key="legacy:${collision}"]`);
+  const page=await pageFor(t,'#run='+legacyId);const history=page.locator(`[data-session-key="legacy:${collision}"]`);
   await page.getByRole('button',{name:/^Original folder/}).click();
   await history.waitFor();assert.equal(await page.getByRole('button',{name:'Folder actions for Original folder'}).count(),0);
   assert.equal(await page.getByRole('button',{name:/Original folder/}).count(),1);
@@ -2401,12 +2503,22 @@ test('chat links remain accented and underlined while plain inline code stays ne
   reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:'[BerriAI/moyai](https://github.com/BerriAI/moyai) contains the workspace.\n\n| Path | Description |\n| --- | --- |\n| `native/web/` | Frontend |\n\nStart with [`docs/architecture.md`](https://github.com/BerriAI/moyai/blob/main/docs/architecture.md).'}]});
   const page=await pageFor(t);
   const link=page.getByRole('link',{name:'BerriAI/moyai',exact:true});await link.waitFor();
-  const code=page.locator('.message-content td code');
-  const linkedCode=page.locator('.message-content a code');
-  const linkColor=await link.evaluate(el=>getComputedStyle(el).color);
-  assert.notEqual(await code.evaluate(el=>getComputedStyle(el).color),linkColor);
-  assert.equal(await linkedCode.evaluate(el=>getComputedStyle(el).color),linkColor);
-  assert.equal(await link.evaluate(el=>getComputedStyle(el).textDecorationLine),'underline');
+  // Read all styles in one browser turn. A session refresh can replace the
+  // Markdown between locator resolution and evaluate, detaching the old link.
+  const snapshot=await page.waitForFunction(()=>{
+    const message=document.querySelector('.message-content');
+    const link=message?.querySelector('a[href="https://github.com/BerriAI/moyai"]');
+    const code=message?.querySelector('td code');
+    const linkedCode=message?.querySelector('a code');
+    if(!link||!code||!linkedCode)return false;
+    return {linkColor:getComputedStyle(link).color,codeColor:getComputedStyle(code).color,
+      linkedCodeColor:getComputedStyle(linkedCode).color,decoration:getComputedStyle(link).textDecorationLine};
+  });
+  const styles=await snapshot.jsonValue();
+  assert.notEqual(styles.linkColor,'');
+  assert.notEqual(styles.codeColor,styles.linkColor);
+  assert.equal(styles.linkedCodeColor,styles.linkColor);
+  assert.equal(styles.decoration,'underline');
 });
 
 // Large synthetic screenshots reproduce the overflowing assistant image report.
