@@ -238,3 +238,66 @@ async def test_in_flight_activity_payload_keeps_legacy_computer_setup(runtime, a
     )
     assert allocations == [str(directory)]
     assert published == [{"provider": "local", "id": str(directory)}]
+
+
+async def test_parent_evidence_reaches_child_model_through_durable_start_and_replay(runtime, actor):
+    from test_bundled_skills_startup import scripted_model
+
+    seen = []
+
+    def respond(messages, info):
+        prompts = [str(part.content) for message in messages for part in message.parts
+                   if isinstance(part, UserPromptPart)]
+        returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+        if any(prompt.startswith("Delegated assignment") for prompt in prompts):
+            # The assignment deliberately contains no answer or original task.
+            assert any("Original request: preserve release branch october." in prompt for prompt in prompts)
+            assert any(part.tool_name == "shell" and "measured-repository-value=73" in str(part.content)
+                       for part in returns)
+            assert any(part.tool_name == "delegate_task" for part in returns)
+            seen.append(messages)
+            return ModelResponse(parts=[TextPart("Child inspected inherited repository evidence.")])
+        if any(part.tool_name == "delegate_task" for part in returns):
+            assert any("Child inspected inherited repository evidence." in str(part.content) for part in returns)
+            return ModelResponse(parts=[TextPart("Parent received the child's result.")])
+        if any(part.tool_name == "shell" for part in returns):
+            return ModelResponse(parts=[ToolCallPart(
+                "delegate_task", {"agent_name": "self", "task": "Review the evidence already gathered."},
+                tool_call_id="inherit-context",
+            )])
+        return ModelResponse(parts=[ToolCallPart(
+            "shell", {"command": "printf measured-repository-value=73"}, tool_call_id="gather-evidence",
+        )])
+
+    runtime.models = {"test": scripted_model(respond)}
+    runtime.agent, runtime.durability = make_agent(
+        runtime.settings, runtime.database, runtime.stores, runtime.objects, models=runtime.models,
+        workspace=LocalWorkspace(runtime.settings.data_dir.parent / "computer"),
+    )
+    root = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    parent = await runtime.database.submit(actor, root.id, NewMessage(
+        prompt="Original request: preserve release branch october.", request_key="context-root",
+    ))
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        async with make_worker(runtime), dispatching(runtime):
+            handle = runtime.client.get_workflow_handle(parent.workflow_id)
+            # Dispatcher admits the workflow asynchronously.
+            async with asyncio.timeout(45):
+                while not seen:
+                    await asyncio.sleep(0.05)
+            assert (await asyncio.wait_for(handle.result(), 45))["status"] == "completed"
+            parent_history = await handle.fetch_history()
+            async with runtime.database.sessions() as db:
+                link = await db.scalar(select(DelegatedSession).where(DelegatedSession.parent_turn_id == parent.id))
+                child = await db.get(Turn, link.initial_turn_id)
+            child_history = await runtime.client.get_workflow_handle(child.workflow_id).fetch_history()
+        for history in (parent_history, child_history):
+            await Replayer(
+                workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+                interceptors=[ActivityCapacity()],
+            ).replay_workflow(history)
+    assert len(seen) == 1

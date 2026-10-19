@@ -249,6 +249,7 @@ class Workflows:
             current = await db.get(Operation, row.id, with_for_update=True)
             if current is None:
                 raise ToolFailed("The publication reservation disappeared.")
+            p.require_attempt(current, row)
             document = JSON_OBJECT.validate_python(p.document(current))
             if "intent" in document and document["intent"] != intent:
                 raise ToolFailed("The publication intent changed. Inspect its receipt before choosing a new request key.")
@@ -278,33 +279,33 @@ class Workflows:
 
     async def create_branch(self, ctx: RunContext[RunScope], request: CreateBranch) -> dict[str, JsonValue]:
         p = self.publisher
-        row = await p.operation(ctx, "create_branch", request)
-        recovered = await self.resume_publication(row)
-        if recovered is not None:
-            return recovered
-        token = await p.token()
-        commit = await self.commit_at(token, request.commit_sha)
-        if commit != request.commit_sha:
-            raise ToolFailed("The source commit changed.")
-        await self.freeze(row, branch=request.branch, commit=commit)
-        await self.create_ref(row, token, request.branch, commit)
-        return await p.finish(row, {"repository_id": p.target, "branch": request.branch, "commit": commit})
+        async with p.attempt(ctx, "create_branch", request) as row:
+            recovered = await self.resume_publication(row)
+            if recovered is not None:
+                return recovered
+            token = await p.token()
+            commit = await self.commit_at(token, request.commit_sha)
+            if commit != request.commit_sha:
+                raise ToolFailed("The source commit changed.")
+            await self.freeze(row, branch=request.branch, commit=commit)
+            await self.create_ref(row, token, request.branch, commit)
+            return await p.finish(row, {"repository_id": p.target, "branch": request.branch, "commit": commit})
 
     async def publish_branch(self, ctx: RunContext[RunScope], request: PublishBranch) -> dict[str, JsonValue]:
         from app.github import workflow_changes
         p = self.publisher
-        row = await p.operation(ctx, "publish_branch", request)
-        recovered = await self.resume_publication(row)
-        if recovered is not None:
-            return recovered
-        token = await p.token(workflows=workflow_changes(request))
-        if request.expected_head_sha is not None:
-            return await self.advance_branch(row, token, request)
-        await self.freeze(row, branch=request.branch, source=request.base_sha)
-        await self.writable(token, request.branch, existing=False)
-        commit = await p.commit(row, request, token)
-        await self.create_ref(row, token, request.branch, commit)
-        return await p.finish(row, {"repository_id": p.target, "branch": request.branch, "commit": commit})
+        async with p.attempt(ctx, "publish_branch", request) as row:
+            recovered = await self.resume_publication(row)
+            if recovered is not None:
+                return recovered
+            token = await p.token(workflows=workflow_changes(request))
+            if request.expected_head_sha is not None:
+                return await self.advance_branch(row, token, request)
+            await self.freeze(row, branch=request.branch, source=request.base_sha)
+            await self.writable(token, request.branch, existing=False)
+            commit = await p.commit(row, request, token)
+            await self.create_ref(row, token, request.branch, commit)
+            return await p.finish(row, {"repository_id": p.target, "branch": request.branch, "commit": commit})
 
     async def advance_branch(
         self, row: Operation, token: str, request: PublishBranch,
@@ -332,46 +333,46 @@ class Workflows:
     async def create(self, ctx: RunContext[RunScope], request: Publish) -> dict[str, JsonValue]:
         from app.github import workflow_changes
         p = self.publisher
-        row = await p.operation(ctx, "create_pull_request", request)
-        recovered = await self.resume_publication(row)
-        if recovered is not None:
-            return recovered
-        token = await p.token(workflows=workflow_changes(request))
-        repo = await self.repository(token)
-        base = request.base_branch or repo.default_branch
-        branch = request.head_branch or f"moyai/{p.scope.session_id[:12]}/{row.id[:16]}"
-        if base == branch:
-            raise ToolFailed("The PR base and head must differ.")
-        current = await self.commit_at(token, base)
-        if current != request.base_sha:
-            comparison = await p.request("GET", self.prefix + f"/compare/{request.base_sha}...{current}", token)
-            if comparison.get("status") not in {"ahead", "identical"}:
-                raise ToolFailed("The requested source is not an ancestor of the selected base branch.")
-        await self.freeze(row, base=base, branch=branch, source=request.base_sha)
-        await p.save(row, base_branch=base, branch=branch, repository=repo.full_name)
-        await self.writable(token, branch, existing=False)
-        commit = await p.commit(row, request, token)
-        await self.create_ref(row, token, branch, commit)
-        return await self.open(row, token, repo, base, branch, commit, request.title, request.body)
+        async with p.attempt(ctx, "create_pull_request", request) as row:
+            recovered = await self.resume_publication(row)
+            if recovered is not None:
+                return recovered
+            token = await p.token(workflows=workflow_changes(request))
+            repo = await self.repository(token)
+            base = request.base_branch or repo.default_branch
+            branch = request.head_branch or f"moyai/{p.scope.session_id[:12]}/{row.id[:16]}"
+            if base == branch:
+                raise ToolFailed("The PR base and head must differ.")
+            current = await self.commit_at(token, base)
+            if current != request.base_sha:
+                comparison = await p.request("GET", self.prefix + f"/compare/{request.base_sha}...{current}", token)
+                if comparison.get("status") not in {"ahead", "identical"}:
+                    raise ToolFailed("The requested source is not an ancestor of the selected base branch.")
+            await self.freeze(row, base=base, branch=branch, source=request.base_sha)
+            await p.save(row, base_branch=base, branch=branch, repository=repo.full_name)
+            await self.writable(token, branch, existing=False)
+            commit = await p.commit(row, request, token)
+            await self.create_ref(row, token, branch, commit)
+            return await self.open(row, token, repo, base, branch, commit, request.title, request.body)
 
     async def open_existing(self, ctx: RunContext[RunScope], request: OpenPullRequest) -> dict[str, JsonValue]:
         p = self.publisher
-        row = await p.operation(ctx, "open_pull_request", request)
-        recovered = await self.resume_publication(row)
-        if recovered is not None:
-            return recovered
-        token = await p.token()
-        repo = await self.repository(token)
-        await self.commit_at(token, request.base_branch)
-        head = await self.ref(token, request.head_branch)
-        if head is None or head.object.sha != request.expected_head_sha:
-            raise ToolFailed("The selected head changed. Read its current SHA before opening a PR.")
-        await self.freeze(row, base=request.base_branch, branch=request.head_branch, commit=request.expected_head_sha)
-        await p.save(row, base_branch=request.base_branch, branch=request.head_branch, repository=repo.full_name)
-        return await self.open(
-            row, token, repo, request.base_branch, request.head_branch, request.expected_head_sha,
-            request.title, request.body,
-        )
+        async with p.attempt(ctx, "open_pull_request", request) as row:
+            recovered = await self.resume_publication(row)
+            if recovered is not None:
+                return recovered
+            token = await p.token()
+            repo = await self.repository(token)
+            await self.commit_at(token, request.base_branch)
+            head = await self.ref(token, request.head_branch)
+            if head is None or head.object.sha != request.expected_head_sha:
+                raise ToolFailed("The selected head changed. Read its current SHA before opening a PR.")
+            await self.freeze(row, base=request.base_branch, branch=request.head_branch, commit=request.expected_head_sha)
+            await p.save(row, base_branch=request.base_branch, branch=request.head_branch, repository=repo.full_name)
+            return await self.open(
+                row, token, repo, request.base_branch, request.head_branch, request.expected_head_sha,
+                request.title, request.body,
+            )
 
     async def open(
         self, row: Operation, token: str, repo: RepositoryIdentity, base: str, branch: str,

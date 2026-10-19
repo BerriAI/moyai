@@ -29,6 +29,7 @@ from .repository_context import RepositoryContext, TOOLS as CONTEXT_TOOLS
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
+PROTECTION_PERMISSIONS = {'administration': 'read'}
 MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'statuses': 'read', 'actions': 'write', 'issues': 'write', 'workflows': 'write'}
 REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
@@ -45,6 +46,17 @@ def supports_permissions(actual, required=PERMISSIONS):
     levels = {'read': 1, 'write': 2}
     return isinstance(actual, dict) and all(
         levels.get(actual.get(name), 0) >= levels[level] for name, level in required.items())
+
+
+def require_protection_permission(permissions):
+    if not supports_permissions(permissions, PROTECTION_PERMISSIONS):
+        raise ConnectorError(
+            'GitHub cannot check protection for a new branch: the installed GitHub App needs Administration: read. '
+            'The App owner must enable it in GitHub App settings → Permissions & events → Repository permissions, '
+            'then an organization owner must approve the updated installation permissions. '
+            'Retry after approval; Administration write is not required for publication.',
+            code='github_branch_protection_permission', dispatched=False,
+        )
 
 
 class Args(BaseModel):
@@ -284,7 +296,8 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
 
     async def verify(self, credentials):
-        await self.installation(credentials)
+        installed = await self.installation(credentials)
+        require_protection_permission(installed.get('permissions'))
         for target in self.connected_ids(credentials):
             token = await self.installation_token(credentials, repository=target, fresh=True)
             repositories = await self.request('GET', '/installation/repositories', token=token)
@@ -294,7 +307,7 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             self.remember_repository(items[0], credentials)
         return ', '.join(self.repository_name(i, credentials) for i in self.connected_ids(credentials))
 
-    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False, ci='', workflows=False, coding=''):
+    async def installation_token(self, credentials=None, *, repository: str | int = '', write=False, fresh=False, rules=False, ci='', workflows=False, coding='', protection=False):
         credentials = credentials if credentials is not None else await self.ensure_connection()
         target = self.target(repository, credentials)
         if target not in self.connected_ids(credentials):
@@ -305,12 +318,18 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             raise ValueError('Workflow publication requires a repository write token.')
         if coding and (coding not in CODING_SCOPES or write or rules or ci or workflows):
             raise ValueError('Invalid coding token scope')
-        key = (config.get('id'), installation, target, write, rules, ci, workflows, coding)
+        if protection and (write or rules or ci or workflows or coding):
+            raise ValueError('Branch protection inspection requires a separate read-only token.')
+        key = (config.get('id'), installation, target, write, rules, ci, workflows, coding, protection)
         async with self.token_lock:
             cached = self.tokens.get(key)
             if not fresh and cached and cached[0] > time.time():
                 return cached[1]
             permissions = {'contents': 'write' if write else 'read', 'pull_requests': 'write' if write else 'read'}
+            if protection:
+                permissions = PROTECTION_PERMISSIONS.copy()
+                installed = await self.installation(credentials)
+                require_protection_permission(installed.get('permissions'))
             if workflows:
                 installed = await self.installation(credentials)
                 if not supports_permissions(installed.get('permissions'), {'workflows': 'write'}):

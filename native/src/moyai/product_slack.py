@@ -344,8 +344,14 @@ class ProductSlack:
                 ProductSlackBinding.session_id == session_id,
             ).values(paused=paused, delivery_after=now()))
             # Neither wake nor deployment backfills answers completed asleep.
+            # Control confirmations remain deliverable while paused, including
+            # when Slack's message and app_mention events repeat one command.
             await db.execute(update(Delivery).where(
                 Delivery.session_id == session_id, Delivery.status == "pending",
+                Delivery.turn_id.in_(select(Turn.id).where(
+                    Turn.session_id == session_id,
+                    ~Turn.workflow_id.startswith("moyai-slack-control-"),
+                )),
             ).values(status="suppressed"))
 
     async def command(self, actor: User, thread: SlackThread, binding: ProductSlackBinding, command: str, key: str):

@@ -62,6 +62,19 @@ state. Later pushes, branch deletion, protection changes or token unavailability
 cannot erase a confirmed outcome. The recovered receipt describes that original
 action; read GitHub separately for the current PR or branch state.
 
+New App registration already includes the permission needed to inspect branch
+protection. Imported Apps, installation verification and connection refresh check
+for Administration read before reporting success. Publication uses a separate,
+repository-scoped Administration read token for this inspection; its Contents and
+Pull requests write token does not gain administrative access.
+
+If preflight fails before any repository write is attempted, the tool reports the
+failed check and corrective action, and `publication_status` returns
+`status="not_dispatched"` with the error. Once corrected, a new tool call can reuse
+the same request key and unchanged inputs. A receipt with attempted writes remains
+`incomplete`; inspect its saved acknowledgments rather than starting a replacement
+publication. Refused executions are fenced from dispatch even after a retry starts.
+
 No tool permits review approval, merging, auto-merge, merge queue actions,
 arbitrary credential-bearing API calls, or unconditional forced ref updates.
 Unstack is intentionally unavailable: the provider's whole-stack mutation
@@ -82,6 +95,8 @@ uv sync --frozen
 MOYAI_TEST_POSTGRES=postgresql://localhost/postgres uv run --frozen pytest -q \
   native/tests/test_product_github_publication.py \
   native/tests/test_product_github_workflows.py \
+  native/tests/test_github_branch_preflight.py \
+  native/tests/test_github_publication_setup.py \
   native/tests/test_product_github_bootstrap.py \
   native/tests/test_product_connections.py \
   native/tests/test_product_execution_version.py \

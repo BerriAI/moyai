@@ -281,11 +281,12 @@ class Database:
         connection checks still fence execution, including Slack disconnection.
         """
         session = await db.get(Session, session_id)
-        if (
-            session is None or session.deleted
-            or (session.visibility == "private" and session.owner_id != actor.id)
-        ):
+        if session is None or session.deleted:
             raise HTTPException(404, "Conversation not found.")
+        if session.visibility == "private" and session.owner_id != actor.id:
+            link = await db.get(DelegatedSession, session.id)
+            if link is None or not await self.same_person(db, actor, session.owner_id):
+                raise HTTPException(404, "Conversation not found.")
         member = await db.get(SwarmMember, session_id)
         if member is not None and member.mission_id != session_id:
             root = await db.get(Session, member.mission_id)
