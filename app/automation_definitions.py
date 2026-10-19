@@ -13,7 +13,7 @@ from .automation_sources import EventTrigger
 
 
 class SelfManagement(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid')
     instructions: bool = False
     schedule: bool = False
 
@@ -22,7 +22,7 @@ class SelfManagement(BaseModel):
 
 
 class Timing(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid')
     frequency: Literal['hourly', 'daily', 'weekdays', 'weekly', 'cron', 'once'] = 'weekdays'
     time: str = Field(default='09:00', pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
     weekday: int = Field(default=1, ge=0, le=6)  # Sunday = 0, as in Temporal.
@@ -75,7 +75,7 @@ class Timing(BaseModel):
 
 
 class Trigger(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid')
     id: str = Field(default_factory=lambda: uuid4().hex, pattern=r'^[A-Za-z0-9_-]{1,40}$')
     schedule: Timing | None = None
     event: EventTrigger | None = None
@@ -88,7 +88,7 @@ class Trigger(BaseModel):
 
 
 class Definition(BaseModel):
-    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=2, max_length=100)
     prompt: str = Field(min_length=3)
     triggers: list[Trigger] = Field(min_length=1)

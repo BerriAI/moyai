@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import text, update
 
 from moyai.models import User
-from moyai.product_memory import ProductMemoryService
+from moyai.product_memory import ProductMemoryLibrary, ProductMemoryService
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Set a disposable local PostgreSQL URL.")
 product_database = authority_fixtures.product_database
@@ -58,6 +58,7 @@ async def test_existing_encrypted_rows_remain_authoritative_and_preferences_do_n
     async with product.source.connect() as db:
         original = dict((await db.execute(text("SELECT * FROM moyai.personal_memories"))).mappings().one())
     response = await product.memory.listing(product.principal.grant)
+    assert ProductMemoryLibrary.model_validate(response).memories[0].source.type == "manual"
     assert response["memories"][0]["id"] == saved["id"]
     assert response["memories"][0]["content"] == note().content
     assert response["scope"] == {"kind": "personal", "owner_id": product.user_id}
@@ -149,6 +150,7 @@ async def test_other_owner_admin_and_shared_login_cannot_access_personal_library
         await product.memory.forget(other.grant, saved["id"], 1)
     assert hidden.value.status_code == 404
     unavailable = await product.memory.listing(shared.grant)
+    assert ProductMemoryLibrary.model_validate(unavailable).scope is None
     assert unavailable["memories"] == [] and not unavailable["capabilities"]["read"]
     assert "shared sign-in" in unavailable["note"]
     with pytest.raises(HTTPException) as denied:

@@ -20,10 +20,21 @@ from typing import Any, Literal, Protocol
 from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import MISSING
 from sqlalchemy import text
 
-from .product_history import MAX_OFFSET, MAX_PAGE, Principal, ProductHistoryAdapter, bounded, session_id
+from .product_history import (
+    MAX_OFFSET,
+    MAX_PAGE,
+    HistoryAttachment,
+    Principal,
+    ProductHistoryAdapter,
+    ResponseModel,
+    absent,
+    bounded,
+    session_id,
+)
 
 PREVIEW_BYTES = 256 * 1024
 PREVIEW_LINES = 2000
@@ -36,6 +47,66 @@ FILE_HEADERS = {
     "Content-Security-Policy": "sandbox; default-src 'none'; frame-ancestors 'none'",
 }
 FileKind = Literal["attachment", "published", "capture", "archive"]
+
+
+class ProductFile(ResponseModel):
+    """A published output, saved capture or workspace archive of an earlier-product session."""
+    id: str
+    kind: Literal["artifact"]
+    name: str
+    size: int
+    media_type: str
+    url: str
+    download_url: str
+    original_url: str
+    source_format: str
+    preview_url: str | MISSING = absent()
+    # Published outputs only.
+    revision: str | MISSING = absent()
+    created_at: str | MISSING = absent()
+    source_turn: int | None | MISSING = absent()
+    # Workspace archive only.
+    preview_supported: bool | MISSING = absent()
+    original_download_available: bool | MISSING = absent()
+    compatibility_download_supported: bool | MISSING = absent()
+
+
+class ProductFileGroupsMore(ResponseModel):
+    files: bool
+    sources: bool
+    captures: bool
+
+
+class ProductFileListing(ResponseModel):
+    files: list[ProductFile]
+    sources: list[HistoryAttachment]
+    links: list[Any]
+    has_more: ProductFileGroupsMore
+    next_offset: int | None
+    read_only: bool
+    source_format: str
+    capture_inventory_truncated: bool
+    limitations: list[str]
+
+
+class ProductFilePreview(ResponseModel):
+    """JSON preview returned by the file content route when ``preview=true``."""
+    name: str
+    media_type: str
+    size: int
+    id: str
+    kind: Literal["upload", "artifact"]
+    preview_kind: Literal["unsupported", "code", "markdown", "text"]
+    language: str | None
+    text: str | None
+    truncated: bool
+    preview_bytes: int
+    text_byte_limit: int
+    text_line_limit: int
+    download_url: str
+    content_url: None
+    notice: str
+    source_format: str
 
 
 class LegacyObjects(Protocol):
@@ -458,17 +529,16 @@ class ProductFilesAdapter:
                 "unsupported" if content is None else "code" if language else
                 "markdown" if PurePosixPath(name).suffix.lower() in {".md", ".markdown"} else "text"
             )
-            from fastapi.responses import JSONResponse
-            return JSONResponse({
-                "name": name, "media_type": item["media_type"], "size": item["size"],
-                "id": id or path or run_id + ".zip", "kind": "upload" if kind == "attachment" else "artifact",
-                "preview_kind": preview_kind, "language": language,
-                "text": content, "truncated": item["size"] > len(raw) or line_truncated, "preview_bytes": len(raw),
-                "text_byte_limit": PREVIEW_BYTES, "text_line_limit": PREVIEW_LINES,
-                "download_url": file_url(run_id, kind, id=id, path=path, revision=revision), "content_url": None,
-                "notice": "Historical file preview. Active documents remain source text; media is available by download.",
-                "source_format": "moyai-product-v1",
-            }, headers=FILE_HEADERS)
+            return JSONResponse(ProductFilePreview(
+                name=name, media_type=item["media_type"], size=item["size"],
+                id=id or path or run_id + ".zip", kind="upload" if kind == "attachment" else "artifact",
+                preview_kind=preview_kind, language=language,
+                text=content, truncated=item["size"] > len(raw) or line_truncated, preview_bytes=len(raw),
+                text_byte_limit=PREVIEW_BYTES, text_line_limit=PREVIEW_LINES,
+                download_url=file_url(run_id, kind, id=id, path=path, revision=revision), content_url=None,
+                notice="Historical file preview. Active documents remain source text; media is available by download.",
+                source_format="moyai-product-v1",
+            ).model_dump(mode="json"), headers=FILE_HEADERS)
         start, stop, status = byte_range(range_header, item["size"])
         stream = self.chunks(principal, run_id, item, start, stop)
         # Validate storage/auth failures before sending response headers.
@@ -502,8 +572,10 @@ class ProductFilesAdapter:
 def routes(adapter: ProductFilesAdapter) -> APIRouter:
     router = APIRouter(prefix="/api/product")
 
-    @router.get("/sessions/{run_id}/workspace")
-    @router.get("/sessions/{run_id}/files")
+    @router.get("/sessions/{run_id}/workspace", operation_id="listProductSessionWorkspace",
+                response_model=ProductFileListing)
+    @router.get("/sessions/{run_id}/files", operation_id="listProductSessionFiles",
+                response_model=ProductFileListing)
     async def listing(
         run_id: str, request: Request, response: Response, limit: int = Query(50, ge=1, le=MAX_PAGE),
         offset: int = Query(0, ge=0, le=MAX_OFFSET),
@@ -512,7 +584,10 @@ def routes(adapter: ProductFilesAdapter) -> APIRouter:
         return await adapter.listing(await adapter.history.identity.authenticate(request), run_id,
                                      limit=limit, offset=offset)
 
-    @router.get("/sessions/{run_id}/files/content")
+    @router.get("/sessions/{run_id}/files/content", operation_id="getProductSessionFileContent", responses={
+        200: {"model": ProductFilePreview,
+              "description": "A JSON preview when preview=true; otherwise the original bytes as a download."},
+    })
     async def content(
         run_id: str, request: Request, kind: FileKind, id: str = Query("", max_length=100),
         path: str = Query("", max_length=2048), revision: str = Query("", max_length=64), preview: bool = False,

@@ -51,7 +51,7 @@ def items(value):
 
 
 class EventTrigger(BaseModel):
-    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid', str_strip_whitespace=True)
     provider: Literal['session','slack','github','gitlab','linear','jira','pylon','pagerduty','webhook']
     session_id: str = Field(default='', max_length=36)
     event: str = Field(default='*', min_length=1, max_length=80)

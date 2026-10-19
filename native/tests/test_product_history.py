@@ -705,6 +705,36 @@ async def test_unified_source_dispatch_does_not_guess_from_identical_id(unified)
     assert (await unified.client.get(f"/api/history/sessions/{ROOT}?source=all")).status_code == 422
 
 
+async def test_typed_history_responses_keep_every_service_key(unified):
+    """Response models must neither drop a key the service returns nor add absent ones as null."""
+    service, reader = unified.service, unified.reader
+    native = json.loads(json.dumps(await service.listing(reader)))
+    assert (await unified.client.get("/api/history/sessions")).json() == native
+    assert {row["source"] for row in native["sessions"]} == {"native", "legacy"}
+    assert all("owner" in row for row in native["sessions"] if row["source"] == "legacy")
+    assert all("owner" not in row for row in native["sessions"] if row["source"] == "native")
+    found = json.loads(json.dumps(await service.listing(reader, query="Native")))
+    assert (await unified.client.get("/api/history/search", params={"q": "Native"})).json() == found
+    for source in ("native", "legacy"):
+        detail = json.loads(json.dumps(await service.detail(reader, ROOT, source)))
+        response = await unified.client.get(f"/api/history/sessions/{ROOT}", params={"source": source})
+        assert response.json() == detail
+        messages = json.loads(json.dumps(await service.messages(reader, ROOT, source)))
+        response = await unified.client.get(f"/api/history/sessions/{ROOT}/messages", params={"source": source})
+        assert response.json() == messages and messages["messages"]
+    history = unified.product.history
+    for path, expected in (
+        ("/api/product/sessions", await history.sessions(reader.principal)),
+        ("/api/product/search?q=Public", await history.search(reader.principal, "Public")),
+        ("/api/product/folders", await history.folders(reader.principal)),
+        (f"/api/product/sessions/{ROOT}", await history.detail(reader.principal, ROOT)),
+        (f"/api/product/sessions/{ROOT}/messages", await history.messages(reader.principal, ROOT)),
+        (f"/api/product/sessions/{ROOT}/children", await history.children(reader.principal, ROOT)),
+        (f"/api/product/sessions/{ROOT}/files", await unified.product.files.listing(reader.principal, ROOT)),
+    ):
+        assert (await unified.client.get(path)).json() == json.loads(json.dumps(expected)), path
+
+
 async def test_merged_pagination_consumes_only_selected_rows_from_each_source(unified):
     for number, day in ((5, 6), (6, 3), (7, 1)):
         await unified.add_session(id=str(number) * 32, updated_at=f"2026-10-0{day}")

@@ -1,6 +1,7 @@
 import { attachmentError, isInlineImage } from "./attachment-files"
+import type { UploadedFile } from "./generated/api"
 
-export type UploadedFile = { id: string; name: string; media_type: string; size: number }
+export type { UploadedFile }
 export type DraftFile = UploadedFile & {
   localId?: string
   uploadState?: "uploading" | "failed" | "ready"

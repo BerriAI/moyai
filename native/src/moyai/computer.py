@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from pydantic_ai.workspaces import Workspace, WorkspaceRef, WorkspaceUnavailableError
 from pydantic_ai_harness import ModalSandbox
 from sqlalchemy import delete, select, update
@@ -75,6 +75,24 @@ class ComputerCommand(BaseModel):
             if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError("Use an HTTP(S) address without embedded credentials.")
         return value
+
+
+class ComputerState(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    available: bool
+    has_workspace: bool
+    controlled: bool
+    busy: bool
+    controller: str | None
+
+
+class ComputerControlResult(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    controlled: bool
+    # Guest readiness; absent for claim/release/heartbeat. Frames travel through noVNC.
+    available: bool | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 async def authorize(runtime: Runtime, session_id: str, user: User) -> Session:
@@ -238,8 +256,8 @@ def routes(runtime: Runtime, actor, *, cookie_name: str = "moyai_session") -> AP
     router.include_router(stream_routes(runtime, cookie_name=cookie_name))
     router.include_router(browser_routes(runtime, actor))
 
-    @router.get("/api/sessions/{session_id}/computer")
-    async def state(session_id: str, client_id: str = "", user: User = Depends(actor)):
+    @router.get("/api/sessions/{session_id}/computer", operation_id="getComputer")
+    async def state(session_id: str, client_id: str = "", user: User = Depends(actor)) -> ComputerState:
         session = await authorize(runtime, session_id, user)
         async with runtime.database.sessions() as db:
             current = await db.get(ComputerLease, session_id)
@@ -253,18 +271,20 @@ def routes(runtime: Runtime, actor, *, cookie_name: str = "moyai_session") -> AP
             if controller and controller.id == user.id and (desktop is None or not desktop.control_client):
                 controller = None
         reference = TypeAdapter(WorkspaceRef).validate_json(session.workspace) if session.workspace else None
-        return {"available": bool(
-                    desktop and reference and desktop.workspace_id == reference.id and desktop.version == DESKTOP_VERSION
-                ), "has_workspace": bool(reference),
-                "controlled": controlled, "busy": bool(session.active_turn),
-                "controller": controller.display_name if controller else None}
+        return ComputerState(
+            available=bool(
+                desktop and reference and desktop.workspace_id == reference.id and desktop.version == DESKTOP_VERSION
+            ), has_workspace=bool(reference),
+            controlled=controlled, busy=bool(session.active_turn),
+            controller=controller.display_name if controller else None,
+        )
 
-    @router.post("/api/sessions/{session_id}/computer")
-    async def control(session_id: str, body: ComputerCommand, user: User = Depends(actor)):
+    @router.post("/api/sessions/{session_id}/computer", operation_id="controlComputer")
+    async def control(session_id: str, body: ComputerCommand, user: User = Depends(actor)) -> ComputerControlResult:
         operation = await lease(runtime, session_id, user, body.action, body.client_id)
         session = await authorize(runtime, session_id, user)
         if body.action in {"claim", "release", "heartbeat"}:
-            return {"controlled": body.action != "release"}
+            return ComputerControlResult(controlled=body.action != "release")
         duration = 600 if body.action == "start" else 30
         try:
             async with asyncio.timeout(duration):
@@ -300,6 +320,6 @@ def routes(runtime: Runtime, actor, *, cookie_name: str = "moyai_session") -> AP
                     desktop.workspace_id = TypeAdapter(WorkspaceRef).validate_json(session.workspace).id
                     desktop.version = DESKTOP_VERSION
         # Frames travel through noVNC. A start response only needs readiness.
-        return {key: item for key, item in {**value, "controlled": True}.items() if key != "frame"}
+        return ComputerControlResult.model_validate({**value, "controlled": True})
 
     return router

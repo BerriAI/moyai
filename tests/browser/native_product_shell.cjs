@@ -20,7 +20,7 @@ async function handle(req,res,next) {
   const data=body?JSON.parse(body):null;
   state.requests.push({path:url.pathname,query:url.search,method:req.method,body:data,headers:req.headers});
   if(state.holds?.[url.pathname])await state.holds[url.pathname];
-  const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
+  const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(url.pathname==='/api/history/sessions'&&status===200?{ancestors:[],...value}:value));};
   const failure=state.httpErrors?.[`${req.method}:${url.pathname}`];
   if(failure) {
     if(failure.network){req.socket.destroy();return;}

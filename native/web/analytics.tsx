@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { api, ApiError } from "./api"
+import { ApiError } from "./api"
+import { getBillingReport, getSettingsPerformance, getSettingsUsage } from "./generated/api"
 import { AnalyticsChart, AnalyticsDatePicker, AnalyticsLegend, AnalyticsMetrics, ReportTable } from "./analytics-shared"
 import { StartupPerformance } from "./performance"
 import { timingReason, timingSource } from "./performance-labels"
@@ -29,14 +30,13 @@ function queryFor(range: AnalyticsRange, filters: Filters) {
   return params
 }
 
-function useReport(path: string, revision: number, billing: boolean) {
+/** `path` keys the request; `load` performs it. */
+function useReport(path: string, revision: number, load: (signal: AbortSignal) => Promise<AnalyticsReport>) {
   const [state, setState] = useState<{ path: string; data?: AnalyticsReport; error?: string; denied?: boolean; loading: boolean }>({ path, loading: true })
   useEffect(() => {
     const controller = new AbortController()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true }))
-    void api<AnalyticsReport | { activity: AnalyticsReport }>(path, "GET", undefined, controller.signal).then(data => {
-      const report = billing ? "activity" in data ? data.activity : undefined : "summary" in data ? data : undefined
-      if (!report) throw new Error("The usage report is unavailable.")
+    void load(controller.signal).then(report => {
       if (!controller.signal.aborted) setState({ path, data: report, loading: false })
     }).catch(error => {
       if (!controller.signal.aborted) setState({
@@ -45,7 +45,7 @@ function useReport(path: string, revision: number, billing: boolean) {
       })
     })
     return () => controller.abort()
-  }, [path, revision, billing])
+  }, [path, revision])
   return state.path === path ? state : { path, loading: true }
 }
 
@@ -243,7 +243,18 @@ export function AnalyticsPage({ kind, productMode, headingRef }: { kind: ReportK
     params.set("include_activity", "true")
   }
   const endpoint = billing ? "/settings/billing" : `/settings/${kind}`
-  const resource = useReport(`${endpoint}?${params}&limit=50&offset=${offset}`, revision, billing)
+  const path = `${endpoint}?${params}&limit=50&offset=${offset}`
+  const filter = (value: string) => value === "all" ? undefined : value
+  const resource = useReport(path, revision, signal => billing
+    ? getBillingReport({
+      query: { ...range, root_model: filter(filters.model), turn_status: filter(filters.status), user_id: filter(filters.user_id), include_activity: true, limit: 50, offset }, signal,
+    }).then(({ data }) => {
+      if (!data.activity) throw new Error("The usage report is unavailable.")
+      return data.activity
+    })
+    : (kind === "usage" ? getSettingsUsage : getSettingsPerformance)({
+      query: { ...range, model: filter(filters.model), status: filter(filters.status), user_id: filter(filters.user_id), limit: 50, offset }, signal,
+    }).then(({ data }) => data))
   useEffect(() => {
     if (resource.denied) { setModelOptions([]); setUserOptions([]) }
     else if (resource.data) {
