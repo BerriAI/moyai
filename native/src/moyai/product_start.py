@@ -111,10 +111,12 @@ async def serve_worker(config: ProductConfig) -> None:
     if config.role != "worker" or not plan.run_worker:
         raise ProductDeploymentError("The worker entrypoint requires the worker role.")
     check_runtime_dependencies()
-    from .worker import make_worker
+    from .product_lifecycle import ProductRoleLifecycle
 
     runtime = _runtime(config)
+    lifecycle = ProductRoleLifecycle(runtime)
     stop = asyncio.Event()
+    lifecycle.retire = stop.set
     loop = asyncio.get_running_loop()
     signals = (signal.SIGTERM, signal.SIGINT)
     try:
@@ -125,9 +127,10 @@ async def serve_worker(config: ProductConfig) -> None:
             brokered=bool(runtime.product_inference and runtime.product_inference.remote),
         )
         await runtime.start()
-        await runtime.connect()
-        async with make_worker(runtime):
+        async with lifecycle.lifespan():
             await stop.wait()
+        if lifecycle.failed:
+            raise ProductDeploymentError("Native worker ownership ended; restart the application process.")
     finally:
         for value in signals:
             loop.remove_signal_handler(value)

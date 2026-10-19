@@ -81,6 +81,8 @@ zero-work drain receipt and exits. Otherwise the gate remains held through
 initialization and any partial-startup cleanup. A successful startup releases
 it only after role readiness and its watcher exist. Owner-session loss releases
 the gate and fences application writes through the existing ownership checks.
+The direct `serve_worker` helper uses this same lifecycle; it cannot start
+registered product workers outside the startup and ownership gates.
 
 The owner session performs only the nonblocking startup lock/unlock operations
 and its usual ownership checks; registry observations use separate pooled

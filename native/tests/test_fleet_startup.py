@@ -6,6 +6,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -249,6 +250,31 @@ async def test_lost_canonical_owner_releases_startup_gate_but_never_becomes_read
     key = fixture.registry.startup_key(fleet="production", generation="blue", role="api")
     assert fixture.registry.connection.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()[0]
     fixture.registry.connection.execute("SELECT pg_advisory_unlock(%s)", (key,))
+
+
+async def test_direct_worker_entrypoint_cannot_bypass_a_sealed_registration(admitted_role, monkeypatch):
+    from moyai import product_lifecycle, product_start
+
+    fixture = admitted_role
+    life, admission = fixture.make("worker")
+    use_admission(monkeypatch, admission)
+    await admission.start()
+    await asyncio.to_thread(fixture.seal, life)
+    life.runtime.start = AsyncMock()
+    life.runtime.close = AsyncMock()
+    life.runtime.connect = AsyncMock(side_effect=AssertionError("Sealed direct worker started connecting."))
+    monkeypatch.setattr(product_start, "require_startable", lambda _: SimpleNamespace(run_worker=True))
+    monkeypatch.setattr(product_start, "check_runtime_dependencies", dict)
+    monkeypatch.setattr(product_start, "verify_product_schema", lambda _: None)
+    monkeypatch.setattr(product_start, "_runtime", lambda _: life.runtime)
+    monkeypatch.setattr(product_lifecycle, "ProductRoleLifecycle", lambda _: life)
+    with pytest.raises(FleetAdmissionError, match="sealed_before_start"):
+        await product_start.serve_worker(life.runtime.product_config)
+    life.runtime.connect.assert_not_called()
+    life.runtime.close.assert_awaited_once()
+    assert fixture.registry.drain_receipts(
+        fleet="production", generation="blue", role="worker",
+    )[0]["request_id"] == "startup-seal"
 
 
 async def test_failed_startup_keeps_seal_blocked_until_partial_worker_cleanup(admitted_role, monkeypatch):
