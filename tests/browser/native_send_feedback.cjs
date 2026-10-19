@@ -65,8 +65,9 @@ async function scenario(t, options = {}) {
     if (pathname === "/api/sessions/chat") {
       state.reads++;
       if (state.posts.length && options.read) await options.read.promise;
+      if (state.reads > 2 && options.refreshDelay) await new Promise(resolve => setTimeout(resolve, options.refreshDelay));
       if (options.denied?.(state)) return json({ detail: "Conversation access revoked." }, 403);
-      if (state.posts.length && options.running) {
+      if (state.posts.length && options.running && state.turns[0].status === "queued") {
         state.turns[0].status = "running";
         state.session.active_turn = state.turns[0].id;
         state.session.status = "running";
@@ -193,6 +194,24 @@ test("a late accepted receipt cannot restore content after sign-out", async t =>
   post.release(); await response;
   assert.equal(await page.getByText("Private pending content", { exact: true }).count(), 0);
   assert.equal(state.streams.length, 0);
+});
+
+test("repeated early stream endings cannot starve a slow terminal-state refresh", async t => {
+  const { page, input, state } = await scenario(t, {
+    running: true, refreshDelay: 1800,
+    events: state => {
+      state.turns[0].status = "completed";
+      state.session.status = "idle";
+      state.session.active_turn = null;
+      return "event: connected\ndata: {}\n\nevent: finished\ndata: {}\n\n";
+    },
+  });
+  await input.fill("Complete while reads are slow");
+  await input.press("Enter");
+  await page.locator(".topbar .status").filter({ hasText: "running" }).waitFor();
+  await page.locator(".topbar .status").filter({ hasText: "idle" }).waitFor({ timeout: 7000 });
+  assert.ok(state.streams.length >= 2, "The read outlives the reconnect interval");
+  assert.ok(state.streams.length <= 3, "Terminal state ends retries promptly");
 });
 
 test("denied history clears a previously accepted message", async t => {

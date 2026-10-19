@@ -486,6 +486,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const liveNow = useRef(liveText)
   const [reconnecting, setReconnecting] = useState(false)
   const [streamAttempt, setStreamAttempt] = useState(0)
+  const streamRefresh = useRef<Promise<void> | null>(null)
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const openedBrowserLogin = useRef("")
@@ -728,7 +729,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     let retry: ReturnType<typeof setTimeout> | undefined
     const stream = new EventSource(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`)
     const current = () => !closed && auth === csrfToken() && version === sensitiveVersion.current && visibleNow.current
-    const refreshSaved = () => { if (current()) void load().catch(reason => { if (current()) setLoadError(String(reason)) }) }
+    const refreshSaved = () => {
+      // Reconnecting must not continually supersede a slow authoritative read.
+      // Keep this flight across stream attempts, including history pagination.
+      if (!current() || streamRefresh.current) return
+      const request = load().catch(reason => { if (current()) setLoadError(String(reason)) })
+        .finally(() => { if (streamRefresh.current === request) streamRefresh.current = null })
+      streamRefresh.current = request
+    }
     stream.onmessage = event => {
       if (!current() || !/^\d+$/.test(event.lastEventId)) return
       try {
