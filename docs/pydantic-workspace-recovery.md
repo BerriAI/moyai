@@ -39,6 +39,59 @@ show a warning. They do not substitute an older snapshot. Settlement and Stop
 serialize on the session row; Stop or deletion cannot be undone by a late
 checkpoint or fallback callback.
 
+## Maintenance pauses
+
+Protocol 6 introduces `moyai-maintenance-workspace-continuation-v1`. New
+executions reach a settled SDK `ModelRequestNode` before parking. They freeze
+steering, save the existing agent continuation, and capture the live filesystem.
+The envelope binds both saves to the session, turn, original workflow run,
+boundary, pause generation, preparation digest and current authority. The drain
+receipt stays blocked until capture and publication finish. A failed capture
+does not certify a safe park.
+
+The workflow then continues as new. Its direct successor takes ownership of the
+parked receipt and waits without constructing an agent or using the computer.
+The original computer may reach its maximum lifetime during this wait. On
+resume, the activity checks the saved binding, permissions, maintenance state,
+effects, inference requests and computer-control fences again. It prefers the
+original live computer. Only confirmed provider expiry or disappearance permits
+restoration from the exact saved image, using the existing idempotent creation
+path.
+
+Resume creates a new immutable continuation with the verified workspace in both
+`AgentCheckpoint.workspace` and `PreparedTurn.workspace`. Application publication
+and the resume receipt are committed together before the successor constructs a
+fresh SDK run. Lost replies reuse that receipt. Original preparations and
+Temporal activity inputs remain unchanged; no SDK private workspace field is
+modified. Conversation, tool results, usage, retry budgets, pending steering and
+stream state follow the existing history-handoff protocol. Human input cannot
+invalidate a held maintenance savepoint.
+
+This saves filesystem bytes, not guest-process memory or external-system state.
+It does not replay process starts or external effects. A missing or expired image
+refuses restoration; it never authorizes an empty computer.
+
+### Initial adoption and older executions
+
+The native compatibility protocol changes from 5 to 6. All native role
+fingerprints change, while legacy fingerprints and schema manifests remain
+unchanged. Use the reviewed contract-adoption path; do not weaken a compatibility
+rejection or perform an ordinary mixed-contract rollout.
+
+Existing workflow histories keep their previous command sequence. They do not
+retroactively gain workspace preservation. In particular, the old `3d0e936`
+runtime's parked receipts are not filesystem backups, including when its
+existing history Continue-As-New path has run.
+
+Initial installation requires a verified fleet-wide empty execution boundary:
+no admitted old execution owning workspace state that must survive, no uncertain
+effects or inference requests, and separate checks for never-prepared tasks and
+deferred waits. Keep the API serving and queue new inputs through the reviewed
+admission controls, adopt the protocol, verify the new owners, then resume.
+Live old executions require their own qualified adoption mechanism; this change
+does not supply one. Computers already expired without a current verified
+snapshot cannot be reconstructed by this upgrade.
+
 ## Restore before execution
 
 Preparation prefers the original live Modal computer. Only confirmed termination

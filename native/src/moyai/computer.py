@@ -138,6 +138,14 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str, clie
         ).values(revision=Session.revision + 1).returning(Session.id))
         if locked is None:
             raise HTTPException(404, "Conversation not found.")
+        from .maintenance_workspace import maintenance_workspace
+
+        session = await db.get(Session, session_id, populate_existing=True)
+        assert session is not None
+        if not session.workspace:
+            raise HTTPException(409, "This conversation no longer has a computer.")
+        if action != "release" and maintenance_workspace(session.snapshot) is not None:
+            raise HTTPException(409, "This computer is preserved for maintenance. Wait for execution to resume.")
         current = await db.get(ComputerLease, session_id)
         reference = TypeAdapter(WorkspaceRef).validate_json(session.workspace)
         desktop = await db.get(ComputerDesktop, session_id)

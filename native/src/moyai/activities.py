@@ -14,6 +14,7 @@ from .computer_keepalive import keep_computer_alive
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
 from .history_handoff import HISTORY_ACTIVITIES
 from .images import hydrate
+from .maintenance_workspace import MAINTENANCE_ACTIVITIES
 from .runtime import current
 from .workspace_recovery import prepare_workspace
 
@@ -138,6 +139,7 @@ async def steering_receipt(turn_id: str, enqueue_id: str | None) -> None:
 
 ACTIVITIES = [
     prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
-    prepare_steering, steering_receipt, keep_computer_alive, preserve_failed_workspace, *HISTORY_ACTIVITIES,
+    prepare_steering, steering_receipt, keep_computer_alive, preserve_failed_workspace,
+    *HISTORY_ACTIVITIES, *MAINTENANCE_ACTIVITIES,
 ]
 

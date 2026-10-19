@@ -46,6 +46,8 @@ with workflow.unsafe.imports_passed_through():
     from .images import prompt_content
     from .input_identity import identified_prompt
     from .live_events import public_event_sink
+    from .maintenance_workspace import VERSION as MAINTENANCE_WORKSPACE_VERSION
+    from .maintenance_workspace import MaintenanceResume
     from .product_continuation_errors import public_preparation_message
     from .product_drain import DRAIN_VERSION, DrainDecision
     from .request_limits import unlimited_model_requests
@@ -64,6 +66,11 @@ PREPARE = {
     "start_to_close_timeout": timedelta(minutes=20),
     "schedule_to_close_timeout": timedelta(minutes=20),
     "heartbeat_timeout": timedelta(seconds=30),
+}
+MAINTENANCE_FILES = {
+    "start_to_close_timeout": timedelta(minutes=17),
+    "schedule_to_close_timeout": timedelta(minutes=20),
+    "retry_policy": RetryPolicy(maximum_attempts=3),
 }
 
 
@@ -146,6 +153,23 @@ class TurnWorkflow(PydanticAIWorkflow):
                 return
             await workflow.sleep(state.delay)
 
+    async def resume_maintenance_workspace(self, handoff: HistoryHandoff) -> AgentCheckpoint:
+        previous = workflow.info().continued_run_id
+        if previous is None:
+            raise ValueError("A maintenance workspace requires its direct workflow continuation.")
+        while True:
+            notice = self.maintenance_notice
+            state = await workflow.execute_activity(
+                "moyai_load_maintenance_checkpoint_v1",
+                args=[self.turn_id, handoff.checkpoint, previous],
+                result_type=MaintenanceResume, **MAINTENANCE_FILES,
+            )
+            if not state.paused:
+                if state.checkpoint is None:
+                    raise ValueError("The maintenance continuation has no verified workspace binding.")
+                return state.checkpoint
+            await workflow.wait_condition(lambda notice=notice: self.maintenance_notice != notice)
+
     @workflow.signal
     async def steer(self, turn_id: str) -> None:
         if turn_id in self.steered:
@@ -198,6 +222,7 @@ class TurnWorkflow(PydanticAIWorkflow):
         keepalive: asyncio.Task[None] | None = None
         try:
             history_handoff = workflow.patched(HISTORY_VERSION)
+            preserve_maintenance = workflow.patched(MAINTENANCE_WORKSPACE_VERSION) and history_handoff
             deployment_handoff = workflow.patched(DEPLOYMENT_HANDOFF_VERSION)
             if self.deployment_handoff and not self.deployment_handoff.applies_to(
                 workflow.info().get_current_deployment_version(),
@@ -206,10 +231,15 @@ class TurnWorkflow(PydanticAIWorkflow):
             checkpoint_workspace = workflow.patched(WORKSPACE_CHECKPOINT_VERSION)
             keep_computer = workflow.patched(COMPUTER_KEEPALIVE_VERSION)
             maintenance = workflow.patched(DRAIN_VERSION)
-            if maintenance:
+            if maintenance and not (handoff is not None and handoff.maintenance_workspace):
                 await self.maintenance_checkpoint(turn_id, "before_prepare")
             resumed: AgentCheckpoint | None = None
-            if handoff is not None:
+            if handoff is not None and handoff.maintenance_workspace:
+                if not preserve_maintenance:
+                    raise ValueError("This worker cannot restore a maintenance workspace.")
+                resumed = await self.resume_maintenance_workspace(handoff)
+                prepared = resumed.prepared
+            elif handoff is not None:
                 resumed = await workflow.execute_activity(
                     "moyai_load_history_checkpoint_v1", args=[turn_id, handoff.checkpoint],
                     result_type=AgentCheckpoint, **CONTROL,
@@ -247,6 +277,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             initial_requests = conversation.usage.requests
             checkpoint_ref: str | None = None
             checkpoint_release: DeploymentHandoff | None = None
+            checkpoint_maintenance = False
             async with self.events, public_event_sink(self.events.stream), runtime.agent.iter(
                 None if resumed else prompt_content(prepared.prompt, prepared.images),
                 conversation=conversation,
@@ -276,15 +307,29 @@ class TurnWorkflow(PydanticAIWorkflow):
                     # This is an SDK graph boundary, not another agent loop.
                     # A running delegation batch settles before this returns.
                     # Completed answers/deferrals still finish their bookkeeping.
+                    maintenance_generation = None
                     if maintenance and agent_run.result is None:
-                        await self.maintenance_checkpoint(turn_id, f"native_node:{boundary}")
-                        boundary += 1
+                        if preserve_maintenance:
+                            # A new SDK run can resume a settled request, carrying
+                            # its original tool results and retry budgets. Do not
+                            # snapshot an unfinished model/tool batch.
+                            if isinstance(node, ModelRequestNode) and not agent_run.pending_messages:
+                                decision = await workflow.execute_activity(
+                                    "moyai_maintenance_boundary_v1",
+                                    args=[turn_id, f"native_node:{boundary}"],
+                                    result_type=DrainDecision, **CONTROL,
+                                )
+                                if decision.paused:
+                                    maintenance_generation = decision.generation
+                        else:
+                            # Old histories retain their exact activity sequence.
+                            await self.maintenance_checkpoint(turn_id, f"native_node:{boundary}")
                     if (
                         limits is not None and isinstance(node, ModelRequestNode)
-                        and agent_run.usage.requests > initial_requests
+                        and (maintenance_generation is not None or agent_run.usage.requests > initial_requests)
                         and not agent_run.pending_messages
                         and (
-                            self.history_full(limits)
+                            maintenance_generation is not None or self.history_full(limits)
                             or (deployment_handoff and self.deployment_handoff is not None)
                         )
                     ):
@@ -302,12 +347,21 @@ class TurnWorkflow(PydanticAIWorkflow):
                             checkpoint.deployment_handoff = self.deployment_handoff
                             checkpoint.allow_history_only = self.history_full(limits)
                         try:
-                            saved = await workflow.execute_activity(
-                                "moyai_save_history_checkpoint_v1",
-                                checkpoint,
-                                result_type=CheckpointSave, **CONTROL,
-                            )
+                            if maintenance_generation is not None:
+                                saved = await workflow.execute_activity(
+                                    "moyai_save_maintenance_checkpoint_v1",
+                                    args=[checkpoint, maintenance_generation, f"native_node:{boundary}"],
+                                    result_type=CheckpointSave, **MAINTENANCE_FILES,
+                                )
+                            else:
+                                saved = await workflow.execute_activity(
+                                    "moyai_save_history_checkpoint_v1",
+                                    checkpoint,
+                                    result_type=CheckpointSave, **CONTROL,
+                                )
                         except ActivityError as error:
+                            if maintenance_generation is not None:
+                                raise
                             if (
                                 isinstance(error.cause, ApplicationError)
                                 and error.cause.type == "MoyaiHistoryAuthorizationDenied"
@@ -319,10 +373,12 @@ class TurnWorkflow(PydanticAIWorkflow):
                             saved = CheckpointSave()
                         if saved.reference is not None:
                             checkpoint_ref = saved.reference
+                            checkpoint_maintenance = maintenance_generation is not None
                             # Recorded v1 saves lack deployment_allowed. Their
                             # successful reference already passed the v1 gate.
                             checkpoint_release = (
-                                checkpoint.deployment_handoff if saved.deployment_allowed is not False else None
+                                checkpoint.deployment_handoff
+                                if not checkpoint_maintenance and saved.deployment_allowed is not False else None
                             )
                             self.events.stream.detach_pollers()
                             await workflow.wait_condition(workflow.all_handlers_finished)
@@ -332,6 +388,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                         self.handing_off = False
                         for steering_id in list(self.pending_steering):
                             await self.steer(steering_id)
+                    boundary += 1
                 result = agent_run.result
                 if result is None and checkpoint_ref is None:
                     raise RuntimeError("The SDK ended without a run result.")
@@ -357,6 +414,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                                 self.deployment_handoff
                                 if self.deployment_handoff != checkpoint_release else None
                             ),
+                            maintenance_workspace=checkpoint_maintenance,
                         ),
                     ],
                     # Ordinary history rollover retains its pinned version.
