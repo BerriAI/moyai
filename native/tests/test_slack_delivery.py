@@ -8,6 +8,7 @@ import itertools
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
@@ -188,7 +189,11 @@ async def test_failed_turn_posts_error_then_uploads_debug_file(runtime, active, 
 
     async def handle(request):
         method = request.url.path.rsplit("/", 1)[-1]
-        payload = json.loads(request.content)
+        payload = (
+            dict(parse_qsl(request.content.decode(), strict_parsing=True))
+            if method == "files.getUploadURLExternal"
+            else json.loads(request.content)
+        )
         events.append((method, payload))
         if method == "chat.postMessage":
             return httpx.Response(200, json={"ok": True, "channel": "CTEST", "ts": "123.457"})
@@ -215,7 +220,7 @@ async def test_failed_turn_posts_error_then_uploads_debug_file(runtime, active, 
         "chat.postMessage", "files.getUploadURLExternal", "upload_bytes", "files.completeUploadExternal",
     ]
     assert events[0][1]["thread_ts"] == "123.456"
-    assert events[1][1] == {"filename": f"moyai-debug-{turn.id}.json", "length": len(debug_bytes)}
+    assert events[1][1] == {"filename": f"moyai-debug-{turn.id}.json", "length": str(len(debug_bytes))}
     assert events[2][2] == debug_bytes
     assert events[3][1]["channel_id"] == "CTEST"
     assert events[3][1]["thread_ts"] == "123.456"
@@ -344,3 +349,70 @@ async def test_file_rejection_preserves_safe_provider_error_before_upload():
                 await SlackFileDelivery.send(client, SlackFileDelivery.content(
                     UploadFile(filename="debug.json", content=b"{}"), after="failure"),
                     {"channel": "CTEST", "thread_ts": "1.2"}, objects=AsyncMock(), headers=None, before_send=before)
+
+
+async def test_file_upload_uses_form_data_for_upload_url(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from agentchat.channels.slack import files
+    from agentchat.models import UploadFile
+
+    from moyai.slack_file_delivery import SlackFileDelivery
+
+    file_content = b'{"trace":true}'
+    events = []
+
+    async def upload_bytes(url, raw):
+        events.append(("upload_bytes", url, raw))
+
+    monkeypatch.setattr(files, "upload_bytes", upload_bytes)
+
+    async def handle(request):
+        method = request.url.path.rsplit("/", 1)[-1]
+        if method == "files.getUploadURLExternal":
+            assert request.headers["content-type"].startswith("application/x-www-form-urlencoded")
+            assert dict(parse_qsl(request.content.decode(), strict_parsing=True)) == {
+                "filename": "debug.json",
+                "length": str(len(file_content)),
+            }
+            events.append(method)
+            return httpx.Response(200, json={
+                "ok": True,
+                "file_id": "F1",
+                "upload_url": "https://files.slack.com/upload/v1/F1",
+            })
+        if method == "files.completeUploadExternal":
+            assert request.headers["content-type"].startswith("application/json")
+            payload = json.loads(request.content)
+            assert payload["channel_id"] == "CTEST"
+            assert payload["thread_ts"] == "1.2"
+            assert payload["files"] == [{"id": "F1", "title": "debug.json"}]
+            events.append(method)
+            return httpx.Response(200, json={
+                "ok": True,
+                "files": [{"id": "F1", "permalink": "https://slack.test/files/F1"}],
+            })
+        raise AssertionError(f"Unexpected Slack API method: {method}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle),
+        base_url="https://slack.test/",
+    ) as client:
+        receipt = await SlackFileDelivery.send(
+            client,
+            SlackFileDelivery.content(
+                UploadFile(filename="debug.json", content=file_content, title="debug.json"),
+                after="failure",
+            ),
+            {"channel": "CTEST", "thread_ts": "1.2"},
+            objects=AsyncMock(),
+            headers=None,
+            before_send=AsyncMock(),
+        )
+
+    assert events == [
+        "files.getUploadURLExternal",
+        ("upload_bytes", "https://files.slack.com/upload/v1/F1", file_content),
+        "files.completeUploadExternal",
+    ]
+    assert receipt == {"files": [{"id": "F1", "permalink": "https://slack.test/files/F1"}]}

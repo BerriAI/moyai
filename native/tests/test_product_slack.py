@@ -14,6 +14,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
@@ -453,7 +454,11 @@ async def test_completed_artifact_upload_waits_for_message_then_uses_slack_file_
 
     async def handle(request):
         method = request.url.path.rsplit("/", 1)[-1]
-        payload = json.loads(request.content)
+        payload = (
+            dict(parse_qsl(request.content.decode(), strict_parsing=True))
+            if method == "files.getUploadURLExternal"
+            else json.loads(request.content)
+        )
         events.append((method, payload))
         assert request.headers["authorization"] == "Bearer synthetic-bot-token"
         if method in {"chat.postMessage", "chat.update"}:
@@ -484,7 +489,7 @@ async def test_completed_artifact_upload_waits_for_message_then_uses_slack_file_
     assert [event[0] for event in events[1:]] == [
         "files.getUploadURLExternal", "upload_bytes", "files.completeUploadExternal",
     ]
-    assert events[1][1] == {"filename": "abc.png", "length": len(png_bytes)}
+    assert events[1][1] == {"filename": "abc.png", "length": str(len(png_bytes))}
     assert events[2][2] == png_bytes
     assert events[3][1]["channel_id"] == thread.channel_id
     assert events[3][1]["thread_ts"] == thread.thread_ts
@@ -526,7 +531,11 @@ async def test_failed_debug_upload_waits_for_message_then_uses_slack_file_helper
 
     async def handle(request):
         method = request.url.path.rsplit("/", 1)[-1]
-        payload = json.loads(request.content)
+        payload = (
+            dict(parse_qsl(request.content.decode(), strict_parsing=True))
+            if method == "files.getUploadURLExternal"
+            else json.loads(request.content)
+        )
         events.append((method, payload))
         assert request.headers["authorization"] == "Bearer synthetic-bot-token"
         if method in {"chat.postMessage", "chat.update"}:
@@ -563,7 +572,7 @@ async def test_failed_debug_upload_waits_for_message_then_uses_slack_file_helper
     )["upload"]["content"])
     assert events[1][1] == {
         "filename": f"moyai-debug-{active[1].id}.json",
-        "length": len(upload_content),
+        "length": str(len(upload_content)),
     }
     assert events[2][2] == upload_content
     assert events[3][1]["channel_id"] == thread.channel_id
