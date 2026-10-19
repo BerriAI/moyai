@@ -486,7 +486,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const liveNow = useRef(liveText)
   const [reconnecting, setReconnecting] = useState(false)
   const [streamAttempt, setStreamAttempt] = useState(0)
-  const streamRefresh = useRef<Promise<void> | null>(null)
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const openedBrowserLogin = useRef("")
@@ -519,6 +518,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
+  const loadFlight = useRef<{ version: number; signal?: AbortSignal; promise: Promise<void> } | null>(null)
   const completeHistory = useRef<{ version: string; messages: Message[] } | null>(null)
   const visibleNow = useRef(visible)
   visibleNow.current = visible
@@ -546,10 +546,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const clearSensitiveNow = useRef(clearSensitive)
   clearSensitiveNow.current = clearSensitive
   useEffect(() => () => { ++loadVersion.current; ++sensitiveVersion.current }, [])
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const load = useCallback(async (signal?: AbortSignal, share = false) => {
+    if (signal?.aborted) return
+    // Polling and reconnects share a read instead of superseding each other.
+    // Explicit action refreshes always start a fresh read.
+    const flight = loadFlight.current
+    if (share && flight && flight.version === loadVersion.current && !flight.signal?.aborted) return flight.promise
     const version = ++loadVersion.current
     const auth = csrfToken()
     const current = () => !signal?.aborted && version === loadVersion.current && auth === csrfToken()
+    const request = (async () => {
     try {
       const cached = resolvedOnce.current
       resolvedOnce.current = undefined
@@ -599,6 +605,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       }
       throw reason
     }
+    })()
+    loadFlight.current = { version, signal, promise: request }
+    try { await request }
+    finally { if (loadFlight.current?.version === version) loadFlight.current = null }
   }, [id, me.user.id, sideMode])
   async function reloadAfterAction(message?: string) {
     const version = sensitiveVersion.current, auth = csrfToken()
@@ -622,7 +632,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }
   useEffect(() => {
     if (sideMode && !visible) return
-    return pollVisible(load, () => {
+    return pollVisible(signal => load(signal, true), () => {
       const current = viewNow.current
       return !current || activeSession(current.session.status) || current.turns.some(turn => activeSession(turn.status)) ? 1500 : 10000
     }, reason => setLoadError(String(reason)))
@@ -729,14 +739,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     let retry: ReturnType<typeof setTimeout> | undefined
     const stream = new EventSource(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`)
     const current = () => !closed && auth === csrfToken() && version === sensitiveVersion.current && visibleNow.current
-    const refreshSaved = () => {
-      // Reconnecting must not continually supersede a slow authoritative read.
-      // Keep this flight across stream attempts, including history pagination.
-      if (!current() || streamRefresh.current) return
-      const request = load().catch(reason => { if (current()) setLoadError(String(reason)) })
-        .finally(() => { if (streamRefresh.current === request) streamRefresh.current = null })
-      streamRefresh.current = request
-    }
+    const refreshSaved = () => { if (current()) void load(undefined, true).catch(reason => { if (current()) setLoadError(String(reason)) }) }
     stream.onmessage = event => {
       if (!current() || !/^\d+$/.test(event.lastEventId)) return
       try {

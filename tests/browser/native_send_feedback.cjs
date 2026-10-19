@@ -209,6 +209,9 @@ test("repeated early stream endings cannot starve a slow terminal-state refresh"
   await input.fill("Complete while reads are slow");
   await input.press("Enter");
   await page.locator(".topbar .status").filter({ hasText: "running" }).waitFor();
+  await page.getByText("Reconnecting to live progress…", { exact: true }).waitFor();
+  // A visibility poll competes with the stream's outstanding refresh.
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await page.locator(".topbar .status").filter({ hasText: "idle" }).waitFor({ timeout: 7000 });
   assert.ok(state.streams.length >= 2, "The read outlives the reconnect interval");
   assert.ok(state.streams.length <= 3, "Terminal state ends retries promptly");
