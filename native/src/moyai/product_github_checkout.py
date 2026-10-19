@@ -9,16 +9,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from pydantic import JsonValue
+from app.connector_errors import ConnectorError
+from app.db import database as source_database
+from app.github import REPOSITORY
+from pydantic import Field, JsonValue, model_validator
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.toolsets import FunctionToolset
 
-from .contracts import RunScope
+from .contracts import Grant, RunScope
 from .github_workflow_types import Checkout, PullRequest
 from .product_github_bootstrap import INSTALL, fetch_bundle
 from .product_github_workflows import Workflows, parse
 
 if TYPE_CHECKING:
+    from .product_connections import ProductConnections
     from .product_github_publication import Publications
 
 CHECKOUT_INSTALL = INSTALL.replace(
@@ -27,6 +32,64 @@ CHECKOUT_INSTALL = INSTALL.replace(
     'if target.parent != pathlib.Path("/workspace") or target.name in {".", "..", ".git"}:\n'
     '    raise ValueError("Invalid checkout directory.")',
 )
+
+
+class RepositoryCheckout(Checkout):
+    """Explicit repository selection for the shared checkout tool."""
+
+    repository: str = Field(
+        default="", pattern="^(?:" + REPOSITORY + ")?$",
+        description="Connected owner/repository to check out. Supply this or repository_id.",
+    )
+    repository_id: int | None = Field(
+        default=None, gt=0, strict=True,
+        description="Permanent GitHub repository ID. If a name is also supplied, both must identify the same repository.",
+    )
+
+    @model_validator(mode="after")
+    def explicit_repository(self) -> RepositoryCheckout:
+        if not self.repository and self.repository_id is None:
+            raise ValueError("Supply the repository name or repository_id to check out.")
+        return self
+
+
+def checkout_toolset(
+    service: ProductConnections, scope: RunScope, grants: list[Grant],
+) -> FunctionToolset[RunScope]:
+    """Route within the admitted checkout grants without discovering provider tools."""
+    tools = FunctionToolset[RunScope](id="product_github_checkout")
+
+    @tools.tool(name="github_checkout", metadata={"annotations": {"readOnlyHint": True}}, sequential=True)
+    async def checkout_repository(ctx: RunContext[RunScope], request: RepositoryCheckout) -> dict[str, JsonValue]:
+        """Check out a connected GitHub repository's branch, commit or PR into a fresh /workspace directory.
+
+        Supply repository or repository_id; the server selects its authorized connection.
+        Existing files are never replaced. GitHub credentials remain on the trusted worker.
+        """
+        from .product_github_publication import Publications
+
+        # Check the entire admitted snapshot before looking up a repository name.
+        # Organization-wide access alone is insufficient: the chosen grant must
+        # also belong to this task and allow checkout.
+        await service.check(scope, grants[0])
+
+        try:
+            github = service.connectors.github
+            repository_id = await source_database(github.target, request.repository_id or request.repository)
+            if request.repository_id is not None and request.repository:
+                named = await source_database(github.target, request.repository)
+                if named != repository_id:
+                    raise ToolFailed("The repository name and ID identify different repositories.")
+        except ConnectorError as error:
+            raise ToolFailed(str(error)) from error
+        selected = [grant for grant in grants if grant.policy["product"]["repository_id"] == repository_id]
+        if len(selected) != 1:
+            raise ToolFailed("This task has no unique selected GitHub connection permitting checkout of that repository.")
+        grant = selected[0]
+        await service.check(scope, grant)
+        return await checkout(Publications(service, scope, grant), ctx, request)
+
+    return tools
 
 
 async def checkout(

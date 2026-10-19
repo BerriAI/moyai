@@ -174,13 +174,14 @@ async def test_full_agent_replays_pre_lazy_startup_commands(runtime, active, mon
     assert len(model_calls) == 1
 
 
-async def test_prefixed_github_checkout_acquires_and_persists_first_workspace(runtime, active, actor):
+@pytest.mark.parametrize("tool_name", ["github_checkout", "github_11111111_checkout"])
+async def test_github_checkout_acquires_and_persists_first_workspace(runtime, active, actor, tool_name):
     session, turn, _ = active
     directory = runtime.settings.data_dir.parent / "computer"
     allocations = []
     tools = FunctionToolset[RunScope](id="checkout-startup-test")
 
-    @tools.tool(name="github_11111111_checkout", metadata={"annotations": {"readOnlyHint": True}})
+    @tools.tool(name=tool_name, metadata={"annotations": {"readOnlyHint": True}})
     async def checkout(ctx: RunContext[RunScope]) -> str:
         assert ctx.workspace.ref is not None
         await ctx.workspace.write_bytes(str(directory / "checkout-started.txt"), b"workspace acquired")
@@ -188,10 +189,10 @@ async def test_prefixed_github_checkout_acquires_and_persists_first_workspace(ru
 
     def respond(messages, info):
         returned = [part for message in messages for part in message.parts
-                    if isinstance(part, ToolReturnPart) and part.tool_name == "github_11111111_checkout"]
+                    if isinstance(part, ToolReturnPart) and part.tool_name == tool_name]
         if not returned:
             assert allocations == []
-            return ModelResponse(parts=[ToolCallPart("github_11111111_checkout", {}, tool_call_id="first-checkout")])
+            return ModelResponse(parts=[ToolCallPart(tool_name, {}, tool_call_id="first-checkout")])
         assert (directory / "checkout-started.txt").read_bytes() == b"workspace acquired"
         return ModelResponse(parts=[TextPart("Checkout completed.")])
 

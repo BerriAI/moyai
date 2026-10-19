@@ -46,6 +46,7 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
 
     def build(ctx: RunContext[RunScope], tool_name: str | None = None) -> AbstractToolset[RunScope]:
         selected = []
+        checkout_grants = []
         prefixes: set[str] = set()
         for grant in sorted(ctx.deps.grants, key=lambda item: item.id):
             service = SERVICES.get(grant.kind)
@@ -55,9 +56,12 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
             if prefix in prefixes:
                 raise ValueError("Selected account tool prefixes collide.")
             prefixes.add(prefix)
+            policy = ConnectionPolicy.model_validate(grant.policy)
+            canonical_github = grant.kind == "github" and policy.product is not None
+            if canonical_github and (policy.allowed_tools is None or "checkout" in policy.allowed_tools):
+                checkout_grants.append(grant)
             if tool_name is not None and not tool_name.startswith(prefix + "_"):
                 continue
-            policy = ConnectionPolicy.model_validate(grant.policy)
             if policy.product is not None:
                 from .runtime import current
                 product = getattr(current(), "product_connections", None)
@@ -78,10 +82,14 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
             def allowed(
                 _ctx: RunContext[RunScope], tool: ToolDefinition,
                 allowed_names: list[str] | None = policy.allowed_tools,
+                hide_checkout: bool = canonical_github and tool_name is None,
             ) -> bool:
                 return (
                     tool.name not in PROHIBITED_TOOLS
                     and (allowed_names is None or tool.name in allowed_names)
+                    # Keep targeted reconstruction of recorded prefixed calls.
+                    # New discovery exposes only the repository-routed checkout.
+                    and not (hide_checkout and tool.name == "checkout")
                 )
 
             tools = native.filtered(allowed)
@@ -98,6 +106,14 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
                     lambda _ctx, tool, _args: not read_only_tool(tool)
                 )
             selected.append(tools.prefixed(prefix).defer_loading())
+        if checkout_grants and tool_name in {None, "github_checkout"}:
+            from .product_github_checkout import checkout_toolset
+            from .runtime import current
+
+            product = current().product_connections
+            if product is None:
+                raise PermissionError("Canonical product connections are not configured.")
+            selected.append(checkout_toolset(product, ctx.deps, checkout_grants).defer_loading())
         return CombinedToolset(selected)
 
     def resolve(ctx: RunContext[RunScope]) -> AbstractToolset[RunScope] | None:

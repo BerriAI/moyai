@@ -216,6 +216,7 @@ async def test_checkpoint_without_a_computer_and_refused_saves_keep_agent_alive(
     session, turn, prepared = active
     allocations = []
     attempts = 0
+    pending_evidence = []
 
     def respond(messages, info):
         count = sum(
@@ -249,7 +250,14 @@ async def test_checkpoint_without_a_computer_and_refused_saves_keep_agent_alive(
                     actor_id=prepared.scope.actor_id, tool_name="shell",
                     arguments=runtime.security.seal({}), fingerprint="a" * 64,
                 ))
-        return await save(checkpoint)
+        result = await save(checkpoint)
+        if outcome == "pending_effect":
+            # Refusing a history handoff does not settle an active attempt.
+            async with runtime.database.sessions() as db:
+                effect = await db.get(Effect, "uncertain-effect")
+                assert effect is not None and effect.state == "pending" and effect.settled_at is None
+                pending_evidence.append((effect.arguments, effect.fingerprint, effect.resolution))
+        return result
 
     monkeypatch.setattr(worker, "ACTIVITIES", [
         save_or_refuse if item is save else item for item in worker.ACTIVITIES
@@ -276,10 +284,11 @@ async def test_checkpoint_without_a_computer_and_refused_saves_keep_agent_alive(
     assert runtime.security.unseal(saved.result).decode() == "Completed without a computer."
     assert json.loads(saved.usage)["requests"] == 4
     if outcome == "pending_effect":
-        # The uncertain write blocked rollover while the turn was active.
-        # Final-answer acceptance settles the attempt without inventing its outcome.
-        assert effect is not None and effect.state == "failed"
-        assert effect.settled_at is not None and effect.resolution is None
+        # The accepted final answer, rather than a refused checkpoint, ends the
+        # attempt. Keep its original evidence for duplicate/late-receipt checks.
+        assert effect is not None and effect.state == "failed" and effect.settled_at is not None
+        assert pending_evidence
+        assert all(item == (effect.arguments, effect.fingerprint, effect.resolution) for item in pending_evidence)
 
 
 @pytest.mark.parametrize("runtime", ["history_retry"], indirect=True)
