@@ -15,7 +15,7 @@ import json
 import re
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -86,7 +86,7 @@ class ProductConnections:
 
     def _grants(
         self, actor_id: str, *, shared_session: bool, surface: str,
-        source_store: Any = None, source_connectors: Any = None,
+        source_store: Any = None, source_connectors: Any = None, selected_ids: Sequence[str] = (),
     ) -> list[Grant]:
         from app.connection_authority import authority
         from app.connector_errors import ConnectorError
@@ -100,7 +100,9 @@ class ProductConnections:
                 continue
             rows = store.rows("SELECT * FROM connections WHERE provider=?", (provider,))
             personal = connectors.personal_slack
-            owner = personal.owner(actor_id) if provider == "slack" else None
+            # Slack conversations use the installed organization account. A
+            # participant's private-web setup must not change shared authority.
+            owner = personal.owner(actor_id) if provider == "slack" and surface != "slack" else None
             personal_row = personal.row(owner) if owner else None
             selected: list[tuple[Any, str | None, str]] = []
             if personal_row and personal_row["encrypted"] is not None:
@@ -114,6 +116,13 @@ class ProductConnections:
                         selected.append((rows[0], None, "bot"))
             elif rows:
                 selected.append((rows[0], None, "organization"))
+                if provider == "slack" and surface == "slack" and selected_ids:
+                    organization = json.loads(self.security.decrypt(rows[0]["encrypted"]))
+                    if (organization.get("bot") or {}).get("access_token"):
+                        # Existing turns/workspaces may retain the former
+                        # bot-only grant. Resolve its exact ID without adding
+                        # it to the catalog or broadening its permissions.
+                        selected.append((rows[0], None, "bot"))
             audit = store.rows(
                 "SELECT MAX(id) AS revision FROM connection_audit WHERE provider=?", (provider,),
             )[0]["revision"]
@@ -140,6 +149,8 @@ class ProductConnections:
                         reference["app_version"] = app_version
                     digest = hashlib.sha256(json.dumps(reference, sort_keys=True).encode()).hexdigest()
                     identity = str(uuid5(NAMESPACE_URL, "moyai/canonical-connection/" + digest))
+                    if surface == "slack" and access == "bot" and identity not in selected_ids:
+                        continue
                     result.append(Grant(
                         id=identity, kind=provider, revision=int(digest[:7], 16) + 1,
                         credential="", read_only=reference["read_only"],
@@ -172,7 +183,7 @@ class ProductConnections:
                 )
                 return self._grants(
                     actor_id, shared_session=shared_session, surface=surface,
-                    source_store=source, source_connectors=connectors,
+                    source_store=source, source_connectors=connectors, selected_ids=selections,
                 )
 
             # run_sync adapts the canonical pure helpers to async SQL on this
@@ -181,6 +192,7 @@ class ProductConnections:
         else:
             available = await source_database(
                 self._grants, actor_id, shared_session=shared_session, surface=surface,
+                selected_ids=selections,
             )
         selected: dict[str, Grant] = {}
         for selection in dict.fromkeys(selections):
