@@ -1,3 +1,5 @@
+import type { OrganizationConnection } from "./generated/api"
+
 export type AutomationTiming = {
   frequency: "hourly" | "daily" | "weekdays" | "weekly" | "cron" | "once"
   time: string; weekday: number; timezone: string; cron: string; run_at: string | null
@@ -44,10 +46,7 @@ export type AutomationEnvironment = {
   enabled: boolean; active_build: string | null; is_default: boolean; ready: boolean; phase: string
   prepared_build: { id: string; revision: number; commit_sha: string; sandbox_provider: string } | null
 }
-export type AutomationConnection = {
-  id: string; connected: boolean; enabled: boolean; read_only: boolean
-  tools?: { name?: string; description: string }[]
-}
+export type AutomationConnection = Pick<OrganizationConnection, "id" | "connected" | "enabled" | "read_only"> & { tools?: OrganizationConnection["tools"] }
 
 export const calendarFrequencies: { value: AutomationTiming["frequency"]; label: string }[] = [
   { value: "hourly", label: "Hourly" }, { value: "daily", label: "Daily" }, { value: "weekdays", label: "Weekdays" },

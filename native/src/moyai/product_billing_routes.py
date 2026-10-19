@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -47,6 +48,198 @@ from .product_billing import (
 
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 REPORT_TIMEOUT_SECONDS = 15.0
+
+
+class BillingResponse(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class BillingTotals(BillingResponse):
+    """Recorded quantities for a set of charges; amounts are exact decimal strings."""
+
+    requests: int
+    unknown_requests: int
+    observations: int
+    priced_requests: int
+    pending_costs: int
+    missing_costs: int
+    estimated_costs: int
+    spend: str | None
+    cost_usd_exact: str | None
+    estimated: str | None
+    cost_coverage: float | None
+    pricing_status: Literal["partial", "priced", "unpriced", "empty"]
+    sessions: int
+    unattributed_charges: int
+    unpriced_requests: int
+    token_samples: int
+    usage_samples: int
+    token_coverage: float | None
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
+    reasoning_tokens: int | None
+
+
+class BillingModelTotals(BillingTotals):
+    model: str | None
+
+
+class BillingDailyTotals(BillingTotals):
+    date: str
+    active_users: int
+    models: list[BillingModelTotals]
+    cumulative_spend: str | None
+    cumulative_pricing_status: Literal["partial", "priced", "unpriced", "empty"]
+    # Set only when some charges in the range have no timestamp.
+    undated_coverage: int | None = None
+
+
+class BillingUserTotals(BillingTotals):
+    id: str | None
+    name: str
+    email: str
+    kind: str
+
+
+class BillingSessionTotals(BillingTotals):
+    user_id: str | None
+    user_name: str
+    run_id: str | None
+    session_id: str | None
+    title: str
+
+
+class BillingRequestSource(BillingResponse):
+    engine: str
+    id: str
+    cost_state: str
+    reported_amount: str | None
+    cost_source: str | None
+    request_status: str
+    observed_at: str
+    recovery_eligible: bool
+    recovery_due: bool
+    recovery_reason: str
+
+
+class BillingRequestDetail(BillingResponse):
+    id: str
+    user_id: str | None
+    session_id: str | None
+    model: str | None
+    observed_models: list[str]
+    created_at: str | None
+    timestamp_basis: str
+    status: str
+    cost: str | None
+    estimated_cost: str | None
+    cost_status: str
+    requests: int | None
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
+    reasoning_tokens: int | None
+    coverage_issues: list[str]
+    sources: list[BillingRequestSource]
+
+
+class BillingInfrastructureSync(BillingResponse):
+    status: str
+
+
+class BillingInfrastructureProvider(BillingResponse):
+    provider: str | None
+    name: str | None
+    spend: str | None
+    estimated: str | None
+    missing_days: int | None
+    covered_days: int | None
+    last_synced_at: str | None
+    sync_enabled: bool
+    sync: BillingInfrastructureSync | None
+
+
+class BillingInfrastructureBill(BillingResponse):
+    provider: str | None
+    month: str | None
+    amount: str | None
+    kind: str | None
+    revision: int | None
+    updated_at: str | None
+
+
+class BillingInfrastructure(BillingResponse):
+    spend: str | None
+    estimated: str | None
+    providers: list[BillingInfrastructureProvider]
+    bills: list[BillingInfrastructureBill]
+    incomplete: bool
+    pending: bool
+    read_only: bool
+    # Set only when infrastructure spend is unavailable for the selected range.
+    coverage_reason: str | None = None
+
+
+class BillingCostSummary(BillingResponse):
+    llm: str | None
+    infrastructure: str | None
+    total: str | None
+    estimated: str | None
+    incomplete: bool
+
+
+class BillingCoverage(BillingResponse):
+    undated_charges: int
+    private_details_omitted: int
+    source_observations: int
+    legacy_observations: int
+    native_observations: int
+    deduplicated_observations: int
+    unreconciled_native_observations: int
+    mapping_version: str
+    complete: bool
+
+
+class BillingCapabilities(BillingResponse):
+    read_only: bool
+    bill_mutations: bool
+    provider_sync: bool
+    identity_linking: bool
+
+
+class BillingReport(BillingResponse):
+    scope: Literal["personal", "organization"]
+    start: str
+    end: str
+    start_at: str
+    end_before: str
+    preset: str
+    timezone: str
+    currency: str
+    total: BillingTotals
+    priced_requests: int
+    daily: list[BillingDailyTotals]
+    users: list[BillingUserTotals]
+    sessions: list[BillingSessionTotals]
+    models: list[BillingModelTotals]
+    request_details: list[BillingRequestDetail]
+    request_total: int
+    limit: int
+    offset: int
+    root_models: list[str]
+    identities: list[dict[str, Any]]
+    infrastructure: BillingInfrastructure | None
+    cost_summary: BillingCostSummary
+    coverage: BillingCoverage
+    capabilities: BillingCapabilities
+    methodology: dict[str, str]
+    # The activity report (analytics_service) when include_activity=true.
+    activity: dict[str, Any] | None = None
 
 
 class Identity(Protocol):
@@ -496,9 +689,10 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
     async def actor(request: Request) -> Any:
         return await service.identity.authenticate(request, admin=request.url.path != "/api/spend")
 
-    @router.get("/api/admin/spend")
-    @router.get("/api/settings/billing")
-    @router.get("/api/spend")
+    # format=csv returns a file Response, which bypasses the JSON response model.
+    @router.get("/api/admin/spend", response_model=BillingReport, operation_id="getAdminSpendReport")
+    @router.get("/api/settings/billing", response_model=BillingReport, operation_id="getBillingReport")
+    @router.get("/api/spend", response_model=BillingReport, operation_id="getSpendReport")
     async def report(
         request: Request, response: Response, principal: Any = Depends(actor),
         preset: Literal["24h", "7d", "30d", "custom"] = "7d",
@@ -585,11 +779,11 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
             )
         return value
 
-    @router.get("/api/admin/spend/infrastructure")
+    @router.get("/api/admin/spend/infrastructure", operation_id="getAdminInfrastructureSpend")
     async def infrastructure(
         response: Response, principal: Any = Depends(actor), preset: Literal["24h", "7d", "30d", "custom"] = "7d",
         start: str | None = None, end: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> BillingInfrastructure:
         try:
             async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
                 value = await service.infrastructure(_period(preset, start, end))
@@ -599,6 +793,6 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
         if not fresh.enabled or fresh.role != "admin":
             raise HTTPException(403, "Your accounting access changed.")
         response.headers["Cache-Control"] = "no-store"
-        return value
+        return BillingInfrastructure.model_validate(value)
 
     return router

@@ -17,6 +17,7 @@ import {
   type AutomationTiming, type AutomationTrigger, type AutomationEvent, type ProductAutomation, type AutomationRunResult,
   type AutomationWebhookInfo, type AutomationWebhookResult, type AutomationTestResult, type AutomationEnvironment, type AutomationConnection,
 } from "./product-automation-data"
+import { listOrganizationConnections } from "./generated/api"
 import "./product-automations.css"
 
 const base = "/product/automations"
@@ -24,7 +25,10 @@ const timeLabel = (value: string) => Number.isFinite(Date.parse(value)) ? new Da
 const errorLabel = (reason: unknown) => reason instanceof ApiError && reason.status === 404
   ? "This automation service or saved definition is not available."
   : reason instanceof Error ? reason.message : "The request could not be completed."
-function useRead<T>(path: string | null) {
+/** `path` keys the read; `load` (a generated SDK call) fetches it when given. */
+function useRead<T>(path: string | null, load?: (signal: AbortSignal) => Promise<T>) {
+  const loader = useRef(load)
+  loader.current = load
   const [version, setVersion] = useState(0)
   const [state, setState] = useState<{ path: string | null; data?: T; loading: boolean; error: string }>({ path: null, loading: false, error: "" })
   useEffect(() => {
@@ -32,7 +36,7 @@ function useRead<T>(path: string | null) {
     const controller = new AbortController()
     const requestAuth = csrfToken()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true, error: "" }))
-    void api<T>(path, "GET", undefined, controller.signal).then(data => {
+    void (loader.current ? loader.current(controller.signal) : api<T>(path, "GET", undefined, controller.signal)).then(data => {
       if (!controller.signal.aborted && csrfToken() === requestAuth) setState({ path, data, loading: false, error: "" })
     }, error => { if (!controller.signal.aborted && csrfToken() === requestAuth) setState({ path, loading: false, error: errorLabel(error) }) })
     return () => controller.abort()
@@ -248,7 +252,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
   const preview = useRead<AutomationPreview>(id ? `${base}/${encodeURIComponent(id)}/preview` : null)
   const models = useRead<{ models: string[]; default_model: string }>("/me")
   const environments = useRead<AutomationEnvironment[]>(mode !== "review" ? "/product/environments" : null)
-  const connections = useRead<AutomationConnection[]>(mode !== "review" ? "/product/connections" : null)
+  const connections = useRead<AutomationConnection[]>(mode !== "review" ? "/product/connections" : null, signal => listOrganizationConnections({ signal }).then(({ data }) => data))
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [historyVersion, setHistoryVersion] = useState(0)
   const [confirm, setConfirm] = useState<"migrate" | "enable" | "pause" | "run" | "retire" | null>(null)
   const [runResult, setRunResult] = useState<AutomationRunResult | null>(null)
