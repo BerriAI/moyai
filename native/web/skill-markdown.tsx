@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm"
 import type { Root, RootContent, PhrasingContent, Text } from "mdast"
 import { decodeString } from "micromark-util-decode-string"
 import { CodeBlock } from "./code-block"
+import { MessageImage, MessageImageLink } from "./message-image"
 import { SkillMention } from "./skill-content"
 import { transcriptSkills, skillMentions, type SkillReference } from "./skill-mentions"
 
@@ -93,6 +94,8 @@ export function SkillMarkdown({ children }: { children: string }) {
   const references = useMemo(() => new Map(skills.map(skill => [skill.reference, skill])), [skills])
   return <Markdown remarkPlugins={[remarkGfm, plugin]} components={{
     pre: CodeBlock,
+    img: ({ src, alt, title }) => <MessageImage key={typeof src === "string" ? src : undefined} src={typeof src === "string" ? src : undefined} alt={alt} title={title} />,
+    a: ({ node, ...props }) => <MessageImageLink {...props} />,
     span: ({ node, children: content }) => {
       const reference = node?.properties["data-skill-reference"] ?? node?.properties.dataSkillReference
       const skill = typeof reference === "string" ? references.get(reference) : undefined
