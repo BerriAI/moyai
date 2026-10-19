@@ -249,7 +249,13 @@ async def test_checkpoint_without_a_computer_and_refused_saves_keep_agent_alive(
                     actor_id=prepared.scope.actor_id, tool_name="shell",
                     arguments=runtime.security.seal({}), fingerprint="a" * 64,
                 ))
-        return await save(checkpoint)
+        result = await save(checkpoint)
+        if outcome == "pending_effect":
+            assert result.reference is None
+            async with runtime.database.sessions() as db:
+                effect = await db.get(Effect, "uncertain-effect")
+                assert effect is not None and effect.state == "pending"
+        return result
 
     monkeypatch.setattr(worker, "ACTIVITIES", [
         save_or_refuse if item is save else item for item in worker.ACTIVITIES
@@ -276,7 +282,10 @@ async def test_checkpoint_without_a_computer_and_refused_saves_keep_agent_alive(
     assert runtime.security.unseal(saved.result).decode() == "Completed without a computer."
     assert json.loads(saved.usage)["requests"] == 4
     if outcome == "pending_effect":
-        assert effect is not None and effect.state == "pending"
+        # The receipt blocks rollover while the agent is running, then settles
+        # as a failed attempt when its final answer is accepted.
+        assert effect is not None and effect.state == "failed"
+        assert effect.settled_at is not None and effect.resolution is None
 
 
 @pytest.mark.parametrize("runtime", ["history_retry"], indirect=True)

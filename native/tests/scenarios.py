@@ -64,7 +64,12 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
             and "Return the phrase native-child-result." in str(part.content)
             for message in messages for part in message.parts
         ):
-            if scenario == "tools" and "write_plan" not in completed:
+            # A parent's plan in the frozen history does not populate the
+            # child's separate plan store.
+            if scenario == "tools" and not any(
+                isinstance(part, ToolReturnPart) and part.tool_call_id == "child-plan"
+                for message in messages for part in message.parts
+            ):
                 return ModelResponse(parts=[ToolCallPart(
                     "write_plan", {"items": [{"content": "Inspect the delegated task", "status": "completed"}]},
                     tool_call_id="child-plan",
