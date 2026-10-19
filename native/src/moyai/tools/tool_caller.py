@@ -19,6 +19,8 @@ from pydantic_ai.exceptions import (
     SkipToolExecution,
     SkipToolValidation,
     ToolFailed,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
 )
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
@@ -47,6 +49,8 @@ class RetryPolicy:
     escalate: frozenset[str] = frozenset({
         "MoyaiHistoryAuthorizationDenied",
         "WorkspaceUnavailableError",
+        "UnexpectedModelBehavior",
+        "UsageLimitExceeded",
     })
 
 
@@ -122,7 +126,13 @@ class ToolCaller:
 
     def outcome(self, cause: BaseException, tool: ToolDefinition, attempt: int) -> Outcome:
         root = self._root_cause(cause)
-        if isinstance(root, (RunCancelled, CancelledError, asyncio.CancelledError, WorkspaceUnavailableError)):
+        # These are SDK termination decisions, including exhausted tool retries
+        # and limits from a delegated run. Returning ToolFailed would let the
+        # parent keep running after the SDK has explicitly stopped execution.
+        if isinstance(root, (
+            RunCancelled, CancelledError, asyncio.CancelledError, WorkspaceUnavailableError,
+            UnexpectedModelBehavior, UsageLimitExceeded,
+        )):
             return Outcome.ESCALATE
 
         error_type = root.type if isinstance(root, ApplicationError) and root.type else type(root).__name__
