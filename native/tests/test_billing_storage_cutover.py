@@ -98,6 +98,35 @@ async def test_guard_runs_inside_exclusive_ownership_before_any_table_retirement
     }
 
 
+async def test_receipt_indexes_extend_an_immutable_cutover_receipt_without_allowing_index_drift(cutover):
+    ctx = cutover
+    schema = ctx.storage.native_schema
+    async with ctx.engine.begin() as db:
+        for name in ("billing_request", "receipts"):
+            await db.execute(text(f'DROP INDEX "{schema}".ix_moyai_billing_records_{name}'))
+    await consolidate(ctx.engine, ctx.storage)
+    before = await projection(ctx)
+    async with ctx.engine.begin() as db:
+        original = await db.scalar(text(f"SELECT view_manifest FROM {ctx.storage.state} WHERE id=1"))
+        await db.execute(text(
+            f"CREATE INDEX ix_moyai_billing_records_billing_request ON {ctx.storage.ledger} (billing_request_id)"
+        ))
+        await db.execute(text(
+            f"CREATE INDEX ix_moyai_billing_records_receipts ON {ctx.storage.ledger} USING gin (billing_receipts)"
+        ))
+        await verify_consolidated(db, ctx.storage)
+        assert await db.scalar(text(f"SELECT view_manifest FROM {ctx.storage.state} WHERE id=1")) == original
+    await verify_product_schema(ctx.engine, schema=schema)
+    assert await projection(ctx) == before
+    async with ctx.engine.begin() as db:
+        await db.execute(text(f'DROP INDEX "{schema}".ix_moyai_billing_records_receipts'))
+        await db.execute(text(
+            f"CREATE INDEX ix_moyai_billing_records_receipts ON {ctx.storage.ledger} (billing_request_id)"
+        ))
+        with pytest.raises(BillingStorageError, match="constraints or indexes differ"):
+            await verify_consolidated(db, ctx.storage)
+
+
 async def test_native_insert_upsert_locks_and_recovery_updates_use_the_same_row(cutover):
     ctx = cutover
     await consolidate(ctx.engine, ctx.storage)

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
@@ -37,6 +37,13 @@ class RejectedReceipt(BaseModel):
 class ReceiptAcknowledgement(BaseModel):
     acknowledged: list[str]
     rejected: list[RejectedReceipt]
+
+
+class ReceiptListenerError(BaseModel):
+    error: Literal[
+        "unauthorized", "unsupported_encoding", "receipt_batch_too_large",
+        "invalid_receipt_batch", "temporarily_unavailable",
+    ]
 
 
 class ReceiptServerSettings(BaseSettings):
@@ -130,27 +137,32 @@ def create_receipt_application(settings: ReceiptServerSettings) -> FastAPI:
             "application/json": {"schema": body_schema},
         }},
     })
-    async def accept(request: Request) -> ReceiptAcknowledgement:
+    async def accept(request: Request, response: Response) -> ReceiptAcknowledgement | ReceiptListenerError:
         authorization = request.headers.get("authorization", "")
         if not hmac.compare_digest(authorization.encode(), ("Bearer " + secret).encode()):
-            raise HTTPException(401, "unauthorized")
+            response.status_code = 401
+            return ReceiptListenerError(error="unauthorized")
         if request.headers.get("content-encoding", "identity") != "identity":
-            raise HTTPException(415, "unsupported_encoding")
+            response.status_code = 415
+            return ReceiptListenerError(error="unsupported_encoding")
         try:
             async with asyncio.timeout(10):
                 body = bytearray()
                 async for chunk in request.stream():
                     if len(body) + len(chunk) > MAX_RECEIPT_BYTES:
-                        raise HTTPException(413, "receipt_batch_too_large")
+                        response.status_code = 413
+                        return ReceiptListenerError(error="receipt_batch_too_large")
                     body.extend(chunk)
                 batch = ChargeReceiptBatch.model_validate_json(body)
                 results: list[ReceiptResult] = []
                 for receipt in batch.events:
                     results.append(await ingestor.accept(receipt))
         except ValidationError:
-            raise HTTPException(422, "invalid_receipt_batch") from None
+            response.status_code = 422
+            return ReceiptListenerError(error="invalid_receipt_batch")
         except (SQLAlchemyError, TimeoutError):
-            raise HTTPException(503, "temporarily_unavailable") from None
+            response.status_code = 503
+            return ReceiptListenerError(error="temporarily_unavailable")
         return ReceiptAcknowledgement(
             acknowledged=[result.event_id for result in results if result.acknowledged],
             rejected=[RejectedReceipt(event_id=result.event_id, error=result.error)

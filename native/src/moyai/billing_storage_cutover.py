@@ -105,6 +105,23 @@ async def verify_consolidated(
         if actual["kind"] != "v" or actual != saved.get(source):
             raise BillingStorageError(f"The {source} billing compatibility view differs from its receipt.")
     ledger = await _ledger_shape(connection, storage)
+    # v23 adds only these indexes. Preserve older cutover receipts verbatim;
+    # the native schema verifier separately requires both indexes after v23.
+    original = saved.get("ledger")
+    if not isinstance(original, dict):
+        raise BillingStorageError("The single billing store's constraints or indexes differ from its receipt.")
+    schema = connection.dialect.identifier_preparer.quote(storage.native_schema)
+    additions = [{
+        "definition": f"CREATE INDEX ix_moyai_billing_records_{name} "
+        f"ON {schema}.moyai_billing_records USING {method} ({column})",
+        "indisvalid": True,
+    } for name, method, column in (
+        ("billing_request", "btree", "billing_request_id"), ("receipts", "gin", "billing_receipts"),
+    )]
+    ledger["indexes"] = [
+        index for index in ledger["indexes"]
+        if index not in additions or index in original.get("indexes", [])
+    ]
     if ledger["kind"] != "r" or ledger != saved.get("ledger"):
         raise BillingStorageError("The single billing store's constraints or indexes differ from its receipt.")
 

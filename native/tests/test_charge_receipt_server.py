@@ -92,7 +92,7 @@ async def test_contended_receipt_is_not_acknowledged_and_can_be_retried(listener
             "/billing/receipts", json={"events": [event.model_dump()]}, headers=AUTH,
         )
         assert unavailable.status_code == 503
-        assert unavailable.json() == {"detail": "temporarily_unavailable"}
+        assert unavailable.json() == {"error": "temporarily_unavailable"}
     assert (await receipt_fixtures.saved(listener.receipts, event.request_id))[0].cost_usd is None
     accepted = await listener.client.post(
         "/billing/receipts", json={"events": [event.model_dump()]}, headers=AUTH,
