@@ -64,10 +64,17 @@ async def test_canonical_hook_offload_drains_cancellation_with_competing_poll(tm
         assert await asyncio.to_thread(entered.wait, 3)
         inbox = HookInbox(store, SimpleNamespace(), list)
         payload = {"type": "event_callback", "team_id": "TLOCAL001", "event_id": "LOCAL001"}
-        tasks.append(asyncio.create_task(database(inbox.enqueue, "local-one", payload)))
+        completed: dict[int, bool] = {}
+
+        def enqueue(index: int) -> bool:
+            result = inbox.enqueue("local-one", payload)
+            completed[index] = result
+            return result
+
+        tasks.append(asyncio.create_task(database(enqueue, 0)))
         await asyncio.sleep(0.05)
         tasks[0].cancel()
-        tasks.append(asyncio.create_task(database(inbox.enqueue, "local-one", payload)))
+        tasks.append(asyncio.create_task(database(enqueue, 1)))
         health = asyncio.create_task(database(store.rows, "SELECT 1"))
         ticks = []
         for _ in range(20):
@@ -81,7 +88,13 @@ async def test_canonical_hook_offload_drains_cancellation_with_competing_poll(tm
         release.set()
         await holder
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-        assert isinstance(outcomes[0], asyncio.CancelledError) and outcomes[1] is False
+        assert isinstance(outcomes[0], asyncio.CancelledError)
+        # Either blocked poll may acquire capacity first. Both owned operations
+        # must finish, with exactly one insert and one duplicate, even when the
+        # cancelled caller no longer receives its synchronous operation's result.
+        assert set(completed) == {0, 1}
+        assert sorted(completed.values()) == [False, True]
+        assert outcomes[1] is completed[1]
         await health
         rows = await database(store.rows, "SELECT id,status FROM coordinator_hooks")
         assert rows == [{"id": "local-one", "status": "pending"}]
