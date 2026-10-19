@@ -16732,12 +16732,24 @@
       },
       "SlackDeliveryStatus": {
         "properties": {
+          "file_error_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "File Error Codes",
+            "type": "array"
+          },
           "pending": {
             "title": "Pending",
             "type": "integer"
           },
           "rejected": {
             "title": "Rejected",
+            "type": "integer"
+          },
+          "rejected_files": {
+            "default": 0,
+            "title": "Rejected Files",
             "type": "integer"
           },
           "sending": {
@@ -16748,7 +16760,9 @@
         "required": [
           "pending",
           "sending",
-          "rejected"
+          "rejected",
+          "rejected_files",
+          "file_error_codes"
         ],
         "title": "SlackDeliveryStatus",
         "type": "object"

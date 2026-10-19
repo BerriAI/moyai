@@ -50,7 +50,7 @@ from .bundled_skills import bundled_skill_catalog
 from .coding_image import with_node
 from .commentary import Commentary
 from .computer_startup import OnDemandDurability, on_demand_coder
-from .connection_catalog import ConnectionToolSearch
+from .connection_catalog import ConnectionToolSearch, connection_search
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
@@ -394,7 +394,7 @@ def make_agent(
             *product_capabilities,
             connection_tools(database.security),
             ConnectionToolSearch(
-                strategy="keywords", max_results=6,
+                strategy=connection_search, max_results=6,
                 tool_description=(
                     "Find tools for the selected connected accounts. Search by service, repository, "
                     "and action before calling a connected tool. Only matching definitions are loaded."

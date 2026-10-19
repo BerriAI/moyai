@@ -108,7 +108,7 @@ async function handle(req,res,next) {
       const value=state.actionDetails?.[key];
       return value ? json(value) : json({detail:'Action not found.'},404);
     }
-    if(url.pathname.endsWith('/progress/'+turnId))return json(state.workProgress||{messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
+    if(/\/progress\/[^/]+$/.test(url.pathname))return json(state.workProgressByTurn?.[url.pathname.split('/').at(-1)]||state.workProgress||{messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
       res.write('event: connected\ndata: {}\n\n'); clients.add(res);
@@ -172,7 +172,7 @@ async function handle(req,res,next) {
     const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
       result.messages=(state.messagesBySession?.[row.id]||state.messages).slice(0,state.paginate?200:undefined);
-    if(state.slackDelivery)result.slack_delivery=state.slackDelivery;
+    if(state.slackDelivery)result.slack_delivery={rejected_files:0,file_error_codes:[],...state.slackDelivery};
     if(state.goal)result.goal=state.goal;
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
@@ -1618,6 +1618,57 @@ test('stopped work without a final answer keeps its updates expanded',async t=>{
   await page.reload();
   await page.getByText('Observed before interruption.',{exact:true}).waitFor();
   assert.equal(await page.locator('.message.assistant').count(),0);
+});
+
+for(const width of [1440,768,320])test(`resumed work without a new message stays visible after reload at ${width}px`,async t=>{
+  const at=seconds=>new Date(Date.now()-60000+seconds*1000).toISOString();
+  const resumed='after-login';
+  reset({sessionOverrides:{[sessionId]:{active_turn:resumed}},
+    turns:[{id:resumed,actor_id:'viewer',status:'running',created_at:at(30),connections:[],usage:{}},
+      {id:turnId,actor_id:'viewer',status:'resumed',created_at:at(0),finished_at:at(20),connections:[],usage:{}}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect the protected page.',created_at:at(0)}],
+    workProgressByTurn:{[turnId]:{messages:[],tools:[],subagents:[]},[resumed]:{
+      messages:[{id:'after-login-update',phase:'commentary',text:'Inspection continued after sign-in.',created_at:at(35)}],
+      tools:[{id:'resumed-read',name:'read_file',status:'completed',created_at:at(36),finished_at:at(37)}],subagents:[]}},
+    actionDetails:{'resumed-read':{id:'resumed-read',name:'read_file',status:'completed',input:'{"path":"README.md"}',output:'Saved content',restricted:false,input_truncated:false,output_truncated:false}},
+  });
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByText('Inspection continued after sign-in.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.message.user').count(),1);
+  const continuation=page.locator(`.turn-progress[data-turn-id="${resumed}"]`);
+  await continuation.getByRole('button',{name:'1 action',exact:true}).click();
+  await continuation.getByRole('button',{name:'Open Read file action',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith(`/progress/${resumed}/actions/resumed-read`)));
+  await page.reload();
+  await page.getByText('Inspection continued after sign-in.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.message.user').count(),1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('replayed historical actions cannot rapidly cycle the current status label',async t=>{
+  reset({workProgress:{messages:[],subagents:[],tools:[{id:'current',name:'shell',status:'running',created_at:new Date().toISOString()}]}});
+  const page=await pageFor(t);
+  await page.locator('.live-action').getByText('Run command…',{exact:true}).waitFor();
+  await waitFor(()=>clients.size>0);
+  for(let i=0;i<80;i++)emit({type:'tool_call',id:`old-${i}`,name:i%2?'browser_open':'edit_file',created_at:'2020-01-01T00:00:00Z'},i);
+  await page.getByRole('button',{name:'81 actions',exact:true}).waitFor();
+  assert.match(await page.locator('.live-action').innerText(),/^Run command…/);
+  state.workProgress.tools[0].status='completed';
+  await page.locator('.live-action').getByText('Working…',{exact:true}).waitFor();
+});
+
+for(const width of [1440,768,320])test(`Slack links and file upload failures are readable at ${width}px`,async t=>{
+  reset({status:'completed',sessionOverrides:{[sessionId]:{surface:'slack',visibility:'shared',can_manage:true}},
+    slackDelivery:{pending:0,sending:0,rejected:1,rejected_files:1,file_error_codes:['missing_scope']},
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',source:'slack',content:'Inspect <https://example.test/repo?a=1&amp;b=2|the repository>. Keep `<https://example.test/literal|code>` literal.'}],
+  });
+  const page=await pageFor(t,'#'+sessionId,width);
+  const link=page.locator('.message-content').getByRole('link',{name:'the repository',exact:true});
+  await link.waitFor();assert.equal(await link.getAttribute('href'),'https://example.test/repo?a=1&b=2');
+  assert.equal(await page.locator('.message-content').getByRole('link',{name:'code',exact:true}).count(),0);
+  await page.getByText(/Slack could not upload 1 file\(s\).*missing_scope/).waitFor();
+  await page.getByRole('button',{name:'Retry delivery',exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });
 
 test('access revocation removes transcript, draft and panel state before reauthorization',async t=>{

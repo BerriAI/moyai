@@ -381,8 +381,10 @@ class ProductHistoryAdapter:
     def view(self, row: dict[str, Any], principal: Principal) -> dict[str, Any]:
         # Explicit allowlist: no pending_result, side_chat_context, sandbox/token,
         # checkpoints, working events, credential configuration or tool payloads.
+        from .slack_messages import plain_slack_title
+        title = row["title"] or "Earlier conversation"
         return {
-            "id": row["id"], "title": row["title"] or "Earlier conversation",
+            "id": row["id"], "title": plain_slack_title(title) if row["slack_connected"] else title,
             "owner_id": row["owner_id"], "owner": {"id": row["owner_id"], "name": row["owner_name"]},
             "visibility": "private" if self.privacy.is_private(row) else "shared",
             "surface": "slack" if row["slack_connected"] else "web",

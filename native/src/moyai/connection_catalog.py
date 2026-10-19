@@ -6,6 +6,8 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -22,6 +24,54 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_core import SchemaValidator, core_schema
 
 from .contracts import RunScope
+
+
+def connection_search(
+    _ctx: RunContext[RunScope], queries: Sequence[str], tools: Sequence[ToolDefinition],
+) -> list[str]:
+    """Rank requested operations and repository names above shared boilerplate.
+
+    Each query gets a first match before filling the result window, and duplicate
+    operations from other accounts cannot crowd every distinct operation out.
+    This only orders already-authorized definitions; it never grants access.
+    """
+    def words(value: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", value.lower()))
+
+    documents = {tool.name: words(f"{tool.name} {tool.description or ''}") for tool in tools}
+    frequencies: dict[str, int] = {}
+    for terms in documents.values():
+        for term in terms:
+            frequencies[term] = frequencies.get(term, 0) + 1
+    ranked = []
+    for query in queries:
+        terms = words(query)
+        scores = []
+        for tool in tools:
+            overlap = terms & documents[tool.name]
+            if not overlap:
+                continue
+            name_words = words(tool.name)
+            score = sum((3 if word in name_words else 1) * math.log(2 + len(tools) / frequencies[word]) for word in overlap)
+            repository = re.match(r"Connected GitHub repository: (.*?)\. ", tool.description or "")
+            if repository:
+                score += 20 * len(terms & words(repository[1]))
+            scores.append((score, tool.name))
+        ranked.append(sorted(scores, key=lambda item: (-item[0], item[1])))
+    result = list(dict.fromkeys(matches[0][1] for matches in ranked if matches))
+    operations = {re.sub(r"^[a-z]+_[a-z0-9]{8}_", "", name) for name in result}
+    rest = sorted((item for matches in ranked for item in matches), key=lambda item: (-item[0], item[1]))
+    duplicates = []
+    for _score, name in rest:
+        if name in result or name in duplicates:
+            continue
+        operation = re.sub(r"^[a-z]+_[a-z0-9]{8}_", "", name)
+        if operation in operations:
+            duplicates.append(name)
+        else:
+            result.append(name)
+            operations.add(operation)
+    return result + duplicates
 
 
 class ConnectionToolSearch(ToolSearch[RunScope]):

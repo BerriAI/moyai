@@ -112,6 +112,31 @@ export function workSegments(messages: Message[], turns: Turn[]): Map<number, Wo
   return segments
 }
 
+/** Approval/login continuations have their own execution but no new user bubble. */
+export function unanchoredWorkSegments(messages: Message[], turns: Turn[]): Map<number | null, WorkSegment[]> {
+  const anchored = new Set([...workSegments(messages, turns).values()].map(segment => segment.turn.id))
+  const result = new Map<number | null, WorkSegment[]>()
+  const roots = turns.filter(turn => !turn.parent_turn && turn.status !== "queued" && !anchored.has(turn.id))
+    .sort((a, b) => (instant(a.created_at) ?? 0) - (instant(b.created_at) ?? 0))
+  for (const turn of roots) {
+    const at = instant(turn.created_at)
+    const next = messages.find(message => message.turn_id === turn.id
+      || (at !== null && (instant(message.created_at) ?? -Infinity) > at))
+    const key = next?.id ?? null
+    const group = result.get(key) ?? []
+    group.push({ id: `${turn.id}:continuation`, turn, after: null, before: null, earlier: false,
+      hasFinalAnswer: messages.some(message => message.id >= 0 && message.turn_id === turn.id && message.role === "assistant" && Boolean(message.content.trim())) })
+    result.set(key, group)
+  }
+  return result
+}
+
+/** A replayed stream is history. Only an authoritative progress read drives current status. */
+export function currentWorkTool(entry?: WorkEntry): ToolProgress | undefined {
+  if (entry?.error) return undefined
+  return entry?.data?.tools?.filter(tool => tool.status === "running").at(-1)
+}
+
 export function mergeProgress(saved: ProgressMessage[], live: ProgressMessage[]): ProgressMessage[] {
   const messages = new Map(saved.map(message => [message.id, message]))
   const legacy = saved.filter(message => !message.id.startsWith("commentary:"))

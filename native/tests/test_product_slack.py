@@ -791,6 +791,29 @@ async def test_delivery_retry_only_resets_explicit_rejections(slack, active, act
         assert (await db.get(Delivery, delivery.id)).status == 'pending'
 
 
+async def test_delivery_status_distinguishes_file_rejections_without_exposing_raw_provider_details(slack, active):
+    from moyai.slack_delivery_status import status
+    from moyai.slack_file_delivery import SlackFileDelivery, UploadFile
+
+    delivery = await queued(slack, active)
+    database = slack.runtime.database
+    async with database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status = "rejected"
+        row.content = database.security.seal(SlackFileDelivery.content(
+            UploadFile(filename="debug.json", title="Debug", content=b"{}"), after="answer",
+        ))
+        row.receipt = database.security.seal({"error": "Slack files.getUploadURLExternal rejected the upload: missing_scope."})
+    async with database.sessions() as db:
+        result = await status(database, db, active[0].id)
+        assert result == {"pending": 0, "sending": 0, "rejected": 1, "rejected_files": 1,
+                          "file_error_codes": ["missing_scope"]}
+    async with database.sessions.begin() as db:
+        (await db.get(Delivery, delivery.id)).receipt = database.security.seal({"error": "secret provider detail"})
+    async with database.sessions() as db:
+        assert (await status(database, db, active[0].id))["file_error_codes"] == []
+
+
 async def test_pending_inbox_is_encrypted_and_expires_without_admission(slack):
     inbox = slack.service.inbox
     inbox.enqueue('old-event', {'text': 'private pending message'})

@@ -75,6 +75,8 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
             )])
         if scenario == "history":
             if "NEW GUIDANCE" in prompts:
+                if "read_plan" not in completed:
+                    return ModelResponse(parts=[ToolCallPart("read_plan", {}, tool_call_id="after-new-guidance")])
                 return ModelResponse(parts=[TextPart("Guidance preserved after handoff.")])
             if "load_capability" not in completed:
                 loader = next(tool for tool in info.function_tools if tool.name == "load_capability")

@@ -53,7 +53,7 @@ def _messages(turn_id: str) -> list[ModelRequest | ModelResponse]:
             instructions="Follow the system guidance.",
             parts=[
                 SystemPromptPart("Follow the system guidance."),
-                UserPromptPart("Check the working directory."),
+                UserPromptPart("Check the working directory.", timestamp=timestamp),
                 ToolReturnPart(
                     "credentials_run", "private command output", tool_call_id="private-call",
                 ),
@@ -92,7 +92,7 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
         saved.error = "A tool failed."
         saved.usage = json.dumps({"cost": 0.25})
 
-    async def snapshot(*, run_id: str):
+    async def snapshot(*, run_id: str, include_interrupted: bool = False):
         assert run_id == turn.id
         return SimpleNamespace(messages=_messages(turn.id))
 
@@ -111,7 +111,7 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
     assert trace["agent"]["version"] == "0.1.0"
     steps = trace["steps"]
     assert [step["step_id"] for step in steps] == list(range(1, len(steps) + 1))
-    requester = steps[0]
+    requester = next(step for step in steps if step.get("extra", {}).get("turn_id") == turn.id and step["source"] == "user")
     assert requester["source"] == "user"
     assert requester["message"] == "Inspect the project."
     assert requester["extra"] == {
@@ -177,7 +177,7 @@ async def test_debug_trace_preserves_malformed_tool_arguments(runtime, actor, mo
     )
     timestamp = datetime(2026, 6, 20, tzinfo=UTC)
 
-    async def snapshot(runtime: Runtime, turn_id: str):
+    async def snapshot(runtime: Runtime, turn_id: str, *, include_interrupted: bool = False):
         assert turn_id == turn.id
         return SimpleNamespace(messages=[
             ModelResponse(
@@ -248,7 +248,7 @@ async def test_debug_trace_uses_saved_assistant_when_no_snapshot_exists(runtime,
             identity=f"debug-trace-assistant:{new_id()}",
         ))
 
-    async def no_snapshot(runtime: Runtime, turn_id: str) -> None:
+    async def no_snapshot(runtime: Runtime, turn_id: str, *, include_interrupted: bool = False) -> None:
         return
 
     monkeypatch.setattr("moyai.debug_trace.latest_turn_snapshot", no_snapshot)
@@ -256,3 +256,52 @@ async def test_debug_trace_uses_saved_assistant_when_no_snapshot_exists(runtime,
     assistant = next(step for step in trace["steps"] if step["source"] == "agent")
     assert assistant["message"] == "Saved answer."
     assert assistant["extra"] == {"turn_id": turn.id}
+
+
+async def test_interrupted_trace_orders_and_deduplicates_delivered_steering(runtime, actor, active, monkeypatch):
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from moyai.input_identity import identified_prompt
+
+    session, turn, _ = active
+    followup = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Use the current checkout.", request_key="trace-steering", mode="asap",
+    ))
+    start = datetime(2026, 10, 19, tzinfo=UTC)
+    authored_at, delivered_at = start + timedelta(seconds=1), start + timedelta(seconds=2)
+    async with runtime.database.sessions.begin() as db:
+        for identity, timestamp in ((turn.id, start), (followup.id, authored_at)):
+            row = await db.scalar(select(Message).where(Message.turn_id == identity, Message.role == "user"))
+            row.created_at = timestamp.isoformat()
+        saved = await db.get(Turn, turn.id)
+        saved.status, saved.finished_at, saved.error = "failed", (start + timedelta(seconds=4)).isoformat(), "Tool failed."
+    segment = turn.id + ":segment:5"
+
+    async def snapshot(_runtime, identity, *, include_interrupted=False):
+        assert include_interrupted
+        if identity != turn.id:
+            return None
+        return SimpleNamespace(messages=[
+            ModelRequest(parts=[UserPromptPart("Initial prompt", timestamp=start)], timestamp=start, run_id=turn.id),
+            # A normalized request can have a different timestamp from its user part.
+            ModelRequest(parts=[UserPromptPart(
+                identified_prompt("Use the current checkout.", followup.id, turn.id), timestamp=delivered_at,
+            )], timestamp=start, run_id=segment),
+            ModelResponse(parts=[ToolCallPart("credentials_request", {"secret": "never export"}, tool_call_id="last-call")],
+                          timestamp=start + timedelta(seconds=3), run_id=segment),
+        ])
+
+    monkeypatch.setattr("moyai.debug_trace.latest_turn_snapshot", snapshot)
+    trace = await debug_trace(runtime, actor, session.id)
+    steps = trace["steps"]
+    assert [step["timestamp"] for step in steps] == sorted(step["timestamp"] for step in steps)
+    corrections = [step for step in steps if step["source"] == "user" and step["message"] == "Use the current checkout."]
+    assert len(corrections) == 1
+    assert corrections[0]["timestamp"] == authored_at.isoformat()
+    assert corrections[0]["extra"]["delivered_at"] == delivered_at.isoformat()
+    call = next(step for step in steps if step.get("tool_calls"))
+    assert call["extra"]["run_id"] == segment
+    assert call["tool_calls"][0]["function_name"] == "credentials_request"
+    assert "never export" not in json.dumps(trace)

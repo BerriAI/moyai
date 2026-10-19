@@ -8,7 +8,11 @@ Private reasoning, tool arguments and tool results are not part of this feed.
 A **Send now** correction starts a new working section. Earlier sections stay
 visible above that input. Only a saved, nonempty parent answer collapses the
 answered section; stopped or failed work without an answer stays expanded.
-Saved activity remains available after reload. The feed belongs to the original
+Saved activity includes history continuations and remains available after reload.
+Work resumed after a login or approval has its own activity section, even without
+a new user message. The current action label follows the saved running action;
+catching up on old streamed events does not replay them as current work.
+The feed belongs to the original
 requester, including in shared conversations.
 
 Expand an action count, such as **11 actions**, then select a row to open its
@@ -63,3 +67,12 @@ older deployment retain their existing delivery behavior.
 Stale unsent progress is suppressed. An external write with an unconfirmed
 acknowledgement remains claimed until Slack reconciliation confirms it; it is
 not reposted. Existing requester and installation checks still apply.
+
+If an execution fails, Moyai attempts to save settled conversation and computer
+state before releasing the workspace. A later authorized request can restore
+that checkpoint. Unresolved external writes retain their review barrier. If the
+checkpoint cannot be saved, the conversation shows a recovery warning.
+
+Slack delivery notices distinguish failed file uploads from undelivered messages
+and include a safe provider error code when available. The failure message does
+not claim that a debug attachment was delivered before Slack confirms it.

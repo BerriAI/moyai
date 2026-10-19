@@ -7,10 +7,11 @@ import pytest
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, RunUsage
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_core import ValidationError
 
-from moyai.connection_catalog import CatalogToolset, ConnectionCatalog
+from moyai.connection_catalog import CatalogToolset, ConnectionCatalog, connection_search
 from moyai.contracts import Grant, RunScope
 
 
@@ -20,6 +21,25 @@ def context(**changes):
         [Grant("connection", "github", 1, "sealed-token")],
     )
     return RunContext(deps=replace(scope, **changes), model=TestModel(), usage=RunUsage())
+
+
+def test_repository_and_distinct_requested_actions_survive_a_crowded_catalog():
+    tools = [ToolDefinition(
+        name=f"github_{identity}_{operation}",
+        description=f"Connected GitHub repository: {repository}. {description}",
+    ) for identity, repository in [("11111111", "BerriAI/litellm"), ("22222222", "BerriAI/moyai"), ("33333333", "BerriAI/other")]
+        for operation, description in [
+            ("checkout", "Check out a branch or PR in the workspace."),
+            ("publish_branch", "Publish staged files to a branch without opening a PR."),
+            ("open_pull_request", "Open a PR from an existing branch."),
+            ("request_pull_request_write_access", "Ask for access to edit an external PR."),
+            ("create_review", "Create a pending review on a PR."),
+            ("publication_status", "Inspect the receipt of a previous publication."),
+        ]]
+    matches = connection_search(context(), ["moyai checkout", "moyai publish branch", "moyai publication status"], tools)[:6]
+    assert matches[:3] == ["github_22222222_checkout", "github_22222222_publish_branch", "github_22222222_publication_status"]
+    assert len({name.split("_", 2)[2] for name in matches}) == len(matches)
+    assert connection_search(context(), ["nonexistentxyz"], tools) == []
 
 
 async def test_repeated_listing_reuses_only_definitions_and_validates_live_calls():

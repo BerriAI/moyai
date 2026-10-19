@@ -1,3 +1,4 @@
+import { SlackMessage } from "./slack-content"
 import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { Send, Bug, Download, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
@@ -40,7 +41,7 @@ import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, ty
 import { TurnProgress, toolLabel } from "./turn-progress"
 import { ActionPanel } from "./action-panel"
 import { useWorkProgress } from "./use-work-progress"
-import { orderedWorkMessages, workSegments } from "./work-timeline"
+import { currentWorkTool, orderedWorkMessages, unanchoredWorkSegments, workSegments, type WorkSegment } from "./work-timeline"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
@@ -854,6 +855,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const visibleMessages = orderedWorkMessages((liveMessage ? [...messages, liveMessage] : messages).filter(message =>
     (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
   const segments = workSegments(visibleMessages.filter(message => message !== liveMessage), view.turns)
+  const unanchored = unanchoredWorkSegments(visibleMessages, view.turns)
+  const currentTool = active ? currentWorkTool(work.entries[active.id]) : undefined
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
@@ -875,6 +878,23 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   // Questions and effect reviews remain in the conversation where they can be answered.
   const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
     && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
+  function renderProgress(segment: WorkSegment) {
+    if (!(segment.turn.is_self ?? segment.turn.actor_id === me.user.id)) return null
+    return <TurnProgress
+              key={`${authorityKey}:${connectionVersion}:${segment.id}`} segment={segment} visible={visible && !space}
+              entry={work.entries[segment.turn.id]} request={work.load}
+              live={liveText.turnId === segment.turn.id ? liveText : undefined}
+              onContentChange={followWork}
+              selectedAction={selectedTab?.kind === "action" ? selectedTab.action : undefined}
+              onAction={(tool, agent) => openAction({ sessionId: id, turnId: segment.turn.id, toolId: tool.id, agentId: agent?.id, name: toolLabel(tool.name) })}
+              onSubagent={agent => openTab(agent.session_id ? {
+                id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,
+              } : {
+                id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id,
+                name: agent.name, status: agent.status, avatar: agent.avatar,
+              })}
+            />
+  }
   const chat = <SkillMarkdownProvider messages={visibleMessages}><section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
@@ -900,7 +920,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             const segment = segments.get(message.id)
-            return <React.Fragment key={message.id}><article className={`message ${message.role}${message === liveMessage ? " live-message" : ""}`}
+            return <React.Fragment key={message.id}>{unanchored.get(message.id)?.map(renderProgress)}<article className={`message ${message.role}${message === liveMessage ? " live-message" : ""}`}
               data-turn-id={message.turn_id}>
               <div className="message-author">{message.source === "slack" && <img src={slackLogo} width={14} height={14} alt="Slack" />}
                 {message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : (message.is_self ?? message.author_id === me.user.id) ? (message.author_name ? `${message.author_name} · You` : "You") : message.author_name || "Unknown sender"}
@@ -910,7 +930,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
-                {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : <SkillMessage content={message.content} />}</div>}
+                {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : message.source === "slack" ? <SlackMessage content={message.content} /> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
                 {message.deleted && <p className="muted">Deleted in Slack.{message.edited_after_start ? " Work that already started may continue." : ""}</p>}
                 {message.edited && <p className="muted">Edited in {message.edited_in === "web" ? "Moyai" : "Slack"}.{message.edited_after_start ? " This task received the original text. Send a follow-up to change the work." : ""}</p>}
@@ -919,23 +939,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.attachment_status?.filter(file => file.error || file.preview_error).map((file, index) => <p className="muted" role="status" key={file.file_id ?? index}>{file.name || "Slack attachment"}: {file.error ? "File unavailable. Open the message in Slack to retry or share it again." : "Preview unavailable. The original file is attached."}</p>)}
               </div>
 
-            </article>{(segment?.turn.is_self ?? segment?.turn.actor_id === me.user.id) && <TurnProgress
-              key={`${authorityKey}:${connectionVersion}:${segment.id}`} segment={segment} visible={visible && !space}
-              entry={work.entries[segment.turn.id]} request={work.load}
-              live={liveText.turnId === segment.turn.id ? liveText : undefined}
-              onContentChange={followWork}
-              selectedAction={selectedTab?.kind === "action" ? selectedTab.action : undefined}
-              onAction={(tool, agent) => openAction({ sessionId: id, turnId: segment.turn.id, toolId: tool.id, agentId: agent?.id, name: toolLabel(tool.name) })}
-              onSubagent={agent => openTab(agent.session_id ? {
-                id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,
-              } : {
-                id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id,
-                name: agent.name, status: agent.status, avatar: agent.avatar,
-              })}
-            />}</React.Fragment>
+            </article>{segment && renderProgress(segment)}</React.Fragment>
           })}
+          {unanchored.get(null)?.map(renderProgress)}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
-          {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
+          {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : currentTool ? `${toolLabel(currentTool.name)}…` : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? (active.is_self ?? active.actor_id === me.user.id)) && <>
             {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
             <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} onOpenComputer={() => sideMode ? sessionActions.openComputer(id) : addTab("computer")} />
@@ -979,7 +987,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           </div>
           {accountNotice && !skipAccounts && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Continue</Button><a href="#settings/general">Preferences</a></p>}
           {session.surface === "slack" && view.slack_delivery && <div className="composer-hint" role="status">
-            {view.slack_delivery.rejected > 0 ? <><span>Slack could not deliver {view.slack_delivery.rejected} message(s). Check the Slack connection in Settings.</span>{session.can_manage && <Button variant="ghost" size="sm" onClick={async () => { try { await retrySlackDelivery({ path: { session_id: id } }); await load() } catch (reason) { setError(String(reason)) } }}>Retry delivery</Button>}</>
+            {view.slack_delivery.rejected > 0 ? <><span>{view.slack_delivery.rejected_files > 0 && <>Slack could not upload {view.slack_delivery.rejected_files} file(s). {view.slack_delivery.file_error_codes.length > 0 && <>Reason: {view.slack_delivery.file_error_codes.join(", ")}. </>}</>}{view.slack_delivery.rejected > view.slack_delivery.rejected_files && <>Slack could not deliver {view.slack_delivery.rejected - view.slack_delivery.rejected_files} message(s). </>}{view.slack_delivery.file_error_codes.includes("missing_scope") && <>Check file upload permissions for the Slack connection in Settings. </>}</span>{session.can_manage && <Button variant="ghost" size="sm" onClick={async () => { try { await retrySlackDelivery({ path: { session_id: id } }); await load() } catch (reason) { setError(String(reason)) } }}>Retry delivery</Button>}</>
               : view.slack_delivery.sending > 0 ? "Confirming Slack delivery. Your message will not be sent twice."
               : view.slack_delivery.pending > 0 ? "Waiting to deliver to Slack…" : null}
           </div>}

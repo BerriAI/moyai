@@ -149,15 +149,20 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                                 add_instructions(part.content, message.timestamp)
                             elif isinstance(part, UserPromptPart):
                                 text = _user_prompt_text(part)
-                                if first_request:
+                                metadata = next((item.metadata for item in part.content
+                                                 if isinstance(item, TextContent) and isinstance(item.metadata, dict)
+                                                 and item.metadata.get("moyai_parent_turn_id") == turn.id), None) if not isinstance(part.content, str) else None
+                                metadata = metadata or message.metadata or {}
+                                input_id = metadata.get("moyai_input_id") if metadata.get("moyai_parent_turn_id") == turn.id else None
+                                if first_request and not input_id:
                                     user_parts.append(text)
                                 else:
                                     steps.append({
                                         "step_id": len(steps) + 1,
-                                        "timestamp": _timestamp(message.timestamp),
+                                        "timestamp": _timestamp(part.timestamp),
                                         "source": "user",
                                         "message": text,
-                                        "extra": {"kind": "steering"},
+                                        "extra": {"kind": "steering", **({"input_turn_id": input_id} if input_id else {})},
                                     })
                             elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
                                 call_id = part.tool_call_id
@@ -299,12 +304,22 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
 
     # Parent runs and admitted steering overlap in time. Storage turn order is
     # not chronology. Prefer the original authored input to its model copy.
-    authored = {(step.get("timestamp"), step.get("message")) for step in steps
+    authored = {step["extra"]["turn_id"]: step for step in steps
                 if step["source"] == "user" and step.get("extra", {}).get("turn_id")}
-    steps = [step for step in steps if not (
-        step.get("extra", {}).get("kind") == "steering"
-        and (step.get("timestamp"), step.get("message")) in authored
-    )]
+    unique_steps = []
+    for step in steps:
+        extra = step.get("extra", {})
+        if extra.get("kind") == "steering":
+            original = authored.get(extra.get("input_turn_id"))
+            if original is None:
+                original = next((row for row in authored.values()
+                                 if row["message"] == step["message"] and row["timestamp"] == step["timestamp"]), None)
+            if original is not None:
+                original["extra"]["prompt_received"] = step["message"]
+                original["extra"]["delivered_at"] = step["timestamp"]
+                continue
+        unique_steps.append(step)
+    steps = unique_steps
     steps.sort(key=lambda step: step.get("timestamp") or "")
     for index, step in enumerate(steps, 1):
         step["step_id"] = index
