@@ -10,6 +10,7 @@
 | Managed operations | Deployment workflows and runbooks are maintained in a private repository |
 | [Deployment contract](pydantic-deployment.md) | Runtime configuration, schema receipts and maintenance interfaces |
 | [Worker checkpoint handoff](worker-checkpoint-handoff.md) | Move a pinned agent turn to a qualified release at a settled checkpoint |
+| [Worker adoption bridge](worker-adoption-bridge.md) | Prepare guarded same-image startup alongside an unversioned fleet |
 | [Authentication](authentication.md) | Local accounts and existing Google/Cloudflare identity |
 | [Cloudflare Access](cloudflare-access.md) | Preserve the existing edge and origin identity boundary |
 | [Automations](pydantic-automations.md) | Canonical definitions, adoption and admission fences |

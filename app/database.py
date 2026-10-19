@@ -381,6 +381,10 @@ class PostgresDatabase:
                 or not runtime_settings.temporal_enabled):
             raise DatabaseError('Coordinator handoff requires verified schema, Temporal and a separate broker.')
         self.schema_updates = schema_mode != 'verify'
+        if runtime_settings and getattr(runtime_settings, 'moyai_worker_adoption_bridge', False) and (
+                schema_mode != 'verify' or initialize or not self.coordinator_handoff
+                or not runtime_settings.moyai_separate_broker or runtime_role == 'standalone'):
+            raise DatabaseError('An adoption bridge can only join a verified distributed runtime.')
         if application_instance and runtime_role != 'standalone' and runtime_settings is None:
             raise DatabaseError('Distributed application startup requires its runtime configuration before schema setup.')
         try:
@@ -402,6 +406,10 @@ class PostgresDatabase:
                     raise DatabaseError('Another Moyai instance owns this Postgres schema. Keep a single application instance.')
                 compatible_coordinator = (runtime_role == 'coordinator' and self.coordinator_handoff
                                           and self.admit_coordinator(runtime_settings))
+                if (runtime_role == 'coordinator'
+                        and getattr(runtime_settings, 'moyai_worker_adoption_bridge', False)
+                        and not compatible_coordinator):
+                    raise DatabaseError('An adoption bridge cannot establish or replace the canonical runtime policy.')
                 if runtime_role == 'coordinator' and not compatible_coordinator:
                     if not self.acquire_coordinator():
                         raise DatabaseError('Another coordinator owns this Postgres schema.')
@@ -525,6 +533,9 @@ class PostgresDatabase:
             raise DatabaseError('Runtime role does not match the database owner.')
         if self.runtime_role == 'api' and not settings.moyai_separate_broker:
             raise DatabaseError('API replicas require a separate inference broker.')
+        if (getattr(settings, 'moyai_worker_adoption_bridge', False) and self.runtime_role == 'coordinator'
+                and not self.admit_coordinator(settings)):
+            raise DatabaseError('An adoption bridge cannot establish or replace the canonical runtime policy.')
         if self.runtime_role == 'api':
             return self.admit_api(settings)
         if self.runtime_role == 'worker' and not self.schema_updates and settings.moyai_separate_broker:
