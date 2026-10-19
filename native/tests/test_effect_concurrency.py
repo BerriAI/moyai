@@ -32,7 +32,7 @@ from moyai.agent import HarnessActivityContext
 from moyai.contracts import NewMessage, NewSession, RunScope
 from moyai.effects import EffectReceipts, PendingEffectError, requires_receipt
 from moyai.live_events import root_event_stream
-from moyai.models import Effect, User
+from moyai.models import Effect, Turn, User
 from moyai.runtime import Runtime
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter
@@ -210,7 +210,7 @@ async def qualify_parallel_children(runtime, active, *, legacy=False):
 
 
 @pytest.mark.parametrize("complete_first", [False, True])
-async def test_cancel_waiting_children_leaves_only_dispatched_effect_uncertain(runtime, active, complete_first):
+async def test_cancel_retains_uncertain_effect_and_admits_independent_turn(runtime, active, complete_first):
     session, turn, prepared = active
     scenario = ParallelChildren(complete_first=complete_first)
     # Isolate tool lifecycle cancellation from the SDK's streamed-event teardown.
@@ -230,27 +230,56 @@ async def test_cancel_waiting_children_leaves_only_dispatched_effect_uncertain(r
                 await asyncio.wait_for(handle.result(), 20)
             rows = await effect_rows(runtime, session.id)
             expected = ["confirmed", "pending"] if complete_first else ["pending"]
+            # Only admitted children dispatched; queued waiters left no receipts.
             assert len(scenario.executed) == len(expected)
             assert [row.state for row in rows] == expected and rows[-1].resolution is None
             scenario.release_shell.set()
             history = await handle.fetch_history()
-        # A newly authorized turn still cannot bypass the uncertain operation.
-        async with runtime.database.sessions() as db:
-            actor = await db.get(User, prepared.scope.actor_id)
-        following = await runtime.database.submit(actor, session.id, NewMessage(
-            prompt="Do not replay the unknown effect.", request_key="after-cancel",
-        ))
-        await runtime.database.claim_next()
-        admitted = await runtime.database.prepare(following.id)
-        receipts = EffectReceipts(runtime.database)
-        with pytest.raises(PermissionError, match="reconciliation"):
-            await receipts.reserve(admitted.scope, "never-replay-unknown", "shell", {"child": 99})
-        assert [r.state for r in await effect_rows(runtime, session.id)] == expected
-        await Replayer(
-            interceptors=[ActivityCapacity()],
-            workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
-        ).replay_workflow(history)
-        assert len(scenario.executed) == len(expected)
+    interrupted = rows[-1]
+    retained = (
+        interrupted.id, interrupted.session_id, interrupted.turn_id, interrupted.actor_id,
+        interrupted.tool_name, interrupted.arguments, interrupted.fingerprint, interrupted.resolution,
+        interrupted.created_at,
+    )
+    assert interrupted.turn_id == turn.id and interrupted.actor_id == prepared.scope.actor_id
+    assert json.loads(runtime.security.unseal(interrupted.arguments)) == {"child": scenario.executed[-1]}
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Turn, turn.id)).status == "stopped"
+        actor = await db.get(User, prepared.scope.actor_id)
+    # A fresh message settles the ended attempt as failed evidence, not success.
+    following = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Do not replay the unknown effect.", request_key="after-cancel",
+    ))
+    await runtime.database.claim_next()
+    admitted = await runtime.database.prepare(following.id)
+    settled = await effect_rows(runtime, session.id)
+    assert [row.state for row in settled] == [*expected[:-1], "failed"]
+    assert all(row.id == old.id for row, old in zip(settled, rows, strict=True))
+    assert settled[-1].settled_at is not None
+    assert (
+        settled[-1].id, settled[-1].session_id, settled[-1].turn_id, settled[-1].actor_id,
+        settled[-1].tool_name, settled[-1].arguments, settled[-1].fingerprint, settled[-1].resolution,
+        settled[-1].created_at,
+    ) == retained
+    receipts = EffectReceipts(runtime.database)
+    # The stopped scope can never replay its unknown effect.
+    with pytest.raises(PermissionError, match="stopped"):
+        await receipts.reserve(prepared.scope, interrupted.id, "shell", {"child": scenario.executed[-1]})
+    # Its identity also cannot be repurposed for a different operation.
+    with pytest.raises(ValueError, match="identity"):
+        await receipts.reserve(admitted.scope, interrupted.id, "shell", {"child": 99})
+    # A distinct operation on the newly admitted turn is allowed.
+    await receipts.reserve(admitted.scope, "independent-after-cancel", "shell", {"child": 99})
+    final = await effect_rows(runtime, session.id)
+    assert [row.state for row in final] == [*expected[:-1], "failed", "pending"]
+    assert final[-1].id == "independent-after-cancel" and final[-1].turn_id == following.id
+    assert final[-2].settled_at == settled[-1].settled_at
+    await Replayer(
+        interceptors=[ActivityCapacity()],
+        workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+    ).replay_workflow(history)
+    assert len(scenario.executed) == len(expected)
+    assert [row.state for row in await effect_rows(runtime, session.id)] == [*expected[:-1], "failed", "pending"]
 
 
 async def test_independent_workflows_execute_guarded_tools_in_parallel(runtime, active, actor):
