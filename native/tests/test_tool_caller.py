@@ -13,6 +13,8 @@ from pydantic_ai.exceptions import (
     SkipToolExecution,
     SkipToolValidation,
     ToolFailed,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
 )
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.tools import ToolDefinition
@@ -126,20 +128,38 @@ async def test_guidance_change_keeps_existing_failure_message():
         pytest.param(lambda: WorkspaceUnavailableError("workspace lost"), id="workspace-unavailable"),
         pytest.param(lambda: RunCancelled("run cancelled"), id="run-cancelled"),
         pytest.param(lambda: CancelledError("workflow cancelled"), id="temporal-cancelled"),
+        pytest.param(lambda: UsageLimitExceeded("usage exhausted"), id="usage-limit"),
+        pytest.param(lambda: UnexpectedModelBehavior("tool retries exhausted"), id="retry-limit"),
+        pytest.param(
+            lambda: ApplicationError("usage exhausted", type="UsageLimitExceeded"),
+            id="serialized-usage-limit",
+        ),
+        pytest.param(
+            lambda: ApplicationError("tool retries exhausted", type="UnexpectedModelBehavior"),
+            id="serialized-retry-limit",
+        ),
     ],
 )
+@pytest.mark.parametrize("wrapped", [False, True], ids=["direct", "activity"])
 @pytest.mark.asyncio
-async def test_escalated_errors_are_reraised_unchanged(error_factory):
+async def test_escalated_errors_are_reraised_unchanged(error_factory, wrapped):
     caller = ToolCaller()
     error = error_factory()
+    if wrapped:
+        error = activity_error(error)
+    attempts = 0
 
     async def handler(_args):
+        nonlocal attempts
+        attempts += 1
         raise error
 
+    assert caller.outcome(error, tool(read_only=True), attempt=1) is Outcome.ESCALATE
     with pytest.raises(type(error)) as raised:
         await caller.call(call(), tool(read_only=True), {}, handler)
 
     assert raised.value is error
+    assert attempts == 1
 
 
 @pytest.mark.parametrize(
