@@ -1987,12 +1987,7 @@ export type BillingModelTotals = {
  * BillingReport
  */
 export type BillingReport = {
-    /**
-     * Activity
-     */
-    activity: {
-        [key: string]: unknown;
-    } | null;
+    activity?: AnalyticsReport | null;
     capabilities: BillingCapabilities;
     cost_summary: BillingCostSummary;
     coverage: BillingCoverage;

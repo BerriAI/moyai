@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api, ApiError } from "./api"
-import { getSettingsPerformance, getSettingsUsage } from "./generated/api"
+import { getBillingReport, getSettingsPerformance, getSettingsUsage } from "./generated/api"
 import { AnalyticsChart, AnalyticsDatePicker, AnalyticsLegend, AnalyticsMetrics, ReportTable } from "./analytics-shared"
 import { StartupPerformance } from "./performance"
 import { timingReason, timingSource } from "./performance-labels"
@@ -28,12 +28,6 @@ function queryFor(range: AnalyticsRange, filters: Filters) {
   const params = new URLSearchParams(range)
   for (const [key, value] of Object.entries(filters)) if (value !== "all") params.set(key, value)
   return params
-}
-
-async function billingActivity(path: string, signal: AbortSignal): Promise<AnalyticsReport> {
-  const data = await api<AnalyticsReport | { activity: AnalyticsReport }>(path, "GET", undefined, signal)
-  if (!("activity" in data)) throw new Error("The usage report is unavailable.")
-  return data.activity
 }
 
 /** `path` keys the request; `load` performs it. */
@@ -251,9 +245,16 @@ export function AnalyticsPage({ kind, productMode, headingRef }: { kind: ReportK
   const endpoint = billing ? "/settings/billing" : `/settings/${kind}`
   const path = `${endpoint}?${params}&limit=50&offset=${offset}`
   const filter = (value: string) => value === "all" ? undefined : value
-  const resource = useReport(path, revision, signal => billing ? billingActivity(path, signal) : (kind === "usage" ? getSettingsUsage : getSettingsPerformance)({
-    query: { ...range, model: filter(filters.model), status: filter(filters.status), user_id: filter(filters.user_id), limit: 50, offset }, signal,
-  }).then(({ data }) => data))
+  const resource = useReport(path, revision, signal => billing
+    ? getBillingReport({
+      query: { ...range, root_model: filter(filters.model), turn_status: filter(filters.status), user_id: filter(filters.user_id), include_activity: true, limit: 50, offset }, signal,
+    }).then(({ data }) => {
+      if (!data.activity) throw new Error("The usage report is unavailable.")
+      return data.activity
+    })
+    : (kind === "usage" ? getSettingsUsage : getSettingsPerformance)({
+      query: { ...range, model: filter(filters.model), status: filter(filters.status), user_id: filter(filters.user_id), limit: 50, offset }, signal,
+    }).then(({ data }) => data))
   useEffect(() => {
     if (resource.denied) { setModelOptions([]); setUserOptions([]) }
     else if (resource.data) {

@@ -3694,14 +3694,12 @@
           "activity": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/AnalyticsReport"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Activity"
+            ]
           },
           "capabilities": {
             "$ref": "#/components/schemas/BillingCapabilities"
@@ -3860,8 +3858,7 @@
           "cost_summary",
           "coverage",
           "capabilities",
-          "methodology",
-          "activity"
+          "methodology"
         ],
         "title": "BillingReport",
         "type": "object"

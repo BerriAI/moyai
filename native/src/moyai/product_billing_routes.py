@@ -45,6 +45,7 @@ from .product_billing import (
     exact_sum,
     read_product_billing,
 )
+from .settings_views import AnalyticsReport
 
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 REPORT_TIMEOUT_SECONDS = 15.0
@@ -213,6 +214,10 @@ class BillingCapabilities(BillingResponse):
 
 
 class BillingReport(BillingResponse):
+    # Not BillingResponse's defaults-required flag: it would leak into the nested
+    # AnalyticsReport TypedDicts and mark their NotRequired keys required.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=False)
+
     scope: Literal["personal", "organization"]
     start: str
     end: str
@@ -239,7 +244,7 @@ class BillingReport(BillingResponse):
     capabilities: BillingCapabilities
     methodology: dict[str, str]
     # The activity report (analytics_service) when include_activity=true.
-    activity: dict[str, Any] | None = None
+    activity: AnalyticsReport | None = None
 
 
 class Identity(Protocol):
