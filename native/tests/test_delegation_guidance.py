@@ -143,7 +143,7 @@ async def test_admission_uses_latest_input_but_reporting_can_settle_older_work(r
         assert len(list(await db.scalars(select(DelegatedSession)))) == 1
 
 
-@pytest.mark.parametrize("missing", ["context_identity", "explicit_argument"])
+@pytest.mark.parametrize("missing", ["context_identity", "explicit_argument", "history_argument"])
 async def test_corrected_delegation_survives_activity_formats_and_replays(runtime, actor, active, monkeypatch, missing):
     session, turn, _ = active
     entered, release = asyncio.Event(), asyncio.Event()
@@ -159,10 +159,14 @@ async def test_corrected_delegation_survives_activity_formats_and_replays(runtim
                 corrected_inputs.append(identity)
                 if missing == "context_identity":
                     envelope.serialized_run_context["metadata"].pop("moyai_input_id")
-                else:
+                elif missing == "explicit_argument":
                     # Simulate a pending activity from the prior revision. The
                     # new worker must recover its accepted input from RunContext.
                     envelope.arguments.pop("input_id")
+                else:
+                    # Pending starts written before context inheritance still
+                    # execute without trying to read omitted activity history.
+                    envelope.arguments.pop("messages")
         return await execute(self, activity_input)
 
     monkeypatch.setattr(AuthorizedActivity, "execute_activity", inspect)

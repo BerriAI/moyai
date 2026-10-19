@@ -171,17 +171,29 @@ class ProductReadService:
         if current.auth_version != reader.user.auth_version:
             raise HTTPException(401, "Your session expired.")
 
-    @staticmethod
-    def visible(reader: Reader, *, deleted: bool = False):
+    def private_candidate(self, reader: Reader, session=Session):
+        """SQL candidates only; native_recheck validates the live identity link/audience."""
         private = reader.principal is None or reader.principal.individual
-        ownership = Session.owner_id == reader.user.id
-        access = or_(ownership if private else false(), Session.visibility == "shared")
+        ownership = session.owner_id == reader.user.id
+        schema = getattr(self.identity, "schema", None)
+        linked = false()
+        if schema and reader.principal is not None and reader.principal.individual:
+            users = table("users", column("id"), column("kind"), column("linked_user_id"), schema=schema)
+            linked = session.owner_id.in_(select(users.c.id).where(
+                users.c.kind == "slack", users.c.linked_user_id == reader.user.id,
+            ))
+        delegation = aliased(DelegatedSession)
+        child = select(delegation.session_id).where(delegation.session_id == session.id).exists()
+        return or_(ownership if private else false(), and_(child, or_(ownership, linked)))
+
+    def visible(self, reader: Reader, *, deleted: bool = False):
+        access = or_(self.private_candidate(reader), Session.visibility == "shared")
         clauses = [Session.deleted.is_(deleted), access]
         if not deleted:
             root = aliased(Session)
             membership = select(SwarmMember.session_id).where(SwarmMember.session_id == Session.id)
             parent_access = or_(
-                root.owner_id == reader.user.id if private else false(), root.visibility == "shared",
+                self.private_candidate(reader, root), root.visibility == "shared",
             )
             visible_parent = select(SwarmMember.session_id).join(
                 root, root.id == SwarmMember.mission_id,
@@ -201,14 +213,14 @@ class ProductReadService:
         parent = aliased(Session)
         parent_access = or_(
             parent.visibility == "shared",
-            parent.owner_id == reader.user.id if reader.principal is None or reader.principal.individual else false(),
+            self.private_candidate(reader, parent),
         )
         query = select(
             Session.id, Session.title, Session.owner_id, Session.visibility, Session.surface, Session.model,
             Session.status, Session.active_turn, Session.archived, Session.deleted, Session.created_at,
             Session.updated_at, SessionPreference.pinned, SessionPreference.folder,
             SessionRead.unread.label("marked_unread"), unread.label("new_messages"),
-            (Session.owner_id == reader.user.id).label("created_by_me"),
+            or_(Session.owner_id == reader.user.id, self.private_candidate(reader)).label("created_by_me"),
             (and_(Session.owner_id != reader.user.id, participated)).label("participated"),
             parent.id.label("parent_session_id"),
         ).outerjoin(SessionPreference, preference).outerjoin(SessionRead, read).outerjoin(

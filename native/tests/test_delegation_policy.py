@@ -34,8 +34,9 @@ async def test_delegation_contract_is_consistent_even_for_unadvertised_calls(
     capability = InteractiveDelegation(runtime.database)
     starts, forwards = [], []
 
-    async def start(scope, call_id, task, input_id, *, ctx):
+    async def start(scope, call_id, task, input_id, *, messages, ctx):
         assert input_id == scope.turn_id
+        assert messages is ctx.messages
         starts.append((scope, call_id, task))
         return {"session_id": "child", "name": "Child"}
 

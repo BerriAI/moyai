@@ -365,6 +365,20 @@ class ProductWorkspaceCompatibility:
         self.authorize_project_grants(context, scope.grants)
         return prepared
 
+    async def repository_session(
+        self, db: AsyncSession, native_session_id: str, current: ProductPrincipal,
+    ) -> Session:
+        session = await db.get(Session, native_session_id)
+        if session is None or session.deleted:
+            raise PermissionError("The project session is no longer accessible.")
+        if session.visibility == "private":
+            context = await self.runtime.database.execution_context(db, session)
+            # Private child presentation does not revoke its Slack owner's
+            # inherited shared authority or grant ordinary private sessions.
+            if session.owner_id != current.id or (not current.individual and context.visibility != "shared"):
+                raise PermissionError("The project session is no longer accessible.")
+        return session
+
     async def repository_scope(
         self, native_session_id: str, grant: ProductGrant, *, turn_id: str | None = None,
     ) -> dict[str, Any] | None:
@@ -377,11 +391,7 @@ class ProductWorkspaceCompatibility:
         saved_preparation = None
         connections = getattr(self.runtime, "product_connections", None)
         async with self.runtime.database.sessions() as db:
-            session = await db.get(Session, native_session_id)
-            if session is None or session.deleted or (
-                session.visibility == "private" and (not current.individual or session.owner_id != current.id)
-            ):
-                raise PermissionError("The project session is no longer accessible.")
+            session = await self.repository_session(db, native_session_id, current)
             query = select(ProductExecutionContext).join(Turn, Turn.id == ProductExecutionContext.turn_id).where(
                 Turn.session_id == native_session_id,
             )
@@ -452,12 +462,11 @@ class ProductWorkspaceCompatibility:
             current = await self.identity.require_current(grant)
             await connections.require_scope(prepared.scope)
             async with self.runtime.database.sessions() as db:
-                session = await db.get(Session, native_session_id)
+                session = await self.repository_session(db, native_session_id, current)
                 turn = await db.get(Turn, prepared.scope.turn_id)
                 if (
                     session is None or session.deleted or turn is None or turn.preparation != saved_preparation
                     or session.visibility != prepared.scope.visibility or session.surface != prepared.scope.surface
-                    or (session.visibility == "private" and (not current.individual or session.owner_id != current.id))
                 ):
                     raise PermissionError("The historical repository task changed during authorization.")
                 await self.runtime.database._check_product_turn(db, turn, grant)

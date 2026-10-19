@@ -272,12 +272,14 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             ).where(
                 DelegatedSession.parent_session_id == session_id, Session.deleted.is_(False),
             ).order_by(DelegatedSession.created_at).limit(101))).all()
+            owners = {owner: await runtime.database.same_person(db, user, owner)
+                      for owner in {link.actor_id for link, _ in children[:100]}}
             subagents = [{
                 "id": link.initial_turn_id, "parent_id": link.parent_turn_id,
-                "session_id": child.id if link.actor_id == user.id else None,
-                "name": child.title if link.actor_id == user.id else link.name,
+                "session_id": child.id if owners[link.actor_id] else None,
+                "name": child.title if owners[link.actor_id] else link.name,
                 "avatar": link.avatar, "status": child.status,
-                "started_at": link.created_at, "can_inspect": link.actor_id == user.id, "depth": 0,
+                "started_at": link.created_at, "can_inspect": owners[link.actor_id], "depth": 0,
             } for link, child in children[:100]] + subagents
             truncated = truncated or len(children) > 100
         await recheck(user, session_id)

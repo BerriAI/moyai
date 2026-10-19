@@ -2821,3 +2821,24 @@ test('Slack history pages beyond 200 and navigation discards the old transcript 
   await page.getByText('The next conversation body.',{exact:true}).waitFor();
   assert.equal(await page.getByText('Authored message 205',{exact:true}).count(),0);
 });
+
+for(const width of [1440,768,320])test(`subagent failure before first output shows diagnostics and opens its chat at ${width}px`,async t=>{
+  const childId='d'.repeat(32),created_at=new Date(Date.now()-10000).toISOString(),updated_at=new Date().toISOString();
+  const failure='Subagent failed: PermissionError during agent__moyai__capability__memory__load_snapshot. Open its conversation for failure details.';
+  reset({sessionOverrides:{[childId]:{title:'Solon',status:'failed',parent_session_id:sessionId}},
+    messagesBySession:{[childId]:[{id:1,turn_id:'child-turn',role:'system',source:'delegation',content:'Inspect the repository.'}]},
+    workProgress:{messages:[],tools:[],subagents:[{id:'child-turn',session_id:childId,parent_id:turnId,parent_name:null,
+      name:'Solon',avatar:0,depth:0,status:'failed',created_at,updated_at,tools:[],messages_limited:false,tools_limited:false,
+      messages:[{id:'failure:child-turn',phase:'commentary',text:failure,created_at:updated_at}]}]}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const card=page.locator('[data-agent-id="child-turn"]');
+  await card.getByText(failure,{exact:true}).waitFor();
+  assert.equal(await card.getByText('No public update was recorded.',{exact:true}).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await card.getByRole('button',{name:'Open Solon details',exact:true}).click();
+  const side=page.locator('.side-conversation');
+  await side.getByRole('heading',{name:'Solon',exact:true}).waitFor();
+  assert.equal(new URL(page.url()).hash,'#'+sessionId);
+  await side.getByText('Inspect the repository.',{exact:true}).waitFor();
+  assert.ok(state.requests.some(row=>row.path===`/api/sessions/${childId}`));
+});
