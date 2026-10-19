@@ -147,6 +147,7 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
           </div>
         </div>
         <div className="home-composer-hint">
+          {busy && <span role="status">Sending…</span>}
           {pictures.uploading && <span role="status">Uploading files…</span>}
           {needsAccounts && !accountsReady && !catalog.error && <span role="status">Loading connections…</span>}
           <span>Drop files or paste images · Enter to send</span>

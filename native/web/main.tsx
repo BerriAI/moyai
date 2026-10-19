@@ -46,7 +46,7 @@ import { currentWorkTool, orderedWorkMessages, unanchoredWorkSegments, workSegme
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
-import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
+import { firstMessage, reconcileHistory, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
 import { QuestionChoices } from "./question-choices"
 import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./browser-login"
@@ -200,6 +200,8 @@ function App() {
     void refresh()
   }
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
+  // Shared inventory refreshes own their errors here and resolve after handling
+  // them. Consumers must not recast an inventory failure as a send/history error.
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
     const updateCheckpoint = sessionUpdates.checkpoint()
@@ -451,6 +453,9 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
 function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PullRequestStatus[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
   const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages != null ? resolved : null)
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
+  const [historyState, setHistoryState] = useState(() => ({
+    complete: Boolean(initial || resolved?.messages && resolved.messages.length < 200), loading: false, error: "",
+  }))
   const [plan, setPlan] = useState<PlanStep[]>([])
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState("")
@@ -478,11 +483,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [loadError, setLoadError] = useState("")
   const pictures = useAttachments(setError)
   const [busy, setBusy] = useState(false)
+  const submitting = useRef(false)
+  const [sending, setSending] = useState(false)
+  const receiptMessageId = useRef(-3)
   const [activity, setActivity] = useState<Activity[]>([])
   const [liveText, setLiveText] = useState(emptyLiveTranscript)
   const liveNow = useRef(liveText)
   const [reconnecting, setReconnecting] = useState(false)
-  const endedStreams = useRef(new Set<string>())
+  const [streamAttempt, setStreamAttempt] = useState(0)
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const openedBrowserLogin = useRef("")
@@ -516,20 +524,25 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
+  const loadFlight = useRef<{ version: number; signal?: AbortSignal; promise: Promise<void> } | null>(null)
   const completeHistory = useRef<{ version: string; messages: Message[] } | null>(null)
+  const historyRequest = useRef<{ version: View["transcript_version"]; controller: AbortController } | null>(null)
   const visibleNow = useRef(visible)
   visibleNow.current = visible
   function clearSensitive(message = "Access to this conversation changed. Please reopen it.") {
     sessionUpdates.invalidate(id)
     ++loadVersion.current
     ++sensitiveVersion.current
+    historyRequest.current?.controller.abort(); historyRequest.current = null
     setGoalDialog(false); lastGoalRequest.current = null; setBusy(false)
     resolvedOnce.current = undefined
     composerInitialized.current = false
     readThrough.current = null
     lastRequest.current = null
+    submitting.current = false; setSending(false)
     viewNow.current = null
     completeHistory.current = null
+    setHistoryState({ complete: false, loading: false, error: "" })
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
@@ -542,27 +555,88 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }
   const clearSensitiveNow = useRef(clearSensitive)
   clearSensitiveNow.current = clearSensitive
-  useEffect(() => () => { ++loadVersion.current; ++sensitiveVersion.current }, [])
-  const load = useCallback(async (signal?: AbortSignal) => {
+  useEffect(() => () => {
+    ++loadVersion.current; ++sensitiveVersion.current
+    historyRequest.current?.controller.abort()
+  }, [])
+  useEffect(() => {
+    const pause = () => {
+      if (!visible || document.hidden) {
+        historyRequest.current?.controller.abort(); historyRequest.current = null
+        setHistoryState(previous => ({ ...previous, loading: false }))
+      }
+    }
+    pause()
+    document.addEventListener("visibilitychange", pause)
+    return () => document.removeEventListener("visibilitychange", pause)
+  }, [visible])
+  const readHistory = useCallback((next: View) => {
+    const existing = historyRequest.current
+    // Session polls do not restart the same transcript's pagination. Its owner
+    // is the transcript revision and authority scope, not a metadata refresh.
+    if (existing && existing.version === next.transcript_version && !existing.controller.signal.aborted) return
+    existing?.controller.abort()
+    const request = { version: next.transcript_version, controller: new AbortController() }
+    historyRequest.current = request
+    const { signal } = request.controller, auth = csrfToken(), scope = sensitiveVersion.current
+    const current = () => historyRequest.current === request && !signal.aborted
+      && auth === csrfToken() && scope === sensitiveVersion.current
+    const cached = next.transcript_version && completeHistory.current?.version === next.transcript_version
+      ? completeHistory.current.messages : undefined
+    setHistoryState(previous => ({ ...previous, complete: Boolean(cached), loading: true }))
+    void (async () => {
+      try {
+        // Older servers may omit the first page during a rolling deployment.
+        const history = [...(cached ?? next.messages ?? (await listSessionMessages({ path: { session_id: id }, signal })).data)]
+        if (!current()) return
+        let pageSize = cached ? 0 : history.length
+        setMessages(previous => reconcileHistory(previous, history, pageSize < 200))
+        setHistoryState({ complete: pageSize < 200, loading: true, error: "" })
+        while (pageSize === 200 && current()) {
+          const after = history.at(-1)!.id
+          const { data: page } = await listSessionMessages({ path: { session_id: id }, query: { after }, signal })
+          if (!current()) return
+          if (page.some(message => message.id <= after)) throw new Error("Conversation history changed while loading. Refresh to retry.")
+          history.push(...page); pageSize = page.length
+          setMessages(previous => reconcileHistory(previous, pageSize < 200 ? history : page, pageSize < 200))
+          setHistoryState({ complete: pageSize < 200, loading: true, error: "" })
+        }
+        if (!current()) return
+        if (next.transcript_version) completeHistory.current = { version: next.transcript_version, messages: history }
+        const latestMessage = history.at(-1)?.id ?? 0
+        if (visibleNow.current && readThrough.current !== latestMessage) {
+          await markSessionRead({ path: { session_id: id }, body: { message_id: latestMessage }, signal })
+          if (!current()) return
+          readThrough.current = latestMessage
+        }
+        setHistoryState({ complete: true, loading: false, error: "" })
+      } catch (reason) {
+        if (!current()) return
+        if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) clearSensitiveNow.current(String(reason))
+        else setHistoryState(previous => ({ ...previous, loading: false, error: String(reason) }))
+      } finally {
+        if (historyRequest.current === request) historyRequest.current = null
+      }
+    })()
+  }, [id])
+  const load = useCallback(async (signal?: AbortSignal, share = false) => {
+    if (signal?.aborted) return
+    // Polling and reconnects share a read instead of superseding each other.
+    // Explicit action refreshes always start a fresh read.
+    const flight = loadFlight.current
+    if (share && flight && flight.version === loadVersion.current && !flight.signal?.aborted) return flight.promise
     const version = ++loadVersion.current
     const updateCheckpoint = sessionUpdates.checkpoint()
+    const auth = csrfToken()
+    const current = () => !signal?.aborted && version === loadVersion.current && auth === csrfToken()
+    const request = (async () => {
     try {
       const cached = resolvedOnce.current
       resolvedOnce.current = undefined
       const next: View = cached ?? (await getSession({ path: { session_id: id }, query: { include_activity: false, include_messages: true }, signal })).data
-      // Older servers can omit the transcript during a rolling deployment.
-      const unchanged = next.transcript_version && completeHistory.current?.version === next.transcript_version
-      const history: Message[] = unchanged ? completeHistory.current!.messages : [...(next.messages ?? (await listSessionMessages({ path: { session_id: id }, signal })).data)]
-      let pageSize = unchanged ? 0 : history.length
-      while (pageSize === 200 && !signal?.aborted && version === loadVersion.current) {
-        const after = history.at(-1)!.id
-        const { data: page } = await listSessionMessages({ path: { session_id: id }, query: { after }, signal })
-        if (page.some(message => message.id <= after)) throw new Error("Conversation history changed while loading. Refresh to retry.")
-        history.push(...page); pageSize = page.length
-      }
-      if (signal?.aborted || version !== loadVersion.current) return
+      if (!current()) return
       if (!cached) sessionUpdates.acceptRead(updateCheckpoint, [next.session], true)
-      // Publish a complete composer with the transcript, before read bookkeeping.
+      // Authorized turn status can start live progress while older history pages load.
       // Seed only once so polling and late receipts cannot overwrite user edits.
       if (!composerInitialized.current) {
         setModel(next.session.model)
@@ -570,33 +644,33 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         setSelectedAccounts((latest?.is_self ?? latest?.actor_id === me.user.id) ? latest.connections ?? [] : [])
         composerInitialized.current = true
       }
-      if (next.transcript_version) completeHistory.current = { version: next.transcript_version, messages: history }
       viewNow.current = next
-      setView(next); setMessages(history)
+      setView(next)
       if (next.activity) setActivity(next.activity)
       setSendingNow(previous => {
         const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
         return pending.length === previous.size ? previous : new Set(pending)
       })
       sessionCallback.current?.(next.session)
-      const latestMessage = history.at(-1)?.id ?? 0
-      if (visibleNow.current && readThrough.current !== latestMessage) {
-        await markSessionRead({ path: { session_id: id }, body: { message_id: latestMessage }, signal })
-        if (signal?.aborted || version !== loadVersion.current) return
-        readThrough.current = latestMessage
-      }
+      readHistory(next)
       setLoadError("")
     } catch (reason) {
-      if (signal?.aborted || version !== loadVersion.current) return
+      if (!current()) return
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) {
         clearSensitiveNow.current(String(reason))
       }
       throw reason
     }
-  }, [id, me.user.id, sideMode, sessionUpdates])
+    })()
+    loadFlight.current = { version, signal, promise: request }
+    try { await request }
+    finally { if (loadFlight.current?.version === version) loadFlight.current = null }
+  }, [id, me.user.id, sideMode, sessionUpdates, readHistory])
   async function reloadAfterAction(message?: string) {
+    const version = sensitiveVersion.current, auth = csrfToken()
     try { await load() }
     catch (reason) {
+      if (version !== sensitiveVersion.current || auth !== csrfToken()) return
       const denied = reason instanceof ApiError && [401, 403, 404].includes(reason.status)
       setLoadError(denied ? String(reason) : message ?? String(reason))
     }
@@ -614,7 +688,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }
   useEffect(() => {
     if (sideMode && !visible) return
-    return pollVisible(load, () => {
+    return pollVisible(signal => load(signal, true), () => {
       const current = viewNow.current
       return !current || activeSession(current.session.status) || current.turns.some(turn => activeSession(turn.status)) ? 1500 : 10000
     }, reason => setLoadError(String(reason)))
@@ -712,16 +786,17 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && (active.is_self ?? active.actor_id === me.user.id) ? active.id : null
   useEffect(() => {
-    if (!activeId || endedStreams.current.has(activeId)) return
+    if (!activeId) return
     if (liveNow.current.turnId !== activeId) {
       liveNow.current = emptyLiveTranscript(activeId)
       setLiveText(liveNow.current)
     }
-    const auth = csrfToken()
+    const auth = csrfToken(), version = sensitiveVersion.current
     let closed = false
+    let retry: ReturnType<typeof setTimeout> | undefined
     const stream = new EventSource(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`)
-    const current = () => !closed && auth === csrfToken() && visibleNow.current
-    const refreshSaved = () => { if (current()) void load().catch(reason => { if (current()) setLoadError(String(reason)) }) }
+    const current = () => !closed && auth === csrfToken() && version === sensitiveVersion.current && visibleNow.current
+    const refreshSaved = () => { if (current()) void load(undefined, true).catch(reason => { if (current()) setLoadError(String(reason)) }) }
     stream.onmessage = event => {
       if (!current() || !/^\d+$/.test(event.lastEventId)) return
       try {
@@ -735,27 +810,29 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     stream.addEventListener("refresh", refreshSaved)
     stream.addEventListener("finished", () => {
       if (!current()) return
-      endedStreams.current.add(activeId)
-      liveNow.current = { ...liveNow.current, finished: true }
-      setLiveText(liveNow.current); setReconnecting(false)
-      refreshSaved(); closed = true; stream.close()
+      // A transport can finish before its workflow is available. Only refreshed
+      // turn state ends subscription; keep the cursor and retry while still active.
+      refreshSaved(); closed = true; stream.close(); setReconnecting(true)
+      retry = setTimeout(() => {
+        if (auth === csrfToken() && version === sensitiveVersion.current && visibleNow.current) setStreamAttempt(value => value + 1)
+      }, 1500)
     })
     stream.addEventListener("access_revoked", () => {
       if (!current()) return
-      closed = true; stream.close(); setReconnecting(false); endedStreams.current.add(activeId)
+      closed = true; stream.close(); setReconnecting(false)
       clearSensitiveNow.current()
       window.dispatchEvent(new Event("moyai:access-changed"))
       void load().catch(reason => { if (auth === csrfToken()) setLoadError(String(reason)) })
     })
     stream.onerror = () => { if (current()) { setReconnecting(true); refreshSaved() } }
-    return () => { closed = true; stream.close() }
-  }, [activeId, id, load])
+    return () => { closed = true; stream.close(); clearTimeout(retry) }
+  }, [activeId, id, load, streamAttempt])
   useEffect(() => {
     followWork()
   }, [liveText, followWork])
 
   async function applyGoal(command: string): Promise<void> {
-    if (goalSending.current || busy) throw new Error("Wait for the current submission to finish, then retry.")
+    if (goalSending.current || submitting.current || busy) throw new Error("Wait for the current submission to finish, then retry.")
     const startingGoal = goalCommandAction(command) === "set"
     if (startingGoal && (pictures.uploading || pictures.hasErrors)) {
       throw new Error("Finish uploading or retry the attached files before starting a goal.")
@@ -785,8 +862,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }
 
   async function send(promptOverride?: string) {
+    if (submitting.current || goalSending.current) return
     const prompt = promptOverride ?? (editing ? editText : draft)
-    const version = sensitiveVersion.current
+    const version = sensitiveVersion.current, auth = csrfToken()
+    const current = () => version === sensitiveVersion.current && auth === csrfToken()
     if (!editing && ["/goal", "/goal edit"].includes(prompt.trim())) {
       if (prompt.trim() === "/goal" && view?.goal) { setDraft(""); return }
       setGoalDialog(true); setDraft(""); return
@@ -811,28 +890,45 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       return
     }
     if ((!prompt.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
-    setBusy(true); setError("")
+    submitting.current = true
+    setBusy(true); setSending(true); setError("")
+    const attachments = pictures.readyFiles
     const body = {
       prompt, model: answeringQuestion ? active?.model ?? model : model, mode,
       connections: answeringQuestion ? active?.connections ?? sendAccounts : sendAccounts,
-      attachments: pictures.readyFiles.map(file => file.id),
+      attachments: attachments.map(file => file.id),
       ...(answeringQuestion ? { reply_to: active?.id } : {}),
     }
-    const serialized = JSON.stringify(body)
+    const serialized = JSON.stringify([id, auth, body])
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
     try {
-      await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: lastRequest.current.key } })
-      if (version !== sensitiveVersion.current) return
+      const { data: turn } = await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: lastRequest.current.key } })
+      if (!current()) return
+      // Invalidate reads begun before admission; they cannot erase this receipt.
+      ++loadVersion.current
       if (body.reply_to) setAnsweredRequest(body.reply_to)
+      else if ("id" in turn) {
+        const message: Message = { id: receiptMessageId.current--, turn_id: turn.id, role: "user",
+          author_id: turn.actor_id, is_self: true, content: prompt, attachments }
+        setMessages(previous => previous.some(item => item.role === "user" && item.turn_id === turn.id)
+          ? previous : [...previous, message])
+        const previous = viewNow.current
+        if (previous) {
+          const next = { ...previous, turns: [turn, ...previous.turns.filter(item => item.id !== turn.id)] }
+          viewNow.current = next; setView(next)
+        }
+      }
       setDraft(""); pictures.clear(); lastRequest.current = null
-      await reloadAfterAction(body.reply_to
+      // Admission releases the composer. Reads never turn an accepted send into a retry.
+      void reloadAfterAction(body.reply_to
         ? "Your response was sent, but the conversation could not be refreshed."
         : "Your message was sent, but the conversation could not be refreshed.")
-      if (version === sensitiveVersion.current) await refreshList()
+      // App.refresh reports inventory failures in its independent global notice.
+      void refreshList()
     } catch (e) {
-      if (version === sensitiveVersion.current) setError(String(e))
+      if (current()) setError(String(e))
     } finally {
-      if (version === sensitiveVersion.current) setBusy(false)
+      if (current()) { submitting.current = false; setBusy(false); setSending(false) }
     }
   }
   async function sendNow(turnId: string) {
@@ -866,7 +962,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const visibleMessages = orderedWorkMessages((liveMessage ? [...messages, liveMessage] : messages).filter(message =>
     (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
   const segments = workSegments(visibleMessages.filter(message => message !== liveMessage), view.turns)
-  const unanchored = unanchoredWorkSegments(visibleMessages, view.turns)
+  // Missing inputs in an unfinished history are not evidence of continuations.
+  const unanchored = unanchoredWorkSegments(visibleMessages,
+    historyState.complete ? view.turns : view.turns.filter(turn => turn.id === active?.id))
   const currentTool = active ? currentWorkTool(work.entries[active.id]) : undefined
   const starting = !active && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
@@ -927,7 +1025,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             followingWork.current = element.scrollHeight - element.scrollTop - element.clientHeight < 180
           }}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
-          {!messages.length && <div className="empty-chat"><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
+          {historyState.complete && !messages.length && <div className="empty-chat"><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             const segment = segments.get(message.id)
@@ -953,6 +1051,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             </article>{segment && renderProgress(segment)}</React.Fragment>
           })}
           {unanchored.get(null)?.map(renderProgress)}
+          {!historyState.complete && <p className="muted" role="status">{historyState.loading ? "Loading conversation history…" : "Conversation history is incomplete."}</p>}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : currentTool ? `${toolLabel(currentTool.name)}…` : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? (active.is_self ?? active.actor_id === me.user.id)) && <>
@@ -967,8 +1066,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {session.save_warning && <p className="notice" role="status">{session.save_warning}</p>}
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
+          {sending && <p className="composer-hint" role="status">Sending…</p>}
           {session.surface === "slack" && <p className="composer-hint"><img src={slackLogo} width={14} height={14} alt="Slack" /> Messages and replies appear in the linked Slack conversation.</p>}
-          {(error || loadError) && <div className="error" role="alert">{error || loadError}<Button size="sm" variant="ghost" onClick={() => error ? setError("") : setLoadError("")}>Dismiss</Button></div>}
+          {[
+            { key: "action", message: error, clear: () => setError("") },
+            { key: "session", message: loadError, clear: () => setLoadError("") },
+            { key: "history", message: historyState.error, clear: () => setHistoryState(previous => ({ ...previous, error: "" })) },
+          ].filter(notice => notice.message).map(notice => <div className="error" role="alert" key={notice.key}>{notice.message}
+            {notice.key === "history" && <Button type="button" size="sm" variant="ghost" disabled={historyState.loading} onClick={() => void reloadAfterAction()}>Retry history</Button>}
+            <Button type="button" size="sm" variant="ghost" onClick={notice.clear}>Dismiss</Button>
+          </div>)}
           {answeringQuestion && <p className="question-reply-hint">Your reply will answer the pending question.</p>}
           {requestAnswered && <p className="question-reply-hint">Your answer was sent. You can send a follow-up.</p>}
           {session.status === "waiting" && view.can_answer && !answeringQuestion && !requestAnswered && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}

@@ -27,3 +27,13 @@ export function firstMessage(start: NewConversation): Message {
   return { id: -1, turn_id: start.turn.id, role: "user", author_id: start.turn.actor_id,
     content: start.prompt, attachments: start.attachments }
 }
+
+/** Pages update known rows; only a complete snapshot may remove absent saved rows. */
+export function reconcileHistory(previous: Message[], page: Message[], complete = false): Message[] {
+  const saved = new Map((complete ? [] : previous.filter(message => message.id >= 0))
+    .map(message => [message.id, message]))
+  for (const message of page) saved.set(message.id, message)
+  const rows = [...saved.values()].sort((a, b) => a.id - b.id)
+  const savedInputs = new Set(rows.filter(message => message.role === "user").map(message => message.turn_id))
+  return [...rows, ...previous.filter(message => message.id < 0 && !savedInputs.has(message.turn_id))]
+}
