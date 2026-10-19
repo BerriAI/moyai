@@ -45,16 +45,17 @@ def test_repository_and_distinct_requested_actions_survive_a_crowded_catalog():
     assert connection_search(context(), ["nonexistentxyz"], tools) == []
 
 
-def test_shared_checkout_ranks_above_unrelated_repository_operations():
+@pytest.mark.parametrize("repository", ["BerriAI/moyai", "BerriAI/sandbox-deployment-control-plane"])
+def test_shared_checkout_ranks_above_unrelated_repository_operations(repository):
     tools = [ToolDefinition(
         name=f"github_{index:08x}_{operation}",
-        description="Connected GitHub repository: BerriAI/moyai. Work on this repository.",
+        description=f"Connected GitHub repository: {repository}. Work on this repository.",
     ) for index in range(20) for operation in ("publication_status", "create_review", "publish_branch")]
     tools.append(ToolDefinition(
         name="github_checkout",
         description="Check out a connected GitHub repository's branch, commit or PR.",
     ))
-    for query in ("moyai checkout", "BerriAI/moyai checkout", "github checkout"):
+    for query in ("moyai checkout", f"{repository} checkout", "github checkout"):
         assert connection_search(context(), [query], tools)[0] == "github_checkout"
 
 

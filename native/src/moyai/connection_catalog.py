@@ -54,20 +54,20 @@ def connection_search(
             name_words = words(tool.name)
             score = sum((3 if word in name_words else 1) * math.log(2 + len(tools) / frequencies[word]) for word in overlap)
             operation = re.sub(r"^[a-z]+_[a-z0-9]{8}_", "", tool.name).removeprefix("github_")
-            if words(operation) <= terms:
-                # An exact requested operation must survive repository-label
-                # boosts, including shared tools such as github_checkout.
-                score += 40
+            operation_terms = words(operation)
+            exact_operation = bool(operation_terms) and operation_terms <= terms
             repository = re.match(r"Connected GitHub repository: (.*?)\. ", tool.description or "")
             if repository:
                 score += 20 * len(terms & words(repository[1]))
-            scores.append((score, tool.name))
-        ranked.append(sorted(scores, key=lambda item: (-item[0], item[1])))
-    result = list(dict.fromkeys(matches[0][1] for matches in ranked if matches))
+            # Operation matches precede repository-label matches regardless of
+            # the number of words in a repository name.
+            scores.append((exact_operation, score, tool.name))
+        ranked.append(sorted(scores, key=lambda item: (-item[0], -item[1], item[2])))
+    result = list(dict.fromkeys(matches[0][2] for matches in ranked if matches))
     operations = {re.sub(r"^[a-z]+_[a-z0-9]{8}_", "", name) for name in result}
-    rest = sorted((item for matches in ranked for item in matches), key=lambda item: (-item[0], item[1]))
+    rest = sorted((item for matches in ranked for item in matches), key=lambda item: (-item[0], -item[1], item[2]))
     duplicates = []
-    for _score, name in rest:
+    for _exact_operation, _score, name in rest:
         if name in result or name in duplicates:
             continue
         operation = re.sub(r"^[a-z]+_[a-z0-9]{8}_", "", name)
