@@ -16,8 +16,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+from asyncpg import InsufficientPrivilegeError, QueryCanceledError
 from fastapi import FastAPI
 from sqlalchemy import event, insert, text
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
 from test_product_identity import google_cookie, settings_for
 from test_product_identity import product as product_fixture
@@ -424,13 +427,8 @@ async def test_read_bound_and_missing_schema_raise_without_creating_bridge_rows(
 
 
 async def test_report_exceeds_old_record_ceiling_without_losing_totals_or_detail_pages(
-    billing_product, monkeypatch,
+    billing_product,
 ):
-    import moyai.product_billing_routes as billing_routes
-
-    # This is an accuracy/population regression, not a runner-speed benchmark.
-    # Keep it bounded on slower CI workers; deadline enforcement is tested below.
-    monkeypatch.setattr(billing_routes, "REPORT_TIMEOUT_SECONDS", 60.0)
     context = billing_product
     count = 50_001
     base = old_row(user_id="google:admin-sub", cost="0.000000000000000001")
@@ -462,23 +460,15 @@ async def test_report_exceeds_old_record_ceiling_without_losing_totals_or_detail
     assert result["users"][0]["spend"] == result["models"][0]["spend"] == result["total"]["spend"]
 
 
-@pytest.mark.parametrize("interrupt", ["deadline", "caller"])
-async def test_report_cancellation_releases_readers(billing_product, monkeypatch, interrupt):
+async def test_report_has_no_internal_deadline_and_caller_cancellation_releases_readers(billing_product, monkeypatch):
     import moyai.product_billing_routes as billing_routes
 
     context = billing_product
     started, cancelled = asyncio.Event(), asyncio.Event()
-    deadlines = []
-    real_timeout = asyncio.timeout
     real_read = billing_routes.read_product_billing
 
-    def observed_timeout(delay):
-        # Verify the production budget, then expire its real timeout only once
-        # both database readers are open. No sleep or machine-speed assumption.
-        assert delay == 15.0
-        deadline = real_timeout(delay)
-        deadlines.append(deadline)
-        return deadline
+    def unexpected_timeout(delay):
+        raise AssertionError(f"The accounting report must not create a fixed deadline ({delay}).")
 
     async def blocked_read(*args, **kwargs):
         started.set()
@@ -487,22 +477,17 @@ async def test_report_cancellation_releases_readers(billing_product, monkeypatch
         finally:
             cancelled.set()
 
-    monkeypatch.setattr(billing_routes.asyncio, "timeout", observed_timeout)
+    monkeypatch.setattr(billing_routes.asyncio, "timeout", unexpected_timeout)
     monkeypatch.setattr(billing_routes, "read_product_billing", blocked_read)
     task = asyncio.create_task(context.service.report(start="2026-10-01", end="2026-10-31"))
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
-        assert len(deadlines) == 1
-        if interrupt == "deadline":
-            deadlines[0].reschedule(asyncio.get_running_loop().time())
-        else:
-            task.cancel()
+        task.cancel()
         done, _ = await asyncio.wait({task}, timeout=5)
-        assert task in done, "The report must stop at its own deadline or caller cancellation."
-        with pytest.raises(TimeoutError if interrupt == "deadline" else asyncio.CancelledError):
+        assert task in done, "Caller cancellation must stop the report."
+        with pytest.raises(asyncio.CancelledError):
             await task
         assert cancelled.is_set()
-        assert deadlines[0].expired() is (interrupt == "deadline")
         assert context.source.pool.checkedout() == context.writer.pool.checkedout() == 0
     finally:
         task.cancel()
@@ -511,6 +496,58 @@ async def test_report_cancellation_releases_readers(billing_product, monkeypatch
     monkeypatch.setattr(billing_routes, "read_product_billing", real_read)
     result = await context.service.report(start="2026-10-01", end="2026-10-31")
     assert result["total"]["requests"] == 0
+
+
+async def test_accounting_failure_logs_phase_without_database_details(billing_product, monkeypatch, caplog):
+    import moyai.product_billing_routes as billing_routes
+
+    async def failed_read(*args, **kwargs):
+        raise SQLAlchemyError("PRIVATE_CONNECTION_DETAIL")
+
+    monkeypatch.setattr(billing_routes, "read_product_billing", failed_read)
+    with pytest.raises(SQLAlchemyError):
+        await billing_product.service.report(start="2026-10-01", end="2026-10-31")
+    assert "'phase': 'accounting'" in caplog.text
+    assert "'error_type': 'SQLAlchemyError'" in caplog.text
+    assert "PRIVATE_CONNECTION_DETAIL" not in caplog.text
+
+
+class _PgcodeQueryCancelled(Exception):
+    pgcode = "57014"
+
+
+@pytest.mark.parametrize(("failure", "message"), [
+    (TimeoutError("PRIVATE_TIMEOUT"), "The accounting database did not respond. Please try again."),
+    (DatabaseTimeoutError("PRIVATE_POOL"), "The accounting database did not respond. Please try again."),
+    (
+        OperationalError("PRIVATE_SQL", {"secret": "PRIVATE_PARAMETER"}, QueryCanceledError("PRIVATE_DRIVER")),
+        "The accounting database query was cancelled. Please try again.",
+    ),
+    (
+        OperationalError("PRIVATE_SQL", None, _PgcodeQueryCancelled("PRIVATE_DRIVER")),
+        "The accounting database query was cancelled. Please try again.",
+    ),
+    (
+        OperationalError("PRIVATE_SQL", None, InsufficientPrivilegeError("PRIVATE_DRIVER")),
+        "Product accounting is temporarily unavailable.",
+    ),
+    (SQLAlchemyError("PRIVATE_DATABASE"), "Product accounting is temporarily unavailable."),
+])
+async def test_billing_route_classifies_driver_failures_without_leaking_details(
+    billing_product, monkeypatch, failure, message,
+):
+    async def unavailable(**kwargs):
+        raise failure
+
+    monkeypatch.setattr(billing_product.service, "report", unavailable)
+    cookie, _ = google_cookie(billing_product.identity)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=billing_product.app), base_url="http://testserver",
+    ) as client:
+        client.cookies.set("workspace_session", cookie)
+        response = await client.get("/api/settings/billing", params={"start": "2026-10-01", "end": "2026-10-31"})
+    assert response.status_code == 503
+    assert response.json() == {"detail": message}
 
 
 def test_reconciliation_population_is_not_limited_by_fetch_bounds(rules, monkeypatch):
