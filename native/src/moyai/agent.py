@@ -212,6 +212,10 @@ class WorkflowPlanning(Planning[RunScope]):
                 result = await original.function(ctx, items)
                 if not result.startswith("Plan updated:"):
                     return result
+                if workflow.in_workflow() and not workflow.patched("moyai-planning-persisted-ids-v1"):
+                    # Old histories proceed directly to finish_tool_effect.
+                    # The additional durable read must not appear on replay.
+                    return result
                 # Read the persisted IDs, including IDs replayed by the durable
                 # store. Ordinal display numbers cannot address granular edits.
                 return "Plan updated.\n\n" + await read(ctx)
