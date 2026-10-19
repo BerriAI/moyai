@@ -70,7 +70,7 @@ before(async () => {
       entries: ["native/web/main.tsx"],
       include: ["three", "three/examples/jsm/loaders/GLTFLoader.js"],
     },
-    server: { host: "127.0.0.1", port: 0, strictPort: true },
+    server: { host: "127.0.0.1", port: 0, strictPort: false },
     plugins: [tailwindcss(), {
       name: "swarm-component-regression",
       resolveId(id) { if (id === moduleUrl) return entry; },

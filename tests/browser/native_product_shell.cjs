@@ -776,7 +776,10 @@ for(const width of [1440,768,320])test(`home keeps the draft and controls reacha
   assert.equal(await page.getByText('Drop files or paste images · Enter to send',{exact:true}).isVisible(),true);
   assert.equal(await page.locator('.home-composer').getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
   await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'hidden'});
-  await input.fill('');
+  // Let Lexical handle selection and deletion through real keyboard commands.
+  // fill('') can race its selection listener and leave the old draft intact.
+  await input.press('ControlOrMeta+A');
+  await input.press('Backspace');
   await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'visible'});
 });
 

@@ -1,4 +1,5 @@
-FROM public.ecr.aws/docker/library/python:3.13-slim AS node-runtime
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.13-slim
+FROM ${PYTHON_IMAGE} AS node-runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils && rm -rf /var/lib/apt/lists/*
 COPY install-node.sh /opt/moyai/install-node.sh
 RUN sh /opt/moyai/install-node.sh
