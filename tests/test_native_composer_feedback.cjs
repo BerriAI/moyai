@@ -52,6 +52,25 @@ test('home-to-chat seed uses the actual accepted turn and preserves its files', 
   });
 });
 
+test('partial history keeps known pages and receipts until a complete snapshot replaces saved rows', async () => {
+  const { reconcileHistory } = await conversationModule;
+  const first = { id: 1, turn_id: 'old', role: 'user', content: 'First page' };
+  const later = { id: 201, turn_id: 'later', role: 'user', content: 'Known later page' };
+  const receipt = { id: -3, turn_id: 'accepted', role: 'user', content: 'Accepted input' };
+  const edited = { ...first, content: 'Edited first page' };
+  assert.deepEqual(reconcileHistory([first, later, receipt], [edited]), [edited, later, receipt]);
+  assert.deepEqual(reconcileHistory([first, later, receipt], [edited], true), [edited, receipt]);
+});
+
+test('a saved input reconciles only its own receipt, preserving other concurrent sends', async () => {
+  const { reconcileHistory } = await conversationModule;
+  const a = { id: -3, turn_id: 'a', role: 'user', content: 'A' };
+  const b = { id: -4, turn_id: 'b', role: 'user', content: 'B' };
+  const saved = { ...a, id: 221 };
+  assert.deepEqual(reconcileHistory([a, b], [saved], true), [saved, b]);
+  assert.deepEqual(reconcileHistory([saved, b], [saved]), [saved, b]);
+});
+
 test('all upload cards appear immediately, with bounded parallel requests and stable order', async () => {
   const { queue, calls, changes } = await uploads();
   const files = ['a.txt', 'b.txt', 'c.txt', 'd.txt'].map(name => file(name));
