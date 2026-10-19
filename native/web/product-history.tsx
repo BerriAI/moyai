@@ -18,6 +18,7 @@ import {
 } from "./generated/api"
 import "./product-history.css"
 import slackLogo from "./assets/slack-logo.svg"
+import { SlackMessage } from "./slack-content"
 
 export type HistorySessionRef = Pick<ProductContinuationResult, "id" | "url"> & { source: "native" | "legacy"; source_session_id?: string }
 export type ProductHistoryProps = {
@@ -280,7 +281,7 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
                   <time dateTime={message.created_at}>{timestamp(message.created_at)}</time>
                   {message.status && !["completed", "done"].includes(message.status) && <span>{message.status}</span>}
                 </div>
-                {message.role === "assistant" ? <Prose text={message.content} /> : <div className="ph-user-text">{message.content}</div>}
+                {message.role === "assistant" ? <Prose text={message.content} /> : <div className="ph-user-text">{message.source === "slack" ? <SlackMessage content={message.content} mentions={message.slack_mentions} /> : message.content}</div>}
                 {message.content_truncated && <Notice>This long message is truncated in the history reader.</Notice>}
                 {!!message.attachments?.length && <div className="ph-files">{resourceRows(message.attachments)}</div>}
               </article>) : <p className="ph-muted">No saved public messages.</p>}

@@ -7736,6 +7736,13 @@
             "title": "Session Id",
             "type": "string"
           },
+          "slack_mentions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Slack Mentions",
+            "type": "object"
+          },
           "source": {
             "const": "slack",
             "title": "Source",
@@ -15619,6 +15626,13 @@
             "title": "Role",
             "type": "string"
           },
+          "slack_mentions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Slack Mentions",
+            "type": "object"
+          },
           "source": {
             "anyOf": [
               {
@@ -15669,6 +15683,7 @@
           "author_name",
           "is_self",
           "content",
+          "slack_mentions",
           "created_at",
           "attachments",
           "source",

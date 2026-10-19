@@ -185,6 +185,7 @@ class HistoryMessage(ResponseModel):
     id: int
     role: str
     content: str
+    slack_mentions: dict[str, str] | MISSING = absent()
     created_at: str
     author_id: str | None
     content_truncated: bool | MISSING = absent()
