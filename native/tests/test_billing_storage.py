@@ -122,6 +122,30 @@ async def test_batched_counterpart_lookup_keeps_aliases_namespaces_and_exact_row
     assert current[0]["cost_usd"] == "0.1234"
 
 
+async def test_consolidated_reader_fetches_more_than_fifty_thousand_records(billing):
+    ctx = billing
+    async with ctx.engine.begin() as connection:
+        await connection.execute(text("""
+            INSERT INTO moyai.model_requests(id,run_id,user_id,model,created_at,status,cost,gateway_id)
+            SELECT 'bulk-' || n,'historical-child','google-user','route',
+                   '2026-10-02T00:00:00+00:00','complete','0.000000000000000001','call-' || n
+            FROM generate_series(1,50001) n
+        """))
+    await prepare(ctx.engine, ctx.storage)
+    await finish_backfill(ctx, size=5000)
+    await activate(ctx.engine, ctx.storage)
+    async with ctx.engine.connect() as connection:
+        await connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        reader = BillingReader(connection, schema=ctx.storage.source_schema, storage=ctx.storage)
+        records = await reader.rows("legacy", PERIOD)
+        assert len(records) == 50_001
+        assert {row["id"] for row in records} == {f"bulk-{n}" for n in range(1, 50_002)}
+        assert all(row["cost"] == "0.000000000000000001" for row in records)
+        bounded = BillingReader(connection, schema=ctx.storage.source_schema, storage=ctx.storage, max_records=2)
+        with pytest.raises(BillingReadError, match="too_many_accounting_records"):
+            await bounded.rows("legacy", PERIOD)
+
+
 async def test_exact_projection_survives_backfill_cutover_and_rollback(billing):
     ctx = billing
     await seed(ctx, old=[
