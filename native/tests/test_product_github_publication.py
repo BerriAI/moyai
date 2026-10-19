@@ -283,7 +283,7 @@ async def test_uncertain_creation_does_not_invent_authorship_from_readback(publi
     f.provider.lost_create = True
     request = create_request()
     await reserve(f, "create_pull_request", request)
-    with pytest.raises(ConnectorError):
+    with pytest.raises(ToolFailed):
         await f.publisher.create(f.ctx, request)
     with pytest.raises(ToolFailed, match="acknowledgment"):
         await f.publisher.create(f.ctx, request)
@@ -295,7 +295,7 @@ async def test_unconfirmed_invisible_creation_retains_write_barrier(publication)
     f.provider.lost_create, f.provider.visible = True, False
     request = create_request()
     identity = await reserve(f, "create_pull_request", request)
-    with pytest.raises(ConnectorError):
+    with pytest.raises(ToolFailed):
         await f.publisher.create(f.ctx, request)
     with pytest.raises(ToolFailed, match="will not be repeated"):
         await f.publisher.create(f.ctx, request)
@@ -310,7 +310,7 @@ async def test_symlink_and_protected_paths_refuse_publication(publication):
     f.provider.symlink = True
     request = create_request()
     await reserve(f, "create_pull_request", request)
-    with pytest.raises(ConnectorError, match="regular files"):
+    with pytest.raises(ToolFailed, match="regular files"):
         await f.publisher.create(f.ctx, request)
     from moyai.github_request_policy import PROTECTION
     assert not [item for item in f.provider.calls if item[0] != "GET"
