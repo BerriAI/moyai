@@ -13,13 +13,13 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary"
 import { mergeRegister } from "@lexical/utils"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
-import { api, csrfToken } from "./api"
+import { csrfToken } from "./api"
+import { listInvocableSkills } from "./generated/api"
 import { SkillIcon, skillDisplayName, skillScopeName, type ComposerSkill } from "./skill-content"
 import { $createSkillNode, SkillNode } from "./skill-node"
 import { skillDisplayText, skillMentions, skillQueryAllowed, transcriptSkills } from "./skill-mentions"
 import "./skill-composer.css"
 
-type SkillPage = { skills: ComposerSkill[]; has_more: boolean; next_offset: number | null }
 type Query = { key: string; start: number; end: number; text: string }
 type Props = {
   value: string; onChange: (value: string) => void; onSend: (value: string) => void
@@ -119,7 +119,7 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
       const rows = new Map<string, ComposerSkill>()
       let offset = 0
       do {
-        const page = await api<SkillPage>(`/skills?shared=${shared}&offset=${offset}&limit=100${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`, "GET", undefined, controller.signal)
+        const { data: page } = await listInvocableSkills({ query: { shared, offset, limit: 100, ...(sessionId ? { session_id: sessionId } : {}) }, signal: controller.signal })
         if (controller.signal.aborted || csrfToken() !== auth) return
         for (const skill of page.skills) rows.set(skill.reference, skill)
         if (!page.has_more) break

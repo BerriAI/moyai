@@ -182,4 +182,4 @@ async def test_shared_snapshot_only_exposes_deferred_requests_to_requester(runti
             if user.id == actor.id:
                 assert view["pending"]["calls"][0]["tool_name"] == "ask_user_question"
             else:
-                assert "pending" not in view
+                assert view["pending"] is None

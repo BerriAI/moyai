@@ -1,20 +1,10 @@
 import type { Message, Turn } from "./conversation-state"
 import { progressMessages, type LiveTranscript, type ProgressMessage } from "./live-transcript"
+import type { TurnWorkProgress, WorkAgentProgress, WorkToolProgress } from "./generated/api"
 
-export type ToolProgress = {
-  id: string; name: string; status: "running" | "completed" | "failed" | "interrupted"
-  created_at: string; finished_at: string | null
-}
-export type AgentProgress = {
-  id: string; session_id?: string | null; parent_id: string | null; parent_name: string | null; name: string; avatar: number
-  depth: number; status: string; created_at: string; updated_at: string
-  messages: (Omit<ProgressMessage, "phase"> & { phase: "commentary" | "final_answer" })[]
-  tools: ToolProgress[]; messages_limited: boolean; tools_limited: boolean
-}
-export type WorkSnapshot = {
-  messages: ProgressMessage[]; tools?: ToolProgress[]; subagents?: AgentProgress[]
-  tools_limited?: boolean; subagents_limited?: boolean
-}
+export type ToolProgress = WorkToolProgress
+export type AgentProgress = WorkAgentProgress
+export type WorkSnapshot = TurnWorkProgress
 export type WorkEntry = { data?: WorkSnapshot; status?: string; loading?: boolean; error?: string }
 export type WorkSegment = {
   id: string; turn: Turn; after: number | null; before: number | null

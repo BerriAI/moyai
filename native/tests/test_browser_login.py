@@ -78,7 +78,7 @@ async def test_request_survives_reload_and_does_not_expire_or_accept_chat(runtim
             assert view["session"]["status"] == "waiting"
             assert view["pending"]["metadata"]["login"]["site"] == "https://example.test"
             assert view["can_answer"] is True and view["can_reply_with_text"] is False
-            assert "question_deadline" not in view
+            assert view["question_deadline"] is None
     async with runtime.database.sessions() as db:
         assert (await db.get(Turn, turn_id)).status == "waiting"
 

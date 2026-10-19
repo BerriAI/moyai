@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api, ApiError, csrfToken } from "./api"
+import { createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
@@ -54,7 +55,18 @@ type ProductSkillDetail = ProductSkill & { instructions: string; files: { path: 
 type ProductSkillLibrary = Collection & { source: string; skills: ProductSkill[]; can_publish: boolean; note?: string; has_more: boolean; next_offset: number | null }
 type Automation = { id: string; name: string; prompt: string; session_id: string; model: string; interval_minutes: number; paused: boolean; state: string; updated_at?: string }
 type Account = { id: string; username: string; display_name: string; role: string; enabled: boolean; email?: string; revision?: number }
-type Connection = { id: string; name: string; kind: string; owner_id: string; shared: boolean; read_only: boolean; enabled: boolean; policy?: { allowed_tools?: string[] | null; require_approval?: boolean } }
+type Connection = ConnectionView
+const loadConnections = async (signal: AbortSignal) => (await listConnections({ signal })).data
+const loadSessions = async (signal: AbortSignal) => (await listSessions({ signal })).data
+const connectionKinds = ["github", "linear", "notion", "slack"] as const
+function connectionInput(values: FormValues, policy: ConnectionPolicy): ConnectionInputWritable {
+  const kind = connectionKinds.find(item => item === values.kind)
+  if (!kind) throw new Error("Choose a supported service.")
+  return {
+    name: String(values.name ?? ""), kind, credential: String(values.credential ?? ""),
+    shared: values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy,
+  }
+}
 type ProductConnection = {
   id: string; connected: boolean; scope: string; oauth_configured: boolean; label: string; identity: string
   enabled: boolean; read_only: boolean; checked_at?: string; check_status?: string; app_registered?: boolean
@@ -91,14 +103,17 @@ const errorText = (error: unknown) => error instanceof ApiError && error.status 
   ? "This settings endpoint is not available on this server."
   : error instanceof Error ? error.message : "The request could not be completed."
 
-function useResource<T>(path: string | null): Resource<T> {
+/** `path` keys the read; `load` (a generated SDK call) replaces the legacy untyped GET of `path`. */
+function useResource<T>(path: string | null, load?: (signal: AbortSignal) => Promise<T>): Resource<T> {
+  const loader = useRef(load)
+  loader.current = load
   const [revision, setRevision] = useState(0)
   const [state, setState] = useState<{ path: string | null; data?: T; loading: boolean; error: string }>({ path, loading: Boolean(path), error: "" })
   useEffect(() => {
     if (!path) { setState({ path, loading: false, error: "" }); return }
     const controller = new AbortController()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true, error: "" }))
-    void api<T>(path, "GET", undefined, controller.signal).then(
+    void (loader.current ? loader.current(controller.signal) : api<T>(path, "GET", undefined, controller.signal)).then(
       data => { if (!controller.signal.aborted) setState({ path, data, loading: false, error: "" }) },
       error => { if (!controller.signal.aborted) setState({ path, loading: false, error: errorText(error) }) },
     )
@@ -769,7 +784,7 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
   const [preferences, setPreferences] = useState(initial)
   const mutation = useMutation()
   const custom = preferences.connection_ids !== null
-  const accounts = useResource<Connection[]>(custom ? "/connections" : null)
+  const accounts = useResource(custom ? "/connections" : null, loadConnections)
   const save = (patch: Partial<GeneralPreferences>) => {
     let updated: GeneralPreferences
     void mutation.run(async () => { updated = await api<GeneralPreferences>("/settings/general", "PATCH", patch) }, () => {
@@ -802,11 +817,11 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
 }
 
 function ConnectionsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Connection[]>("/connections")
+  const resource = useResource("/connections", loadConnections)
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [editor, setEditor] = useState<Connection | "new" | null>(null), [disable, setDisable] = useState<Connection | null>(null)
   const services = [{ value: "github", label: "GitHub" }, { value: "slack", label: "Slack" }, { value: "linear", label: "Linear" }, { value: "notion", label: "Notion" }]
-  const connectionBody = (row: Connection) => ({ name: row.name, kind: row.kind, credential: "", shared: row.shared, read_only: row.read_only, enabled: row.enabled, policy: row.policy ?? { require_approval: true } })
+  const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", shared: row.shared, read_only: row.read_only, enabled: row.enabled }, row.policy)
   return <LoadState resource={resource}>{data => {
     const rows = data.filter(row => contains(search, row.name, row.kind) && (filter === "all" || row.kind === filter))
     return <><p className="ns-muted">Choose default connections in <a className="ns-link" href="#settings/general">General preferences</a>.</p>
@@ -823,8 +838,8 @@ function ConnectionsPage({ user }: { user: SettingsUser }) {
         { name: "credential", label: editor === "new" ? "Access token" : "Replacement token", type: "password", required: editor === "new", hint: values.kind === "slack" ? "Use a Slack user token, not a bot token." : values.kind === "notion" ? "Use a Notion OAuth access token, not an integration token." : editor === "new" ? "Token permissions determine which resources this account can reach." : "Leave blank to keep the current token." },
         { name: "read_only", label: "Read only", type: "checkbox" }, { name: "enabled", label: "Enable this connection", type: "checkbox" },
         ...(user.role === "admin" ? [{ name: "shared", label: "Share with workspace members", type: "checkbox" as const }] : []),
-      ]} onSave={async values => { await api(`/connections${editor === "new" ? "" : `/${encodeURIComponent(editor.id)}`}`, editor === "new" ? "POST" : "PUT", { ...values, policy: editor === "new" ? { require_approval: true } : editor.policy ?? { require_approval: true } }); resource.refresh() }} onClose={() => setEditor(null)} />}
-      {disable && <Confirm title={`Disable ${disable.name}?`} description="New work cannot use this connection until you enable it again. The saved credential is kept." label="Disable connection" onConfirm={async () => { await api(`/connections/${encodeURIComponent(disable.id)}`, "PUT", { ...connectionBody(disable), enabled: false }); resource.refresh() }} onClose={() => setDisable(null)} />}
+      ]} onSave={async values => { await (editor === "new" ? createConnection({ body: connectionInput(values, { require_approval: true }) }) : updateConnection({ path: { connection_id: editor.id }, body: connectionInput(values, editor.policy) })); resource.refresh() }} onClose={() => setEditor(null)} />}
+      {disable && <Confirm title={`Disable ${disable.name}?`} description="New work cannot use this connection until you enable it again. The saved credential is kept." label="Disable connection" onConfirm={async () => { await updateConnection({ path: { connection_id: disable.id }, body: { ...connectionBody(disable), enabled: false } }); resource.refresh() }} onClose={() => setDisable(null)} />}
     </>
   }}</LoadState>
 }
@@ -872,9 +887,9 @@ function UsersPage({ user }: { user: SettingsUser }) {
 }
 
 function AutomationEditor({ user, onClose, refresh }: { user: SettingsUser; onClose: () => void; refresh: () => void }) {
-  const sessions = useResource<{ id: string; title: string; owner_id: string; archived: boolean; deleted?: boolean; surface: string; visibility: string }[]>("/sessions")
+  const sessions = useResource("/sessions", loadSessions)
   const models = useResource<{ models: string[]; default_model: string }>("/me")
-  const connections = useResource<Connection[]>("/connections")
+  const connections = useResource("/connections", loadConnections)
   if (sessions.error || models.error || connections.error || !sessions.data || !models.data || !connections.data) return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog"><DialogHeader><DialogTitle>New automation</DialogTitle><DialogDescription>Choose an active session and a model available to your account.</DialogDescription></DialogHeader>
     {sessions.error || models.error || connections.error ? <><p className="ns-error" role="alert">{sessions.error || models.error || connections.error}</p><Button variant="outline" onClick={() => { sessions.refresh(); models.refresh(); connections.refresh() }}>Try again</Button></> : <p role="status">Loading sessions and models…</p>}
   </DialogContent></Dialog>

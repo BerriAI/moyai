@@ -13,6 +13,7 @@ import "./style.css"
 import "./product-shell.css"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { getMe, type Me } from "./generated/api"
+import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, getSessionActivity, getSessionPlan, listConnections, listSessionMessages, listSessions, loginWithPassword, logout, resolveEffect, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending, type PlanStep, type SessionDetail, type SessionEffect } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import slackLogo from "./assets/slack-logo.svg"
@@ -55,13 +56,17 @@ type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
 type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
-type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
-type Plan = { id: string; content: string; status: string }
-type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
-type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, BrowserLoginMetadata & { request_id?: string }> }
-type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { transcript_version?: string; slack_delivery?: { pending: number; sending: number; rejected: number }; session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type Connection = ConnectionView
+/** A loaded session detail, or the optimistic view of a just-created conversation. */
+type View = Partial<Omit<SessionDetail, "session" | "turns" | "messages">> & { session: Session; turns: Turn[]; messages?: Message[] | null }
 type Activity = LiveEvent
+function metadataText(value: { [key: string]: unknown } | undefined, key: string): string | undefined {
+  const item = value?.[key]
+  return typeof item === "string" ? item : undefined
+}
+function browserLoginMetadata(value: { [key: string]: unknown } | undefined): BrowserLoginMetadata | undefined {
+  return value && { kind: metadataText(value, "kind"), site: metadataText(value, "site"), reason: metadataText(value, "reason"), workspace_id: metadataText(value, "workspace_id") }
+}
 const settingsDestinations = [
   { page: "general", label: "General" },
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
@@ -82,7 +87,7 @@ const searchSessions: PaletteSearchAdapter = (query, { signal, limit }) => api(
   query ? `/history/search?source=all&limit=${limit}&q=${encodeURIComponent(query)}` : `/history/sessions?source=all&limit=${limit}`,
   "GET", undefined, signal,
 )
-type SessionReference = Pick<PaletteSession, "id" | "source" | "url"> & { source_session_id?: string }
+type SessionReference = Pick<PaletteSession, "id" | "source" | "url"> & { source_session_id?: string | null }
 export function sessionReferenceHash(session: SessionReference): string {
   const original = session.url?.match(/^\/#run=([a-f0-9]{32})$/)?.[1]
   return original ? `run=${original}` : session.source === "legacy" ? `run=${encodeURIComponent(session.id)}` : encodeURIComponent(session.id)
@@ -156,10 +161,10 @@ function App() {
     const controller = new AbortController(), key = routeKey
     // A native UUID can itself be an alias. Only the authenticated read adapter
     // may supply that mapping; ordinary session reads still enforce native ACLs.
-    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false&include_messages=true`, "GET", undefined, controller.signal).then(value => {
+    void getSession({ path: { session_id: selected }, query: { resolve: true, include_activity: false, include_messages: true }, signal: controller.signal }).then(({ data: value }) => {
       const session = value.reference
       if (controller.signal.aborted || currentRoute() !== selected) return
-      if (session.id !== selected || session.source !== "native") throw new Error("The session reference changed. Reopen the conversation.")
+      if (!session || session.id !== selected || session.source !== "native") throw new Error("The session reference changed. Reopen the conversation.")
       if (session.source_session_id) {
         const reference = continuationReference(session, session.source_session_id)
         if (!reference) throw new Error("The saved continuation reference is invalid.")
@@ -229,7 +234,7 @@ function App() {
           if (current() && reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
           throw reason
         }),
-        api<Connection[]>("/connections", "GET", undefined, signal).then(accounts => { if (current()) setConnections(accounts) }),
+        listConnections({ signal }).then(({ data: accounts }) => { if (current()) setConnections(accounts) }),
         api<SessionFolder[]>("/session-folders", "GET", undefined, signal).then(groups => { if (current()) setFolders(groups) }),
       ])
       if (!current()) return
@@ -338,7 +343,7 @@ function App() {
         }}
         onOpenPullRequest={(sessionId, url) => { setWorkspaceRequest(previous => ({ sessionId, url, tab: "pull-request", sequence: (previous?.sequence ?? 0) + 1 })); location.hash = sessionId; setMobileNav(false) }} />
       <div className="account"><span>{me.user.name}</span><AppearanceToggle /><Button variant="ghost" size="icon" aria-label="Settings" onClick={() => navigateSettings("overview")}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => {
-        try { const result = await api<{ logout_url?: string }>("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")); if (result.logout_url) navigateAuth(result.logout_url, true) }
+        try { const { data: result } = await logout(); window.dispatchEvent(new Event("moyai:signed-out")); if (result.logout_url) navigateAuth(result.logout_url, true) }
         catch (reason) { setError(String(reason)) }
       }}><LogOut /></Button></div>
     </aside>}
@@ -388,7 +393,6 @@ function navigateAuth(value: string, sameOrigin = false) {
   if (url.username || url.password || (sameOrigin ? url.origin !== location.origin : url.protocol !== "https:" && url.origin !== location.origin)) throw new Error("The sign-in destination is invalid.")
   location.assign(url.href)
 }
-type AuthConfig = { mode: "standalone" | "existing"; password_enabled: boolean; google_enabled: boolean; access_enabled: boolean }
 function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   const [config, setConfig] = useState<AuthConfig | null>(null)
   const [error, setError] = useState("")
@@ -397,7 +401,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   useEffect(() => {
     const controller = new AbortController()
     setError("")
-    void api<AuthConfig>("/auth/config", "GET", undefined, controller.signal).then(value => { if (!controller.signal.aborted) setConfig(value) }, reason => { if (!controller.signal.aborted) setError(String(reason)) })
+    void getAuthConfig({ signal: controller.signal }).then(({ data: value }) => { if (!controller.signal.aborted) setConfig(value) }, reason => { if (!controller.signal.aborted) setError(String(reason)) })
     return () => controller.abort()
   }, [retry])
   return <main className="center"><section className="login" aria-labelledby="login-title">
@@ -412,7 +416,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
       event.preventDefault(); setBusy(true); setError("")
       const form = new FormData(event.currentTarget)
       try {
-        const result = await api<{ csrf?: string }>("/login", "POST", Object.fromEntries(form))
+        const { data: result } = await loginWithPassword({ body: { username: String(form.get("username") ?? ""), password: String(form.get("password") ?? "") } })
         if (result.csrf) setCsrf(result.csrf)
         onLogin((await getMe()).data)
       } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
@@ -429,9 +433,9 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
 }
 
 function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
-  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages !== undefined ? resolved : null)
+  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages != null ? resolved : null)
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
-  const [plan, setPlan] = useState<Plan[]>([])
+  const [plan, setPlan] = useState<PlanStep[]>([])
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState("")
   const [traceBusy, setTraceBusy] = useState(false)
@@ -522,14 +526,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     try {
       const cached = resolvedOnce.current
       resolvedOnce.current = undefined
-      const next = cached ?? await api<View>(`/sessions/${id}?include_activity=false&include_messages=true`, "GET", undefined, signal)
+      const next: View = cached ?? (await getSession({ path: { session_id: id }, query: { include_activity: false, include_messages: true }, signal })).data
       // Older servers can omit the transcript during a rolling deployment.
       const unchanged = next.transcript_version && completeHistory.current?.version === next.transcript_version
-      const history = unchanged ? completeHistory.current!.messages : [...(next.messages ?? await api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal))]
+      const history: Message[] = unchanged ? completeHistory.current!.messages : [...(next.messages ?? (await listSessionMessages({ path: { session_id: id }, signal })).data)]
       let pageSize = unchanged ? 0 : history.length
       while (pageSize === 200 && !signal?.aborted && version === loadVersion.current) {
         const after = history.at(-1)!.id
-        const page = await api<Message[]>(`/sessions/${id}/messages?after=${after}`, "GET", undefined, signal)
+        const { data: page } = await listSessionMessages({ path: { session_id: id }, query: { after }, signal })
         if (page.some(message => message.id <= after)) throw new Error("Conversation history changed while loading. Refresh to retry.")
         history.push(...page); pageSize = page.length
       }
@@ -598,10 +602,15 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     const version = sensitiveVersion.current
     setPanelLoading(true); setPanelError("")
     return pollVisible(async signal => {
-      const rows = await api<Plan[] | Activity[]>(`/sessions/${id}/${auxiliaryPanel}`, "GET", undefined, signal)
-      if (signal.aborted || version !== sensitiveVersion.current) return
-      if (auxiliaryPanel === "plan") setPlan(rows as Plan[])
-      else setActivity(rows as Activity[])
+      if (auxiliaryPanel === "plan") {
+        const { data: rows } = await getSessionPlan({ path: { session_id: id }, signal })
+        if (signal.aborted || version !== sensitiveVersion.current) return
+        setPlan(rows)
+      } else {
+        const { data: rows } = await getSessionActivity({ path: { session_id: id }, signal })
+        if (signal.aborted || version !== sensitiveVersion.current) return
+        setActivity(rows)
+      }
       setPanelLoading(false); setPanelError("")
     }, () => activeSession(viewNow.current?.session.status) ? 1500 : 10000, reason => {
       if (version !== sensitiveVersion.current) return
@@ -619,8 +628,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (!view || !visible) return
     const controller = new AbortController(), scope = accountScope
     setAccountCatalog({ scope, rows: [], loading: true, error: "" })
-    const query = new URLSearchParams({ session_id: id })
-    void api<Connection[]>(`/connections?${query}`, "GET", undefined, controller.signal).then(rows => {
+    void listConnections({ query: { session_id: id }, signal: controller.signal }).then(({ data: rows }) => {
       if (!controller.signal.aborted) setAccountCatalog({ scope, rows, loading: false, error: "" })
     }, reason => { if (!controller.signal.aborted) setAccountCatalog({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
@@ -663,7 +671,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const browserLoginIds = view?.pending?.calls.filter(call => call.tool_name === "request_browser_login")
     .map(call => call.tool_call_id).join(",") ?? ""
   const browserLogin = view?.pending?.calls.find(call => call.tool_name === "request_browser_login")
-  const loginMetadata = browserLogin ? view?.pending?.metadata?.[browserLogin.tool_call_id] : undefined
+  const loginMetadata = browserLogin ? browserLoginMetadata(view?.pending?.metadata[browserLogin.tool_call_id]) : undefined
   const canResolveInput = Boolean(active && (view?.can_answer ?? active.actor_id === me.user.id))
   useEffect(() => {
     if (sideMode || !visible || !browserLoginIds || !canResolveInput || requestAnswered) return
@@ -728,7 +736,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       if (busy || !prompt.trim()) return
       setBusy(true); setError("")
       try {
-        await api(`/turns/${editing.turn_id}`, "PATCH", { prompt })
+        await updateQueuedTurn({ path: { turn_id: editing.turn_id }, body: { prompt } })
         if (version !== sensitiveVersion.current) return
         setEditing(null); await reloadAfterAction()
       } catch (error) {
@@ -749,7 +757,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
     try {
-      await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: lastRequest.current.key })
+      await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: lastRequest.current.key } })
       if (version !== sensitiveVersion.current) return
       if (body.reply_to) setAnsweredRequest(body.reply_to)
       setDraft(""); pictures.clear(); lastRequest.current = null
@@ -769,7 +777,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     setBusy(true); setError("")
     setSendingNow(previous => new Set(previous).add(turnId))
     try {
-      const turn = await api<Turn>(`/turns/${turnId}/steer`, "POST")
+      const { data: turn } = await steerQueuedTurn({ path: { turn_id: turnId } })
       if (version !== sensitiveVersion.current) return
       setView(previous => previous ? { ...previous, turns: previous.turns.map(item => item.id === turn.id ? turn : item) } : previous)
       await reloadAfterAction()
@@ -892,7 +900,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
             <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={() => void runConversationAction(
-              () => api(`/turns/${message.turn_id}`, "DELETE"),
+              () => cancelQueuedTurn({ path: { turn_id: message.turn_id } }),
               () => { if (editing?.id === message.id) setEditing(null) },
             )}><X size={14} /></Button>
           </div>)}</div>}
@@ -907,13 +915,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             </div>
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} compact />
-              {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={() => void runConversationAction(() => api(`/sessions/${id}/stop`, "POST"))}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
+              {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={() => void runConversationAction(() => stopSession({ path: { session_id: id } }))}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
             </div>
           </div>
           {accountNotice && !skipAccounts && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Continue</Button><a href="#settings/general">Preferences</a></p>}
           {session.surface === "slack" && view.slack_delivery && <div className="composer-hint" role="status">
-            {view.slack_delivery.rejected > 0 ? <><span>Slack could not deliver {view.slack_delivery.rejected} message(s). Check the Slack connection in Settings.</span>{session.can_manage && <Button variant="ghost" size="sm" onClick={async () => { try { await api(`/sessions/${id}/slack-delivery/retry`, "POST"); await load() } catch (reason) { setError(String(reason)) } }}>Retry delivery</Button>}</>
+            {view.slack_delivery.rejected > 0 ? <><span>Slack could not deliver {view.slack_delivery.rejected} message(s). Check the Slack connection in Settings.</span>{session.can_manage && <Button variant="ghost" size="sm" onClick={async () => { try { await retrySlackDelivery({ path: { session_id: id } }); await load() } catch (reason) { setError(String(reason)) } }}>Retry delivery</Button>}</>
               : view.slack_delivery.sending > 0 ? "Confirming Slack delivery. Your message will not be sent twice."
               : view.slack_delivery.pending > 0 ? "Waiting to deliver to Slack…" : null}
           </div>}
@@ -1026,7 +1034,7 @@ function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelec
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true); setError("")
-    void api<Session[]>("/sessions", "GET", undefined, controller.signal).then(rows => {
+    void listSessions({ signal: controller.signal }).then(({ data: rows }) => {
       if (!controller.signal.aborted) { setSessions(rows.filter(row => row.id !== parentId && !row.deleted)); setLoading(false) }
     }, reason => { if (!controller.signal.aborted) { setLoading(false); setError(String(reason)) } })
     return () => controller.abort()
@@ -1036,7 +1044,7 @@ function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelec
     <Button className="side-chat-new" disabled={busy} onClick={async () => {
       setBusy(true); setError("")
       try {
-        const next = await api<Session>("/sessions", "POST", { visibility: "shared", model: defaultModel })
+        const { data: next } = await createSession({ body: { visibility: "shared", model: defaultModel } })
         if (alive.current) onSelect(next)
         // The session already exists; a sidebar refresh failure must not turn
         // a confirmed creation into an invitation to create it again.
@@ -1058,19 +1066,19 @@ function ActivityRow({ item }: { item: Activity }) {
   return <details className="activity-row"><summary>{item.type === "tool_result" ? "Finished" : item.type === "tool_call" ? "Using" : "Updated"} {item.name?.replaceAll("_", " ")}</summary><pre>{typeof item.content === "string" ? item.content : JSON.stringify(item.arguments ?? item.data ?? {}, null, 2)}</pre></details>
 }
 
-function EffectReview({ effect, onDone }: { effect: Effect; onDone: () => Promise<void> }) {
-  const [outcome, setOutcome] = useState("completed")
+function EffectReview({ effect, onDone }: { effect: SessionEffect; onDone: () => Promise<void> }) {
+  const [outcome, setOutcome] = useState<"completed" | "not_executed">("completed")
   const [evidence, setEvidence] = useState("")
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   return <form className="pending" onSubmit={async event => {
     event.preventDefault(); setBusy(true); setError("")
-    try { await api(`/effects/${effect.id}/resolve`, "POST", { outcome, evidence }); await onDone() }
+    try { await resolveEffect({ path: { effect_id: effect.id }, body: { outcome, evidence } }); await onDone() }
     catch (error) { setError(String(error)) } finally { setBusy(false) }
   }}>
     <h3>An action needs review</h3><p>Its outcome was not confirmed. Inspect the command or destination before allowing more changes.</p>
     <details><summary>{effect.tool_name.replaceAll("_", " ")}</summary><pre>{JSON.stringify(effect.arguments, null, 2)}</pre></details>
-    <label>What did you verify?<Choice label="Verified outcome" value={outcome} onChange={setOutcome} options={[{ value: "completed", label: "The action completed" }, { value: "not_executed", label: "The action did not run" }]} /></label>
+    <label>What did you verify?<Choice label="Verified outcome" value={outcome} onChange={value => setOutcome(value === "not_executed" ? "not_executed" : "completed")} options={[{ value: "completed", label: "The action completed" }, { value: "not_executed", label: "The action did not run" }]} /></label>
     <label>Evidence<Textarea value={evidence} onChange={event => setEvidence(event.target.value)} placeholder="Describe what you checked and what you found." minLength={10} required /></label>
     {error && <p className="error" role="alert">{error}</p>}<Button disabled={busy || evidence.trim().length < 10} type="submit">Record verified outcome</Button>
   </form>
@@ -1124,7 +1132,7 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
       const key = `${call.tool_call_id}:${question.header}`
       return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
     }) }]))
-    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers, ...(logins.length ? { browser_logins: nextLogins } : {}) }) }
+    try { await createSessionAnswer({ path: { session_id: sessionId }, body: { turn_id: turnId, request_key: requestKey.current, approvals, answers, ...(logins.length ? { browser_logins: nextLogins } : {}) } }) }
     catch (e) {
       submitting.current = false
       setError(String(e)); setBusy(false)
@@ -1137,7 +1145,7 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
   }
   return <>
     {credentials.map(call => {
-      const requestId = pending.metadata?.[call.tool_call_id]?.request_id
+      const requestId = metadataText(pending.metadata[call.tool_call_id], "request_id")
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
@@ -1145,7 +1153,7 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
     {questions.length
       ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{disabled && <span className="question-send-status" role="status">{submitted ? "Answer sent" : "Sending…"}</span>}</div>
       : logins.length === 0 && <h3>Your input is needed</h3>}
-    {logins.map(call => <BrowserLoginCard key={call.tool_call_id} metadata={pending.metadata?.[call.tool_call_id]}
+    {logins.map(call => <BrowserLoginCard key={call.tool_call_id} metadata={browserLoginMetadata(pending.metadata[call.tool_call_id])}
       outcome={browserLogins[call.tool_call_id]} disabled={disabled} onOpen={onOpenComputer}
       onAnswer={outcome => {
         if (submitting.current) return

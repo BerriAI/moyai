@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api } from "./api"
+import { deleteSession, restoreSession, updateSession, type SessionEdit } from "./generated/api"
 import { preferencePatch, type SessionPreferenceUpdates } from "./session-preferences"
 import { downloadDebugTrace } from "./debug-trace"
 
@@ -26,7 +27,7 @@ type Actions = {
   userId: string; busy: boolean
   preferenceSession: (row: SidebarSession) => SidebarSession
   openEditor: (editor: Editor) => void
-  edit: (row: SidebarSession, body: object, message: string) => Promise<boolean>
+  edit: (row: SidebarSession, body: SessionEdit, message: string) => Promise<boolean>
   copy: (row: SidebarSession) => void
   openComputer: (id: string) => void
   newSession: () => void
@@ -128,10 +129,10 @@ export function SessionActionsProvider({ userId, folders, refresh, preferences, 
     catch (error) { setError(String(error)); return false }
     finally { busyRef.current = false; setBusy(false) }
   }
-  async function edit(row: SidebarSession, body: object, message: string) {
+  async function edit(row: SidebarSession, body: SessionEdit, message: string) {
     if (sessionIsReadOnly(row) || busyRef.current) return false
     const patch = preferencePatch(body)
-    if (!patch) return mutate(() => api(`/sessions/${row.id}`, "PATCH", body), message)
+    if (!patch) return mutate(() => updateSession({ path: { session_id: row.id }, body }), message)
     const sequence = ++preferenceSequence.current
     setEditor(null); setError(""); setNotice("")
     try {
@@ -176,15 +177,15 @@ export function SessionActionsProvider({ userId, folders, refresh, preferences, 
         if (!editor) return
         if (editor.action === "rename") void edit(editor.session!, { title: name.trim() }, "Session renamed.")
         else if (editor.action === "archive") void edit(editor.session!, { archived: !editor.session!.archived }, editor.session!.archived ? "Session restored." : "Session archived.")
-        else if (editor.action === "delete") void mutate(async () => { await api(`/sessions/${editor.session!.id}`, "DELETE"); onDeleted(editor.session!.id) }, "Moved to Deleted sessions.")
-        else if (editor.action === "restore") void mutate(() => api(`/sessions/${editor.session!.id}/restore`, "POST"), "Restored to active sessions.")
+        else if (editor.action === "delete") void mutate(async () => { await deleteSession({ path: { session_id: editor.session!.id } }); onDeleted(editor.session!.id) }, "Moved to Deleted sessions.")
+        else if (editor.action === "restore") void mutate(() => restoreSession({ path: { session_id: editor.session!.id } }), "Restored to active sessions.")
         else if (editor.action === "folder-remove") void mutate(() => api(`/session-folders/${editor.folder!.id}`, "DELETE"), "Folder removed. Sessions are still saved.")
         else if (editor.action === "folder-rename") void mutate(() => api(`/session-folders/${editor.folder!.id}`, "PATCH", { name }), "Folder renamed.")
         else void mutate(async () => {
           const created = await api<SessionFolder>("/session-folders", "POST", { name })
           if (editor.session) {
             setEditor({ action: "move", session: editor.session }); await refresh()
-            await api(`/sessions/${editor.session.id}`, "PATCH", { folder: created.name })
+            await updateSession({ path: { session_id: editor.session.id }, body: { folder: created.name } })
           }
         }, editor.session ? "Folder created and session moved." : "Folder created.")
       }}>

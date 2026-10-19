@@ -44,6 +44,38 @@
         "title": "ApprovalReply",
         "type": "object"
       },
+      "AuthConfig": {
+        "properties": {
+          "access_enabled": {
+            "title": "Access Enabled",
+            "type": "boolean"
+          },
+          "google_enabled": {
+            "title": "Google Enabled",
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "existing",
+              "standalone"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "password_enabled": {
+            "title": "Password Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "mode",
+          "password_enabled",
+          "google_enabled",
+          "access_enabled"
+        ],
+        "title": "AuthConfig",
+        "type": "object"
+      },
       "AutomationDefinition": {
         "additionalProperties": false,
         "properties": {
@@ -580,6 +612,115 @@
         "title": "ConnectionPolicy",
         "type": "object"
       },
+      "ConnectionPolicyView": {
+        "properties": {
+          "allowed_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Tools"
+          },
+          "product": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product"
+          },
+          "require_approval": {
+            "default": true,
+            "title": "Require Approval",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "allowed_tools",
+          "require_approval",
+          "product"
+        ],
+        "title": "ConnectionPolicyView",
+        "type": "object"
+      },
+      "ConnectionView": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ConnectionPolicyView"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "shared": {
+            "title": "Shared",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "const": "product",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "owner_id",
+          "shared",
+          "read_only",
+          "enabled",
+          "revision",
+          "policy",
+          "source"
+        ],
+        "title": "ConnectionView",
+        "type": "object"
+      },
       "ContinuationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -678,6 +819,19 @@
         "title": "ContinuationRequest",
         "type": "object"
       },
+      "CredentialRequestRef": {
+        "properties": {
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "title": "CredentialRequestRef",
+        "type": "object"
+      },
       "EffectResolution": {
         "properties": {
           "evidence": {
@@ -700,6 +854,19 @@
           "evidence"
         ],
         "title": "EffectResolution",
+        "type": "object"
+      },
+      "EffectResolveResult": {
+        "properties": {
+          "recorded": {
+            "title": "Recorded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "recorded"
+        ],
+        "title": "EffectResolveResult",
         "type": "object"
       },
       "EventTrigger": {
@@ -986,6 +1153,225 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthStatus": {
+        "properties": {
+          "durability": {
+            "title": "Durability",
+            "type": "string"
+          },
+          "engine": {
+            "title": "Engine",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "engine",
+          "durability"
+        ],
+        "title": "HealthStatus",
+        "type": "object"
+      },
+      "InvocableSkill": {
+        "properties": {
+          "archived": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived"
+          },
+          "can_manage": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Can Manage"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "icon": {
+            "title": "Icon",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "scope",
+          "reference",
+          "icon",
+          "revision",
+          "archived",
+          "created_at",
+          "updated_at",
+          "can_manage",
+          "source"
+        ],
+        "title": "InvocableSkill",
+        "type": "object"
+      },
+      "InvocableSkillPage": {
+        "properties": {
+          "can_publish": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Can Publish"
+          },
+          "capabilities": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "boolean"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capabilities"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/InvocableSkill"
+            },
+            "title": "Skills",
+            "type": "array"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "required": [
+          "skills",
+          "has_more",
+          "next_offset",
+          "can_publish",
+          "capabilities",
+          "source",
+          "note"
+        ],
+        "title": "InvocableSkillPage",
+        "type": "object"
+      },
+      "JsonValue": {},
       "LinkInput": {
         "properties": {
           "kind": {
@@ -1037,6 +1423,72 @@
           "password"
         ],
         "title": "Login",
+        "type": "object"
+      },
+      "LoginResult": {
+        "properties": {
+          "authenticated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authenticated"
+          },
+          "csrf": {
+            "title": "Csrf",
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "admin",
+                  "member"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          }
+        },
+        "required": [
+          "csrf",
+          "authenticated",
+          "role"
+        ],
+        "title": "LoginResult",
+        "type": "object"
+      },
+      "LogoutResult": {
+        "properties": {
+          "logout_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logout Url"
+          },
+          "signed_out": {
+            "title": "Signed Out",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "signed_out",
+          "logout_url"
+        ],
+        "title": "LogoutResult",
         "type": "object"
       },
       "Me": {
@@ -1135,6 +1587,128 @@
           "content"
         ],
         "title": "MemoryInput",
+        "type": "object"
+      },
+      "MessageAttachment": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "media_type",
+          "size"
+        ],
+        "title": "MessageAttachment",
+        "type": "object"
+      },
+      "MessageAttachmentStatus": {
+        "properties": {
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "const": "unavailable",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "file_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Id"
+          },
+          "media_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Type"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "preview_error": {
+            "anyOf": [
+              {
+                "const": "preview_unavailable",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Error"
+          },
+          "upload_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upload Id"
+          }
+        },
+        "required": [
+          "file_id",
+          "upload_id",
+          "name",
+          "bytes",
+          "media_type",
+          "error",
+          "preview_error"
+        ],
+        "title": "MessageAttachmentStatus",
         "type": "object"
       },
       "Migration": {
@@ -1458,6 +2032,221 @@
         "title": "Note",
         "type": "object"
       },
+      "PendingEffect": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "turn_id",
+          "tool_name",
+          "arguments",
+          "created_at"
+        ],
+        "title": "PendingEffect",
+        "type": "object"
+      },
+      "PendingRequests": {
+        "properties": {
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/PendingToolCall"
+            },
+            "title": "Approvals",
+            "type": "array"
+          },
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/PendingToolCall"
+            },
+            "title": "Calls",
+            "type": "array"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Metadata",
+            "type": "object"
+          }
+        },
+        "required": [
+          "calls",
+          "approvals",
+          "metadata"
+        ],
+        "title": "PendingRequests",
+        "type": "object"
+      },
+      "PendingToolCall": {
+        "description": "A pydantic-ai ToolCallPart awaiting an answer or approval.",
+        "properties": {
+          "args": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Args"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "part_kind": {
+            "title": "Part Kind",
+            "type": "string"
+          },
+          "provider_details": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Details"
+          },
+          "provider_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Name"
+          },
+          "tool_call_id": {
+            "title": "Tool Call Id",
+            "type": "string"
+          },
+          "tool_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Kind"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_name",
+          "args",
+          "tool_call_id",
+          "tool_kind",
+          "id",
+          "provider_name",
+          "provider_details",
+          "part_kind"
+        ],
+        "title": "PendingToolCall",
+        "type": "object"
+      },
+      "PlanStep": {
+        "properties": {
+          "active_form": {
+            "title": "Active Form",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "depends_on": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "cancelled",
+              "blocked"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "status",
+          "active_form",
+          "parent_id",
+          "depends_on"
+        ],
+        "title": "PlanStep",
+        "type": "object"
+      },
       "PolicyChange": {
         "additionalProperties": false,
         "properties": {
@@ -1709,6 +2498,32 @@
           "prompt"
         ],
         "title": "QueuedEdit",
+        "type": "object"
+      },
+      "QueuedTurnCancelResult": {
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cancelled"
+        ],
+        "title": "QueuedTurnCancelResult",
+        "type": "object"
+      },
+      "QueuedTurnUpdateResult": {
+        "properties": {
+          "updated": {
+            "title": "Updated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "updated"
+        ],
+        "title": "QueuedTurnUpdateResult",
         "type": "object"
       },
       "ReadThrough": {
@@ -1998,6 +2813,333 @@
         "title": "SelfManagement",
         "type": "object"
       },
+      "SessionDeleteResult": {
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "title": "SessionDeleteResult",
+        "type": "object"
+      },
+      "SessionDetail": {
+        "properties": {
+          "activity": {
+            "anyOf": [
+              {
+                "items": {
+                  "discriminator": {
+                    "mapping": {
+                      "tool_call": "#/components/schemas/ToolCallActivity",
+                      "tool_result": "#/components/schemas/ToolResultActivity"
+                    },
+                    "propertyName": "type"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ToolCallActivity"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ToolResultActivity"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity"
+          },
+          "can_answer": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Can Answer"
+          },
+          "can_reply_with_text": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Can Reply With Text"
+          },
+          "credential_requests": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CredentialRequestRef"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Requests"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/components/schemas/SessionEffect"
+            },
+            "title": "Effects",
+            "type": "array"
+          },
+          "has_unsettled_effects": {
+            "title": "Has Unsettled Effects",
+            "type": "boolean"
+          },
+          "messages": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/SessionMessage"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Messages"
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PendingRequests"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "question_deadline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question Deadline"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionDetailSession"
+          },
+          "slack_delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SlackDeliveryStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transcript_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcript Version"
+          },
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/SessionTurn"
+            },
+            "title": "Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session",
+          "turns",
+          "has_unsettled_effects",
+          "effects",
+          "transcript_version",
+          "slack_delivery",
+          "reference",
+          "activity",
+          "can_answer",
+          "pending",
+          "can_reply_with_text",
+          "question_deadline",
+          "credential_requests",
+          "messages"
+        ],
+        "title": "SessionDetail",
+        "type": "object"
+      },
+      "SessionDetailSession": {
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "folder": {
+            "title": "Folder",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Session Id"
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "save_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Warning"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "swarm_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Swarm Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "unread": {
+            "title": "Unread",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "visibility": {
+            "title": "Visibility",
+            "type": "string"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "owner_id",
+          "visibility",
+          "surface",
+          "model",
+          "status",
+          "active_turn",
+          "archived",
+          "deleted",
+          "workspace",
+          "save_warning",
+          "updated_at",
+          "can_manage",
+          "pinned",
+          "folder",
+          "unread",
+          "swarm_id",
+          "parent_session_id"
+        ],
+        "title": "SessionDetailSession",
+        "type": "object"
+      },
       "SessionEdit": {
         "properties": {
           "archived": {
@@ -2062,6 +3204,856 @@
         "title": "SessionEdit",
         "type": "object"
       },
+      "SessionEffect": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "turn_id",
+          "tool_name",
+          "arguments"
+        ],
+        "title": "SessionEffect",
+        "type": "object"
+      },
+      "SessionFile": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "media_type",
+          "size",
+          "created_at"
+        ],
+        "title": "SessionFile",
+        "type": "object"
+      },
+      "SessionListItem": {
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "folder": {
+            "title": "Folder",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "participated": {
+            "title": "Participated",
+            "type": "boolean"
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "save_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Warning"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "unread": {
+            "title": "Unread",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "visibility": {
+            "title": "Visibility",
+            "type": "string"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "owner_id",
+          "visibility",
+          "surface",
+          "model",
+          "status",
+          "active_turn",
+          "archived",
+          "deleted",
+          "workspace",
+          "save_warning",
+          "updated_at",
+          "can_manage",
+          "pinned",
+          "folder",
+          "participated",
+          "unread"
+        ],
+        "title": "SessionListItem",
+        "type": "object"
+      },
+      "SessionMessage": {
+        "properties": {
+          "attachment_status": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MessageAttachmentStatus"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Status"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/MessageAttachment"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "attachments_changed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachments Changed"
+          },
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Name"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "context_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Status"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "deleted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted"
+          },
+          "edited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited"
+          },
+          "edited_after_start": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited After Start"
+          },
+          "edited_in": {
+            "anyOf": [
+              {
+                "enum": [
+                  "web",
+                  "slack"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited In"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_self": {
+            "title": "Is Self",
+            "type": "boolean"
+          },
+          "legacy_review_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legacy Review Required"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "slack",
+                  "delegation"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "source_timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Timestamp"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "turn_id",
+          "role",
+          "author_id",
+          "author_name",
+          "is_self",
+          "content",
+          "created_at",
+          "attachments",
+          "source",
+          "source_url",
+          "source_timestamp",
+          "attachment_status",
+          "context_status",
+          "edited",
+          "edited_in",
+          "deleted",
+          "edited_after_start",
+          "attachments_changed",
+          "legacy_review_required"
+        ],
+        "title": "SessionMessage",
+        "type": "object"
+      },
+      "SessionReference": {
+        "description": "The product read adapter's view of a native session (resolve=true).",
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "capabilities": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Capabilities",
+            "type": "object"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by_me": {
+            "title": "Created By Me",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "execution_engine": {
+            "title": "Execution Engine",
+            "type": "string"
+          },
+          "folder": {
+            "title": "Folder",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Session Id"
+          },
+          "participated": {
+            "title": "Participated",
+            "type": "boolean"
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "save_warning": {
+            "title": "Save Warning",
+            "type": "null"
+          },
+          "source": {
+            "enum": [
+              "native",
+              "legacy"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Session Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "unread": {
+            "title": "Unread",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "visibility": {
+            "title": "Visibility",
+            "type": "string"
+          },
+          "workspace": {
+            "title": "Workspace",
+            "type": "null"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "owner_id",
+          "visibility",
+          "surface",
+          "model",
+          "status",
+          "active_turn",
+          "archived",
+          "deleted",
+          "created_at",
+          "updated_at",
+          "pinned",
+          "folder",
+          "created_by_me",
+          "participated",
+          "parent_session_id",
+          "source_session_id",
+          "source_format",
+          "execution_engine",
+          "read_only",
+          "unread",
+          "workspace",
+          "save_warning",
+          "capabilities",
+          "can_manage",
+          "source",
+          "key",
+          "url"
+        ],
+        "title": "SessionReference",
+        "type": "object"
+      },
+      "SessionRestoreResult": {
+        "properties": {
+          "restored": {
+            "title": "Restored",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "restored"
+        ],
+        "title": "SessionRestoreResult",
+        "type": "object"
+      },
+      "SessionStopResult": {
+        "properties": {
+          "status": {
+            "const": "stopping",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "SessionStopResult",
+        "type": "object"
+      },
+      "SessionSummary": {
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "save_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Warning"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "visibility": {
+            "title": "Visibility",
+            "type": "string"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "owner_id",
+          "visibility",
+          "surface",
+          "model",
+          "status",
+          "active_turn",
+          "archived",
+          "deleted",
+          "workspace",
+          "save_warning",
+          "updated_at"
+        ],
+        "title": "SessionSummary",
+        "type": "object"
+      },
+      "SessionTurn": {
+        "properties": {
+          "accepted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted At"
+          },
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "connections": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Connections",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "enqueue_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enqueue Id"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "guidance_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guidance At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_self": {
+            "title": "Is Self",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "parent_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Turn"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "usage": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Usage",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "actor_id",
+          "model",
+          "status",
+          "mode",
+          "parent_turn",
+          "enqueue_id",
+          "connections",
+          "accepted_at",
+          "usage",
+          "error",
+          "created_at",
+          "finished_at",
+          "guidance_at",
+          "is_self"
+        ],
+        "title": "SessionTurn",
+        "type": "object"
+      },
+      "SessionUpdateResult": {
+        "properties": {
+          "updated": {
+            "title": "Updated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "updated"
+        ],
+        "title": "SessionUpdateResult",
+        "type": "object"
+      },
       "SignInStart": {
         "properties": {
           "return_to": {
@@ -2116,6 +4108,42 @@
           "content"
         ],
         "title": "SkillInput",
+        "type": "object"
+      },
+      "SlackDeliveryRetry": {
+        "properties": {
+          "retried": {
+            "title": "Retried",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retried"
+        ],
+        "title": "SlackDeliveryRetry",
+        "type": "object"
+      },
+      "SlackDeliveryStatus": {
+        "properties": {
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          },
+          "sending": {
+            "title": "Sending",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending",
+          "sending",
+          "rejected"
+        ],
+        "title": "SlackDeliveryStatus",
         "type": "object"
       },
       "StatusRequest": {
@@ -2275,6 +4303,89 @@
         "title": "TokenConnection",
         "type": "object"
       },
+      "ToolCallActivity": {
+        "properties": {
+          "arguments": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arguments"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_call",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "arguments"
+        ],
+        "title": "ToolCallActivity",
+        "type": "object"
+      },
+      "ToolResultActivity": {
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_result",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "content",
+          "failed"
+        ],
+        "title": "ToolResultActivity",
+        "type": "object"
+      },
       "Trigger": {
         "additionalProperties": false,
         "properties": {
@@ -2305,6 +4416,195 @@
           }
         },
         "title": "Trigger",
+        "type": "object"
+      },
+      "TurnView": {
+        "properties": {
+          "accepted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted At"
+          },
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "connections": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Connections",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "enqueue_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enqueue Id"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "parent_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Turn"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "usage": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Usage",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "actor_id",
+          "model",
+          "status",
+          "mode",
+          "parent_turn",
+          "enqueue_id",
+          "connections",
+          "accepted_at",
+          "usage",
+          "error",
+          "created_at",
+          "finished_at"
+        ],
+        "title": "TurnView",
+        "type": "object"
+      },
+      "TurnWorkProgress": {
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/WorkCommentary"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "subagents": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/WorkAgentProgress"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subagents"
+          },
+          "subagents_limited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subagents Limited"
+          },
+          "tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/WorkToolProgress"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools"
+          },
+          "tools_limited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools Limited"
+          }
+        },
+        "required": [
+          "messages",
+          "tools",
+          "subagents",
+          "tools_limited",
+          "subagents_limited"
+        ],
+        "title": "TurnWorkProgress",
         "type": "object"
       },
       "UserEdit": {
@@ -2487,6 +4787,303 @@
           "provider"
         ],
         "title": "WebhookSetup",
+        "type": "object"
+      },
+      "WorkActionDetail": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "input_truncated": {
+            "title": "Input Truncated",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "output_truncated": {
+            "title": "Output Truncated",
+            "type": "boolean"
+          },
+          "restricted": {
+            "title": "Restricted",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "created_at",
+          "finished_at",
+          "input",
+          "output",
+          "restricted",
+          "input_truncated",
+          "output_truncated"
+        ],
+        "title": "WorkActionDetail",
+        "type": "object"
+      },
+      "WorkAgentProgress": {
+        "properties": {
+          "avatar": {
+            "title": "Avatar",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "depth": {
+            "title": "Depth",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/WorkProgressMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "messages_limited": {
+            "title": "Messages Limited",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "parent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Name"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/WorkToolProgress"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "tools_limited": {
+            "title": "Tools Limited",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "parent_id",
+          "parent_name",
+          "name",
+          "avatar",
+          "depth",
+          "status",
+          "created_at",
+          "updated_at",
+          "messages",
+          "tools",
+          "messages_limited",
+          "tools_limited"
+        ],
+        "title": "WorkAgentProgress",
+        "type": "object"
+      },
+      "WorkCommentary": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "phase": {
+            "const": "commentary",
+            "title": "Phase",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "phase",
+          "created_at"
+        ],
+        "title": "WorkCommentary",
+        "type": "object"
+      },
+      "WorkProgressMessage": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "phase": {
+            "enum": [
+              "commentary",
+              "final_answer"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "phase",
+          "created_at"
+        ],
+        "title": "WorkProgressMessage",
+        "type": "object"
+      },
+      "WorkToolProgress": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "created_at",
+          "finished_at"
+        ],
+        "title": "WorkToolProgress",
         "type": "object"
       }
     }
@@ -2795,12 +5392,14 @@
     },
     "/api/auth/config": {
       "get": {
-        "operationId": "auth_config_api_auth_config_get",
+        "operationId": "getAuthConfig",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfig"
+                }
               }
             },
             "description": "Successful Response"
@@ -2847,7 +5446,7 @@
     },
     "/api/connections": {
       "get": {
-        "operationId": "connections_api_connections_get",
+        "operationId": "listConnections",
         "parameters": [
           {
             "in": "query",
@@ -2880,7 +5479,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConnectionView"
+                  },
+                  "title": "Response Listconnections",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -2899,7 +5504,7 @@
         "summary": "Connections"
       },
       "post": {
-        "operationId": "create_connection_api_connections_post",
+        "operationId": "createConnection",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2914,7 +5519,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionView"
+                }
               }
             },
             "description": "Successful Response"
@@ -3075,7 +5682,7 @@
     },
     "/api/connections/{connection_id}": {
       "put": {
-        "operationId": "edit_connection_api_connections__connection_id__put",
+        "operationId": "updateConnection",
         "parameters": [
           {
             "in": "path",
@@ -3101,7 +5708,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionView"
+                }
               }
             },
             "description": "Successful Response"
@@ -3630,7 +6239,7 @@
     },
     "/api/effects/{effect_id}/resolve": {
       "post": {
-        "operationId": "resolve_effect_api_effects__effect_id__resolve_post",
+        "operationId": "resolveEffect",
         "parameters": [
           {
             "in": "path",
@@ -3656,7 +6265,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/EffectResolveResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -4027,7 +6638,7 @@
     },
     "/api/login": {
       "post": {
-        "operationId": "login_api_login_post",
+        "operationId": "loginWithPassword",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4042,7 +6653,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -4063,12 +6676,14 @@
     },
     "/api/logout": {
       "post": {
-        "operationId": "logout_api_logout_post",
+        "operationId": "logout",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -5942,7 +8557,7 @@
     },
     "/api/sessions": {
       "get": {
-        "operationId": "sessions_api_sessions_get",
+        "operationId": "listSessions",
         "parameters": [
           {
             "in": "query",
@@ -5969,7 +8584,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionListItem"
+                  },
+                  "title": "Response Listsessions",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -5988,7 +8609,7 @@
         "summary": "Sessions"
       },
       "post": {
-        "operationId": "create_session_api_sessions_post",
+        "operationId": "createSession",
         "requestBody": {
           "content": {
             "application/json": {
@@ -6003,7 +8624,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummary"
+                }
               }
             },
             "description": "Successful Response"
@@ -6024,7 +8647,7 @@
     },
     "/api/sessions/{session_id}": {
       "delete": {
-        "operationId": "delete_session_api_sessions__session_id__delete",
+        "operationId": "deleteSession",
         "parameters": [
           {
             "in": "path",
@@ -6040,7 +8663,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDeleteResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -6059,7 +8684,7 @@
         "summary": "Delete Session"
       },
       "get": {
-        "operationId": "session_api_sessions__session_id__get",
+        "operationId": "getSession",
         "parameters": [
           {
             "in": "path",
@@ -6105,7 +8730,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetail"
+                }
               }
             },
             "description": "Successful Response"
@@ -6124,7 +8751,7 @@
         "summary": "Session"
       },
       "patch": {
-        "operationId": "edit_session_api_sessions__session_id__patch",
+        "operationId": "updateSession",
         "parameters": [
           {
             "in": "path",
@@ -6150,7 +8777,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUpdateResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -6171,7 +8800,7 @@
     },
     "/api/sessions/{session_id}/activity": {
       "get": {
-        "operationId": "session_activity_api_sessions__session_id__activity_get",
+        "operationId": "getSessionActivity",
         "parameters": [
           {
             "in": "path",
@@ -6187,7 +8816,27 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "discriminator": {
+                      "mapping": {
+                        "tool_call": "#/components/schemas/ToolCallActivity",
+                        "tool_result": "#/components/schemas/ToolResultActivity"
+                      },
+                      "propertyName": "type"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ToolCallActivity"
+                      },
+                      {
+                        "$ref": "#/components/schemas/ToolResultActivity"
+                      }
+                    ]
+                  },
+                  "title": "Response Getsessionactivity",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -6208,7 +8857,7 @@
     },
     "/api/sessions/{session_id}/answers": {
       "post": {
-        "operationId": "answer_api_sessions__session_id__answers_post",
+        "operationId": "createSessionAnswer",
         "parameters": [
           {
             "in": "path",
@@ -6234,7 +8883,9 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnView"
+                }
               }
             },
             "description": "Successful Response"
@@ -6466,7 +9117,7 @@
     },
     "/api/sessions/{session_id}/effects": {
       "get": {
-        "operationId": "effects_api_sessions__session_id__effects_get",
+        "operationId": "listSessionEffects",
         "parameters": [
           {
             "in": "path",
@@ -6482,7 +9133,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PendingEffect"
+                  },
+                  "title": "Response Listsessioneffects",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -6736,7 +9393,7 @@
     },
     "/api/sessions/{session_id}/files": {
       "get": {
-        "operationId": "files_api_sessions__session_id__files_get",
+        "operationId": "listSessionFiles",
         "parameters": [
           {
             "in": "path",
@@ -6752,7 +9409,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionFile"
+                  },
+                  "title": "Response Listsessionfiles",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -6866,7 +9529,7 @@
     },
     "/api/sessions/{session_id}/messages": {
       "get": {
-        "operationId": "messages_api_sessions__session_id__messages_get",
+        "operationId": "listSessionMessages",
         "parameters": [
           {
             "in": "path",
@@ -6892,7 +9555,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionMessage"
+                  },
+                  "title": "Response Listsessionmessages",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -6911,7 +9580,7 @@
         "summary": "Messages"
       },
       "post": {
-        "operationId": "send_api_sessions__session_id__messages_post",
+        "operationId": "createSessionMessage",
         "parameters": [
           {
             "in": "path",
@@ -6937,7 +9606,9 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnView"
+                }
               }
             },
             "description": "Successful Response"
@@ -7004,7 +9675,7 @@
     },
     "/api/sessions/{session_id}/plan": {
       "get": {
-        "operationId": "plan_api_sessions__session_id__plan_get",
+        "operationId": "getSessionPlan",
         "parameters": [
           {
             "in": "path",
@@ -7020,7 +9691,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PlanStep"
+                  },
+                  "title": "Response Getsessionplan",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -7041,7 +9718,7 @@
     },
     "/api/sessions/{session_id}/progress/{turn_id}": {
       "get": {
-        "operationId": "progress_api_sessions__session_id__progress__turn_id__get",
+        "operationId": "getTurnProgress",
         "parameters": [
           {
             "in": "path",
@@ -7076,7 +9753,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnWorkProgress"
+                }
               }
             },
             "description": "Successful Response"
@@ -7097,7 +9776,7 @@
     },
     "/api/sessions/{session_id}/progress/{turn_id}/actions/{action_id}": {
       "get": {
-        "operationId": "action_detail_api_sessions__session_id__progress__turn_id__actions__action_id__get",
+        "operationId": "getTurnAction",
         "parameters": [
           {
             "in": "path",
@@ -7147,7 +9826,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WorkActionDetail"
+                }
               }
             },
             "description": "Successful Response"
@@ -7289,7 +9970,7 @@
     },
     "/api/sessions/{session_id}/restore": {
       "post": {
-        "operationId": "restore_session_api_sessions__session_id__restore_post",
+        "operationId": "restoreSession",
         "parameters": [
           {
             "in": "path",
@@ -7305,7 +9986,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRestoreResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -7326,7 +10009,7 @@
     },
     "/api/sessions/{session_id}/slack-delivery/retry": {
       "post": {
-        "operationId": "retry_slack_delivery_api_sessions__session_id__slack_delivery_retry_post",
+        "operationId": "retrySlackDelivery",
         "parameters": [
           {
             "in": "path",
@@ -7342,7 +10025,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SlackDeliveryRetry"
+                }
               }
             },
             "description": "Successful Response"
@@ -7363,7 +10048,7 @@
     },
     "/api/sessions/{session_id}/stop": {
       "post": {
-        "operationId": "stop_api_sessions__session_id__stop_post",
+        "operationId": "stopSession",
         "parameters": [
           {
             "in": "path",
@@ -7379,7 +10064,9 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStopResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9026,7 +11713,7 @@
     },
     "/api/skills": {
       "get": {
-        "operationId": "invocable_skills_api_skills_get",
+        "operationId": "listInvocableSkills",
         "parameters": [
           {
             "in": "query",
@@ -9083,7 +11770,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InvocableSkillPage"
+                }
               }
             },
             "description": "Successful Response"
@@ -9400,7 +12089,7 @@
     },
     "/api/turns/{turn_id}": {
       "delete": {
-        "operationId": "cancel_queued_api_turns__turn_id__delete",
+        "operationId": "cancelQueuedTurn",
         "parameters": [
           {
             "in": "path",
@@ -9416,7 +12105,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/QueuedTurnCancelResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9435,7 +12126,7 @@
         "summary": "Cancel Queued"
       },
       "patch": {
-        "operationId": "edit_queued_api_turns__turn_id__patch",
+        "operationId": "updateQueuedTurn",
         "parameters": [
           {
             "in": "path",
@@ -9461,7 +12152,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/QueuedTurnUpdateResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -9482,7 +12175,7 @@
     },
     "/api/turns/{turn_id}/steer": {
       "post": {
-        "operationId": "steer_queued_api_turns__turn_id__steer_post",
+        "operationId": "steerQueuedTurn",
         "parameters": [
           {
             "in": "path",
@@ -9498,7 +12191,9 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/TurnView"
+                }
               }
             },
             "description": "Successful Response"
@@ -9727,12 +12422,14 @@
     },
     "/health": {
       "get": {
-        "operationId": "health_health_get",
+        "operationId": "getHealth",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
               }
             },
             "description": "Successful Response"
