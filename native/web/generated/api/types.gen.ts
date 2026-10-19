@@ -320,6 +320,100 @@ export type ConnectionPolicy = {
 };
 
 /**
+ * ContinuationBlocker
+ */
+export type ContinuationBlocker = {
+    /**
+     * Action
+     */
+    action: string;
+    /**
+     * Code
+     */
+    code: string;
+    /**
+     * Message
+     */
+    message: string;
+};
+
+/**
+ * ContinuationRecoveryFile
+ */
+export type ContinuationRecoveryFile = {
+    /**
+     * Download Url
+     */
+    download_url: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: 'artifact';
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Omissions
+     */
+    omissions: string;
+    /**
+     * Preview Supported
+     */
+    preview_supported: boolean;
+    /**
+     * Restored Directory
+     */
+    restored_directory: string;
+    /**
+     * Size
+     */
+    size: number;
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * ContinuationRecoveryFiles
+ */
+export type ContinuationRecoveryFiles = {
+    /**
+     * Files
+     */
+    files: Array<ContinuationRecoveryFile>;
+    /**
+     * Links
+     */
+    links: Array<unknown>;
+    /**
+     * Original Files Url
+     */
+    original_files_url: string;
+    /**
+     * Source Session Id
+     */
+    source_session_id: string;
+    /**
+     * Sources
+     */
+    sources: Array<unknown>;
+};
+
+/**
  * ContinuationRequest
  */
 export type ContinuationRequest = {
@@ -535,6 +629,557 @@ export type HttpValidationError = {
      * Detail
      */
     detail?: Array<ValidationError>;
+};
+
+/**
+ * HistoryAttachment
+ */
+export type HistoryAttachment = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Download Url
+     */
+    download_url: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: 'upload';
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Message Id
+     */
+    message_id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Original Url
+     */
+    original_url: string;
+    /**
+     * Preview Url
+     */
+    preview_url: string;
+    /**
+     * Size
+     */
+    size: number;
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * HistoryAttachmentStatus
+ */
+export type HistoryAttachmentStatus = {
+    /**
+     * Bytes
+     */
+    bytes?: number;
+    /**
+     * Error
+     */
+    error?: 'unavailable';
+    /**
+     * File Id
+     */
+    file_id?: string;
+    /**
+     * Media Type
+     */
+    media_type?: string;
+    /**
+     * Name
+     */
+    name?: string;
+    /**
+     * Preview Error
+     */
+    preview_error?: 'preview_unavailable';
+    /**
+     * Upload Id
+     */
+    upload_id?: string;
+};
+
+/**
+ * HistoryCapabilities
+ */
+export type HistoryCapabilities = {
+    /**
+     * Archive
+     */
+    archive?: boolean;
+    /**
+     * Computer
+     */
+    computer?: boolean;
+    /**
+     * Continue
+     */
+    continue: boolean;
+    /**
+     * Delete
+     */
+    delete?: boolean;
+    /**
+     * Move
+     */
+    move: boolean;
+    /**
+     * Pin
+     */
+    pin: boolean;
+    /**
+     * Read
+     */
+    read: boolean;
+    /**
+     * Rename
+     */
+    rename: boolean;
+    /**
+     * Restore
+     */
+    restore?: boolean;
+    /**
+     * Stop
+     */
+    stop?: boolean;
+};
+
+/**
+ * HistoryMatch
+ */
+export type HistoryMatch = {
+    /**
+     * Message Id
+     */
+    message_id: number | null;
+    /**
+     * Snippet
+     */
+    snippet: string;
+};
+
+/**
+ * HistoryMessage
+ *
+ * A native or earlier-product public message. Slack-sourced rows add the source fields.
+ */
+export type HistoryMessage = {
+    /**
+     * Attachment Status
+     */
+    attachment_status?: Array<HistoryAttachmentStatus>;
+    /**
+     * Attachments
+     */
+    attachments?: Array<HistoryAttachment>;
+    /**
+     * Attachments Changed
+     */
+    attachments_changed?: boolean;
+    /**
+     * Author Id
+     */
+    author_id: string | null;
+    /**
+     * Author Name
+     */
+    author_name?: string | null;
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Content Truncated
+     */
+    content_truncated?: boolean;
+    /**
+     * Content Unavailable
+     */
+    content_unavailable?: boolean;
+    /**
+     * Context Status
+     */
+    context_status?: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Deleted
+     */
+    deleted?: boolean;
+    /**
+     * Edited
+     */
+    edited?: boolean;
+    /**
+     * Edited After Start
+     */
+    edited_after_start?: boolean;
+    /**
+     * Edited In
+     */
+    edited_in?: 'web' | 'slack';
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Is Self
+     */
+    is_self?: boolean;
+    /**
+     * Legacy Review Required
+     */
+    legacy_review_required?: boolean;
+    /**
+     * Model
+     */
+    model?: string | null;
+    /**
+     * Response To Id
+     */
+    response_to_id?: number | null;
+    /**
+     * Revision
+     */
+    revision?: number | null;
+    /**
+     * Role
+     */
+    role: string;
+    /**
+     * Session Id
+     */
+    session_id?: string;
+    /**
+     * Source
+     */
+    source?: 'slack';
+    /**
+     * Source Format
+     */
+    source_format?: string;
+    /**
+     * Source Timestamp
+     */
+    source_timestamp?: string;
+    /**
+     * Source Url
+     */
+    source_url?: string | null;
+    /**
+     * Started At
+     */
+    started_at?: string;
+    /**
+     * Status
+     */
+    status?: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+};
+
+/**
+ * HistoryMessagePage
+ */
+export type HistoryMessagePage = {
+    /**
+     * Attachments Truncated
+     */
+    attachments_truncated?: boolean;
+    /**
+     * Content Limit
+     */
+    content_limit?: number;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Messages
+     */
+    messages: Array<HistoryMessage>;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Source Format
+     */
+    source_format?: string;
+};
+
+/**
+ * HistoryOwner
+ */
+export type HistoryOwner = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string | null;
+};
+
+/**
+ * HistorySearchLimits
+ */
+export type HistorySearchLimits = {
+    /**
+     * Legacy Message Prefix Chars
+     */
+    legacy_message_prefix_chars: number | null;
+    /**
+     * Native Ciphertext Bytes
+     */
+    native_ciphertext_bytes: number;
+    /**
+     * Native Messages
+     */
+    native_messages: number;
+};
+
+/**
+ * HistorySession
+ *
+ * A native or earlier-product session row, as listed by history and product routes.
+ */
+export type HistorySession = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Archived
+     */
+    archived: boolean;
+    capabilities: HistoryCapabilities;
+    /**
+     * Completion Marker
+     */
+    completion_marker?: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Created By Me
+     */
+    created_by_me: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+    /**
+     * Deleting
+     */
+    deleting?: boolean;
+    /**
+     * Execution Engine
+     */
+    execution_engine: string;
+    /**
+     * Folder
+     */
+    folder: string;
+    /**
+     * Folder Id
+     */
+    folder_id?: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    match?: HistoryMatch | null;
+    /**
+     * Model
+     */
+    model: string;
+    owner?: HistoryOwner;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Parent Session Id
+     */
+    parent_session_id: string | null;
+    /**
+     * Participated
+     */
+    participated: boolean;
+    /**
+     * Pinned
+     */
+    pinned: boolean;
+    /**
+     * Read Marker Key
+     */
+    read_marker_key?: string;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+    /**
+     * Root Session Id
+     */
+    root_session_id?: string;
+    /**
+     * Save Warning
+     */
+    save_warning: null;
+    /**
+     * Side Chat Of
+     */
+    side_chat_of?: string | null;
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Source Session Id
+     */
+    source_session_id?: string | null;
+    /**
+     * Source Status
+     */
+    source_status?: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Surface
+     */
+    surface: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Unread
+     */
+    unread: boolean | null;
+    /**
+     * Unread Source
+     */
+    unread_source?: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Url
+     */
+    url: string;
+    /**
+     * Visibility
+     */
+    visibility: 'private' | 'shared';
+    /**
+     * Workspace
+     */
+    workspace: null;
+};
+
+/**
+ * HistorySessionDetail
+ */
+export type HistorySessionDetail = {
+    continuation?: ProductContinuationResult | null;
+    /**
+     * Continuation Supported
+     */
+    continuation_supported?: boolean;
+    /**
+     * Effects
+     */
+    effects?: Array<unknown>;
+    /**
+     * Has Unsettled Effects
+     */
+    has_unsettled_effects?: boolean;
+    session: SourcedHistorySession;
+    /**
+     * Turns
+     */
+    turns?: Array<unknown>;
+};
+
+/**
+ * HistorySessionList
+ */
+export type HistorySessionList = {
+    /**
+     * Ancestors
+     */
+    ancestors: Array<SourcedHistorySession>;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Cursor
+     */
+    next_cursor: string | null;
+    /**
+     * Notice
+     */
+    notice: string | null;
+    /**
+     * Partial
+     */
+    partial: boolean;
+    search_limits: HistorySearchLimits | null;
+    /**
+     * Sessions
+     */
+    sessions: Array<SourcedHistorySession>;
+    sources: HistorySourceStates;
+};
+
+/**
+ * HistorySourceStates
+ */
+export type HistorySourceStates = {
+    /**
+     * Legacy
+     */
+    legacy?: 'available' | 'unavailable' | 'disabled';
+    /**
+     * Native
+     */
+    native?: 'available' | 'unavailable' | 'disabled';
 };
 
 /**
@@ -834,6 +1479,459 @@ export type Preferences = {
 };
 
 /**
+ * ProductChildrenPage
+ */
+export type ProductChildrenPage = {
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Sessions
+     */
+    sessions: Array<HistorySession>;
+};
+
+/**
+ * ProductContinuationPreview
+ */
+export type ProductContinuationPreview = {
+    /**
+     * Blockers
+     */
+    blockers: Array<ContinuationBlocker>;
+    continuation?: ProductContinuationResult;
+    /**
+     * File Notice
+     */
+    file_notice?: string;
+    /**
+     * History Bytes
+     */
+    history_bytes?: number;
+    /**
+     * History Count
+     */
+    history_count?: number;
+    /**
+     * Imported Count
+     */
+    imported_count?: number;
+    /**
+     * Requires Recent History
+     */
+    requires_recent_history?: boolean;
+    /**
+     * Requires Workspace Ack
+     */
+    requires_workspace_ack?: boolean;
+    /**
+     * Requires Workspace Drain
+     */
+    requires_workspace_drain?: boolean;
+    /**
+     * Source Fingerprint
+     */
+    source_fingerprint?: string;
+    /**
+     * State
+     */
+    state: 'ready' | 'blocked' | 'continued';
+    /**
+     * Surface
+     */
+    surface?: string;
+    /**
+     * Visibility
+     */
+    visibility?: 'private' | 'shared';
+};
+
+/**
+ * ProductContinuationResult
+ *
+ * The native conversation that continues an earlier-product session.
+ */
+export type ProductContinuationResult = {
+    /**
+     * History Count
+     */
+    history_count: number;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Imported Count
+     */
+    imported_count: number;
+    /**
+     * Recent History
+     */
+    recent_history: boolean;
+    /**
+     * Source
+     */
+    source: 'native';
+    /**
+     * Source Session Id
+     */
+    source_session_id: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string | null;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * ProductEnvironment
+ */
+export type ProductEnvironment = {
+    /**
+     * Active Build
+     */
+    active_build: string | null;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Is Default
+     */
+    is_default: boolean;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Phase
+     */
+    phase: string;
+    prepared_build: ProductEnvironmentBuild | null;
+    /**
+     * Ready
+     */
+    ready: boolean;
+    /**
+     * Repository
+     */
+    repository: string;
+    /**
+     * Repository Id
+     */
+    repository_id: number | null;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
+ * ProductEnvironmentBuild
+ */
+export type ProductEnvironmentBuild = {
+    /**
+     * Commit Sha
+     */
+    commit_sha: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Revision
+     */
+    revision: number | null;
+    /**
+     * Sandbox Provider
+     */
+    sandbox_provider: string | null;
+};
+
+/**
+ * ProductFile
+ *
+ * A published output, saved capture or workspace archive of an earlier-product session.
+ */
+export type ProductFile = {
+    /**
+     * Compatibility Download Supported
+     */
+    compatibility_download_supported?: boolean;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Download Url
+     */
+    download_url: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: 'artifact';
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Original Download Available
+     */
+    original_download_available?: boolean;
+    /**
+     * Original Url
+     */
+    original_url: string;
+    /**
+     * Preview Supported
+     */
+    preview_supported?: boolean;
+    /**
+     * Preview Url
+     */
+    preview_url?: string;
+    /**
+     * Revision
+     */
+    revision?: string;
+    /**
+     * Size
+     */
+    size: number;
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Source Turn
+     */
+    source_turn?: number | null;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * ProductFileGroupsMore
+ */
+export type ProductFileGroupsMore = {
+    /**
+     * Captures
+     */
+    captures: boolean;
+    /**
+     * Files
+     */
+    files: boolean;
+    /**
+     * Sources
+     */
+    sources: boolean;
+};
+
+/**
+ * ProductFileListing
+ */
+export type ProductFileListing = {
+    /**
+     * Capture Inventory Truncated
+     */
+    capture_inventory_truncated: boolean;
+    /**
+     * Files
+     */
+    files: Array<ProductFile>;
+    has_more: ProductFileGroupsMore;
+    /**
+     * Limitations
+     */
+    limitations: Array<string>;
+    /**
+     * Links
+     */
+    links: Array<unknown>;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Sources
+     */
+    sources: Array<HistoryAttachment>;
+};
+
+/**
+ * ProductFilePreview
+ *
+ * JSON preview returned by the file content route when ``preview=true``.
+ */
+export type ProductFilePreview = {
+    /**
+     * Content Url
+     */
+    content_url: null;
+    /**
+     * Download Url
+     */
+    download_url: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: 'upload' | 'artifact';
+    /**
+     * Language
+     */
+    language: string | null;
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Notice
+     */
+    notice: string;
+    /**
+     * Preview Bytes
+     */
+    preview_bytes: number;
+    /**
+     * Preview Kind
+     */
+    preview_kind: 'unsupported' | 'code' | 'markdown' | 'text';
+    /**
+     * Size
+     */
+    size: number;
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Text
+     */
+    text: string | null;
+    /**
+     * Text Byte Limit
+     */
+    text_byte_limit: number;
+    /**
+     * Text Line Limit
+     */
+    text_line_limit: number;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+};
+
+/**
+ * ProductFolder
+ */
+export type ProductFolder = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
+ * ProductFolderPage
+ */
+export type ProductFolderPage = {
+    /**
+     * Folders
+     */
+    folders: Array<ProductFolder>;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+};
+
+/**
+ * ProductMessagePage
+ */
+export type ProductMessagePage = {
+    /**
+     * Attachments Truncated
+     */
+    attachments_truncated: boolean;
+    /**
+     * Content Limit
+     */
+    content_limit: number;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Messages
+     */
+    messages: Array<HistoryMessage>;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Source Format
+     */
+    source_format: string;
+};
+
+/**
  * ProductSaveSecret
  */
 export type ProductSaveSecret = {
@@ -877,6 +1975,77 @@ export type ProductSaveSecret = {
      * Scope
      */
     scope: 'session' | 'personal' | 'organization';
+};
+
+/**
+ * ProductSearchPage
+ */
+export type ProductSearchPage = {
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Searched Message Prefix Chars
+     */
+    searched_message_prefix_chars: number;
+    /**
+     * Sessions
+     */
+    sessions: Array<HistorySession>;
+    /**
+     * Source Format
+     */
+    source_format: string;
+};
+
+/**
+ * ProductSessionDetail
+ */
+export type ProductSessionDetail = {
+    /**
+     * Continuation Supported
+     */
+    continuation_supported: boolean;
+    /**
+     * Effects
+     */
+    effects: Array<unknown>;
+    /**
+     * Has Unsettled Effects
+     */
+    has_unsettled_effects: boolean;
+    session: HistorySession;
+    /**
+     * Turns
+     */
+    turns: Array<unknown>;
+};
+
+/**
+ * ProductSessionPage
+ */
+export type ProductSessionPage = {
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Sessions
+     */
+    sessions: Array<HistorySession>;
+    /**
+     * Source Format
+     */
+    source_format: string;
 };
 
 /**
@@ -1091,6 +2260,70 @@ export type SessionEdit = {
 };
 
 /**
+ * SessionFilePreview
+ *
+ * Metadata and bounded text of a native session file preview.
+ */
+export type SessionFilePreview = {
+    /**
+     * Content Url
+     */
+    content_url: string | null;
+    /**
+     * Download Url
+     */
+    download_url: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: 'artifact' | 'upload';
+    /**
+     * Language
+     */
+    language: string | null;
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Notice
+     */
+    notice: string | null;
+    /**
+     * Preview Kind
+     */
+    preview_kind: 'text' | 'markdown' | 'code' | 'image' | 'video' | 'audio' | 'pdf' | 'unsupported';
+    /**
+     * Size
+     */
+    size: number;
+    /**
+     * Text
+     */
+    text: string | null;
+    /**
+     * Text Byte Limit
+     */
+    text_byte_limit: number;
+    /**
+     * Text Line Limit
+     */
+    text_line_limit: number;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+};
+
+/**
  * SignInStart
  */
 export type SignInStart = {
@@ -1124,6 +2357,165 @@ export type SkillInput = {
      * Scope
      */
     scope?: 'personal' | 'shared';
+};
+
+/**
+ * SourcedHistorySession
+ *
+ * A /api/history row: stored IDs are kept; ``key`` is the source-qualified UI identity.
+ */
+export type SourcedHistorySession = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Can Manage
+     */
+    can_manage?: boolean;
+    capabilities: HistoryCapabilities;
+    /**
+     * Completion Marker
+     */
+    completion_marker?: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Created By Me
+     */
+    created_by_me: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+    /**
+     * Deleting
+     */
+    deleting?: boolean;
+    /**
+     * Execution Engine
+     */
+    execution_engine: string;
+    /**
+     * Folder
+     */
+    folder: string;
+    /**
+     * Folder Id
+     */
+    folder_id?: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Key
+     */
+    key: string;
+    match?: HistoryMatch | null;
+    /**
+     * Model
+     */
+    model: string;
+    owner?: HistoryOwner;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Parent Session Id
+     */
+    parent_session_id: string | null;
+    /**
+     * Participated
+     */
+    participated: boolean;
+    /**
+     * Pinned
+     */
+    pinned: boolean;
+    /**
+     * Read Marker Key
+     */
+    read_marker_key?: string;
+    /**
+     * Read Only
+     */
+    read_only: boolean;
+    /**
+     * Root Session Id
+     */
+    root_session_id?: string;
+    /**
+     * Save Warning
+     */
+    save_warning: null;
+    /**
+     * Side Chat Of
+     */
+    side_chat_of?: string | null;
+    /**
+     * Source
+     */
+    source: 'native' | 'legacy';
+    /**
+     * Source Format
+     */
+    source_format: string;
+    /**
+     * Source Session Id
+     */
+    source_session_id?: string | null;
+    /**
+     * Source Status
+     */
+    source_status?: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Surface
+     */
+    surface: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Unread
+     */
+    unread: boolean | null;
+    /**
+     * Unread Source
+     */
+    unread_source?: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Url
+     */
+    url: string;
+    /**
+     * Visibility
+     */
+    visibility: 'private' | 'shared';
+    /**
+     * Workspace
+     */
+    workspace: null;
 };
 
 /**
@@ -2346,7 +3738,7 @@ export type DownloadApiFilesArtifactIdGetResponses = {
     200: unknown;
 };
 
-export type SearchApiHistorySearchGetData = {
+export type SearchHistoryData = {
     body?: never;
     path?: never;
     query?: {
@@ -2370,23 +3762,25 @@ export type SearchApiHistorySearchGetData = {
     url: '/api/history/search';
 };
 
-export type SearchApiHistorySearchGetErrors = {
+export type SearchHistoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SearchApiHistorySearchGetError = SearchApiHistorySearchGetErrors[keyof SearchApiHistorySearchGetErrors];
+export type SearchHistoryError = SearchHistoryErrors[keyof SearchHistoryErrors];
 
-export type SearchApiHistorySearchGetResponses = {
+export type SearchHistoryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: HistorySessionList;
 };
 
-export type SessionsApiHistorySessionsGetData = {
+export type SearchHistoryResponse = SearchHistoryResponses[keyof SearchHistoryResponses];
+
+export type ListHistorySessionsData = {
     body?: never;
     path?: never;
     query?: {
@@ -2418,23 +3812,25 @@ export type SessionsApiHistorySessionsGetData = {
     url: '/api/history/sessions';
 };
 
-export type SessionsApiHistorySessionsGetErrors = {
+export type ListHistorySessionsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SessionsApiHistorySessionsGetError = SessionsApiHistorySessionsGetErrors[keyof SessionsApiHistorySessionsGetErrors];
+export type ListHistorySessionsError = ListHistorySessionsErrors[keyof ListHistorySessionsErrors];
 
-export type SessionsApiHistorySessionsGetResponses = {
+export type ListHistorySessionsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: HistorySessionList;
 };
 
-export type DetailApiHistorySessionsRunIdGetData = {
+export type ListHistorySessionsResponse = ListHistorySessionsResponses[keyof ListHistorySessionsResponses];
+
+export type GetHistorySessionData = {
     body?: never;
     path: {
         /**
@@ -2451,23 +3847,25 @@ export type DetailApiHistorySessionsRunIdGetData = {
     url: '/api/history/sessions/{run_id}';
 };
 
-export type DetailApiHistorySessionsRunIdGetErrors = {
+export type GetHistorySessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DetailApiHistorySessionsRunIdGetError = DetailApiHistorySessionsRunIdGetErrors[keyof DetailApiHistorySessionsRunIdGetErrors];
+export type GetHistorySessionError = GetHistorySessionErrors[keyof GetHistorySessionErrors];
 
-export type DetailApiHistorySessionsRunIdGetResponses = {
+export type GetHistorySessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: HistorySessionDetail;
 };
 
-export type MessagesApiHistorySessionsRunIdMessagesGetData = {
+export type GetHistorySessionResponse = GetHistorySessionResponses[keyof GetHistorySessionResponses];
+
+export type ListHistoryMessagesData = {
     body?: never;
     path: {
         /**
@@ -2492,21 +3890,23 @@ export type MessagesApiHistorySessionsRunIdMessagesGetData = {
     url: '/api/history/sessions/{run_id}/messages';
 };
 
-export type MessagesApiHistorySessionsRunIdMessagesGetErrors = {
+export type ListHistoryMessagesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type MessagesApiHistorySessionsRunIdMessagesGetError = MessagesApiHistorySessionsRunIdMessagesGetErrors[keyof MessagesApiHistorySessionsRunIdMessagesGetErrors];
+export type ListHistoryMessagesError = ListHistoryMessagesErrors[keyof ListHistoryMessagesErrors];
 
-export type MessagesApiHistorySessionsRunIdMessagesGetResponses = {
+export type ListHistoryMessagesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: HistoryMessagePage;
 };
+
+export type ListHistoryMessagesResponse = ListHistoryMessagesResponses[keyof ListHistoryMessagesResponses];
 
 export type LoginApiLoginPostData = {
     body: LoginWritable;
@@ -2895,21 +4295,25 @@ export type AccountsApiProductConnectionsGetResponses = {
     200: unknown;
 };
 
-export type EnvironmentsApiProductEnvironmentsGetData = {
+export type ListProductEnvironmentsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/product/environments';
 };
 
-export type EnvironmentsApiProductEnvironmentsGetResponses = {
+export type ListProductEnvironmentsResponses = {
     /**
+     * Response Listproductenvironments
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<ProductEnvironment>;
 };
 
-export type FoldersApiProductFoldersGetData = {
+export type ListProductEnvironmentsResponse = ListProductEnvironmentsResponses[keyof ListProductEnvironmentsResponses];
+
+export type ListProductFoldersData = {
     body?: never;
     path?: never;
     query?: {
@@ -2925,21 +4329,23 @@ export type FoldersApiProductFoldersGetData = {
     url: '/api/product/folders';
 };
 
-export type FoldersApiProductFoldersGetErrors = {
+export type ListProductFoldersErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type FoldersApiProductFoldersGetError = FoldersApiProductFoldersGetErrors[keyof FoldersApiProductFoldersGetErrors];
+export type ListProductFoldersError = ListProductFoldersErrors[keyof ListProductFoldersErrors];
 
-export type FoldersApiProductFoldersGetResponses = {
+export type ListProductFoldersResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductFolderPage;
 };
+
+export type ListProductFoldersResponse = ListProductFoldersResponses[keyof ListProductFoldersResponses];
 
 export type ListingApiProductMemoryGetData = {
     body?: never;
@@ -3057,7 +4463,7 @@ export type UpdateNoteApiProductMemoryNoteIdPutResponses = {
     200: unknown;
 };
 
-export type SearchApiProductSearchGetData = {
+export type SearchProductSessionsData = {
     body?: never;
     path?: never;
     query: {
@@ -3077,23 +4483,25 @@ export type SearchApiProductSearchGetData = {
     url: '/api/product/search';
 };
 
-export type SearchApiProductSearchGetErrors = {
+export type SearchProductSessionsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SearchApiProductSearchGetError = SearchApiProductSearchGetErrors[keyof SearchApiProductSearchGetErrors];
+export type SearchProductSessionsError = SearchProductSessionsErrors[keyof SearchProductSessionsErrors];
 
-export type SearchApiProductSearchGetResponses = {
+export type SearchProductSessionsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductSearchPage;
 };
 
-export type SessionsApiProductSessionsGetData = {
+export type SearchProductSessionsResponse = SearchProductSessionsResponses[keyof SearchProductSessionsResponses];
+
+export type ListProductSessionsData = {
     body?: never;
     path?: never;
     query?: {
@@ -3117,23 +4525,25 @@ export type SessionsApiProductSessionsGetData = {
     url: '/api/product/sessions';
 };
 
-export type SessionsApiProductSessionsGetErrors = {
+export type ListProductSessionsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SessionsApiProductSessionsGetError = SessionsApiProductSessionsGetErrors[keyof SessionsApiProductSessionsGetErrors];
+export type ListProductSessionsError = ListProductSessionsErrors[keyof ListProductSessionsErrors];
 
-export type SessionsApiProductSessionsGetResponses = {
+export type ListProductSessionsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductSessionPage;
 };
 
-export type DetailApiProductSessionsRunIdGetData = {
+export type ListProductSessionsResponse = ListProductSessionsResponses[keyof ListProductSessionsResponses];
+
+export type GetProductSessionData = {
     body?: never;
     path: {
         /**
@@ -3145,23 +4555,25 @@ export type DetailApiProductSessionsRunIdGetData = {
     url: '/api/product/sessions/{run_id}';
 };
 
-export type DetailApiProductSessionsRunIdGetErrors = {
+export type GetProductSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DetailApiProductSessionsRunIdGetError = DetailApiProductSessionsRunIdGetErrors[keyof DetailApiProductSessionsRunIdGetErrors];
+export type GetProductSessionError = GetProductSessionErrors[keyof GetProductSessionErrors];
 
-export type DetailApiProductSessionsRunIdGetResponses = {
+export type GetProductSessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductSessionDetail;
 };
 
-export type ChildrenApiProductSessionsRunIdChildrenGetData = {
+export type GetProductSessionResponse = GetProductSessionResponses[keyof GetProductSessionResponses];
+
+export type ListProductSessionChildrenData = {
     body?: never;
     path: {
         /**
@@ -3182,23 +4594,25 @@ export type ChildrenApiProductSessionsRunIdChildrenGetData = {
     url: '/api/product/sessions/{run_id}/children';
 };
 
-export type ChildrenApiProductSessionsRunIdChildrenGetErrors = {
+export type ListProductSessionChildrenErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ChildrenApiProductSessionsRunIdChildrenGetError = ChildrenApiProductSessionsRunIdChildrenGetErrors[keyof ChildrenApiProductSessionsRunIdChildrenGetErrors];
+export type ListProductSessionChildrenError = ListProductSessionChildrenErrors[keyof ListProductSessionChildrenErrors];
 
-export type ChildrenApiProductSessionsRunIdChildrenGetResponses = {
+export type ListProductSessionChildrenResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductChildrenPage;
 };
 
-export type PreviewApiProductSessionsRunIdContinuationGetData = {
+export type ListProductSessionChildrenResponse = ListProductSessionChildrenResponses[keyof ListProductSessionChildrenResponses];
+
+export type PreviewProductContinuationData = {
     body?: never;
     path: {
         /**
@@ -3210,23 +4624,25 @@ export type PreviewApiProductSessionsRunIdContinuationGetData = {
     url: '/api/product/sessions/{run_id}/continuation';
 };
 
-export type PreviewApiProductSessionsRunIdContinuationGetErrors = {
+export type PreviewProductContinuationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PreviewApiProductSessionsRunIdContinuationGetError = PreviewApiProductSessionsRunIdContinuationGetErrors[keyof PreviewApiProductSessionsRunIdContinuationGetErrors];
+export type PreviewProductContinuationError = PreviewProductContinuationErrors[keyof PreviewProductContinuationErrors];
 
-export type PreviewApiProductSessionsRunIdContinuationGetResponses = {
+export type PreviewProductContinuationResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductContinuationPreview;
 };
 
-export type ContinueSessionApiProductSessionsRunIdContinuationPostData = {
+export type PreviewProductContinuationResponse = PreviewProductContinuationResponses[keyof PreviewProductContinuationResponses];
+
+export type ContinueProductSessionData = {
     body: ContinuationRequest;
     path: {
         /**
@@ -3238,21 +4654,23 @@ export type ContinueSessionApiProductSessionsRunIdContinuationPostData = {
     url: '/api/product/sessions/{run_id}/continuation';
 };
 
-export type ContinueSessionApiProductSessionsRunIdContinuationPostErrors = {
+export type ContinueProductSessionErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ContinueSessionApiProductSessionsRunIdContinuationPostError = ContinueSessionApiProductSessionsRunIdContinuationPostErrors[keyof ContinueSessionApiProductSessionsRunIdContinuationPostErrors];
+export type ContinueProductSessionError = ContinueProductSessionErrors[keyof ContinueProductSessionErrors];
 
-export type ContinueSessionApiProductSessionsRunIdContinuationPostResponses = {
+export type ContinueProductSessionResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductContinuationResult;
 };
+
+export type ContinueProductSessionResponse = ContinueProductSessionResponses[keyof ContinueProductSessionResponses];
 
 export type ArchiveApiProductSessionsRunIdContinuationArchiveMemberIdGetData = {
     body?: never;
@@ -3286,7 +4704,7 @@ export type ArchiveApiProductSessionsRunIdContinuationArchiveMemberIdGetResponse
     200: unknown;
 };
 
-export type FilesApiProductSessionsRunIdContinuationFilesGetData = {
+export type ListProductContinuationFilesData = {
     body?: never;
     path: {
         /**
@@ -3298,23 +4716,25 @@ export type FilesApiProductSessionsRunIdContinuationFilesGetData = {
     url: '/api/product/sessions/{run_id}/continuation/files';
 };
 
-export type FilesApiProductSessionsRunIdContinuationFilesGetErrors = {
+export type ListProductContinuationFilesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type FilesApiProductSessionsRunIdContinuationFilesGetError = FilesApiProductSessionsRunIdContinuationFilesGetErrors[keyof FilesApiProductSessionsRunIdContinuationFilesGetErrors];
+export type ListProductContinuationFilesError = ListProductContinuationFilesErrors[keyof ListProductContinuationFilesErrors];
 
-export type FilesApiProductSessionsRunIdContinuationFilesGetResponses = {
+export type ListProductContinuationFilesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ContinuationRecoveryFiles;
 };
 
-export type ListingApiProductSessionsRunIdFilesGetData = {
+export type ListProductContinuationFilesResponse = ListProductContinuationFilesResponses[keyof ListProductContinuationFilesResponses];
+
+export type ListProductSessionFilesData = {
     body?: never;
     path: {
         /**
@@ -3335,23 +4755,25 @@ export type ListingApiProductSessionsRunIdFilesGetData = {
     url: '/api/product/sessions/{run_id}/files';
 };
 
-export type ListingApiProductSessionsRunIdFilesGetErrors = {
+export type ListProductSessionFilesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ListingApiProductSessionsRunIdFilesGetError = ListingApiProductSessionsRunIdFilesGetErrors[keyof ListingApiProductSessionsRunIdFilesGetErrors];
+export type ListProductSessionFilesError = ListProductSessionFilesErrors[keyof ListProductSessionFilesErrors];
 
-export type ListingApiProductSessionsRunIdFilesGetResponses = {
+export type ListProductSessionFilesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductFileListing;
 };
 
-export type ContentApiProductSessionsRunIdFilesContentGetData = {
+export type ListProductSessionFilesResponse = ListProductSessionFilesResponses[keyof ListProductSessionFilesResponses];
+
+export type GetProductSessionFileContentData = {
     body?: never;
     path: {
         /**
@@ -3384,23 +4806,25 @@ export type ContentApiProductSessionsRunIdFilesContentGetData = {
     url: '/api/product/sessions/{run_id}/files/content';
 };
 
-export type ContentApiProductSessionsRunIdFilesContentGetErrors = {
+export type GetProductSessionFileContentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ContentApiProductSessionsRunIdFilesContentGetError = ContentApiProductSessionsRunIdFilesContentGetErrors[keyof ContentApiProductSessionsRunIdFilesContentGetErrors];
+export type GetProductSessionFileContentError = GetProductSessionFileContentErrors[keyof GetProductSessionFileContentErrors];
 
-export type ContentApiProductSessionsRunIdFilesContentGetResponses = {
+export type GetProductSessionFileContentResponses = {
     /**
-     * Successful Response
+     * A JSON preview when preview=true; otherwise the original bytes as a download.
      */
-    200: unknown;
+    200: ProductFilePreview;
 };
 
-export type MessagesApiProductSessionsRunIdMessagesGetData = {
+export type GetProductSessionFileContentResponse = GetProductSessionFileContentResponses[keyof GetProductSessionFileContentResponses];
+
+export type ListProductSessionMessagesData = {
     body?: never;
     path: {
         /**
@@ -3421,23 +4845,25 @@ export type MessagesApiProductSessionsRunIdMessagesGetData = {
     url: '/api/product/sessions/{run_id}/messages';
 };
 
-export type MessagesApiProductSessionsRunIdMessagesGetErrors = {
+export type ListProductSessionMessagesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type MessagesApiProductSessionsRunIdMessagesGetError = MessagesApiProductSessionsRunIdMessagesGetErrors[keyof MessagesApiProductSessionsRunIdMessagesGetErrors];
+export type ListProductSessionMessagesError = ListProductSessionMessagesErrors[keyof ListProductSessionMessagesErrors];
 
-export type MessagesApiProductSessionsRunIdMessagesGetResponses = {
+export type ListProductSessionMessagesResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductMessagePage;
 };
 
-export type ListingApiProductSessionsRunIdWorkspaceGetData = {
+export type ListProductSessionMessagesResponse = ListProductSessionMessagesResponses[keyof ListProductSessionMessagesResponses];
+
+export type ListProductSessionWorkspaceData = {
     body?: never;
     path: {
         /**
@@ -3458,21 +4884,23 @@ export type ListingApiProductSessionsRunIdWorkspaceGetData = {
     url: '/api/product/sessions/{run_id}/workspace';
 };
 
-export type ListingApiProductSessionsRunIdWorkspaceGetErrors = {
+export type ListProductSessionWorkspaceErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ListingApiProductSessionsRunIdWorkspaceGetError = ListingApiProductSessionsRunIdWorkspaceGetErrors[keyof ListingApiProductSessionsRunIdWorkspaceGetErrors];
+export type ListProductSessionWorkspaceError = ListProductSessionWorkspaceErrors[keyof ListProductSessionWorkspaceErrors];
 
-export type ListingApiProductSessionsRunIdWorkspaceGetResponses = {
+export type ListProductSessionWorkspaceResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductFileListing;
 };
+
+export type ListProductSessionWorkspaceResponse = ListProductSessionWorkspaceResponses[keyof ListProductSessionWorkspaceResponses];
 
 export type ListingApiProductSkillsGetData = {
     body?: never;
@@ -4147,7 +5575,7 @@ export type EventsApiSessionsSessionIdEventsGetResponses = {
     200: unknown;
 };
 
-export type PreviewApiSessionsSessionIdFilePreviewKindResourceIdGetData = {
+export type GetSessionFilePreviewData = {
     body?: never;
     path: {
         /**
@@ -4167,21 +5595,23 @@ export type PreviewApiSessionsSessionIdFilePreviewKindResourceIdGetData = {
     url: '/api/sessions/{session_id}/file-preview/{kind}/{resource_id}';
 };
 
-export type PreviewApiSessionsSessionIdFilePreviewKindResourceIdGetErrors = {
+export type GetSessionFilePreviewErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PreviewApiSessionsSessionIdFilePreviewKindResourceIdGetError = PreviewApiSessionsSessionIdFilePreviewKindResourceIdGetErrors[keyof PreviewApiSessionsSessionIdFilePreviewKindResourceIdGetErrors];
+export type GetSessionFilePreviewError = GetSessionFilePreviewErrors[keyof GetSessionFilePreviewErrors];
 
-export type PreviewApiSessionsSessionIdFilePreviewKindResourceIdGetResponses = {
+export type GetSessionFilePreviewResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionFilePreview;
 };
+
+export type GetSessionFilePreviewResponse = GetSessionFilePreviewResponses[keyof GetSessionFilePreviewResponses];
 
 export type ContentApiSessionsSessionIdFilePreviewKindResourceIdContentGetData = {
     body?: never;

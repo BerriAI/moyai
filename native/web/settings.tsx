@@ -14,6 +14,7 @@ import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
 import type { GeneralPreferences } from "./general-preferences"
+import { listHistorySessions, type HistorySessionList, type SourcedHistorySession } from "./generated/api"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
@@ -285,6 +286,26 @@ export function ProductSecretRows({ secrets, providers, capabilities, onEdit, on
     </div>{secret.format === "aws-sso" && <small>AWS SSO access is renewed through its sign-in flow.</small>}</TableCell>
   </TableRow>)}</RecordTable>
 }
+type CredentialRootSession = Pick<SourcedHistorySession, "id" | "source" | "title" | "parent_session_id" | "deleted" | "deleting">
+/** One page of session-lifetime credential roots from the history listing. */
+function useHistoryRoots(enabled: boolean, cursor: string | null) {
+  const [revision, setRevision] = useState(0)
+  const key = enabled ? `${revision}:${cursor ?? ""}` : null
+  const [state, setState] = useState<{ key: string | null; data?: HistorySessionList; error: string }>({ key: null, error: "" })
+  useEffect(() => {
+    if (key === null) return
+    const controller = new AbortController()
+    void listHistorySessions({ query: { source: "all", limit: 100, cursor: cursor ?? undefined }, signal: controller.signal }).then(
+      ({ data }) => { if (!controller.signal.aborted) setState({ key, data, error: "" }) },
+      error => { if (!controller.signal.aborted) setState({ key, error: errorText(error) }) },
+    )
+    return () => controller.abort()
+  }, [key])
+  const refresh = useCallback(() => setRevision(value => value + 1), [])
+  const current = state.key === key
+  return { data: current ? state.data : undefined, loading: key !== null && !current, error: current ? state.error : "", refresh }
+}
+
 export function productCredentialRoot(session: { id: string; source: string }): string {
   if (session.source === "legacy" && /^[0-9a-f]{32}$/.test(session.id)) return session.id
   if (session.source === "native" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(session.id)) return `native:${session.id}`
@@ -342,8 +363,8 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
   const [expiry, setExpiry] = useState(onceUtcInput(existing?.expires_at || null))
   const [variables, setVariables] = useState<{ key: string; value: string; id: string }[]>([{ key: onePassword ? "OP_SERVICE_ACCOUNT_TOKEN" : "", value: "", id: crypto.randomUUID() }])
   const file = useRef<HTMLInputElement>(null)
-  const [cursor, setCursor] = useState<string | null>(null), [savedRoots, setSavedRoots] = useState<{ id: string; source: string; title: string; parent_session_id?: string | null; deleted?: boolean; deleting?: boolean }[]>([])
-  const roots = useResource<{ sessions: typeof savedRoots; next_cursor?: string | null }>(draft.lifetime === "session" ? `/history/sessions?source=all&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}` : null)
+  const [cursor, setCursor] = useState<string | null>(null), [savedRoots, setSavedRoots] = useState<CredentialRootSession[]>([])
+  const roots = useHistoryRoots(draft.lifetime === "session", cursor)
   useEffect(() => { if (roots.error) setSavedRoots([]) }, [roots.error])
   const rootRows = roots.error ? [] : [...new Map([...savedRoots, ...roots.data?.sessions ?? []].map(row => [`${row.source}:${row.id}`, row])).values()]
   const rootOptions = rootRows.filter(row => !row.parent_session_id && !row.deleted && !row.deleting).flatMap(row => {

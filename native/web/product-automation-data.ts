@@ -39,11 +39,7 @@ export type AutomationWebhookInfo = {
 }
 export type AutomationWebhookResult = { id: string; revision: number; provider: string; paused: boolean; configured: boolean; registered_at_provider: boolean; secret?: string }
 export type AutomationTestResult = { matches: boolean; context: { matched_trigger_ids?: string[]; [key: string]: unknown } | null; started: false }
-export type AutomationEnvironment = {
-  id: string; name: string; repository: string; repository_id: number | null; revision: number
-  enabled: boolean; active_build: string | null; is_default: boolean; ready: boolean; phase: string
-  prepared_build: { id: string; revision: number; commit_sha: string; sandbox_provider: string } | null
-}
+export type { ProductEnvironment as AutomationEnvironment } from "./generated/api"
 export type AutomationConnection = {
   id: string; connected: boolean; enabled: boolean; read_only: boolean
   tools?: { name?: string; description: string }[]

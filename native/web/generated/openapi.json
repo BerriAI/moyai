@@ -580,6 +580,131 @@
         "title": "ConnectionPolicy",
         "type": "object"
       },
+      "ContinuationBlocker": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "action"
+        ],
+        "title": "ContinuationBlocker",
+        "type": "object"
+      },
+      "ContinuationRecoveryFile": {
+        "properties": {
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "artifact",
+            "title": "Kind",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "omissions": {
+            "title": "Omissions",
+            "type": "string"
+          },
+          "preview_supported": {
+            "title": "Preview Supported",
+            "type": "boolean"
+          },
+          "restored_directory": {
+            "title": "Restored Directory",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "url",
+          "download_url",
+          "size",
+          "media_type",
+          "source_format",
+          "preview_supported",
+          "restored_directory",
+          "omissions"
+        ],
+        "title": "ContinuationRecoveryFile",
+        "type": "object"
+      },
+      "ContinuationRecoveryFiles": {
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/ContinuationRecoveryFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "links": {
+            "items": {},
+            "title": "Links",
+            "type": "array"
+          },
+          "original_files_url": {
+            "title": "Original Files Url",
+            "type": "string"
+          },
+          "source_session_id": {
+            "title": "Source Session Id",
+            "type": "string"
+          },
+          "sources": {
+            "items": {},
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "files",
+          "sources",
+          "links",
+          "source_session_id",
+          "original_files_url"
+        ],
+        "title": "ContinuationRecoveryFiles",
+        "type": "object"
+      },
       "ContinuationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -984,6 +1109,856 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HistoryAttachment": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "upload",
+            "title": "Kind",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "original_url": {
+            "title": "Original Url",
+            "type": "string"
+          },
+          "preview_url": {
+            "title": "Preview Url",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "size",
+          "media_type",
+          "created_at",
+          "url",
+          "download_url",
+          "preview_url",
+          "original_url",
+          "source_format",
+          "message_id"
+        ],
+        "title": "HistoryAttachment",
+        "type": "object"
+      },
+      "HistoryAttachmentStatus": {
+        "properties": {
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "error": {
+            "const": "unavailable",
+            "title": "Error",
+            "type": "string"
+          },
+          "file_id": {
+            "title": "File Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "preview_error": {
+            "const": "preview_unavailable",
+            "title": "Preview Error",
+            "type": "string"
+          },
+          "upload_id": {
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "title": "HistoryAttachmentStatus",
+        "type": "object"
+      },
+      "HistoryCapabilities": {
+        "properties": {
+          "archive": {
+            "title": "Archive",
+            "type": "boolean"
+          },
+          "computer": {
+            "title": "Computer",
+            "type": "boolean"
+          },
+          "continue": {
+            "title": "Continue",
+            "type": "boolean"
+          },
+          "delete": {
+            "title": "Delete",
+            "type": "boolean"
+          },
+          "move": {
+            "title": "Move",
+            "type": "boolean"
+          },
+          "pin": {
+            "title": "Pin",
+            "type": "boolean"
+          },
+          "read": {
+            "title": "Read",
+            "type": "boolean"
+          },
+          "rename": {
+            "title": "Rename",
+            "type": "boolean"
+          },
+          "restore": {
+            "title": "Restore",
+            "type": "boolean"
+          },
+          "stop": {
+            "title": "Stop",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read",
+          "continue",
+          "rename",
+          "move",
+          "pin"
+        ],
+        "title": "HistoryCapabilities",
+        "type": "object"
+      },
+      "HistoryMatch": {
+        "properties": {
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "snippet": {
+            "title": "Snippet",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "snippet"
+        ],
+        "title": "HistoryMatch",
+        "type": "object"
+      },
+      "HistoryMessage": {
+        "description": "A native or earlier-product public message. Slack-sourced rows add the source fields.",
+        "properties": {
+          "attachment_status": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryAttachmentStatus"
+            },
+            "title": "Attachment Status",
+            "type": "array"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryAttachment"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "attachments_changed": {
+            "title": "Attachments Changed",
+            "type": "boolean"
+          },
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Name"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "content_truncated": {
+            "title": "Content Truncated",
+            "type": "boolean"
+          },
+          "content_unavailable": {
+            "title": "Content Unavailable",
+            "type": "boolean"
+          },
+          "context_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Status"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "edited": {
+            "title": "Edited",
+            "type": "boolean"
+          },
+          "edited_after_start": {
+            "title": "Edited After Start",
+            "type": "boolean"
+          },
+          "edited_in": {
+            "enum": [
+              "web",
+              "slack"
+            ],
+            "title": "Edited In",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_self": {
+            "title": "Is Self",
+            "type": "boolean"
+          },
+          "legacy_review_required": {
+            "title": "Legacy Review Required",
+            "type": "boolean"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "response_to_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response To Id"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source": {
+            "const": "slack",
+            "title": "Source",
+            "type": "string"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "source_timestamp": {
+            "title": "Source Timestamp",
+            "type": "string"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "content",
+          "created_at",
+          "author_id",
+          "turn_id"
+        ],
+        "title": "HistoryMessage",
+        "type": "object"
+      },
+      "HistoryMessagePage": {
+        "properties": {
+          "attachments_truncated": {
+            "title": "Attachments Truncated",
+            "type": "boolean"
+          },
+          "content_limit": {
+            "title": "Content Limit",
+            "type": "integer"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          }
+        },
+        "required": [
+          "messages",
+          "has_more",
+          "next_offset"
+        ],
+        "title": "HistoryMessagePage",
+        "type": "object"
+      },
+      "HistoryOwner": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "HistoryOwner",
+        "type": "object"
+      },
+      "HistorySearchLimits": {
+        "properties": {
+          "legacy_message_prefix_chars": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legacy Message Prefix Chars"
+          },
+          "native_ciphertext_bytes": {
+            "title": "Native Ciphertext Bytes",
+            "type": "integer"
+          },
+          "native_messages": {
+            "title": "Native Messages",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "native_messages",
+          "native_ciphertext_bytes",
+          "legacy_message_prefix_chars"
+        ],
+        "title": "HistorySearchLimits",
+        "type": "object"
+      },
+      "HistorySession": {
+        "description": "A native or earlier-product session row, as listed by history and product routes.",
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/HistoryCapabilities"
+          },
+          "completion_marker": {
+            "title": "Completion Marker",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by_me": {
+            "title": "Created By Me",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "deleting": {
+            "title": "Deleting",
+            "type": "boolean"
+          },
+          "execution_engine": {
+            "title": "Execution Engine",
+            "type": "string"
+          },
+          "folder": {
+            "title": "Folder",
+            "type": "string"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "match": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryMatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/HistoryOwner"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Session Id"
+          },
+          "participated": {
+            "title": "Participated",
+            "type": "boolean"
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "read_marker_key": {
+            "title": "Read Marker Key",
+            "type": "string"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "root_session_id": {
+            "title": "Root Session Id",
+            "type": "string"
+          },
+          "save_warning": {
+            "title": "Save Warning",
+            "type": "null"
+          },
+          "side_chat_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Side Chat Of"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Session Id"
+          },
+          "source_status": {
+            "title": "Source Status",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "unread": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unread"
+          },
+          "unread_source": {
+            "title": "Unread Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "shared"
+            ],
+            "title": "Visibility",
+            "type": "string"
+          },
+          "workspace": {
+            "title": "Workspace",
+            "type": "null"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "owner_id",
+          "visibility",
+          "surface",
+          "model",
+          "status",
+          "active_turn",
+          "workspace",
+          "save_warning",
+          "created_at",
+          "updated_at",
+          "archived",
+          "deleted",
+          "pinned",
+          "folder",
+          "participated",
+          "created_by_me",
+          "parent_session_id",
+          "url",
+          "source_format",
+          "execution_engine",
+          "read_only",
+          "capabilities",
+          "unread"
+        ],
+        "title": "HistorySession",
+        "type": "object"
+      },
+      "HistorySessionDetail": {
+        "properties": {
+          "continuation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductContinuationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "continuation_supported": {
+            "title": "Continuation Supported",
+            "type": "boolean"
+          },
+          "effects": {
+            "items": {},
+            "title": "Effects",
+            "type": "array"
+          },
+          "has_unsettled_effects": {
+            "title": "Has Unsettled Effects",
+            "type": "boolean"
+          },
+          "session": {
+            "$ref": "#/components/schemas/SourcedHistorySession"
+          },
+          "turns": {
+            "items": {},
+            "title": "Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "HistorySessionDetail",
+        "type": "object"
+      },
+      "HistorySessionList": {
+        "properties": {
+          "ancestors": {
+            "items": {
+              "$ref": "#/components/schemas/SourcedHistorySession"
+            },
+            "title": "Ancestors",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "notice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice"
+          },
+          "partial": {
+            "title": "Partial",
+            "type": "boolean"
+          },
+          "search_limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistorySearchLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SourcedHistorySession"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "sources": {
+            "$ref": "#/components/schemas/HistorySourceStates"
+          }
+        },
+        "required": [
+          "sessions",
+          "ancestors",
+          "has_more",
+          "next_cursor",
+          "sources",
+          "partial",
+          "notice",
+          "search_limits"
+        ],
+        "title": "HistorySessionList",
+        "type": "object"
+      },
+      "HistorySourceStates": {
+        "properties": {
+          "legacy": {
+            "enum": [
+              "available",
+              "unavailable",
+              "disabled"
+            ],
+            "title": "Legacy",
+            "type": "string"
+          },
+          "native": {
+            "enum": [
+              "available",
+              "unavailable",
+              "disabled"
+            ],
+            "title": "Native",
+            "type": "string"
+          }
+        },
+        "title": "HistorySourceStates",
         "type": "object"
       },
       "LinkInput": {
@@ -1500,6 +2475,705 @@
         "title": "Preferences",
         "type": "object"
       },
+      "ProductChildrenPage": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/HistorySession"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions",
+          "has_more",
+          "next_offset"
+        ],
+        "title": "ProductChildrenPage",
+        "type": "object"
+      },
+      "ProductContinuationPreview": {
+        "properties": {
+          "blockers": {
+            "items": {
+              "$ref": "#/components/schemas/ContinuationBlocker"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "continuation": {
+            "$ref": "#/components/schemas/ProductContinuationResult"
+          },
+          "file_notice": {
+            "title": "File Notice",
+            "type": "string"
+          },
+          "history_bytes": {
+            "title": "History Bytes",
+            "type": "integer"
+          },
+          "history_count": {
+            "title": "History Count",
+            "type": "integer"
+          },
+          "imported_count": {
+            "title": "Imported Count",
+            "type": "integer"
+          },
+          "requires_recent_history": {
+            "title": "Requires Recent History",
+            "type": "boolean"
+          },
+          "requires_workspace_ack": {
+            "title": "Requires Workspace Ack",
+            "type": "boolean"
+          },
+          "requires_workspace_drain": {
+            "title": "Requires Workspace Drain",
+            "type": "boolean"
+          },
+          "source_fingerprint": {
+            "title": "Source Fingerprint",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "blocked",
+              "continued"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "shared"
+            ],
+            "title": "Visibility",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "blockers"
+        ],
+        "title": "ProductContinuationPreview",
+        "type": "object"
+      },
+      "ProductContinuationResult": {
+        "description": "The native conversation that continues an earlier-product session.",
+        "properties": {
+          "history_count": {
+            "title": "History Count",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "imported_count": {
+            "title": "Imported Count",
+            "type": "integer"
+          },
+          "recent_history": {
+            "title": "Recent History",
+            "type": "boolean"
+          },
+          "source": {
+            "const": "native",
+            "title": "Source",
+            "type": "string"
+          },
+          "source_session_id": {
+            "title": "Source Session Id",
+            "type": "string"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "id",
+          "source_session_id",
+          "url",
+          "turn_id",
+          "history_count",
+          "imported_count",
+          "recent_history"
+        ],
+        "title": "ProductContinuationResult",
+        "type": "object"
+      },
+      "ProductEnvironment": {
+        "properties": {
+          "active_build": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Build"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_default": {
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "prepared_build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductEnvironmentBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository Id"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "repository",
+          "repository_id",
+          "revision",
+          "enabled",
+          "active_build",
+          "is_default",
+          "ready",
+          "phase",
+          "prepared_build"
+        ],
+        "title": "ProductEnvironment",
+        "type": "object"
+      },
+      "ProductEnvironmentBuild": {
+        "properties": {
+          "commit_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Sha"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "sandbox_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Provider"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "commit_sha",
+          "sandbox_provider"
+        ],
+        "title": "ProductEnvironmentBuild",
+        "type": "object"
+      },
+      "ProductFile": {
+        "description": "A published output, saved capture or workspace archive of an earlier-product session.",
+        "properties": {
+          "compatibility_download_supported": {
+            "title": "Compatibility Download Supported",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "artifact",
+            "title": "Kind",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "original_download_available": {
+            "title": "Original Download Available",
+            "type": "boolean"
+          },
+          "original_url": {
+            "title": "Original Url",
+            "type": "string"
+          },
+          "preview_supported": {
+            "title": "Preview Supported",
+            "type": "boolean"
+          },
+          "preview_url": {
+            "title": "Preview Url",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "source_turn": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Turn"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "size",
+          "media_type",
+          "url",
+          "download_url",
+          "original_url",
+          "source_format"
+        ],
+        "title": "ProductFile",
+        "type": "object"
+      },
+      "ProductFileGroupsMore": {
+        "properties": {
+          "captures": {
+            "title": "Captures",
+            "type": "boolean"
+          },
+          "files": {
+            "title": "Files",
+            "type": "boolean"
+          },
+          "sources": {
+            "title": "Sources",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "files",
+          "sources",
+          "captures"
+        ],
+        "title": "ProductFileGroupsMore",
+        "type": "object"
+      },
+      "ProductFileListing": {
+        "properties": {
+          "capture_inventory_truncated": {
+            "title": "Capture Inventory Truncated",
+            "type": "boolean"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/ProductFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "has_more": {
+            "$ref": "#/components/schemas/ProductFileGroupsMore"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "links": {
+            "items": {},
+            "title": "Links",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryAttachment"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "files",
+          "sources",
+          "links",
+          "has_more",
+          "next_offset",
+          "read_only",
+          "source_format",
+          "capture_inventory_truncated",
+          "limitations"
+        ],
+        "title": "ProductFileListing",
+        "type": "object"
+      },
+      "ProductFilePreview": {
+        "description": "JSON preview returned by the file content route when ``preview=true``.",
+        "properties": {
+          "content_url": {
+            "title": "Content Url",
+            "type": "null"
+          },
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "upload",
+              "artifact"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notice": {
+            "title": "Notice",
+            "type": "string"
+          },
+          "preview_bytes": {
+            "title": "Preview Bytes",
+            "type": "integer"
+          },
+          "preview_kind": {
+            "enum": [
+              "unsupported",
+              "code",
+              "markdown",
+              "text"
+            ],
+            "title": "Preview Kind",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "text_byte_limit": {
+            "title": "Text Byte Limit",
+            "type": "integer"
+          },
+          "text_line_limit": {
+            "title": "Text Line Limit",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "media_type",
+          "size",
+          "id",
+          "kind",
+          "preview_kind",
+          "language",
+          "text",
+          "truncated",
+          "preview_bytes",
+          "text_byte_limit",
+          "text_line_limit",
+          "download_url",
+          "content_url",
+          "notice",
+          "source_format"
+        ],
+        "title": "ProductFilePreview",
+        "type": "object"
+      },
+      "ProductFolder": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "revision"
+        ],
+        "title": "ProductFolder",
+        "type": "object"
+      },
+      "ProductFolderPage": {
+        "properties": {
+          "folders": {
+            "items": {
+              "$ref": "#/components/schemas/ProductFolder"
+            },
+            "title": "Folders",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "folders",
+          "has_more",
+          "next_offset",
+          "read_only"
+        ],
+        "title": "ProductFolderPage",
+        "type": "object"
+      },
+      "ProductMessagePage": {
+        "properties": {
+          "attachments_truncated": {
+            "title": "Attachments Truncated",
+            "type": "boolean"
+          },
+          "content_limit": {
+            "title": "Content Limit",
+            "type": "integer"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          }
+        },
+        "required": [
+          "messages",
+          "has_more",
+          "next_offset",
+          "content_limit",
+          "attachments_truncated",
+          "source_format"
+        ],
+        "title": "ProductMessagePage",
+        "type": "object"
+      },
       "ProductSaveSecret": {
         "additionalProperties": false,
         "properties": {
@@ -1599,6 +3273,121 @@
           "client_id"
         ],
         "title": "ProductSaveSecret",
+        "type": "object"
+      },
+      "ProductSearchPage": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "searched_message_prefix_chars": {
+            "title": "Searched Message Prefix Chars",
+            "type": "integer"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/HistorySession"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sessions",
+          "has_more",
+          "next_offset",
+          "source_format",
+          "searched_message_prefix_chars"
+        ],
+        "title": "ProductSearchPage",
+        "type": "object"
+      },
+      "ProductSessionDetail": {
+        "properties": {
+          "continuation_supported": {
+            "title": "Continuation Supported",
+            "type": "boolean"
+          },
+          "effects": {
+            "items": {},
+            "title": "Effects",
+            "type": "array"
+          },
+          "has_unsettled_effects": {
+            "title": "Has Unsettled Effects",
+            "type": "boolean"
+          },
+          "session": {
+            "$ref": "#/components/schemas/HistorySession"
+          },
+          "turns": {
+            "items": {},
+            "title": "Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session",
+          "turns",
+          "effects",
+          "has_unsettled_effects",
+          "continuation_supported"
+        ],
+        "title": "ProductSessionDetail",
+        "type": "object"
+      },
+      "ProductSessionPage": {
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/HistorySession"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sessions",
+          "has_more",
+          "next_offset",
+          "source_format"
+        ],
+        "title": "ProductSessionPage",
         "type": "object"
       },
       "ProductUpdateSecret": {
@@ -2062,6 +3851,127 @@
         "title": "SessionEdit",
         "type": "object"
       },
+      "SessionFilePreview": {
+        "description": "Metadata and bounded text of a native session file preview.",
+        "properties": {
+          "content_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Url"
+          },
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "artifact",
+              "upload"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice"
+          },
+          "preview_kind": {
+            "enum": [
+              "text",
+              "markdown",
+              "code",
+              "image",
+              "video",
+              "audio",
+              "pdf",
+              "unsupported"
+            ],
+            "title": "Preview Kind",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "text_byte_limit": {
+            "title": "Text Byte Limit",
+            "type": "integer"
+          },
+          "text_line_limit": {
+            "title": "Text Line Limit",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "size",
+          "media_type",
+          "preview_kind",
+          "text",
+          "language",
+          "truncated",
+          "notice",
+          "text_byte_limit",
+          "text_line_limit",
+          "download_url",
+          "content_url"
+        ],
+        "title": "SessionFilePreview",
+        "type": "object"
+      },
       "SignInStart": {
         "properties": {
           "return_to": {
@@ -2116,6 +4026,263 @@
           "content"
         ],
         "title": "SkillInput",
+        "type": "object"
+      },
+      "SourcedHistorySession": {
+        "description": "A /api/history row: stored IDs are kept; ``key`` is the source-qualified UI identity.",
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "can_manage": {
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/HistoryCapabilities"
+          },
+          "completion_marker": {
+            "title": "Completion Marker",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by_me": {
+            "title": "Created By Me",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "deleting": {
+            "title": "Deleting",
+            "type": "boolean"
+          },
+          "execution_engine": {
+            "title": "Execution Engine",
+            "type": "string"
+          },
+          "folder": {
+            "title": "Folder",
+            "type": "string"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "match": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryMatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/HistoryOwner"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "parent_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Session Id"
+          },
+          "participated": {
+            "title": "Participated",
+            "type": "boolean"
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "read_marker_key": {
+            "title": "Read Marker Key",
+            "type": "string"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "root_session_id": {
+            "title": "Root Session Id",
+            "type": "string"
+          },
+          "save_warning": {
+            "title": "Save Warning",
+            "type": "null"
+          },
+          "side_chat_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Side Chat Of"
+          },
+          "source": {
+            "enum": [
+              "native",
+              "legacy"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "source_format": {
+            "title": "Source Format",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Session Id"
+          },
+          "source_status": {
+            "title": "Source Status",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "unread": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unread"
+          },
+          "unread_source": {
+            "title": "Unread Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "shared"
+            ],
+            "title": "Visibility",
+            "type": "string"
+          },
+          "workspace": {
+            "title": "Workspace",
+            "type": "null"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "owner_id",
+          "visibility",
+          "surface",
+          "model",
+          "status",
+          "active_turn",
+          "workspace",
+          "save_warning",
+          "created_at",
+          "updated_at",
+          "archived",
+          "deleted",
+          "pinned",
+          "folder",
+          "participated",
+          "created_by_me",
+          "parent_session_id",
+          "url",
+          "source_format",
+          "execution_engine",
+          "read_only",
+          "capabilities",
+          "unread",
+          "source",
+          "key"
+        ],
+        "title": "SourcedHistorySession",
         "type": "object"
       },
       "StatusRequest": {
@@ -3714,7 +5881,7 @@
     },
     "/api/history/search": {
       "get": {
-        "operationId": "search_api_history_search_get",
+        "operationId": "searchHistory",
         "parameters": [
           {
             "in": "query",
@@ -3776,7 +5943,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HistorySessionList"
+                }
               }
             },
             "description": "Successful Response"
@@ -3797,7 +5966,7 @@
     },
     "/api/history/sessions": {
       "get": {
-        "operationId": "sessions_api_history_sessions_get",
+        "operationId": "listHistorySessions",
         "parameters": [
           {
             "in": "query",
@@ -3882,7 +6051,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HistorySessionList"
+                }
               }
             },
             "description": "Successful Response"
@@ -3903,7 +6074,7 @@
     },
     "/api/history/sessions/{run_id}": {
       "get": {
-        "operationId": "detail_api_history_sessions__run_id__get",
+        "operationId": "getHistorySession",
         "parameters": [
           {
             "in": "path",
@@ -3932,7 +6103,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HistorySessionDetail"
+                }
               }
             },
             "description": "Successful Response"
@@ -3953,7 +6126,7 @@
     },
     "/api/history/sessions/{run_id}/messages": {
       "get": {
-        "operationId": "messages_api_history_sessions__run_id__messages_get",
+        "operationId": "listHistoryMessages",
         "parameters": [
           {
             "in": "path",
@@ -4006,7 +6179,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryMessagePage"
+                }
               }
             },
             "description": "Successful Response"
@@ -4625,12 +6800,18 @@
     },
     "/api/product/environments": {
       "get": {
-        "operationId": "environments_api_product_environments_get",
+        "operationId": "listProductEnvironments",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProductEnvironment"
+                  },
+                  "title": "Response Listproductenvironments",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -4641,7 +6822,7 @@
     },
     "/api/product/folders": {
       "get": {
-        "operationId": "folders_api_product_folders_get",
+        "operationId": "listProductFolders",
         "parameters": [
           {
             "in": "query",
@@ -4672,7 +6853,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductFolderPage"
+                }
               }
             },
             "description": "Successful Response"
@@ -4871,7 +7054,7 @@
     },
     "/api/product/search": {
       "get": {
-        "operationId": "search_api_product_search_get",
+        "operationId": "searchProductSessions",
         "parameters": [
           {
             "in": "query",
@@ -4913,7 +7096,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductSearchPage"
+                }
               }
             },
             "description": "Successful Response"
@@ -4934,7 +7119,7 @@
     },
     "/api/product/sessions": {
       "get": {
-        "operationId": "sessions_api_product_sessions_get",
+        "operationId": "listProductSessions",
         "parameters": [
           {
             "in": "query",
@@ -4985,7 +7170,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductSessionPage"
+                }
               }
             },
             "description": "Successful Response"
@@ -5006,7 +7193,7 @@
     },
     "/api/product/sessions/{run_id}": {
       "get": {
-        "operationId": "detail_api_product_sessions__run_id__get",
+        "operationId": "getProductSession",
         "parameters": [
           {
             "in": "path",
@@ -5022,7 +7209,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductSessionDetail"
+                }
               }
             },
             "description": "Successful Response"
@@ -5043,7 +7232,7 @@
     },
     "/api/product/sessions/{run_id}/children": {
       "get": {
-        "operationId": "children_api_product_sessions__run_id__children_get",
+        "operationId": "listProductSessionChildren",
         "parameters": [
           {
             "in": "path",
@@ -5083,7 +7272,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductChildrenPage"
+                }
               }
             },
             "description": "Successful Response"
@@ -5104,7 +7295,7 @@
     },
     "/api/product/sessions/{run_id}/continuation": {
       "get": {
-        "operationId": "preview_api_product_sessions__run_id__continuation_get",
+        "operationId": "previewProductContinuation",
         "parameters": [
           {
             "in": "path",
@@ -5120,7 +7311,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductContinuationPreview"
+                }
               }
             },
             "description": "Successful Response"
@@ -5139,7 +7332,7 @@
         "summary": "Preview"
       },
       "post": {
-        "operationId": "continue_session_api_product_sessions__run_id__continuation_post",
+        "operationId": "continueProductSession",
         "parameters": [
           {
             "in": "path",
@@ -5165,7 +7358,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductContinuationResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -5232,7 +7427,7 @@
     },
     "/api/product/sessions/{run_id}/continuation/files": {
       "get": {
-        "operationId": "files_api_product_sessions__run_id__continuation_files_get",
+        "operationId": "listProductContinuationFiles",
         "parameters": [
           {
             "in": "path",
@@ -5248,7 +7443,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ContinuationRecoveryFiles"
+                }
               }
             },
             "description": "Successful Response"
@@ -5269,7 +7466,7 @@
     },
     "/api/product/sessions/{run_id}/files": {
       "get": {
-        "operationId": "listing_api_product_sessions__run_id__files_get",
+        "operationId": "listProductSessionFiles",
         "parameters": [
           {
             "in": "path",
@@ -5309,7 +7506,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductFileListing"
+                }
               }
             },
             "description": "Successful Response"
@@ -5330,7 +7529,7 @@
     },
     "/api/product/sessions/{run_id}/files/content": {
       "get": {
-        "operationId": "content_api_product_sessions__run_id__files_content_get",
+        "operationId": "getProductSessionFileContent",
         "parameters": [
           {
             "in": "path",
@@ -5404,10 +7603,12 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductFilePreview"
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "A JSON preview when preview=true; otherwise the original bytes as a download."
           },
           "422": {
             "content": {
@@ -5425,7 +7626,7 @@
     },
     "/api/product/sessions/{run_id}/messages": {
       "get": {
-        "operationId": "messages_api_product_sessions__run_id__messages_get",
+        "operationId": "listProductSessionMessages",
         "parameters": [
           {
             "in": "path",
@@ -5465,7 +7666,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductMessagePage"
+                }
               }
             },
             "description": "Successful Response"
@@ -5486,7 +7689,7 @@
     },
     "/api/product/sessions/{run_id}/workspace": {
       "get": {
-        "operationId": "listing_api_product_sessions__run_id__workspace_get",
+        "operationId": "listProductSessionWorkspace",
         "parameters": [
           {
             "in": "path",
@@ -5526,7 +7729,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProductFileListing"
+                }
               }
             },
             "description": "Successful Response"
@@ -6559,7 +8764,7 @@
     },
     "/api/sessions/{session_id}/file-preview/{kind}/{resource_id}": {
       "get": {
-        "operationId": "preview_api_sessions__session_id__file_preview__kind___resource_id__get",
+        "operationId": "getSessionFilePreview",
         "parameters": [
           {
             "in": "path",
@@ -6597,7 +8802,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionFilePreview"
+                }
               }
             },
             "description": "Successful Response"

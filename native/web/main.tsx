@@ -12,7 +12,7 @@ import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
-import { getMe, type Me } from "./generated/api"
+import { getMe, listHistorySessions, searchHistory, type HistorySessionList, type Me, type SourcedHistorySession } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import slackLogo from "./assets/slack-logo.svg"
@@ -54,7 +54,6 @@ const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(m
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
-type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
@@ -78,10 +77,16 @@ function currentRoute() {
   return hash.startsWith("run=") || hash.startsWith("settings/") ? hash : decodeRoute(hash)
 }
 function decodeRoute(value: string) { try { return decodeURIComponent(value) } catch { return value } }
-const searchSessions: PaletteSearchAdapter = (query, { signal, limit }) => api(
-  query ? `/history/search?source=all&limit=${limit}&q=${encodeURIComponent(query)}` : `/history/sessions?source=all&limit=${limit}`,
-  "GET", undefined, signal,
-)
+const searchSessions: PaletteSearchAdapter = async (query, { signal, limit }) => {
+  const { data } = query
+    ? await searchHistory({ query: { source: "all", limit, q: query }, signal })
+    : await listHistorySessions({ query: { source: "all", limit }, signal })
+  return { sessions: data.sessions, has_more: data.has_more, notice: data.notice ?? undefined }
+}
+/** History rows have no live workspace or save warning; the sidebar keeps its browser-local unread state. */
+function historyRow(row: SourcedHistorySession): Session {
+  return { ...row, unread: row.unread ?? undefined, workspace: undefined, save_warning: undefined }
+}
 type SessionReference = Pick<PaletteSession, "id" | "source" | "url"> & { source_session_id?: string }
 export function sessionReferenceHash(session: SessionReference): string {
   const original = session.url?.match(/^\/#run=([a-f0-9]{32})$/)?.[1]
@@ -195,16 +200,18 @@ function App() {
       const rows = new Map<string, Session>(), notices = new Set<string>()
       let cursor: string | null = null, hasMore = false
       for (let page = 0; page < sessionPageCount; page++) {
-        const next: SessionInventory = await api(`/history/sessions?source=all&scope=mine&limit=100&archived=${listView === "archived"}&deleted=${listView === "deleted"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, "GET", undefined, signal)
+        const { data: next }: { data: HistorySessionList } = await listHistorySessions({ query: {
+          source: "all", scope: "mine", limit: 100, archived: listView === "archived", deleted: listView === "deleted", cursor: cursor ?? undefined,
+        }, signal })
         if (signal?.aborted || version !== refreshVersion.current || listViewRef.current !== listView) return null
-        for (const row of next.sessions) {
+        for (const row of next.sessions.map(item => historyRow(item))) {
           let unread = row.unread
           if (row.source === "legacy" && row.read_marker_key && row.completion_marker) {
             try { unread = localStorage.getItem(row.read_marker_key) !== row.completion_marker } catch { unread = false }
           }
           rows.set(sessionKey(row), { ...row, unread })
         }
-        for (const row of next.ancestors ?? []) {
+        for (const row of next.ancestors.map(item => historyRow(item))) {
           if (!rows.has(sessionKey(row))) rows.set(sessionKey(row), row)
         }
         if (next.notice) notices.add(next.notice)

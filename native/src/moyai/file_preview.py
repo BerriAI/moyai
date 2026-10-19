@@ -18,6 +18,7 @@ from urllib.parse import quote
 from botocore.exceptions import ClientError
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict
 
 from .artifacts import MAX_ARTIFACT_BYTES
 from .images import MAX_UPLOAD_BYTES, image_type
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 ResourceKind = Literal["artifact", "upload"]
+PreviewKind = Literal["text", "markdown", "code", "image", "video", "audio", "pdf", "unsupported"]
 MAX_TEXT_BYTES = 128 * 1024
 MAX_TEXT_LINES = 2000
 HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
@@ -67,9 +69,28 @@ class FileRecord:
         return f"/api/files/{quote(self.id, safe='')}" if self.kind == "artifact" else self.path + "/download"
 
 
+class SessionFilePreview(BaseModel):
+    """Metadata and bounded text of a native session file preview."""
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    kind: ResourceKind
+    name: str
+    size: int
+    media_type: str
+    preview_kind: PreviewKind
+    text: str | None
+    language: str | None
+    truncated: bool
+    notice: str | None
+    text_byte_limit: int
+    text_line_limit: int
+    download_url: str
+    content_url: str | None
+
+
 @dataclass(frozen=True)
 class Preview:
-    kind: str
+    kind: PreviewKind
     media_type: str
     text: str | None = None
     language: str | None = None
@@ -237,20 +258,20 @@ def routes(runtime: Runtime, actor, *, service: FilePreviewService | None = None
     router = APIRouter()
     service = service or FilePreviewService(runtime)
 
-    @router.get("/api/sessions/{session_id}/file-preview/{kind}/{resource_id}")
+    @router.get("/api/sessions/{session_id}/file-preview/{kind}/{resource_id}", operation_id="getSessionFilePreview")
     async def preview(
         session_id: str, kind: ResourceKind, resource_id: str, response: Response, user: User = Depends(actor),
-    ):
+    ) -> SessionFilePreview:
         record, _raw, view = await service.load(user, session_id, kind, resource_id)
         response.headers.update(HEADERS)
-        return {
-            "id": record.id, "kind": record.kind, "name": record.name, "size": record.size,
-            "media_type": view.media_type, "preview_kind": view.kind, "text": view.text,
-            "language": view.language, "truncated": view.truncated, "notice": view.notice,
-            "text_byte_limit": MAX_TEXT_BYTES, "text_line_limit": MAX_TEXT_LINES,
-            "download_url": record.download_url,
-            "content_url": record.path + "/content" if view.inline else None,
-        }
+        return SessionFilePreview(
+            id=record.id, kind=record.kind, name=record.name, size=record.size,
+            media_type=view.media_type, preview_kind=view.kind, text=view.text,
+            language=view.language, truncated=view.truncated, notice=view.notice,
+            text_byte_limit=MAX_TEXT_BYTES, text_line_limit=MAX_TEXT_LINES,
+            download_url=record.download_url,
+            content_url=record.path + "/content" if view.inline else None,
+        )
 
     @router.get("/api/sessions/{session_id}/file-preview/{kind}/{resource_id}/content")
     async def content(

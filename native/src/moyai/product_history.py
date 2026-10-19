@@ -12,9 +12,10 @@ import asyncio
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import MISSING, BaseModel, ConfigDict, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
@@ -29,6 +30,198 @@ CAPABILITIES = {
     "pin": False, "archive": False, "delete": False, "restore": False,
     "stop": False, "computer": False,
 }
+
+
+def _missing(value: object) -> bool:
+    return value is MISSING
+
+
+def absent() -> Any:
+    """A response key that some rows omit: optional in OpenAPI, omitted (not null) on the wire."""
+    return Field(default=MISSING, exclude_if=_missing)
+
+
+class ResponseModel(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+# Response models are the source of the generated frontend types. They mirror
+# the dictionaries built below; FastAPI validates and filters each response once.
+
+class HistoryOwner(ResponseModel):
+    id: str
+    name: str | None
+
+
+class HistoryCapabilities(ResponseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, validate_by_name=True,
+                              serialize_by_alias=True)
+    read: bool
+    continue_: bool = Field(alias="continue")
+    rename: bool
+    move: bool
+    pin: bool
+    archive: bool | MISSING = absent()
+    delete: bool | MISSING = absent()
+    restore: bool | MISSING = absent()
+    stop: bool | MISSING = absent()
+    computer: bool | MISSING = absent()
+
+
+class HistoryMatch(ResponseModel):
+    message_id: int | None
+    snippet: str
+
+
+class HistorySession(ResponseModel):
+    """A native or earlier-product session row, as listed by history and product routes."""
+    id: str
+    title: str
+    owner_id: str
+    visibility: Literal["private", "shared"]
+    surface: str
+    model: str
+    status: str
+    active_turn: str | None
+    workspace: None
+    save_warning: None
+    created_at: str
+    updated_at: str
+    archived: bool
+    deleted: bool
+    pinned: bool
+    folder: str
+    participated: bool
+    created_by_me: bool
+    parent_session_id: str | None
+    url: str
+    source_format: str
+    execution_engine: str
+    read_only: bool
+    capabilities: HistoryCapabilities
+    unread: bool | None
+    # Earlier-product rows only.
+    owner: HistoryOwner | MISSING = absent()
+    source_status: str | MISSING = absent()
+    deleting: bool | MISSING = absent()
+    deleted_at: str | None | MISSING = absent()
+    folder_id: str | None | MISSING = absent()
+    root_session_id: str | MISSING = absent()
+    side_chat_of: str | None | MISSING = absent()
+    unread_source: str | MISSING = absent()
+    read_marker_key: str | MISSING = absent()
+    completion_marker: str | MISSING = absent()
+    # Native rows continued from an earlier-product session.
+    source_session_id: str | None | MISSING = absent()
+    # Search hits.
+    match: HistoryMatch | None | MISSING = absent()
+
+
+class ProductSessionPage(ResponseModel):
+    sessions: list[HistorySession]
+    has_more: bool
+    next_offset: int | None
+    source_format: str
+
+
+class ProductSearchPage(ProductSessionPage):
+    searched_message_prefix_chars: int
+
+
+class ProductChildrenPage(ResponseModel):
+    sessions: list[HistorySession]
+    has_more: bool
+    next_offset: int | None
+
+
+class ProductFolder(ResponseModel):
+    id: str
+    name: str
+    revision: int
+
+
+class ProductFolderPage(ResponseModel):
+    folders: list[ProductFolder]
+    has_more: bool
+    next_offset: int | None
+    read_only: bool
+
+
+class ProductSessionDetail(ResponseModel):
+    session: HistorySession
+    turns: list[Any]
+    effects: list[Any]
+    has_unsettled_effects: bool
+    continuation_supported: bool
+
+
+class HistoryAttachment(ResponseModel):
+    id: str
+    kind: Literal["upload"]
+    name: str
+    size: int
+    media_type: str
+    created_at: str
+    url: str
+    download_url: str
+    preview_url: str
+    original_url: str
+    source_format: str
+    message_id: int
+
+
+class HistoryAttachmentStatus(ResponseModel):
+    file_id: str | MISSING = absent()
+    upload_id: str | MISSING = absent()
+    name: str | MISSING = absent()
+    bytes: int | MISSING = absent()
+    media_type: str | MISSING = absent()
+    error: Literal["unavailable"] | MISSING = absent()
+    preview_error: Literal["preview_unavailable"] | MISSING = absent()
+
+
+class HistoryMessage(ResponseModel):
+    """A native or earlier-product public message. Slack-sourced rows add the source fields."""
+    id: int
+    role: str
+    content: str
+    created_at: str
+    author_id: str | None
+    content_truncated: bool | MISSING = absent()
+    content_unavailable: bool | MISSING = absent()
+    turn_id: str
+    author_name: str | None | MISSING = absent()
+    is_self: bool | MISSING = absent()
+    # Earlier-product rows only.
+    session_id: str | MISSING = absent()
+    status: str | MISSING = absent()
+    started_at: str | MISSING = absent()
+    response_to_id: int | None | MISSING = absent()
+    model: str | None | MISSING = absent()
+    revision: int | None | MISSING = absent()
+    source_format: str | MISSING = absent()
+    attachments: list[HistoryAttachment] | MISSING = absent()
+    # message_sources.source_view
+    source: Literal["slack"] | MISSING = absent()
+    source_url: str | None | MISSING = absent()
+    source_timestamp: str | MISSING = absent()
+    attachment_status: list[HistoryAttachmentStatus] | MISSING = absent()
+    context_status: str | None | MISSING = absent()
+    edited: bool | MISSING = absent()
+    edited_in: Literal["web", "slack"] | MISSING = absent()
+    deleted: bool | MISSING = absent()
+    edited_after_start: bool | MISSING = absent()
+    attachments_changed: bool | MISSING = absent()
+    legacy_review_required: bool | MISSING = absent()
+
+
+class ProductMessagePage(ResponseModel):
+    messages: list[HistoryMessage]
+    has_more: bool
+    next_offset: int | None
+    content_limit: int
+    attachments_truncated: bool
+    source_format: str
 
 
 class Principal(Protocol):
@@ -430,7 +623,7 @@ def routes(adapter: ProductHistoryAdapter) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         return await adapter.identity.authenticate(request)
 
-    @router.get("/sessions")
+    @router.get("/sessions", operation_id="listProductSessions", response_model=ProductSessionPage)
     async def sessions(
         request: Request, response: Response, limit: int = Query(50, ge=1, le=MAX_PAGE),
         offset: int = Query(0, ge=0, le=MAX_OFFSET), archived: bool = False, deleted: bool = False,
@@ -438,32 +631,32 @@ def routes(adapter: ProductHistoryAdapter) -> APIRouter:
         return await adapter.sessions(await actor(request, response), limit=limit, offset=offset,
                                       archived=archived, deleted=deleted)
 
-    @router.get("/search")
+    @router.get("/search", operation_id="searchProductSessions", response_model=ProductSearchPage)
     async def search(
         request: Request, response: Response, q: str = Query(min_length=1, max_length=200),
         limit: int = Query(20, ge=1, le=MAX_PAGE), offset: int = Query(0, ge=0, le=MAX_OFFSET),
     ):
         return await adapter.search(await actor(request, response), q, limit=limit, offset=offset)
 
-    @router.get("/folders")
+    @router.get("/folders", operation_id="listProductFolders", response_model=ProductFolderPage)
     async def folders(
         request: Request, response: Response, limit: int = Query(100, ge=1, le=MAX_PAGE),
         offset: int = Query(0, ge=0, le=MAX_OFFSET),
     ):
         return await adapter.folders(await actor(request, response), limit=limit, offset=offset)
 
-    @router.get("/sessions/{run_id}")
+    @router.get("/sessions/{run_id}", operation_id="getProductSession", response_model=ProductSessionDetail)
     async def detail(run_id: str, request: Request, response: Response):
         return await adapter.detail(await actor(request, response), run_id)
 
-    @router.get("/sessions/{run_id}/messages")
+    @router.get("/sessions/{run_id}/messages", operation_id="listProductSessionMessages", response_model=ProductMessagePage)
     async def messages(
         run_id: str, request: Request, response: Response, limit: int = Query(50, ge=1, le=MAX_PAGE),
         offset: int = Query(0, ge=0, le=MAX_OFFSET),
     ):
         return await adapter.messages(await actor(request, response), run_id, limit=limit, offset=offset)
 
-    @router.get("/sessions/{run_id}/children")
+    @router.get("/sessions/{run_id}/children", operation_id="listProductSessionChildren", response_model=ProductChildrenPage)
     async def children(
         run_id: str, request: Request, response: Response, limit: int = Query(50, ge=1, le=MAX_PAGE),
         offset: int = Query(0, ge=0, le=MAX_OFFSET),
