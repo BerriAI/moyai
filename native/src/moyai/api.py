@@ -471,6 +471,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 from .slack_delivery_status import status as delivery_status
                 result["slack_delivery"] = await delivery_status(runtime.database, db, session_id)
             swarm_member = await runtime.database.swarms.member(db, session_id)
+            from .goal_models import Goal
+            result["goal"] = runtime.database.goals.view(await db.get(Goal, session_id))
             if swarm_member is not None:
                 result["session"]["swarm_id"] = swarm_member.mission_id
             from .delegation_models import DelegatedSession
@@ -617,6 +619,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.patch("/api/sessions/{session_id}")
     async def edit_session(session_id: str, body: SessionEdit, user: User = Depends(actor)):
         async with runtime.database.sessions.begin() as db:
+            if body.archived is True:
+                # Keep the same source/user/session lock order as goal admission.
+                # Archive and goal suspension commit together before dispatch can claim work.
+                await runtime.database.goals.lock(db, user, session_id)
             await lock_sidebar(db, user.id)
             row = await runtime.database.allowed_session(db, session_id, user)
             if body.title is not None or body.archived is not None:
@@ -626,6 +632,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                     row.title = body.title
                 if body.archived is not None:
                     row.archived = body.archived
+                    if body.archived:
+                        from .goal_models import Goal
+                        goal = await db.get(Goal, session_id)
+                        if goal is not None and goal.status == "active":
+                            await runtime.database.goals.pause_continuation(
+                                db, goal, "The conversation was archived. Unarchive it before resuming the goal.",
+                            )
                 row.updated_at = now()
             if body.pinned is not None or body.folder is not None:
                 pref = await db.get(SessionPreference, (user.id, session_id))
@@ -662,9 +675,29 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def messages(session_id: str, after: int = 0, user: User = Depends(actor)):
         return await runtime.database.messages(user, session_id, after=after)
 
+    async def cancel_stopped_workflow(workflow_id: str) -> None:
+        # Stop intent has committed. The dispatcher keeps ownership until
+        # cancellation/terminal state is acknowledged, including lost RPCs.
+        try:
+            async with asyncio.timeout(2):
+                client = await runtime.connect()
+                await client.get_workflow_handle(workflow_id).cancel()
+        except (RPCError, TimeoutError, RuntimeError, OSError):
+            logging.getLogger(__name__).warning("Stop cancellation remains pending for dispatcher reconciliation.")
+
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
+        from .goals import is_goal_command
         from .skill_invocations import has_invocations
+        if is_goal_command(body.prompt):
+            result = await runtime.database.goals.command(user, session_id, body)
+            async with runtime.database.sessions() as db:
+                stopped_workflow = await db.scalar(select(Turn.workflow_id).join(
+                    Session, Session.active_turn == Turn.id,
+                ).where(Session.id == session_id, Turn.status == "stopped"))
+            if stopped_workflow:
+                await cancel_stopped_workflow(stopped_workflow)
+            return result
         if body.reply_to is not None:
             async with runtime.database.sessions() as db:
                 await runtime.database.allowed_session(db, session_id, user)
@@ -749,12 +782,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def stop(session_id: str, user: User = Depends(actor)):
         workflow_id = await runtime.database.stop(user, session_id)
         if workflow_id:
-            try:
-                client = await runtime.connect()
-                await client.get_workflow_handle(workflow_id).cancel()
-            except RPCError:
-                # The persisted Stop already revoked authority. Dispatcher reconciliation follows.
-                pass
+            await cancel_stopped_workflow(workflow_id)
         return {"status": "stopping"}
 
     @app.post("/api/sessions/{session_id}/answers", status_code=202)

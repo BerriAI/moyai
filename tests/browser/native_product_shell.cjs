@@ -118,6 +118,14 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/messages')) {
       const messages=state.messagesBySession?.[url.pathname.split('/')[3]]||state.messages;
       if(req.method==='POST') {
+        if(state.goal && data.prompt.startsWith('/goal ')) {
+          if(state.goalError)return json({detail:'Goal update temporarily unavailable.'},503);
+          state.goalAccepted=true;
+          if(data.prompt==='/goal pause')state.goal={...state.goal,status:'paused'};
+          else if(data.prompt==='/goal resume')state.goal={...state.goal,status:'active'};
+          else if(data.prompt.startsWith('/goal edit '))state.goal={...state.goal,objective:data.prompt.slice(11),generation:state.goal.generation+1};
+          return json({goal:state.goal});
+        }
         if(state.afterWriteErrors)state.httpErrors={...state.httpErrors,...state.afterWriteErrors};
         if(state.steeringAt&&data.mode==='asap') {
           const turn={id:'turn-steer',actor_id:'viewer',parent_turn:turnId,status:'accepted',mode:'asap',
@@ -159,11 +167,13 @@ async function handle(req,res,next) {
       return json({updated:true});
     }
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
+    if(state.goalAccepted&&state.goalRefreshError)return json({detail:'Could not refresh the goal.'},503);
     const row=session(url.pathname.split('/')[3]);
     const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
       result.messages=(state.messagesBySession?.[row.id]||state.messages).slice(0,state.paginate?200:undefined);
     if(state.slackDelivery)result.slack_delivery=state.slackDelivery;
+    if(state.goal)result.goal=state.goal;
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
   }
@@ -1204,8 +1214,61 @@ test('skill catalog retries and excludes personal skills in shared sessions',asy
   const page=await pageFor(t,'#'),input=page.getByRole('textbox',{name:'Message Moyai'});
   await input.fill('/');await page.getByText('Couldn’t load your skills.').waitFor();
   state.skillError=false;await page.getByRole('button',{name:'Retry skills'}).click();
-  await page.getByText('No matching skills available in shared sessions.').waitFor();
-  assert.equal(await page.getByRole('option').count(),0);
+  await page.getByText('Couldn’t load your skills.').waitFor({state:'hidden'});
+  await page.getByRole('option',{name:/Goal/}).waitFor();
+  assert.equal(await page.getByRole('option').count(),1);
+  assert.equal(await page.getByRole('option',{name:/private-only/}).count(),0);
+});
+
+const testGoal=()=>({objective:'Verify the original result.',status:'active',generation:1,owner_id:'viewer',
+  tokens_used:0,token_budget:null,turns:0,blocked_count:0,reason:'',created_at:''});
+test('chat goal retries keep their request identity and preserve the edit after a failure',async t=>{
+  reset({mode:'standalone',status:'idle',goal:testGoal(),goalError:true});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Edit goal',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Edit goal',exact:true});
+  await dialog.getByLabel('Objective',{exact:true}).fill('Verify the new criterion.');
+  await dialog.getByRole('button',{name:'Save goal',exact:true}).click();
+  await dialog.getByRole('alert').filter({hasText:'Goal update temporarily unavailable'}).waitFor();
+  assert.equal(await dialog.getByLabel('Objective',{exact:true}).inputValue(),'Verify the new criterion.');
+  state.goalError=false;
+  await dialog.getByRole('button',{name:'Save goal',exact:true}).click();
+  await dialog.waitFor({state:'hidden'});
+  const requests=state.requests.filter(row=>row.method==='POST'&&row.body?.prompt==='/goal edit Verify the new criterion.');
+  assert.equal(requests.length,2);
+  assert.deepEqual(requests[0].body,requests[1].body);
+});
+test('confirmed chat goal edits recover refresh errors without resubmitting',async t=>{
+  reset({mode:'standalone',status:'idle',goal:testGoal(),goalRefreshError:true});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Edit goal',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Edit goal',exact:true});
+  await dialog.getByLabel('Objective',{exact:true}).fill('The confirmed new objective.');
+  await dialog.getByRole('button',{name:'Save goal',exact:true}).click();
+  await dialog.waitFor({state:'hidden'});
+  await page.getByRole('alert').filter({hasText:'goal was updated'}).waitFor();
+  assert.equal(state.requests.filter(row=>row.method==='POST'&&row.body?.prompt?.startsWith('/goal ')).length,1);
+  assert.equal(state.goal.objective,'The confirmed new objective.');
+  state.goalRefreshError=false;
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.getByRole('alert').waitFor({state:'hidden'});
+  await page.getByRole('region',{name:'Conversation goal'}).getByText('The confirmed new objective.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(row=>row.method==='POST'&&row.body?.prompt?.startsWith('/goal ')).length,1);
+});
+test('typed goal controls preserve staged files and work while connection selection is unavailable',async t=>{
+  reset({mode:'standalone',status:'idle',goal:testGoal(),connectionError:true,
+    preferences:{delivery_mode:'when_idle',connection_ids:['missing']}});
+  const page=await pageFor(t);
+  await page.route('**/api/uploads?**',route=>route.fulfill({json:{id:'staged-file',name:'draft.txt',media_type:'text/plain',size:5}}));
+  await page.locator('input[type="file"]').setInputFiles({name:'draft.txt',mimeType:'text/plain',buffer:Buffer.from('draft')});
+  await page.locator('.image-preview[aria-busy="false"]').waitFor();
+  const input=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await input.fill('/goal pause');await input.press('Enter');
+  await page.getByText('Goal paused',{exact:true}).waitFor();
+  const request=state.requests.find(row=>row.method==='POST'&&row.body?.prompt==='/goal pause');
+  assert.equal(request.body.attachments,undefined);
+  assert.equal(request.body.connections,undefined);
+  await page.getByRole('button',{name:'Remove draft.txt',exact:true}).waitFor();
 });
 
 for(const width of [1440,768,320])test(`palette keyboard, escaped body search, focus handoff and historical isolation at ${width}px`,async t=>{

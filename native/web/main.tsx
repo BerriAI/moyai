@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
+import { GoalDialog, GoalPanel, goalCommandAction, type Goal } from "./goal"
 import { SkillMessage } from "./skill-content"
 import { SkillMarkdown, SkillMarkdownProvider } from "./skill-markdown"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -61,7 +62,7 @@ type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, BrowserLoginMetadata & { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { transcript_version?: string; slack_delivery?: { pending: number; sending: number; rejected: number }; session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { transcript_version?: string; slack_delivery?: { pending: number; sending: number; rejected: number }; session: Session; turns: Turn[]; goal?: Goal | null; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 const settingsDestinations = [
   { page: "general", label: "General" },
@@ -444,6 +445,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
+  const [goalDialog, setGoalDialog] = useState(false)
   const [model, setModel] = useState(view?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(() => {
     const latest = view?.turns[0]
@@ -490,6 +492,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [])
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
+  const lastGoalRequest = useRef<{ payload: string; key: string } | null>(null)
+  const goalSending = useRef(false)
   const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
@@ -499,6 +503,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   function clearSensitive(message = "Access to this conversation changed. Please reopen it.") {
     ++loadVersion.current
     ++sensitiveVersion.current
+    setGoalDialog(false); lastGoalRequest.current = null; setBusy(false)
     resolvedOnce.current = undefined
     composerInitialized.current = false
     readThrough.current = null
@@ -722,9 +727,48 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     followWork()
   }, [liveText, followWork])
 
+  async function applyGoal(command: string): Promise<void> {
+    if (goalSending.current || busy) throw new Error("Wait for the current submission to finish, then retry.")
+    const startingGoal = goalCommandAction(command) === "set"
+    if (startingGoal && (pictures.uploading || pictures.hasErrors)) {
+      throw new Error("Finish uploading or retry the attached files before starting a goal.")
+    }
+    if (startingGoal && accountBlocked) throw new Error("Resolve the connection error before starting a goal.")
+    const auth = csrfToken(), version = sensitiveVersion.current
+    const current = () => auth === csrfToken() && version === sensitiveVersion.current
+    const body = { prompt: command, ...(startingGoal ? {
+      model, connections: [...sendAccounts].sort(), attachments: pictures.readyFiles.map(file => file.id),
+    } : {}) }
+    const payload = JSON.stringify([id, auth, body])
+    if (lastGoalRequest.current?.payload !== payload) lastGoalRequest.current = { payload, key: crypto.randomUUID() }
+    const attempt = lastGoalRequest.current
+    goalSending.current = true; setBusy(true); setError("")
+    try {
+      await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: attempt.key })
+      if (lastGoalRequest.current === attempt) lastGoalRequest.current = null
+      if (!current()) return
+      if (startingGoal) pictures.clear()
+      // The mutation is acknowledged. Refresh errors must not retry that mutation.
+      await reloadAfterAction("Your goal was updated, but the conversation could not be refreshed.")
+      if (current()) await refreshList()
+    } finally {
+      goalSending.current = false
+      if (current()) setBusy(false)
+    }
+  }
+
   async function send(promptOverride?: string) {
     const prompt = promptOverride ?? (editing ? editText : draft)
     const version = sensitiveVersion.current
+    if (!editing && ["/goal", "/goal edit"].includes(prompt.trim())) {
+      if (prompt.trim() === "/goal" && view?.goal) { setDraft(""); return }
+      setGoalDialog(true); setDraft(""); return
+    }
+    if (!editing && goalCommandAction(prompt)) {
+      try { await applyGoal(prompt); if (version === sensitiveVersion.current) setDraft("") }
+      catch (reason) { if (version === sensitiveVersion.current) setError(String(reason)) }
+      return
+    }
     if (editing) {
       if (busy || !prompt.trim()) return
       setBusy(true); setError("")
@@ -820,6 +864,12 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
+        {view.goal && <GoalPanel goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy}
+          onCommand={command => {
+            const version = sensitiveVersion.current
+            void applyGoal(command).catch(reason => { if (version === sensitiveVersion.current) setError(String(reason)) })
+          }} onEdit={() => setGoalDialog(true)} />}
+        <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} goal={view.goal} onSubmit={applyGoal} />
         {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
           space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
         {originalSessionId && !space && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>

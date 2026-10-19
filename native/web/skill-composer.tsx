@@ -27,6 +27,10 @@ type Props = {
   placeholder: string; shared?: boolean; disabled?: boolean; sessionId?: string; focusRequest?: number
 }
 const CLIPBOARD_TYPE = "application/x-moyai-message"
+const GOAL_COMMAND: ComposerSkill = {
+  id: "command:goal", reference: "goal", name: "goal", scope: "Command",
+  description: "Keep working until a goal is complete. Set, view, pause, or resume.",
+}
 
 function $textNodes(text: string): LexicalNode[] {
   return text.split("\n").flatMap((line, index) => [
@@ -139,8 +143,10 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
   }, [])
   const rows = state.scope === scope ? state.rows : []
   const loading = state.scope !== scope || state.loading
-  const matches = rows.filter(skill => `${skill.name} ${skill.reference} ${skill.description}`.toLowerCase().includes((query?.text || "").toLowerCase()))
+  const commands = /^\/[a-z]*$/i.test(value.trim()) && "goal".startsWith((query?.text || "").toLowerCase()) ? [GOAL_COMMAND] : []
+  const matches = [...commands, ...rows.filter(skill => `${skill.name} ${skill.reference} ${skill.description}`.toLowerCase().includes((query?.text || "").toLowerCase()))
     .sort((a, b) => Number(b.name === query?.text) - Number(a.name === query?.text) || a.name.localeCompare(b.name)).slice(0, 30)
+  ]
   const selectedIndex = Math.min(active, Math.max(matches.length - 1, 0))
   const open = wantsPicker && !dismissed
   function pick(skill: ComposerSkill) {
@@ -150,7 +156,8 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
       if (!$isTextNode(node)) return
       node.select(query.start, query.end)
       const selection = $getSelection()
-      if ($isRangeSelection(selection)) selection.insertNodes([$createSkillNode(skill), $createTextNode(" ")])
+      if ($isRangeSelection(selection)) selection.insertNodes(skill.id === "command:goal"
+        ? [$createTextNode("/goal ")] : [$createSkillNode(skill), $createTextNode(" ")])
     }, { tag: HISTORY_PUSH_TAG })
     setDismissed(true); editor.focus()
   }
@@ -217,10 +224,9 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
       <PopoverContent className="skill-picker" side="top" align="start" sideOffset={8}
         onOpenAutoFocus={event => event.preventDefault()} onCloseAutoFocus={event => event.preventDefault()}
         onInteractOutside={event => { if (event.target instanceof Node && input.current?.contains(event.target)) event.preventDefault() }}>
-        <div className="skill-picker-heading">Skills</div>
+        <div className="skill-picker-heading">{commands.length ? "Commands and skills" : "Skills"}</div>
         <span className="visually-hidden" id={`${id}-help`}>Use the arrow keys to browse skills, Enter to select, or Escape to close.</span>
-        {loading ? <p role="status">Loading skills…</p> : state.error ? <div role="alert"><p>Couldn’t load your skills.</p><Button type="button" variant="outline" size="sm" onMouseDown={event => event.preventDefault()} onClick={() => setVersion(value => value + 1)}>Retry skills</Button></div>
-          : matches.length ? <div id={id} role="listbox" aria-label="Skills" className="skill-options">{matches.map((skill, index) =>
+        {(!loading && !state.error || commands.length > 0) && (matches.length ? <div id={id} role="listbox" aria-label="Skills" className="skill-options">{matches.map((skill, index) =>
             <button type="button" role="option" aria-selected={selectedIndex === index} tabIndex={-1}
               id={`${id}-${index}`} key={skill.reference} className="skill-option"
               title={`${skillDisplayName(skill.name)} · ${skillScopeName(skill.scope)}\n${skill.description}`}
@@ -229,7 +235,9 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
               <span className="skill-option-copy"><span className="skill-option-title">{skillDisplayName(skill.name)}</span><span className="skill-option-description">{skill.description}</span></span>
               <span className="skill-option-scope">{skillScopeName(skill.scope)}</span>
             </button>)}</div>
-          : <p role="status">No matching skills{shared ? " available in shared sessions" : ""}. <a href="#settings/skills">View skills</a></p>}
+          : <p role="status">No matching skills{shared ? " available in shared sessions" : ""}. <a href="#settings/skills">View skills</a></p>)}
+        {loading && <p role="status">Loading skills…</p>}
+        {state.error && <div role="alert"><p>Couldn’t load your skills.</p><Button type="button" variant="outline" size="sm" onMouseDown={event => event.preventDefault()} onClick={() => setVersion(value => value + 1)}>Retry skills</Button></div>}
       </PopoverContent>
     </Popover>
   </div>

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react"
 import { ArrowUpRight, Bug, Code2, FileCode2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
+import { GoalDialog, goalCommandAction } from "./goal"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
@@ -34,6 +35,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   const isPrivate = individual && privateSession
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [goalDialog, setGoalDialog] = useState(false)
   const pictures = useAttachments(setError)
   const fileDrop = useFileDrop(pictures.add, setError, busy)
   const [accountsVersion, setAccountsVersion] = useState(0)
@@ -67,28 +69,51 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   }, [needsAccounts, accountScope, isPrivate])
 
   async function send(prompt = draft) {
-    if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!prompt.trim() && !pictures.files.length)) return
+    if (prompt.trim() === "/goal") { setGoalDialog(true); return }
+    const auth = csrfToken()
+    try { await submit(prompt) }
+    catch (reason) { if (mounted.current && csrfToken() === auth) setError(String(reason)) }
+  }
+
+  async function submit(prompt: string): Promise<void> {
+    const action = goalCommandAction(prompt)
+    if (action && action !== "set") throw new Error("Open an existing conversation to change its goal.")
+    if (submitting.current) throw new Error("A message is already being sent.")
+    if (pictures.uploading) throw new Error("Wait for the attached files to finish uploading, then retry.")
+    if (pictures.hasErrors) throw new Error("Retry or remove the failed attachments before sending.")
+    if (!accountsReady) throw new Error(catalog.error
+      ? "Connections could not be loaded. Cancel to retry connections or continue without them."
+      : "Connections are still loading. Retry when they are ready.")
+    if (!prompt.trim() && !pictures.files.length) throw new Error("Enter a message or attach a file.")
     submitting.current = true
     setBusy(true); setError("")
     const auth = csrfToken(), attachments = pictures.readyFiles
+    const requireCurrent = () => {
+      if (!mounted.current || csrfToken() !== auth) throw new Error("Your sign-in changed. Retry from the current workspace.")
+    }
     try {
       const submission = homeSubmission(prompt, model, isPrivate, attachments.map(file => file.id), selectedAccounts, accounts)
-      const signature = submission.signature
+      const signature = JSON.stringify([auth, submission.signature])
       if (admission.current?.signature !== signature) admission.current = { signature, request: crypto.randomUUID() }
-      if (!admission.current.session) {
-        admission.current.session = await api<Session>("/sessions", "POST", { model, visibility: submission.visibility })
+      const attempt = admission.current
+      if (!attempt.session) {
+        attempt.session = await api<Session>("/sessions", "POST", { model, visibility: submission.visibility })
       }
-      const turn = await api<Turn>(`/sessions/${admission.current.session.id}/messages`, "POST", {
-        ...submission.body, request_key: admission.current.request,
+      requireCurrent()
+      const turn = await api<Turn>(`/sessions/${attempt.session.id}/messages`, "POST", {
+        ...submission.body, request_key: attempt.request,
       })
-      if (!mounted.current || csrfToken() !== auth) return
-      onStarted({ session: admission.current.session, turn, prompt, attachments })
-      await onCreated()
-    } catch (error) { if (mounted.current && csrfToken() === auth) setError(String(error)) }
+      requireCurrent()
+      onStarted({ session: attempt.session, turn, prompt, attachments })
+      // Admission succeeded. A list refresh failure must not invite a second start.
+      try { await onCreated() }
+      catch { if (mounted.current && csrfToken() === auth) setError("Your message was sent, but the session list could not be refreshed.") }
+    }
     finally { submitting.current = false; if (mounted.current) setBusy(false) }
   }
 
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
+    <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} onSubmit={async command => { setDraft(command); await submit(command) }} />
     {fileDrop.dragging && <FileDropOverlay />}
     <SpaceBackdrop />
     <div className="home-workbench-bar"><span><FileCode2 size={14} />Workspace<span className="home-path-separator">/</span><strong>New session</strong></span><span className="home-workbench-context"><Code2 size={13} />Moyai</span></div>
