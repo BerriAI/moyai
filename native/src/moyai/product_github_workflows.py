@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
 
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from .product_github_publication import Publications
 
 JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+logger = logging.getLogger(__name__)
 
 
 class PublicationSteps(ProviderObject):
@@ -73,7 +75,17 @@ class PRReceiptScope(RefReceiptScope):
 def parse[T: BaseModel](schema: type[T], value: object) -> T:
     try:
         return schema.model_validate(value)
-    except (ValidationError, TypeError, ValueError):
+    except ValidationError as error:
+        # Preserve the failing contract without logging provider response
+        # bodies, input values, credentials, or validation context.
+        logger.warning(
+            "GitHub response validation failed: schema=%s fields=%s",
+            schema.__name__,
+            [{"location": item["loc"], "type": item["type"]}
+             for item in error.errors(include_input=False, include_context=False, include_url=False)],
+        )
+        raise ToolFailed("GitHub did not return the expected repository, ref or operation identity.") from None
+    except (TypeError, ValueError):
         raise ToolFailed("GitHub did not return the expected repository, ref or operation identity.") from None
 
 

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import asyncpg
+import modal
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
@@ -21,9 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.exceptions import ApplicationError
 
 from moyai.activities import save_computer
-from moyai.answer_settlement import ModalSnapshots
+from moyai.answer_settlement import CHECKPOINT_BUDGET, SNAPSHOT_WARNING, ModalSnapshots
 from moyai.contracts import NewMessage, NewSession
 from moyai.database import Database
+from moyai.effects import EffectReceipts
 from moyai.models import ComputerDesktop, ComputerLease, ComputerOperation, Effect, Session, Turn, User
 from moyai.security import Security
 from moyai.settings import Settings
@@ -267,6 +269,114 @@ async def test_failed_checkpoint_preserves_deferred_request(runtime, active, mon
         assert await db.scalar(select(ComputerLease).where(ComputerLease.session_id == session.id)) is None
 
 
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_finished_tool_failure_does_not_block_final_answer_backup(runtime, active, monkeypatch, waiting):
+    session, turn, prepared = active
+    receipts = EffectReceipts(runtime.database)
+    await receipts.reserve(prepared.scope, "failed-publication", "github_publish_branch", {"branch": "work/change"})
+    async with runtime.database.sessions() as db:
+        original = await db.get(Effect, "failed-publication")
+        evidence = (original.arguments, original.fingerprint, original.resolution)
+    _, _, _, capture = await saved(runtime, active, monkeypatch, waiting=waiting)
+    await save_computer(turn.id, REFERENCE)
+    async with runtime.database.sessions() as db:
+        current, effect = await db.get(Session, session.id), await db.get(Effect, "failed-publication")
+        assert (effect.arguments, effect.fingerprint, effect.resolution) == evidence
+        if waiting:
+            # A deferred approval has not ended the turn and cannot clear an
+            # unconfirmed action simply to force its backup through.
+            assert effect.state == "pending" and current.save_warning
+            capture.assert_not_awaited()
+        else:
+            assert effect.state == "failed" and effect.settled_at is not None
+            assert current.status == "idle" and current.save_warning is None
+            assert checkpoint(current.snapshot).image_id == "im-checkpoint"
+            capture.assert_awaited_once()
+    if not waiting:
+        # The original attempt stays fenced; a late provider receipt can still
+        # confirm it without dispatching the publication a second time.
+        with pytest.raises(PermissionError):
+            await receipts.reserve(prepared.scope, "failed-publication", "github_publish_branch", {"branch": "work/change"})
+        await receipts.confirm("failed-publication")
+        async with runtime.database.sessions() as db:
+            assert (await db.get(Effect, "failed-publication")).state == "confirmed"
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, modal.exception.TimeoutError, modal.exception.ConnectionError])
+async def test_transient_backup_failure_recovers_without_a_user_warning(runtime, active, monkeypatch, failure):
+    session, turn, _, capture = await saved(runtime, active, monkeypatch, waiting=False)
+    capture.side_effect = [failure("Temporary capture failure"), "im-recovered"]
+    await save_computer(turn.id, REFERENCE)
+    assert capture.await_count == 2
+    async with runtime.database.sessions() as db:
+        current, answer = await db.get(Session, session.id), await db.get(Turn, turn.id)
+        assert current.status == "idle" and answer.status == "completed"
+        assert current.save_warning is None and checkpoint(current.snapshot).image_id == "im-recovered"
+        assert await db.get(ComputerOperation, session.id) is None
+
+
+async def test_backup_retries_are_bounded_and_keep_the_saved_answer(runtime, active, monkeypatch):
+    session, turn, _, capture = await saved(runtime, active, monkeypatch, waiting=False)
+    capture.side_effect = TimeoutError("Temporary capture failure")
+    await save_computer(turn.id, REFERENCE)
+    assert capture.await_count == 3
+    async with runtime.database.sessions() as db:
+        current, answer = await db.get(Session, session.id), await db.get(Turn, turn.id)
+        assert current.status == "idle" and answer.status == "completed" and answer.result_accepted
+        assert current.save_warning == SNAPSHOT_WARNING
+        assert checkpoint(current.snapshot).image_id is None
+        assert await db.get(ComputerOperation, session.id) is None
+
+
+async def test_backup_total_deadline_preserves_answer_and_releases_reservation(runtime, active, monkeypatch):
+    session, turn, _, capture = await saved(runtime, active, monkeypatch, waiting=False)
+    monkeypatch.setitem(CHECKPOINT_BUDGET, "modal", 0.1)
+
+    async def hung(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    capture.side_effect = hung
+    await save_computer(turn.id, REFERENCE)
+    capture.assert_awaited_once()
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert current.status == "idle" and current.save_warning == SNAPSHOT_WARNING
+        assert await db.get(ComputerOperation, session.id) is None
+
+
+@pytest.mark.parametrize("change", ["stop", "revoke", "workspace"])
+async def test_retry_rechecks_ownership_before_recapturing(runtime, active, actor, monkeypatch, change):
+    session, turn, prepared, capture = await saved(runtime, active, monkeypatch, waiting=False)
+
+    async def unavailable(*_args, **_kwargs):
+        if change == "stop":
+            await runtime.database.stop(actor, session.id)
+        else:
+            async with runtime.database.sessions.begin() as db:
+                if change == "revoke":
+                    (await db.get(User, prepared.scope.actor_id)).enabled = False
+                else:
+                    (await db.get(Session, session.id)).workspace = json.dumps(RESTORED)
+        raise TimeoutError("The snapshot acknowledgment was lost")
+
+    capture.side_effect = unavailable
+    await save_computer(turn.id, REFERENCE)
+    capture.assert_awaited_once()
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert checkpoint(current.snapshot).image_id is None
+        assert await db.get(ComputerOperation, session.id) is None
+        if change == "stop":
+            assert current.status == "stopped"
+
+
+async def test_expired_computer_is_not_retried(runtime, active, monkeypatch):
+    _, turn, _, capture = await saved(runtime, active, monkeypatch, waiting=False)
+    capture.side_effect = modal.exception.SandboxTimeoutError("Expired")
+    await save_computer(turn.id, REFERENCE)
+    capture.assert_awaited_once()
+
+
 async def test_stop_during_deferred_checkpoint_does_not_rearm_approval(runtime, actor, active, monkeypatch):
     session, turn, _, capture = await saved(runtime, active, monkeypatch)
 
@@ -491,3 +601,26 @@ async def test_checkpoint_fallback_serializes_with_stop(checkpoint_postgres, mon
     await database.stopped(turn.id)
     async with database.sessions() as db:
         assert (await db.get(Session, session.id)).active_turn is None
+
+
+async def test_postgres_final_answer_settles_failed_action_before_backup(checkpoint_postgres, monkeypatch):
+    database, actor, *_ = checkpoint_postgres
+    session = await database.create_session(actor, NewSession())
+    turn = await database.submit(actor, session.id, NewMessage(prompt="Save the result.", request_key="final"))
+    assert (await database.claim_next()).id == turn.id
+    prepared = await database.prepare(turn.id)
+    await EffectReceipts(database).reserve(prepared.scope, "publication", "github_publish_branch", {})
+    await database.save_result(
+        prepared.scope, conversation=ConversationTypeAdapter.dump_json(Conversation()).decode(),
+        output="The files are ready, but publication failed.", workspace=REFERENCE, usage={},
+        checkpoint_workspace=True,
+    )
+    capture = AsyncMock(return_value="im-saved")
+    monkeypatch.setattr(database.answers, "snapshots", SimpleNamespace(capture=capture))
+    await database.answers.save_computer(turn.id, REFERENCE, product=False)
+    capture.assert_awaited_once()
+    async with database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert current.status == "idle" and current.save_warning is None
+        assert checkpoint(current.snapshot).image_id == "im-saved"
+        assert (await db.get(Effect, "publication")).state == "failed"
