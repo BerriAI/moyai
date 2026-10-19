@@ -1,5 +1,8 @@
 """Real Slack ingress keeps control and ownership fences ahead of input preparation."""
 
+import json
+
+import httpx
 import pytest
 import pytest_asyncio
 import test_context_slack as context_tests
@@ -7,7 +10,7 @@ from app.connector_errors import ConnectorError
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from moyai.models import Session, Turn
+from moyai.models import Delivery, Session, Turn
 from moyai.product_slack_models import ProductSlackBinding, SlackTurnSource
 
 bridge = context_tests.bridge
@@ -205,6 +208,54 @@ async def test_controls_bypass_input_readers(ingress, conversation, monkeypatch,
     assert expected in runtime.security.unseal(controls[0].result).decode()
     assert binding.paused is (command == "sleep")
     assert session.model == "test"
+
+
+@pytest.mark.parametrize("command", ["sleep", "wake"])
+async def test_duplicate_control_events_preserve_confirmation(ingress, conversation, monkeypatch, command):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def admitted_grant(db, actor):
+        assert actor.id == ingress.grant.user_id
+        await service.product.identity.require_current(ingress.grant)
+        return ingress.grant
+
+    monkeypatch.setattr(runtime.database, "_actor_product_grant", admitted_grant)
+    payload = followup(command, mentioned=True)
+    await service.receive_payload(payload)
+    # Slack sends distinct app_mention and message events for the same message.
+    duplicate = context_tests.envelope({**payload["event"], "type": "message"})
+    await service.receive_payload(duplicate)
+
+    async with runtime.database.sessions() as db:
+        deliveries = list(await db.scalars(select(Delivery)))
+        binding = await db.get(ProductSlackBinding, conversation.session_id)
+    assert binding.paused is (command == "sleep")
+    assert len(deliveries) == 1
+    assert deliveries[0].status == "pending"
+
+    requests = []
+
+    async def receive(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "ts": "1792255891.001"})
+
+    async with httpx.AsyncClient(
+        base_url="https://slack.test/api/", transport=httpx.MockTransport(receive),
+    ) as client:
+        await service.pump(client)
+        await service.receive_payload(duplicate)
+        await service.pump(client)
+    assert len(requests) == 1
+    assert requests[0].url.path == "/api/chat.postMessage"
+    posted = json.loads(requests[0].content)
+    assert posted["channel"] == context_tests.CHANNEL
+    assert posted["thread_ts"] == context_tests.ROOT_TS
+    assert posted["text"] == {
+        "sleep": "Paused this thread and requested a stop. Say wake or mention Moyai to continue.",
+        "wake": "Listening again. Send your next message here.",
+    }[command]
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Delivery, deliveries[0].id)).status == "sent"
 
 
 @pytest.mark.parametrize("command,allowed", [
