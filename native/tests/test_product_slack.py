@@ -875,7 +875,7 @@ async def test_uncertain_backlog_cannot_starve_pending_delivery(slack, active, m
 
 
 async def test_web_mirror_dedup_and_edit_supersedes_known_unsent_content(slack, active):
-    from moyai.models import MessageSource
+    from moyai.models import MessageSource, User
     await bind(slack, active)
     service = slack.service
     await service.stage_web_inputs()
@@ -884,6 +884,9 @@ async def test_web_mirror_dedup_and_edit_supersedes_known_unsent_content(slack, 
         rows = list(await db.scalars(select(Delivery)))
         assert len(rows) == 1
         original = rows[0]
+        author = await db.get(User, active[1].actor_id)
+    original_content = json.loads(slack.runtime.security.unseal(original.content))
+    assert original_content["text"].startswith(f"*{author.display_name} (from Moyai)*\n")
     assert await service.delivery_allowed(original)
     async with slack.runtime.database.sessions.begin() as db:
         source = await db.get(MessageSource, f'user:{active[1].id}')
@@ -893,7 +896,106 @@ async def test_web_mirror_dedup_and_edit_supersedes_known_unsent_content(slack, 
     async with slack.runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Delivery).order_by(Delivery.created_at)))
         assert len(rows) == 2
-        assert await service.delivery_allowed(rows[-1])
+        edited = next(row for row in rows if row.identity.endswith(":1:0"))
+        assert await service.delivery_allowed(edited)
+    edited_content = json.loads(slack.runtime.security.unseal(edited.content))
+    assert edited_content["text"].startswith(f"*{author.display_name} (edited in Moyai)*\n")
+
+
+async def test_scoped_web_mirror_posts_as_slack_sender_with_avatar(slack, active, monkeypatch):
+    from moyai.models import MessageSource, User
+
+    service = slack.service
+    service.connectors.save("slack", {
+        "access_token": "synthetic-user-token",
+        "bot": {
+            "access_token": "synthetic-bot-token", "bot_user_id": "UBOT00001",
+            "team": {"id": "TTEST0001"},
+            "scope": "chat:write,chat:write.customize,users:read",
+        },
+    }, "Local Slack")
+    await bind(slack, active)
+    async with slack.runtime.database.sessions.begin() as db:
+        author = await db.get(User, active[1].actor_id)
+        author.slack_user_id = "UTEST0001"
+        source = await db.get(MessageSource, f"user:{active[1].id}")
+        source.revision = 1
+
+    lookups = []
+
+    async def request(method, url, **kwargs):
+        lookups.append((method, url, kwargs))
+        return {
+            "ok": True,
+            "user": {
+                "id": "UTEST0001",
+                "profile": {
+                    "image_192": "https://avatars.example.test/ishaan-192.png",
+                    "image_72": "https://avatars.example.test/ishaan-72.png",
+                },
+            },
+        }
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.stage_web_inputs()
+    async with slack.runtime.database.sessions() as db:
+        delivery = await db.scalar(select(Delivery))
+    staged = json.loads(slack.runtime.security.unseal(delivery.content))
+    assert staged["username"] == author.display_name
+    assert staged["icon_url"] == "https://avatars.example.test/ishaan-192.png"
+    assert "(from Moyai)" not in staged["text"]
+    assert staged["text"].endswith(" (edited)")
+    assert len(lookups) == 1
+    assert lookups[0][0:2] == ("GET", "https://slack.com/api/users.info")
+    assert lookups[0][2]["headers"] == {"Authorization": "Bearer synthetic-bot-token"}
+    assert lookups[0][2]["params"] == {"user": "UTEST0001"}
+    assert lookups[0][2]["allowed_errors"] == ("user_not_found", "missing_scope", "ratelimited")
+
+    sent = []
+
+    async def handle(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "channel": "CTEST0001", "ts": "1792100000.123"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="https://slack.test/",
+    ) as client:
+        await service.deliver(client, delivery)
+    assert len(sent) == 1
+    assert sent[0]["username"] == author.display_name
+    assert sent[0]["icon_url"] == "https://avatars.example.test/ishaan-192.png"
+    assert "(from Moyai)" not in sent[0]["text"]
+    assert sent[0]["text"].endswith(" (edited)")
+
+
+async def test_scoped_web_mirror_ignores_avatar_lookup_failure(slack, active, monkeypatch):
+    from moyai.models import User
+
+    service = slack.service
+    service.connectors.save("slack", {
+        "access_token": "synthetic-user-token",
+        "bot": {
+            "access_token": "synthetic-bot-token", "bot_user_id": "UBOT00001",
+            "team": {"id": "TTEST0001"},
+            "scope": "chat:write,chat:write.customize,users:read",
+        },
+    }, "Local Slack")
+    await bind(slack, active)
+    async with slack.runtime.database.sessions.begin() as db:
+        author = await db.get(User, active[1].actor_id)
+        author.slack_user_id = "UTEST0001"
+
+    async def request(*_args, **_kwargs):
+        raise httpx.ConnectError("local stub failure")
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.stage_web_inputs()
+    async with slack.runtime.database.sessions() as db:
+        delivery = await db.scalar(select(Delivery))
+    staged = json.loads(slack.runtime.security.unseal(delivery.content))
+    assert staged["username"] == author.display_name
+    assert "icon_url" not in staged
+    assert "(from Moyai)" not in staged["text"]
 
 
 async def test_delivery_retry_only_resets_explicit_rejections(slack, active, actor):

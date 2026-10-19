@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
@@ -526,6 +526,14 @@ class ProductSlack:
                 Delivery.identity == "product-slack:" + Turn.id + ":web-input:" + Message.identity
                 + ":" + cast(MessageSource.revision, String) + ":0",
             ).exists()).order_by(Message.id).limit(100))).all()
+        if not rows:
+            return
+        try:
+            bot = await source_database(self.installation)
+        except SlackInstallationUnavailable:
+            bot = {}
+        scopes = set(bot.get("scopes", []))
+        post_as_author = "chat:write.customize" in scopes
         for message, source, turn, thread, author in rows:
             origin = json.loads(self.runtime.security.unseal(source.data))
             if origin.get("kind") != "web" and origin.get("edited_in") != "web":
@@ -538,10 +546,62 @@ class ProductSlack:
                     TurnImage.turn_id == turn.id,
                 ).order_by(TurnImage.position)):
                     content += f"\n<{self.settings.public_url.rstrip('/')}/api/uploads/{upload.id}|{html.escape(upload.name).replace('|', '¦')}>"
-            parts = split_reply(content, limit=2800) or ["Attached files"]
-            await self.queue_batch(turn, thread, [(f"web-input:{message.identity}:{source.revision}:{index}", {
-                "text": f"*{html.escape(author.display_name, quote=False)} ({'edited in' if source.revision else 'from'} Moyai)*\n{part}",
-            }) for index, part in enumerate(parts)])
+            segments = split_reply(content, limit=2800) or ["Attached files"]
+            avatar_url = await self._slack_avatar_url(author, scopes) if post_as_author else None
+            staged = []
+            for index, part in enumerate(segments):
+                if post_as_author:
+                    value = {
+                        "text": part + (" (edited)" if source.revision > 0 and index == 0 else ""),
+                        "username": author.display_name,
+                    }
+                    if avatar_url is not None:
+                        value["icon_url"] = avatar_url
+                else:
+                    value = {
+                        "text": f"*{html.escape(author.display_name, quote=False)} "
+                        f"({'edited in' if source.revision else 'from'} Moyai)*\n{part}",
+                    }
+                staged.append((f"web-input:{message.identity}:{source.revision}:{index}", value))
+            await self.queue_batch(turn, thread, staged)
+
+    async def _slack_avatar_url(self, author: User, scopes: set[str]) -> str | None:
+        if not author.slack_user_id or "users:read" not in scopes:
+            return None
+        try:
+            async with asyncio.timeout(8):
+                token = await self.connectors.slack_bot_token()
+                result = await self.connectors.request(
+                    "GET",
+                    "https://slack.com/api/users.info",
+                    headers={"Authorization": "Bearer " + token},
+                    params={"user": author.slack_user_id},
+                    allowed_errors=("user_not_found", "missing_scope", "ratelimited"),
+                )
+        except Exception as error:  # noqa: BLE001 - Avatar failures must not block message staging.
+            logger.debug("Slack sender avatar lookup failed (%s).", type(error).__name__)
+            return None
+        user = result.get("user") if isinstance(result, dict) else None
+        profile = user.get("profile") if isinstance(user, dict) else None
+        if (
+            not isinstance(result, dict) or result.get("ok") is not True
+            or not isinstance(user, dict) or user.get("id") != author.slack_user_id
+            or not isinstance(profile, dict)
+        ):
+            return None
+        for value in (profile.get("image_192"), profile.get("image_72")):
+            if not isinstance(value, str) or not value or len(value) > 2048 or any(char.isspace() for char in value):
+                continue
+            try:
+                parsed = urlsplit(value)
+                if (
+                    parsed.scheme == "https" and parsed.hostname
+                    and parsed.username is None and parsed.password is None
+                ):
+                    return value
+            except ValueError:
+                continue
+        return None
 
     async def interact(self, payload: dict[str, Any]):
         bot = await source_database(self.installation)
@@ -711,6 +771,8 @@ class ProductSlack:
             ),
             channel_id=destination["channel"], thread_ts=destination["thread_ts"], message_ts=reply_ts,
             metadata={"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
+            username=content.get("username"),
+            icon_url=content.get("icon_url"),
             fallback_blocks=False,
         )
         # Refresh only the installation bot. Never use personal/shared user OAuth.

@@ -47,11 +47,9 @@ starts drafting, the starters cannot replace their text. Home no longer loads th
 Three.js sculpture or runs the headline decode animation. The full-width shell keeps navigation and independent panels
 compact across viewport sizes.
 
-The sidebar defaults to Needs you, In progress, In review and Backlog, derived
-from current session/child states and accessible, non-draft open pull requests.
-Each conversation family appears once. The grouping control retains the folder
-view with its pins, participation, archive and drag/drop behavior; moving a task
-between status groups is not an action. The chat composer uses a compact rounded
+The sidebar lists Recent and Participated sessions alongside pins and folders,
+newest first, with each session’s status or PR state on a second line under the
+title. The chat composer uses a compact rounded
 entry above its attachment/model toolbar. Fenced Markdown code has a language
 header, local syntax coloring and plain-text copy; unknown languages remain
 readable plain text, and long lines scroll within a focusable region. PR diffs appear above
