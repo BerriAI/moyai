@@ -30,7 +30,7 @@ import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { SessionTitle } from "./session-title"
-import { useSessionPreferences } from "./use-session-preferences"
+import { useSessionUpdates } from "./use-session-updates"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
@@ -152,11 +152,11 @@ function App() {
   const settingsOpen = selected === "settings" || selected.startsWith("settings/")
   const historical = selected.startsWith("run=")
   const scopeKey = `${me?.user.id}:${me?.user.role}:${me?.user.individual}:${me?.csrf}`
-  const preferences = useSessionPreferences(scopeKey)
-  const preferenceRows = new Map(sessions.filter(row => !sessionIsReadOnly(row)).map(row => [row.id, row]))
-  const preferenceSession = (row: SidebarSession) => {
-    const latest = preferenceRows.get(row.id)
-    return preferences.apply(sessionIsReadOnly(row) || !latest ? row : { ...row, pinned: latest.pinned, folder: latest.folder })
+  const sessionUpdates = useSessionUpdates(scopeKey)
+  const latestRows = new Map(sessions.filter(row => !sessionIsReadOnly(row)).map(row => [row.id, row]))
+  const optimisticSession = <T extends SidebarSession,>(row: T): T => {
+    const latest = latestRows.get(row.id)
+    return sessionUpdates.apply(sessionIsReadOnly(row) || !latest ? row : { ...row, pinned: latest.pinned, folder: latest.folder })
   }
   const routeScope = `${scopeKey}:${routeRevision}`, routeKey = `${routeScope}:${selected}`
   const originalId = historical ? decodeRoute(selected.slice(4)) : ""
@@ -202,7 +202,7 @@ function App() {
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
-    const preferenceCheckpoint = preferences.checkpoint()
+    const updateCheckpoint = sessionUpdates.checkpoint()
     // Background polling keeps the existing list and pagination control quiet.
     // Explicit pagination sets loading before starting its new refresh.
     setInventoryState(previous => previous.loaded ? previous : { ...previous, loading: true })
@@ -238,7 +238,7 @@ function App() {
       const results = await Promise.allSettled([
         inventory().then(result => {
           if (result && current()) {
-            preferences.acceptRead(preferenceCheckpoint, result.rows)
+            sessionUpdates.acceptRead(updateCheckpoint, result.rows)
             setSessions(result.rows)
             setInventoryState({ loading: false, loaded: true, hasMore: result.hasMore, notice: result.notice })
           }
@@ -262,7 +262,7 @@ function App() {
     } finally {
       if (version === refreshVersion.current) setInventoryState(previous => ({ ...previous, loading: false }))
     }
-  }, [listView, sessionPageCount, preferences])
+  }, [listView, sessionPageCount, sessionUpdates])
 
   useEffect(() => {
     getMe().then(({ data: value }) => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
@@ -328,7 +328,7 @@ function App() {
   const newSession = () => { setStartPrivate(false); location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
   const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
   const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
-  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} preferences={preferences} preferenceSession={preferenceSession} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
+  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} updates={sessionUpdates} optimisticSession={optimisticSession} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
     setWorkspaceRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1, tab: "computer" }))
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
@@ -340,7 +340,7 @@ function App() {
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
-      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...preferences.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
+      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...sessionUpdates.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
         hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => {
           ++refreshVersion.current
           setInventoryState(previous => ({ ...previous, loading: true }))
@@ -390,7 +390,7 @@ function AppCommandPalette({ current, historicalId, productMode, ...props }: {
 }) {
   const actions = useSessionActions()
   const session: PaletteCurrentSession | undefined = current ? {
-    ...actions.preferenceSession(current), source: "native", capabilities: { read: true, rename: current.can_manage ?? current.owner_id === actions.userId, pin: true, move: true },
+    ...actions.optimisticSession(current), source: "native", capabilities: { read: true, rename: current.can_manage ?? current.owner_id === actions.userId, pin: true, move: true },
   } : historicalId ? { id: historicalId, title: "Saved session", source: "legacy", read_only: true } : undefined
   return <CommandPalette {...props} scopeLabel="Your accessible sessions" currentSession={session} busy={actions.busy} search={searchSessions}
     destinations={settingsDestinations.filter(item => !item.productOnly || productMode === "existing")} onOpenSession={openSessionReference}
@@ -488,6 +488,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const openedBrowserLogin = useRef("")
   const panelReturnFocus = useRef<HTMLElement | null>(null)
   const sessionActions = useSessionActions()
+  const sessionUpdates = sessionActions.updates
   const exportTrace = useCallback(() => {
     setTraceBusy(true)
     setTraceError("")
@@ -519,6 +520,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const visibleNow = useRef(visible)
   visibleNow.current = visible
   function clearSensitive(message = "Access to this conversation changed. Please reopen it.") {
+    sessionUpdates.invalidate(id)
     ++loadVersion.current
     ++sensitiveVersion.current
     setGoalDialog(false); lastGoalRequest.current = null; setBusy(false)
@@ -543,6 +545,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   useEffect(() => () => { ++loadVersion.current; ++sensitiveVersion.current }, [])
   const load = useCallback(async (signal?: AbortSignal) => {
     const version = ++loadVersion.current
+    const updateCheckpoint = sessionUpdates.checkpoint()
     try {
       const cached = resolvedOnce.current
       resolvedOnce.current = undefined
@@ -558,6 +561,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         history.push(...page); pageSize = page.length
       }
       if (signal?.aborted || version !== loadVersion.current) return
+      if (!cached) sessionUpdates.acceptRead(updateCheckpoint, [next.session], true)
       // Publish a complete composer with the transcript, before read bookkeeping.
       // Seed only once so polling and late receipts cannot overwrite user edits.
       if (!composerInitialized.current) {
@@ -589,7 +593,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       }
       throw reason
     }
-  }, [id, me.user.id, sideMode])
+  }, [id, me.user.id, sideMode, sessionUpdates])
   async function reloadAfterAction(message?: string) {
     try { await load() }
     catch (reason) {
@@ -673,10 +677,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     else if (workspaceRequest.url) dispatchPanel({ type: "open", tab: { id: `pr:${workspaceRequest.url.toLowerCase()}`, kind: "pull-request", title: "Pull request", url: workspaceRequest.url } })
   }, [workspaceRequest, sideMode])
   useEffect(() => { if (visible) heading.current?.focus() }, [Boolean(view), visible])
+  const displayedTitle = view ? sessionUpdates.apply(view.session).title : undefined
   useEffect(() => {
-    if (!sideMode) document.title = `${view?.session.title ?? "Conversation"} · Moyai`
-    else if (view?.session.title) titleCallback.current?.(view.session.title)
-  }, [view?.session.title, sideMode])
+    if (!sideMode) document.title = `${displayedTitle ?? "Conversation"} · Moyai`
+    else if (displayedTitle) titleCallback.current?.(displayedTitle)
+  }, [displayedTitle, sideMode])
   useEffect(() => {
     const element = transcript.current
     if (element) { followingWork.current = true; element.scrollTop = element.scrollHeight }
@@ -849,7 +854,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     }
   }
   if (!view) return <div className="center" role={loadError || error ? "alert" : "status"}>{loadError || error || "Opening conversation…"}</div>
-  const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
+  const session = sessionUpdates.apply(originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session)
   const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
   const finalText = liveFinalAnswer(liveText)
   const liveMessage: Message | null = !savedAssistant && finalText ? {
@@ -1026,14 +1031,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
       <header className={`topbar${traceError ? " has-trace-error" : ""}`}>
         <div className="session-heading"><h1 ref={heading} tabIndex={-1} title={session.title} aria-label={session.title}>
-          <SessionTitle session={session} onRenamed={title => {
-            // Discard reads started before the rename so they cannot restore the old title.
-            ++loadVersion.current
-            const current = viewNow.current
-            if (!current) return
-            const next = { ...current, session: { ...current.session, title } }
-            viewNow.current = next; setView(next); sessionCallback.current?.(next.session)
-          }} />
+          <SessionTitle session={session} />
         </h1>
           <span className={`status ${displayStatus}`}>{displayStatus === "waiting" ? "Needs input" : displayStatus}</span>
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
