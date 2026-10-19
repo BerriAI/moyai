@@ -8,13 +8,18 @@ barrier and guarded resume from completing.
 Drain accounting excludes an accepted input from `unsafe_turns` only when:
 
 - Its mode is `asap`, with a nonempty enqueue ID and acceptance timestamp.
-- It has no preparation, result, conversation, deferred result, result acceptance,
-  or finish timestamp indicating independent execution.
-- Its parent exists in the same session, with the same actor and model.
+- It has no preparation, result, result fingerprint, conversation, deferred
+  result, result acceptance, error, or finish timestamp indicating independent
+  execution, and its usage is an empty JSON object.
+- Its parent exists in the same session, with the same actor, model, and
+  connection ID set. Malformed usage or connection data remains unsafe.
 - The parent is an execution turn, not another steering input.
 - The parent is terminal (`completed`, `failed`, `stopped`, or `resumed`), or
   satisfies the existing checkpoint checks for the current maintenance generation.
-  A deferred waiting parent still requires the verified deferred-waiting receipt.
+  A live starting/running/saving parent must also have preparation: the SDK cannot
+  acknowledge enqueue before the parent's agent run exists. A deferred waiting
+  parent instead requires the verified deferred-waiting receipt and accepted saved
+  conversation; that existing contract does not require preparation.
 
 Missing, cross-session, cyclic, or otherwise invalid parent links remain unsafe.
 Unacknowledged steering and unknown statuses remain unsafe. Global outstanding

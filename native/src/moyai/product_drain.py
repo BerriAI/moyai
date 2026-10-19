@@ -284,18 +284,38 @@ class ProductDrainService:
         # Accepted steering is durably enqueued in its parent's workflow, not
         # dispatched as a separate workflow. Its parent must still prove safety;
         # never invent a checkpoint or make all accepted rows terminal.
-        safe_inputs = sum(
-            t.parent_turn is not None
-            and t.mode == "asap" and bool(t.enqueue_id) and bool(t.accepted_at)
-            and t.preparation is None and t.result is None and t.conversation is None
-            and t.deferred_results is None and t.result_accepted is None and t.finished_at is None
-            and (parent := parents.get(t.parent_turn)) is not None
-            and parent.parent_turn is None and bool(parent.workflow_id)
-            and parent.session_id == t.session_id
-            and parent.actor_id == t.actor_id and parent.model == t.model
-            and (parent.id in safe or parent.status in {"completed", "failed", "stopped", "resumed"})
-            for t in accepted
-        )
+        def safe_input(t: Turn) -> bool:
+            parent = parents.get(t.parent_turn or "")
+            if not (
+                t.mode == "asap" and t.enqueue_id and t.accepted_at
+                and t.preparation is None and t.result is None and t.conversation is None
+                and t.deferred_results is None and t.result_accepted is None and t.finished_at is None
+                and t.result_fingerprint is None and t.error is None
+                and parent is not None and parent.parent_turn is None and parent.workflow_id
+                and parent.session_id == t.session_id
+                and parent.actor_id == t.actor_id and parent.model == t.model
+            ):
+                return False
+            try:
+                usage = json.loads(t.usage)
+                connections = (json.loads(t.connections), json.loads(parent.connections))
+            except (TypeError, ValueError):
+                return False
+            if (
+                not isinstance(usage, dict) or usage
+                or any(not isinstance(ids, list) or not all(isinstance(key, str) for key in ids)
+                       for ids in connections)
+                or set(connections[0]) != set(connections[1])
+            ):
+                return False
+            # SDK enqueue cannot precede preparation of a live agent run.
+            # A deferred-waiting receipt instead proves its exact completed
+            # Temporal run and saved result; it does not require preparation.
+            return parent.status in {"completed", "failed", "stopped", "resumed"} or (
+                parent.id in safe and (parent.status == "waiting" or bool(parent.preparation))
+            )
+
+        safe_inputs = sum(safe_input(t) for t in accepted)
         effects, requests = await self._unsettled(db)
         return {
             "queued": queued, "parked": len(safe),

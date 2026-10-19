@@ -264,7 +264,10 @@ async def accepted_steering(product, session, parent):
         return await db.get(Turn, child.id)
 
 
-@pytest.mark.parametrize("parent_state", ["parked", "deferred_waiting", "completed", "failed", "stopped", "resumed"])
+@pytest.mark.parametrize("parent_state", [
+    "parked", "prepared_before_prepare", "deferred_waiting", "deferred_waiting_unprepared",
+    "completed", "failed", "stopped", "resumed",
+])
 async def test_accepted_steering_inherits_only_its_safe_parent_without_rewriting_rows(drain, parent_state):
     product, service = drain.product, drain.first.service
     await service.request(paused=False, expected_generation=0, request_key="start")
@@ -273,14 +276,17 @@ async def test_accepted_steering_inherits_only_its_safe_parent_without_rewriting
     original = (child.status, child.parent_turn, child.enqueue_id, child.accepted_at, child.finished_at)
     await service.request(paused=True, expected_generation=1, request_key="pause")
     assert (await service.status())["counts"]["unsafe_turns"] == 2
-    if parent_state == "parked":
+    if parent_state in {"parked", "prepared_before_prepare"}:
         await service.checkpoint(
-            parent.id, workflow_id=parent.workflow_id, workflow_run_id="parent-run", boundary="native_node:2",
+            parent.id, workflow_id=parent.workflow_id, workflow_run_id="parent-run",
+            boundary="before_prepare" if parent_state == "prepared_before_prepare" else "native_node:2",
         )
-    elif parent_state == "deferred_waiting":
+    elif parent_state.startswith("deferred_waiting"):
         async with product.database.sessions.begin() as db:
             stored = await db.get(Turn, parent.id)
             stored.status, stored.result_accepted, stored.conversation = "waiting", True, "saved-conversation"
+            if parent_state == "deferred_waiting_unprepared":
+                stored.preparation = None
         await service.park_deferred(
             parent.id, 2, workflow_id=parent.workflow_id, workflow_run_id="completed-parent-run",
         )
@@ -291,7 +297,7 @@ async def test_accepted_steering_inherits_only_its_safe_parent_without_rewriting
     observed = await service.status()
     assert observed["state"] == "drained"
     assert observed["counts"] == {
-        "queued": 0, "parked": int(parent_state in {"parked", "deferred_waiting"}),
+        "queued": 0, "parked": int(parent_state not in {"completed", "failed", "stopped", "resumed"}),
         "unsafe_turns": 0, "effects": 0, "requests": 0,
     }
     assert not (await service.request(
@@ -307,6 +313,9 @@ async def test_accepted_steering_inherits_only_its_safe_parent_without_rewriting
     "missing_parent", "no_parent", "self_parent", "other_session", "other_actor", "other_model",
     "not_steering", "no_enqueue", "no_acceptance", "parent_is_input",
     "preparation", "result", "conversation", "deferred_results", "result_accepted", "finished_at",
+    "result_fingerprint", "error", "usage", "malformed_usage", "usage_wrong_shape",
+    "connections", "malformed_connections", "connections_wrong_shape", "connection_id_wrong_type",
+    "parent_malformed_connections", "parent_connections_wrong_shape", "parent_connection_id_wrong_type",
 ])
 async def test_accepted_steering_with_invalid_parent_or_acceptance_still_blocks_resume(drain, invalid):
     product, service = drain.product, drain.first.service
@@ -345,10 +354,32 @@ async def test_accepted_steering_with_invalid_parent_or_acceptance_still_blocks_
             saved.enqueue_id = None
         elif invalid == "no_acceptance":
             saved.accepted_at = None
-        elif invalid in {"preparation", "result", "conversation", "deferred_results", "finished_at"}:
+        elif invalid in {
+            "preparation", "result", "conversation", "deferred_results", "finished_at", "result_fingerprint", "error",
+        }:
             setattr(saved, invalid, "independent-execution-evidence")
         elif invalid == "result_accepted":
             saved.result_accepted = True
+        elif invalid == "usage":
+            saved.usage = '{"requests":1}'
+        elif invalid == "malformed_usage":
+            saved.usage = "{"
+        elif invalid == "usage_wrong_shape":
+            saved.usage = "[]"
+        elif invalid == "connections":
+            saved.connections = '["different-connection"]'
+        elif invalid == "malformed_connections":
+            saved.connections = "["
+        elif invalid == "connections_wrong_shape":
+            saved.connections = "{}"
+        elif invalid == "connection_id_wrong_type":
+            saved.connections = "[{}]"
+        elif invalid == "parent_malformed_connections":
+            stored_parent.connections = "["
+        elif invalid == "parent_connections_wrong_shape":
+            stored_parent.connections = "{}"
+        elif invalid == "parent_connection_id_wrong_type":
+            stored_parent.connections = "[{}]"
         else:
             stored_parent.parent_turn = child.id
     observed = await service.status()
@@ -360,6 +391,7 @@ async def test_accepted_steering_with_invalid_parent_or_acceptance_still_blocks_
 @pytest.mark.parametrize("invalid", [
     "running", "stopping", "queued", "unknown", "blocked", "stale_generation",
     "wrong_workflow", "resumed_receipt", "waiting_no_result", "waiting_no_conversation", "waiting_wrong_boundary",
+    "unprepared_running", "unprepared_starting", "unprepared_saving",
 ])
 async def test_accepted_steering_cannot_cover_an_unsafe_parent(drain, invalid):
     product, service = drain.product, drain.first.service
@@ -375,13 +407,16 @@ async def test_accepted_steering_cannot_cover_an_unsafe_parent(drain, invalid):
             stored.status = "waiting"
             stored.result_accepted = invalid != "waiting_no_result"
             stored.conversation = None if invalid == "waiting_no_conversation" else "saved-conversation"
+        elif invalid.startswith("unprepared"):
+            stored.status = invalid.removeprefix("unprepared_")
+            stored.preparation = None
         if invalid != "running":
             db.add(ProductDrainReceipt(
                 turn_id=parent.id, generation=1 if invalid == "stale_generation" else 2,
                 workflow_id="wrong-workflow" if invalid == "wrong_workflow" else parent.workflow_id,
                 workflow_run_id="parent-run",
                 boundary="deferred_waiting" if invalid.startswith("waiting") and invalid != "waiting_wrong_boundary"
-                else "native_node:2",
+                else "before_prepare" if invalid == "unprepared_starting" else "native_node:2",
                 phase="blocked" if invalid == "blocked" else "parked",
                 resumed_generation=3 if invalid == "resumed_receipt" else None,
             ))
@@ -389,6 +424,26 @@ async def test_accepted_steering_cannot_cover_an_unsafe_parent(drain, invalid):
     assert observed["state"] == "draining" and observed["counts"]["unsafe_turns"] >= 1
     with pytest.raises(ProductDrainError, match="unknown outcomes"):
         await service.request(paused=False, expected_generation=2, request_key="resume")
+
+
+async def test_accepted_steering_compares_connection_sets_and_empty_usage_semantically(drain):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, parent, _ = await authority_fixtures.active_turn(product)
+    child = await accepted_steering(product, session, parent)
+    async with product.database.sessions.begin() as db:
+        saved, stored_parent = await db.get(Turn, child.id), await db.get(Turn, parent.id)
+        saved.usage = " { } "
+        saved.connections = '["connection-b", "connection-a"]'
+        stored_parent.connections = '["connection-a", "connection-b"]'
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    await service.checkpoint(
+        parent.id, workflow_id=parent.workflow_id, workflow_run_id="parent-run", boundary="native_node:2",
+    )
+    assert (await service.status())["state"] == "drained"
+    assert not (await service.request(
+        paused=False, expected_generation=2, request_key="resume",
+    ))["paused"]
 
 
 @pytest.mark.parametrize("kind", ["effect", "usage", "broker_request"])
