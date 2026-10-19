@@ -95,10 +95,32 @@ jobs:
           name: native-tests-${{ matrix.shard }}
           path: native/test-results/
           if-no-files-found: warn
+  workspace-node:
+    name: Coding computer Node (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.13'
+      - uses: docker/setup-qemu-action@v3
+      - run: uv sync --frozen
+      - name: Verify dependency install and preview use the pinned runtime
+        run: uv run --frozen python -m scripts.node_runtime_smoke --platform "${{ matrix.platform }}"
   runtime:
     # Preserve the existing required check and reject failed, cancelled or
     # skipped prerequisites; a successful shard cannot stand in for the suite.
-    needs: [quality, tests]
+    needs: [quality, tests, workspace-node]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -107,6 +129,8 @@ jobs:
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
+          NODE_RESULT: ${{ needs.workspace-node.result }}
         run: |
           test "$QUALITY_RESULT" = success
           test "$TESTS_RESULT" = success
+          test "$NODE_RESULT" = success

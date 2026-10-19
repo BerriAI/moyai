@@ -11,6 +11,13 @@ description: Implement or fix code in a repository, including setup, tests, and 
    one installer at a time for each shared dependency directory and wait for a
    successful exit before starting previews, browser checks, or dependent builds.
    Check build hooks too: a Python package install may already run `npm ci`.
+   Use the same selected Node executable and PATH for installation and npm
+   build/dev/preview scripts. Do not switch only the launch command with
+   `npx node@...`. After changing Node or restoring dependencies installed under
+   another version, reinstall from the repository's lockfile. Engine errors
+   mean the runtime needs attention; do not suppress them to start a preview.
+   For background previews, check the process output and a successful local
+   HTTP response before opening the URL in the browser.
 4. Implement the smallest complete change. Use native subagents for bounded
    research or independent review; give them clear scopes.
 5. Run the checks that establish the requested behavior, including the real

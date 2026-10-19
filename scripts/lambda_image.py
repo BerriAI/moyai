@@ -1,13 +1,14 @@
 """Package only the current native workspace tools and Lambda transport."""
 import argparse
-from contextlib import closing
 import hashlib
 import json
+import zipfile
+from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
-import zipfile
 
 import boto3
+from moyai.coding_image import node_install_script
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def package(destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("install-node.sh", node_install_script())
         for path in sorted((ROOT / "native/lambda_guest").iterdir()):
             if path.is_file() and path.name in {"Dockerfile", "service.py", "checkpoint.py"}:
                 archive.write(path, path.name)
