@@ -37,7 +37,12 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
         }
         if scenario == "steer":
             if "VERIFY_CORRECTED_CHILD" in prompts:
-                if "write_file" not in completed:
+                # Frozen parent history includes the fenced old write's return.
+                # Only this child's call proves the corrected write ran.
+                if not any(
+                    isinstance(part, ToolReturnPart) and part.tool_call_id == "child-write"
+                    for message in messages for part in message.parts
+                ):
                     return ModelResponse(parts=[ToolCallPart(
                         "write_file", {"path": "steered.txt", "content": "corrected"},
                         tool_call_id="child-write",

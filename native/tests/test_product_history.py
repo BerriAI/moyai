@@ -628,7 +628,7 @@ async def unified(product, tmp_path):
     await add_session(updated_at="2026-10-04")
     await add_message()
     runtime = SimpleNamespace(
-        database=SimpleNamespace(sessions=sessions, user=current_user), security=security,
+        database=SimpleNamespace(sessions=sessions, user=current_user, slack_mentions=None), security=security,
         product_identity=product.identity, product_history=product.history, product_files=product.files,
     )
     from types import MethodType
