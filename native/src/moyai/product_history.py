@@ -271,6 +271,7 @@ async def prepare_history_query(db: AsyncConnection | AsyncSession) -> None:
 class ProductHistoryAdapter:
     continuation_access: Any = None
     slack_access: Any = None
+    slack_prefetch: Any = None
     decorate_messages: Any = None
     continuation_schema: str | None = None
 
@@ -416,6 +417,7 @@ class ProductHistoryAdapter:
 
     async def allowed(
         self, conn: AsyncConnection | AsyncSession, principal: Principal, run_id: str,
+        *, source_actor: Any = None,
     ) -> dict[str, Any]:
         session_id(run_id)
         result = await conn.execute(text(
@@ -427,14 +429,17 @@ class ProductHistoryAdapter:
         guard = getattr(self, "continuation_access", None)
         if guard is not None and run_id not in await guard(conn, principal, [run_id]):
             raise HTTPException(404, "Session not found.")
-        if self.slack_access is not None and run_id not in await self.slack_access(conn, principal, [run_id]):
-            raise HTTPException(404, "Session not found.")
+        if self.slack_access is not None:
+            options = {"source_actor": source_actor} if source_actor is not None else {}
+            if run_id not in await self.slack_access(conn, principal, [run_id], **options):
+                raise HTTPException(404, "Session not found.")
         return dict(row)
 
     async def recheck(self, principal: Principal, ids: list[str], *, deleted: bool = False) -> set[str]:
         current = await self.identity.require_current(principal.grant)
         if not ids:
             return set()
+        await self.prefetch(current, ids, deleted=deleted)
         async with self.read() as conn:
             query = text(self.access_cte(deleted=deleted) + "SELECT id FROM visible WHERE id IN :ids")
             result = await conn.execute(query.bindparams(bindparam("ids", expanding=True)),
@@ -449,9 +454,24 @@ class ProductHistoryAdapter:
 
     async def require(self, principal: Principal, run_id: str) -> Principal:
         current = await self.identity.require_current(principal.grant)
+        await self.prefetch(current, [run_id])
         async with self.read() as conn:
             await self.allowed(conn, current, run_id)
         return current
+
+    async def prefetch(self, principal: Principal, ids: list[str], *, deleted: bool = False) -> None:
+        if self.slack_prefetch is not None and ids:
+            # Resolve only currently visible candidates before asking a
+            # provider about their audience. Recheck again when publishing.
+            async with self.read() as conn:
+                query = text(self.access_cte(deleted=deleted) + "SELECT id FROM visible WHERE id IN :ids")
+                visible = set((await conn.execute(
+                    query.bindparams(bindparam("ids", expanding=True)), self.params(principal) | {"ids": ids},
+                )).scalars())
+                guard = getattr(self, "continuation_access", None)
+                if guard is not None:
+                    visible &= await guard(conn, principal, list(visible))
+            await self.slack_prefetch(principal, list(visible))
 
     def navigation_scope(
         self, principal: Principal, *, archived: bool | None = None, personal: bool = False,
@@ -511,6 +531,7 @@ class ProductHistoryAdapter:
 
     async def detail(self, principal: Principal, run_id: str) -> dict[str, Any]:
         current = await self.identity.require_current(principal.grant)
+        await self.prefetch(current, [run_id])
         async with self.read() as conn:
             row = await self.allowed(conn, current, run_id)
         if run_id not in await self.recheck(current, [run_id]):
@@ -523,6 +544,7 @@ class ProductHistoryAdapter:
     ) -> dict[str, Any]:
         bounded(limit, offset)
         current = await self.identity.require_current(principal.grant)
+        await self.prefetch(current, [run_id])
         async with self.read() as conn:
             await self.allowed(conn, current, run_id)
             rows = [dict(r) for r in (await conn.execute(text(
@@ -552,6 +574,7 @@ class ProductHistoryAdapter:
     ) -> dict[str, Any]:
         bounded(limit, offset)
         current = await self.identity.require_current(principal.grant)
+        await self.prefetch(current, [run_id])
         t = self.table
         async with self.read() as conn:
             await self.allowed(conn, current, run_id)

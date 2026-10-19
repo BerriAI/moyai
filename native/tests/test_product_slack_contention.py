@@ -181,6 +181,11 @@ async def test_connection_resolution_reuses_transaction_while_pool_one_writer_wa
             assert len(grants) == 5 and all(grant.credential == "" for grant in grants)
             installation = await asyncio.wait_for(service.slack_installation(db=db), 2)
             assert installation["installed"] and "access_token" not in installation
+            from moyai.product_slack import ProductSlack
+            slack = SimpleNamespace(product=service.product, settings=service.settings)
+            slack._installation = lambda store, connectors: ProductSlack._installation(slack, store, connectors)
+            audience_installation = await asyncio.wait_for(ProductSlack.installation_in(slack, db), 2)
+            assert audience_installation["installed"] and len(audience_installation["authority"]) == 64
             assert not acquired.is_set()
         finished.set()
         await asyncio.wait_for(holder, 3)

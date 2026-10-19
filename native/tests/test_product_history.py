@@ -637,7 +637,9 @@ async def unified(product, tmp_path):
     runtime.database.security = security
     runtime.database.product_identity = None
     runtime.database.product_authority_enabled = False
-    for method in ("allowed_session", "execution_session", "check_source_audience", "same_person"):
+    for method in (
+        "allowed_session", "execution_session", "check_source_audience", "same_person", "prefetch_session_audiences",
+    ):
         setattr(runtime.database, method, MethodType(getattr(Database, method), runtime.database))
 
     async def actor():
@@ -868,6 +870,39 @@ async def test_partial_source_outage_never_downgrades_auth_error(unified, monkey
     async def expired(*args, **kwargs):
         raise HTTPException(401, "Expired authority.")
     monkeypatch.setattr(unified.product.history, "sessions", expired)
+    assert (await unified.client.get("/api/history/sessions")).status_code == 401
+
+
+async def test_all_sources_unavailable_is_not_a_successful_empty_history(unified, monkeypatch):
+    async def unavailable(*args, **kwargs):
+        raise HTTPException(503, "Private storage details.")
+
+    monkeypatch.setattr(ProductReadService, "native_list", unavailable)
+    monkeypatch.setattr(unified.product.history, "sessions", unavailable)
+    response = await unified.client.get("/api/history/sessions")
+    assert response.status_code == 503
+    assert "sessions" not in response.json() and "Private storage" not in response.text
+
+
+async def test_unavailable_source_with_empty_healthy_source_is_not_empty_success(unified, monkeypatch):
+    async def empty(*args, **kwargs):
+        return {"sessions": [], "has_more": False, "next_offset": None}
+
+    async def unavailable(*args, **kwargs):
+        raise HTTPException(503, "Private storage details.")
+
+    monkeypatch.setattr(ProductReadService, "native_list", empty)
+    monkeypatch.setattr(unified.product.history, "sessions", unavailable)
+    assert (await unified.client.get("/api/history/sessions")).status_code == 503
+
+
+async def test_history_rechecks_revocation_before_reporting_all_sources_busy(unified, monkeypatch):
+    async def revoked_and_unavailable(*args, **kwargs):
+        unified.product.identity.revoked = True
+        raise HTTPException(503, "Private storage details.")
+
+    monkeypatch.setattr(ProductReadService, "native_list", revoked_and_unavailable)
+    monkeypatch.setattr(unified.product.history, "sessions", revoked_and_unavailable)
     assert (await unified.client.get("/api/history/sessions")).status_code == 401
 
 

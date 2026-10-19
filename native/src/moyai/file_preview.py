@@ -204,6 +204,7 @@ class FilePreviewService:
         current = await self.runtime.database.user(user.id)
         if current.auth_version != user.auth_version:
             raise HTTPException(401, "Your session expired.")
+        await self.runtime.database.prefetch_session_audiences(user, [session_id])
         async with self.runtime.database.sessions() as db:
             await self.runtime.database.allowed_session(db, session_id, user)
             row = await db.get(Artifact if kind == "artifact" else Upload, resource_id)

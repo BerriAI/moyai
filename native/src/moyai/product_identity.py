@@ -52,6 +52,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -65,13 +66,17 @@ from itsdangerous import BadSignature, SignatureExpired
 from sqlalchemy import inspect, select, text
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from .models import User
 
 if TYPE_CHECKING:
     from app.config import Settings as ProductSettings
+
+
+class ProductAuthorityBusy(SQLAlchemyError):
+    """A transient gate wait, never an authorization denial or permission change."""
 
 
 @dataclass(frozen=True)
@@ -462,9 +467,17 @@ class ProductIdentityAdapter:
         # This is the SAME lock namespace used by app.database.begin_write.
         # Shared read ownership allows native concurrency but serializes against
         # canonical role/mapping writers, including inserting an absent role row.
-        await db.execute(text(
-            "SELECT pg_advisory_xact_lock_shared(726941, CAST(CAST(:schema AS regnamespace) AS oid)::int)"
-        ), {"schema": self.schema})
+        try:
+            await db.execute(text(
+                "SELECT pg_advisory_xact_lock_shared(726941, CAST(CAST(:schema AS regnamespace) AS oid)::int)"
+            ), {"schema": self.schema})
+        except DBAPIError as error:
+            if getattr(error.orig, "sqlstate", None) != "55P03":
+                raise
+            logging.getLogger(__name__).warning("Canonical authorization gate is busy: sqlstate=55P03")
+            # The caller's transaction rolls back. Never retry a mutation or
+            # turn contention into missing permission or an empty inventory.
+            raise ProductAuthorityBusy("Account access is busy. Try again shortly.") from None
         principal = await self._current(db, grant.user_id, await self._native_controls(grant.user_id, db))
         if not hmac.compare_digest(principal.authority_version, grant.authority_version):
             raise HTTPException(401, "Product authority changed before admission.")

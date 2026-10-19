@@ -296,6 +296,7 @@ class ProductReadService:
 
     async def native_recheck(self, reader: Reader, ids: list[str], *, deleted: bool = False) -> set[str]:
         await self.current(reader)
+        await self.runtime.database.prefetch_session_audiences(reader.user, ids, deleted=deleted)
         mapped: dict[str, str] = {}
         async with self.runtime.database.sessions() as db:
             await prepare_history_query(db)
@@ -589,6 +590,8 @@ class ProductReadService:
             page["sessions"] = [row for row in page["sessions"] if row["id"] in valid]
         merged = merge_session_lists(pages.get("native", {}).get("sessions", []),
                                      pages.get("legacy", {}).get("sessions", []))
+        if not merged and "unavailable" in states.values():
+            raise HTTPException(503, "Session history is temporarily unavailable. Refresh to retry.")
         chosen = merged[:limit]
         has_more = len(merged) > limit or any(page["has_more"] for page in pages.values())
         for selected, page in pages.items():
@@ -630,6 +633,8 @@ class ProductReadService:
 
     async def detail(self, reader: Reader, run_id: str, source: Source) -> dict[str, Any]:
         await self.current(reader)
+        if source == "native":
+            await self.runtime.database.prefetch_session_audiences(reader.user, [run_id])
         if source == "legacy":
             if self.history is None or reader.principal is None:
                 raise HTTPException(503, "Existing product history is not configured.")

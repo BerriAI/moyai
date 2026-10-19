@@ -140,6 +140,11 @@ def routes(runtime: Runtime, actor) -> APIRouter:
     @router.get("/api/uploads/{upload_id}")
     async def content(upload_id: str, user: User = Depends(actor)):
         async with runtime.database.sessions() as db:
+            candidate = await db.get(Upload, upload_id)
+            session_id = candidate.session_id if candidate else None
+        if session_id is not None:
+            await runtime.database.prefetch_session_audiences(user, [session_id])
+        async with runtime.database.sessions() as db:
             row = await db.get(Upload, upload_id)
             if row is None:
                 raise HTTPException(404, "File not found.")

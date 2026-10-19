@@ -204,6 +204,7 @@ class ProductFilesAdapter:
         bounded(limit, offset)
         h, t = self.history, self.history.table
         current = await h.identity.require_current(principal.grant)
+        await h.prefetch(current, [run_id])
         async with h.read() as conn:
             await h.allowed(conn, current, run_id)
             # Each group has a separate bounded cursor, avoiding hidden files when
@@ -327,6 +328,7 @@ class ProductFilesAdapter:
     ) -> dict[str, Any]:
         h, t = self.history, self.history.table
         current = await h.identity.require_current(principal.grant)
+        await h.prefetch(current, [run_id])
         name = ""
         if len(path) > 2048 or any(ord(c) < 32 or ord(c) == 127 for c in path):
             raise HTTPException(422, "Invalid saved file path.")

@@ -85,6 +85,7 @@ from .models import (
     now,
 )
 from .presentation import public_event, redact, saved_activity
+from .product_identity import ProductAuthorityBusy
 from .product_requester import answer_actor, can_answer
 from .pull_requests import routes as pull_request_routes
 from .runtime import Runtime
@@ -208,6 +209,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             {key: item[key] for key in ("type", "loc", "msg")} for item in error.errors()
         ]})
 
+    @app.exception_handler(ProductAuthorityBusy)
+    async def authority_busy(_request: Request, _error: ProductAuthorityBusy):
+        return JSONResponse(
+            status_code=503, content={"detail": "Account access is busy. Try again shortly."},
+            headers={"Retry-After": "1", "Cache-Control": "no-store"},
+        )
+
     async def actor(request: Request) -> User:
         if runtime.product_identity is not None:
             principal = await runtime.product_identity.authenticate(
@@ -224,6 +232,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             # Share membership reads only within this authenticated HTTP request.
             # Live streams explicitly discard this snapshot before each recheck.
             cast(Any, user).slack_read_cache = {}
+            await prefetch_request_audience(request, user)
             return user
         token = request.cookies.get(COOKIE, "")
         identity = runtime.security.read_session(token)
@@ -237,6 +246,24 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if not hmac.compare_digest(csrf, identity["csrf"]):
                 raise HTTPException(403, "Refresh the page before making changes.")
         return user
+
+    async def prefetch_request_audience(request: Request, user: User) -> None:
+        """HTTP mutations must not discover provider work after taking write locks."""
+        if runtime.product_slack is None:
+            return
+        session_id = request.path_params.get("session_id")
+        if session_id is None:
+            turn_id = request.path_params.get("turn_id")
+            artifact_id = request.path_params.get("artifact_id")
+            async with runtime.database.sessions() as db:
+                if turn_id:
+                    session_id = await db.scalar(select(Turn.session_id).where(Turn.id == turn_id))
+                elif artifact_id:
+                    session_id = await db.scalar(select(Artifact.session_id).where(Artifact.id == artifact_id))
+        if session_id is not None:
+            await runtime.database.prefetch_session_audiences(
+                user, [session_id], deleted=request.url.path.endswith("/restore"),
+            )
 
     app.include_router(image_routes(runtime, actor))
     app.include_router(computer_routes(runtime, actor, cookie_name=COOKIE))

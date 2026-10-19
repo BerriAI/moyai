@@ -17,7 +17,7 @@ from moyai.inbound_events import InboundEvent
 from moyai.models import Session, SlackThread, Turn, User
 from moyai.product_routes import ProductReadService, Reader
 from moyai.product_slack_models import ProductSlackBinding
-from moyai.slack_audience import can_read
+from moyai.slack_audience import can_read, prefetch_sessions
 from moyai.slack_audience_reads import AUDIENCE_TTL, SlackAudienceReads
 
 pytestmark = pytest.mark.skipif(not os.getenv('MOYAI_TEST_POSTGRES'), reason='Requires local PostgreSQL')
@@ -43,11 +43,17 @@ async def audience(slack_admission):
                                             'is_private': state['private'], 'is_ext_shared': False}}
         assert url.endswith('conversations.members')
         return {'ok': True, 'members': state['members'], 'response_metadata': {'next_cursor': ''}}
+    async def installation_in(db):
+        return {'team_id': 'TLOCAL001', 'authority': state['authority']}
     slack = SimpleNamespace(runtime=SimpleNamespace(database=product.database),
         installation=lambda: {'team_id': 'TLOCAL001', 'authority': state['authority']},
+        installation_in=installation_in,
         connectors=SimpleNamespace(slack_bot_token=token, request=request),
         audience_reads=SlackAudienceReads(clock=lambda: state['clock']))
     product.database.slack_access = lambda db, session, actor: can_read(slack, db, session, actor)
+    product.database.slack_prefetch = lambda actor, ids, deleted=False: prefetch_sessions(
+        slack, actor, ids, deleted=deleted,
+    )
     async with product.database.sessions.begin() as db:
         sender = await product.adapter.project_native_user(db, product.raw_principal)
     sender.slack_channel_evidence = ('TLOCAL001', 'GPRIVATE1')
@@ -444,10 +450,10 @@ async def test_idle_native_sender_refresh_restores_verified_self_without_new_mes
 
 
 async def test_historical_reads_use_native_controls_and_preserve_verified_attribution(audience):
-    from moyai.slack_audience import historical_access, historical_messages
+    from moyai.product_history import ProductHistoryAdapter
+    from moyai.slack_audience import historical_access, historical_messages, prefetch_historical
     product = audience
     source_id = 'a' * 32
-    from moyai.product_history import ProductHistoryAdapter
     product.slack.runtime.product_history = ProductHistoryAdapter(product.adapter, product.source, schema='moyai')
     async with product.source.begin() as db:
         for ddl in (
@@ -466,6 +472,7 @@ async def test_historical_reads_use_native_controls_and_preserve_verified_attrib
         await db.execute(text("INSERT INTO moyai.slack_events VALUES(:id,'UACTUAL01','2026-10-17')"), {'id': source_id})
         await db.execute(text('INSERT INTO moyai.messages VALUES(1,:id,:actor)'), {'id': source_id, 'actor': product.raw_principal.id})
         await db.execute(text("INSERT INTO moyai.slack_receipts VALUES(1,:id,'TLOCAL001','GPRIVATE1','1792255700.002','UACTUAL01')"), {'id': source_id})
+    await prefetch_historical(product.slack, product.principal, [source_id])
     async with product.source.connect() as db:
         assert await historical_access(product.slack, db, product.principal, [source_id]) == {source_id}
         rows = [{'id': 1, 'role': 'user', 'author_id': product.raw_principal.id,
@@ -475,6 +482,7 @@ async def test_historical_reads_use_native_controls_and_preserve_verified_attrib
         assert rows[0]['source'] == 'slack' and rows[0]['is_self']
     product.state['members'] = []
     product.state['clock'] += AUDIENCE_TTL
+    await prefetch_historical(product.slack, product.principal, [source_id])
     async with product.source.connect() as db:
         assert await historical_access(product.slack, db, product.principal, [source_id]) == set()
 

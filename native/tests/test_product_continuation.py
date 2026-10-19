@@ -848,7 +848,9 @@ async def test_historical_slack_binding_exists_before_first_native_admission(con
     await product.sql("ALTER TABLE moyai.slack_threads ADD team_id text, ADD channel text, ADD thread_ts text, ADD paused integer")
     await product.sql("ALTER TABLE moyai.slack_events ADD user_id text, ADD created_at text")
     await product.sql("INSERT INTO moyai.slack_threads VALUES(:id,'TTEST0001','CTEST0001','1792255740.000',0)", id=ROOT)
-    slack = SimpleNamespace(runtime=product.runtime, installation=lambda: {'team_id': 'TTEST0001', 'authority': 'a' * 64})
+    installed = {'team_id': 'TTEST0001', 'authority': 'a' * 64}
+    slack = SimpleNamespace(runtime=product.runtime, installation=lambda: installed,
+                            installation_in=AsyncMock(return_value=installed))
     slack.events = SimpleNamespace(conversations=SlackConversations(slack))
     product.runtime.product_slack = slack
     async def membership(*_):
