@@ -25,6 +25,12 @@ range with more than 50,000 records includes every matching charge. Exact-ID
 counterparts are still loaded before reconciliation and date attribution.
 Request-detail pagination does not change aggregate totals.
 
+Reconciliation reads the selected period once. Further rounds look up only new
+aliases outside that period, keeping cross-date evidence without rereading the
+same in-range rows. PostgreSQL batches up to 10,000 counterpart identities and
+uses array parameters for admission lookups. All retained evidence belongs to
+one report's snapshots; subsequent requests read current costs and permissions.
+
 Reconciliation retains the report's evidence in memory; batching bounds the
 database fetch buffer, not total report memory. The 15-second report timeout,
 database statement timeout, reconciliation-round limit and ambiguous-identity
