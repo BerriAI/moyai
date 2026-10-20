@@ -150,6 +150,7 @@ async def test_repository_lookup_refusal_leaves_no_false_pending_automation_effe
     caller = await fixtures.tool_context(ctx)
     body = CreateRequest(
         revision=0, request_key="refused-repo-lookup", turn_id=caller.deps.turn_id,
+        destination="new_chat",
         definition=fixtures.definition(repo_url="https://github.com/synthetic/original"),
     )
     tools, selected, receipt = await fixtures.reserved_call(ctx, caller, "automation_create", body)

@@ -1523,6 +1523,12 @@ export type AutomationDefinition = {
      */
     self_management?: SelfManagementInput;
     /**
+     * Session Id
+     *
+     * Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.
+     */
+    session_id?: string | null;
+    /**
      * Triggers
      *
      * Every trigger must supply a stable id; do not generate different IDs on retries.
@@ -5592,6 +5598,12 @@ export type ProductAutomationDefinition = {
      * Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed.
      */
     self_management: SelfManagementOutput;
+    /**
+     * Session Id
+     *
+     * Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.
+     */
+    session_id: string | null;
     /**
      * Triggers
      */

@@ -34,8 +34,15 @@ READ = {"annotations": {"readOnlyHint": True}}
 WRITE = {"annotations": {"readOnlyHint": False}}
 
 
-class CreateRequest(Save):
+class DefinitionRequest(Save):
     turn_id: str = Field(min_length=1, max_length=36, description="Current turn_id from automation_list.")
+
+
+class CreateRequest(DefinitionRequest):
+    destination: Literal["current_chat", "new_chat"] = Field(
+        default="current_chat",
+        description="Continue this shared web chat by default. Choose new_chat for independent runs or when scheduling from Slack.",
+    )
 
 
 class TargetRequest(Mutation):
@@ -44,7 +51,7 @@ class TargetRequest(Mutation):
     turn_id: str = Field(min_length=1, max_length=36, description="Current turn_id from automation_list.")
 
 
-class UpdateRequest(CreateRequest):
+class UpdateRequest(DefinitionRequest):
     automation_id: str = Field(pattern=AUTOMATION_ID)
     revision: int = Field(ge=1)
 
@@ -129,9 +136,13 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
 
     async def mutate_checked(ctx, action, request, grant, receipt, attempt):
         identity = getattr(request, "automation_id", None)
+        if action == "create":
+            request = request.model_copy(update={"definition": request.definition.model_copy(update={
+                "session_id": ctx.deps.session_id if request.destination == "current_chat" else None,
+            })})
         body = (
             Save(revision=request.revision, request_key=request.request_key, definition=request.definition)
-            if isinstance(request, CreateRequest) else
+            if isinstance(request, DefinitionRequest) else
             Migration(revision=request.revision, request_key=request.request_key, activate=request.activate)
             if isinstance(request, MigrateRequest) else
             Mutation(revision=request.revision, request_key=request.request_key)
@@ -261,6 +272,9 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
         """Save a shared canonical automation paused, only on the user's request.
 
         List first to avoid duplicates. Supply stable trigger IDs and request_key.
+        By default, scheduled runs continue this chat with its existing history,
+        computer and accounts. Use destination=new_chat only for independent runs
+        or when creating from Slack. No global transcript is shared between chats.
         No private-chat content may be exported. Preview and explicitly migrate
         before enabling native execution; saved/pending is not scheduler readiness.
         """

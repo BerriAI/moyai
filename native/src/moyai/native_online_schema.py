@@ -39,6 +39,7 @@ from sqlalchemy.schema import CreateColumn, CreateIndex, CreateTable
 PROTOCOL = "moyai-native-online-v1"
 FROM_VERSION = "2026-10-18-message-sources-v21"
 TO_VERSION = "2026-10-17-goals-v22"
+AUTOMATION_CHAT_VERSION = "2026-10-19-automation-chats-v23"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -124,7 +125,21 @@ class Expansion(NamedTuple):
     define: Callable[[MetaData, str], None]
 
 
-EXPANSIONS = (Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),)
+def _automation_chat_tables(metadata: MetaData, schema: str) -> None:
+    # Freeze the v23 provenance table independently of later ORM changes.
+    Table(
+        "moyai_product_automation_turns", metadata,
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_turns.id"), primary_key=True),
+        Column("origin_turn_id", String(36), ForeignKey(f"{schema}.moyai_turns.id"), nullable=False, index=True),
+        schema=schema,
+    )
+
+
+EXPANSIONS = (
+    Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
+    Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
+              _automation_chat_tables),
+)
 
 
 def _versions() -> list[str]:

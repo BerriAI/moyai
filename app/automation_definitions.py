@@ -91,6 +91,10 @@ class Definition(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=2, max_length=100)
     prompt: str = Field(min_length=3)
+    session_id: str | None = Field(
+        default=None, pattern=r'^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$',
+        description='Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.',
+    )
     triggers: list[Trigger] = Field(min_length=1)
     max_runs_per_hour: int | None = Field(default=50, ge=1)
     queue_events: bool = False

@@ -5,6 +5,35 @@ configuration remain canonical. Native tables hold execution bindings, immutable
 authority selections, native occurrence links, operation receipts, and grants
 for the current human turn. No legacy run or executor is created.
 
+## Chat history and recurring work
+
+In a shared web chat, `automation_create` defaults to continuing that chat on
+future runs. Each run sees the chat's earlier messages and answers and reuses
+its computer and selected accounts. Choose `destination="new_chat"` when each
+run should start independently. Scheduling from Slack requires `new_chat`.
+
+In **Settings → Automations**, **Run in** defaults to **New chat each run**.
+Select a recent shared chat you own to keep context between runs. Existing
+automations keep their fresh-chat behavior unless you change this selection.
+Save the definition paused, review it, then enable it.
+
+Runs that continue a chat wait while it is busy or waiting for input. Archiving,
+deleting, or making the chat private prevents scheduled execution. If its
+selected accounts or project change, review and enable the automation again.
+The selected chat supplies its project and connections; the standalone project
+settings apply only to new-chat runs.
+
+Automations in different chats do not share conversation history. Two schedules
+attached to the same chat see the same earlier messages through that chat.
+Scheduled turns and their approval/question resumptions retain automation
+permissions; a later human turn retains ordinary chat permissions. These runs
+cannot write personal memory or create other automations.
+
+The definition stores an optional native `session_id`; absence means a fresh
+chat per run. The additive `2026-10-19-automation-chats-v23` migration records
+per-turn automation provenance without changing earlier schema receipts or
+existing enabled definitions' digests.
+
 ## Assembly
 
 Construct `product_identity`, `product_connections`, `product_workspace`,

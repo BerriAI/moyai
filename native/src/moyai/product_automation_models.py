@@ -58,3 +58,11 @@ class ProductAutomationOperation(Base):
     automation_id: Mapped[str] = mapped_column(String(32))
     source_revision: Mapped[int] = mapped_column(Integer)
     result: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ProductAutomationTurn(Base):
+    """Automation provenance follows a turn and its resumptions, never the whole chat."""
+
+    __tablename__ = "moyai_product_automation_turns"
+    turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_turns.id"), primary_key=True)
+    origin_turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_turns.id"), index=True)

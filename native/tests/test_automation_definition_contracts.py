@@ -46,6 +46,12 @@ def test_json_schema_matches_original_public_contract(name):
     if event is not None:
         assert event["properties"]["session_id"]["maxLength"] == 36
         event["properties"]["session_id"]["maxLength"] = 32
+    # Chat continuation adds one optional destination; retain the original contract otherwise.
+    definition = schema if name == "Definition" else schema.get("$defs", {}).get("Definition")
+    if definition is not None:
+        destination = definition["properties"].pop("session_id")
+        assert destination["default"] is None
+        assert "session_id" not in definition.get("required", [])
     assert hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest() == SCHEMAS[name]
 
 

@@ -27,6 +27,7 @@ from moyai.native_online_schema import (
     validate,
 )
 from moyai.product_schema import (
+    AUTOMATION_CHAT_SCHEMA_VERSION,
     _manifest,
     application_metadata,
     migrate_product_schema,
@@ -45,7 +46,7 @@ async def expansion(product_database):
     await migrate_product_schema(
         product.source, schema=product.schema, source_schema="moyai", version=FROM_VERSION,
     )
-    value = plan("moyai", product.schema, "native-online-test")
+    value = plan("moyai", product.schema, "native-online-test", to_version=TO_VERSION)
     dsn = product.settings.postgres_url
     assert dsn
     with psycopg.connect(dsn, autocommit=True) as connection:
@@ -60,15 +61,51 @@ def assert_missing(connection, schema, *names):
 def test_frozen_expansion_matches_the_real_v22_tables_and_indexes():
     # Includes PostgreSQL index-name shortening for supported long schemas.
     for schema in ("native_online", "moyai_product_authority_regression_execution_schema"):
-        value = plan("moyai", schema, "native-q")
+        value = plan("moyai", schema, "native-q", to_version=TO_VERSION)
         frozen = _metadata(schema)
         actual = application_metadata(schema, version=TO_VERSION)
         assert _manifest(frozen) == _manifest(actual)
         assert _indexes(frozen) == _indexes(actual)
-        assert plan("moyai", schema, "native-q") == value
+        assert plan("moyai", schema, "native-q", to_version=TO_VERSION) == value
         assert value["before"]["app"].keys() < value["target"]["app"].keys()
         assert set(value["target"]["app"]) - set(value["before"]["app"]) == {TO_VERSION}
         assert all(value["target"]["app"][key] == manifest for key, manifest in value["before"]["app"].items())
+
+
+@pytest.mark.parametrize("before", [FROM_VERSION, TO_VERSION])
+async def test_automation_chat_expansion_preserves_history_and_matches_offline_schema(product_database, before):
+    product = product_database
+    await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai", version=before)
+    value = plan("moyai", product.schema, "native-online-test", from_version=before)
+    assert value["to_version"] == AUTOMATION_CHAT_SCHEMA_VERSION
+    frozen = _metadata(product.schema, version=AUTOMATION_CHAT_SCHEMA_VERSION)
+    actual = application_metadata(product.schema, version=AUTOMATION_CHAT_SCHEMA_VERSION)
+    assert _manifest(frozen) == _manifest(actual)
+    assert _indexes(frozen) == _indexes(actual)
+    assert product.settings.postgres_url
+    with psycopg.connect(product.settings.postgres_url, autocommit=True) as connection:
+        receipts = sql.Identifier(product.schema, "moyai_app_schema_versions")
+        original = connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall()
+        calls = 0
+
+        def fail_after_ddl(_):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OnlineSchemaError("test_guard_changed")
+
+        with pytest.raises(OnlineSchemaError, match="test_guard_changed"):
+            apply(connection, value, guard=fail_after_ddl)
+        assert_missing(connection, product.schema, "moyai_product_automation_turns", LEDGER)
+        assert inspect(connection, value)["status"] == "planned"
+        assert apply(connection, value, guard=lambda _: None)["status"] == "applied"
+        assert apply(connection, value, guard=lambda _: None)["status"] == "already_applied"
+        assert set(original) <= set(connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall())
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {}").format(
+            sql.Identifier(product.schema, "moyai_product_automation_turns"),
+        )).fetchone() == (0,)
+    await verify_product_schema(product.source, schema=product.schema, version=before)
+    await verify_product_schema(product.source, schema=product.schema, version=AUTOMATION_CHAT_SCHEMA_VERSION)
 
 
 @pytest.mark.parametrize("change", ["sql", "digest", "prefix", "schema", "queue", "extra"])

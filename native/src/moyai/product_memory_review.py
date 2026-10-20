@@ -53,6 +53,7 @@ from temporalio.worker import ActivityInboundInterceptor, ExecuteActivityInput, 
 from .contracts import PreparedTurn, RunScope
 from .inference_usage import INFERENCE_ACTIVITY, InferenceActivity, UsageCapture
 from .models import Message, Session, Turn, User, now
+from .product_automation_models import ProductAutomationTurn
 from .product_drain_models import ProductDrainState
 from .product_memory import ProductMemoryService
 from .product_memory_models import ProductMemoryBarrier
@@ -194,6 +195,7 @@ class ProductMemoryReviewService:
             or turn.result_accepted is not True or turn.parent_turn is not None
             or session.deleted or session.visibility != "shared" or session.surface not in {"web", "slack"}
             or not turn.preparation or await db.get(ProductMemoryReview, turn.id) is not None
+            or await db.get(ProductAutomationTurn, turn.id) is not None
         ):
             return False
         try:

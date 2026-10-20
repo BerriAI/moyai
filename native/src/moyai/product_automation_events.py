@@ -18,7 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from app.automation_webhook_auth import MAX_BODY, verify_webhook
     from fastapi import APIRouter, HTTPException, Request
     from pydantic import BaseModel, ConfigDict, Field, SecretStr
-    from sqlalchemy import func, select, text
+    from sqlalchemy import func, or_, select, text
     from temporalio.client import WorkflowExecutionStatus
     from temporalio.exceptions import WorkflowAlreadyStartedError
     from temporalio.service import RPCError
@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from .product_automation_models import ProductAutomationBinding as Binding
     from .product_automation_models import ProductAutomationOccurrence as Occurrence
     from .product_automation_models import ProductAutomationOperation as Operation
+    from .product_automation_models import ProductAutomationTurn
     from .product_config import CORE_IDENTITY
     from .product_identity import ProductGrant
 
@@ -524,8 +525,6 @@ class ProductAutomationEvents:
         session = await db.scalar(select(Session).where(Session.id == identity).with_for_update())
         if not session or session.deleted or session.visibility != "shared" or session.surface != "web":
             return None
-        if await db.scalar(select(Occurrence.occurrence).where(Occurrence.session_id == identity).limit(1)):
-            return None
         return session
 
     async def capture_sessions(self, *, limit: int = 20) -> None:
@@ -556,7 +555,8 @@ class ProductAutomationEvents:
                 ).order_by(Message.id).limit(max(1, min(limit, 20)))))
                 for message in messages:
                     turn = await db.get(Turn, message.turn_id)
-                    if message.role == "user" and message.author_id and turn and turn.parent_turn is None:
+                    if (message.role == "user" and message.author_id and turn and turn.parent_turn is None
+                            and await db.get(ProductAutomationTurn, turn.id) is None):
                         session = await self._human_session(db, message.session_id)
                         if session is not None:
                             original = await self.continuations.canonical_original_id(session.id, db=db) if self.continuations else None
@@ -727,9 +727,14 @@ class ProductAutomationEvents:
                 return {"status": "waiting"}
             if await service._old_active(db, row["id"]):
                 return {"status": "waiting"}
-            if definition.queue_events and await db.scalar(select(Occurrence.occurrence).join(
-                Turn, Turn.id == Occurrence.turn_id,
-            ).where(Occurrence.automation_id == row["id"], Turn.status.not_in(TERMINAL)).limit(1)):
+            if definition.queue_events and await db.scalar(select(Turn.id).outerjoin(
+                ProductAutomationTurn, ProductAutomationTurn.turn_id == Turn.id,
+            ).join(Occurrence, Occurrence.turn_id == func.coalesce(ProductAutomationTurn.origin_turn_id, Turn.id)).where(
+                Occurrence.automation_id == row["id"], Turn.status.not_in(TERMINAL),
+                # Mapped resumptions have their own live turn; old occurrences
+                # retain the previous conservative queue behavior.
+                or_(Turn.status != "resumed", ProductAutomationTurn.turn_id.is_(None)),
+            ).limit(1)):
                 return {"status": "waiting"}
             if definition.queue_events and await db.scalar(text(
                 f"SELECT 1 FROM {table} WHERE automation_id=:id AND status IN ('native_pending','native_dispatched') "
@@ -760,7 +765,7 @@ class ProductAutomationEvents:
                 db, grant=grant, title=f"Automation · {definition.name}", prompt=prompt,
                 model=service.settings.resolve_model(definition.model or None),
                 request_key="automation-" + hashlib.sha256(occurrence.encode()).hexdigest(),
-                connections=connections,
+                connections=connections, session_id=definition.session_id,
             )
             if service.workspace is not None:
                 await service.workspace.bind_automation_turn(db, session, turn, workspace)

@@ -101,9 +101,12 @@ async def test_human_turn_grant_allows_delegated_narrow_edits_then_expires_on_tu
         await ctx.service.access.read(run_ctx.deps)
 
 
-async def test_claim_item_deduplicates_across_native_occurrences_even_after_failure(automations):
+@pytest.mark.parametrize("continued", [False, True])
+async def test_claim_item_deduplicates_across_native_occurrences_even_after_failure(automations, continued):
     ctx = automations
-    row, binding = await fixtures.activate(ctx)
+    from moyai.contracts import NewSession
+    session = await ctx.product.database.create_session(ctx.product.actor, NewSession(visibility="shared"))
+    row, binding = await fixtures.activate(ctx, session_id=session.id if continued else None)
     first = await automation_context(ctx, row, binding)
     result = await invoke(ctx, first, "automation_claim_item", Claim(item_key="SYNTHETIC-123"))
     assert result["claimed"]

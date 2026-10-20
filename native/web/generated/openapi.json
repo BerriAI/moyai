@@ -2730,6 +2730,19 @@
             "$ref": "#/components/schemas/SelfManagement-Input",
             "description": "Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed."
           },
+          "session_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.",
+            "title": "Session Id"
+          },
           "triggers": {
             "description": "Every trigger must supply a stable id; do not generate different IDs on retries.",
             "items": {
@@ -9931,6 +9944,19 @@
             "$ref": "#/components/schemas/SelfManagement-Output",
             "description": "Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed."
           },
+          "session_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.",
+            "title": "Session Id"
+          },
           "triggers": {
             "items": {
               "$ref": "#/components/schemas/Trigger-Output"
@@ -9943,6 +9969,7 @@
         "required": [
           "name",
           "prompt",
+          "session_id",
           "triggers",
           "max_runs_per_hour",
           "queue_events",

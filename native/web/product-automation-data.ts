@@ -91,6 +91,7 @@ export function automationSamplePayload(value: string): Record<string, unknown> 
   return parsed as Record<string, unknown>
 }
 const blockerMessages: Record<string, string> = {
+  scheduled_chat_unavailable: "Choose an active shared chat you own, or start a new chat each run.",
   execution_mode_not_supported: "This execution mode is not supported by the new runtime.",
   too_many_triggers: "The new runtime supports at most 16 triggers.",
   event_trigger_adapter_required: "Event triggers are not supported by this migration yet.",
