@@ -18,10 +18,15 @@ socket. A private sibling `.lock` file is held with an OS lock for the listener'
 lifetime and remains on disk after exit. Do not remove or replace that file:
 concurrent starters must coordinate through the same inode.
 
-After an abrupt process death, startup can recover an orphaned socket owned by
-the same user. It requires an exclusive lock, a refused connection and an
-unchanged socket inode. Live listeners, ambiguous connection failures, symlinks,
+After an abrupt process death, startup can recover an orphaned socket previously
+recorded by this locking protocol. It requires an exclusive lock, a matching
+ownership record (device, inode and change time), a refused connection and an
+unchanged socket. Live listeners, ambiguous connection failures, symlinks,
 foreign files and unsafe permissions stop startup without removing the path.
+Unrecorded sockets, including those left by older versions or a crash before the
+ownership record was written, require inspection or a fresh ephemeral instance.
+Connection refusal alone cannot distinguish an orphan from an older process
+paused between binding and listening.
 This relies on the private directory and cooperating processes; the filesystem
 lock is not a security boundary against other code running as the same OS user.
 Recovery does not bypass canonical ownership, fleet admission or Temporal drain
