@@ -25,7 +25,7 @@ function Fixture() {
   const [options, setOptions] = useState({ workers:20, budget_seconds:0, worker_models:[] });
   const [space, setSpace] = useState(false);
   window.swarmFixture = { setId, setSpace };
-  if (location.search === '?home') return <Home models={['test-model']} defaultModel="test-model"
+  if (location.search === '?home') return <Home recentSessions={[]} recentLoading={false} onSearchSessions={() => {}} models={['test-model']} defaultModel="test-model"
     onCreated={async () => {}} onStarted={value => { window.startedConversation = value; }} />;
   return <main>
     <SwarmSetup value={options} onChange={setOptions} models={['openai/test','anthropic/test']} disabled={false} />

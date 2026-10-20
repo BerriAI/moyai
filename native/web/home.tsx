@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUpRight, Bug, Code2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
+import { ArrowUpRight, Bug, Clock3, Code2, Globe, ListChecks, LockKeyhole, Search, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { GoalChip, goalCommandAction } from "./goal"
@@ -26,8 +26,9 @@ export function homeSubmission(prompt: string, model: string, privateSession: bo
   return { body, visibility, signature: JSON.stringify([visibility, body]) }
 }
 
-export function Home({ models, defaultModel, initiallyPrivate = false, individual = true, productMode = "standalone", connectionVersion = "", preferences, onCreated, onStarted }: {
+export function Home({ models, defaultModel, initiallyPrivate = false, individual = true, productMode = "standalone", connectionVersion = "", preferences, recentSessions, recentLoading, onSearchSessions, onCreated, onStarted }: {
   models: string[]; defaultModel: string; initiallyPrivate?: boolean; individual?: boolean; productMode?: "standalone" | "existing"; connectionVersion?: string; preferences?: GeneralPreferences
+  recentSessions: { key: string; title: Session["title"]; href: string }[]; recentLoading: boolean; onSearchSessions: () => void
   onCreated: () => Promise<void>; onStarted: (conversation: NewConversation) => void
 }) {
   const [draft, setDraft] = useState("")
@@ -154,6 +155,17 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
           <span>Drop files or paste images · Enter to send</span>
         </div>
       </form>
+      <section className="home-recent" aria-labelledby="home-recent-heading">
+        <div className="home-recent-header">
+          <h2 id="home-recent-heading">Recent sessions</h2>
+          <Button type="button" variant="ghost" size="sm" onClick={onSearchSessions}><Search aria-hidden="true" />Search sessions</Button>
+        </div>
+        {recentSessions.length > 0 ? <ul>
+          {recentSessions.map(row => <li key={row.key}><Button asChild variant="ghost" className="home-recent-link">
+            <a href={row.href} title={row.title || "Untitled session"}><Clock3 aria-hidden="true" /><span>{row.title || "Untitled session"}</span><ArrowUpRight aria-hidden="true" /></a>
+          </Button></li>)}
+        </ul> : <p className="muted" role="status">{recentLoading ? "Loading recent sessions…" : "No recent sessions in this view. Search to find more."}</p>}
+      </section>
       <div className="home-starters" role="group" aria-label="Start with a prompt" aria-hidden={Boolean(draft.trim())}>
         <p className="home-starters-heading">Start with a prompt</p>
         {starters.map(({ label, detail, prompt, Icon }) => <Button key={label} type="button" variant="ghost" aria-label={label} disabled={busy || Boolean(draft.trim())}

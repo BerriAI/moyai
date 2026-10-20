@@ -55,7 +55,7 @@ async function handle(req,res,next) {
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
       {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId}];
     if(state.createdSession)rows.push({...session('c'.repeat(32)),key:'native:'+'c'.repeat(32),source:'native',url:'/#'+'c'.repeat(32)});
-    if(url.pathname==='/api/history/sessions'&&url.searchParams.get('limit')==='100'&&state.inventoryPages) {
+    if(url.pathname==='/api/history/sessions'&&url.searchParams.get('limit')==='20'&&state.inventoryPages) {
       const page=url.searchParams.get('cursor')==='page-2'?1:0;
       return json({sessions:state.inventoryPages[page],has_more:page===0,next_cursor:page===0?'page-2':null});
     }
@@ -363,7 +363,7 @@ test('Recent and Participated list sessions once with status and PR metadata',as
   assert.equal(await recent.getAttribute('aria-expanded'),'true');
   assert.equal(await participated.getAttribute('aria-expanded'),'true');
   const sectionNames=await page.locator('.session-group-toggle > span').allTextContents();
-  assert.ok(sectionNames.indexOf('Recent')<sectionNames.indexOf('Participated'));
+  assert.ok(sectionNames.indexOf('Participated')<sectionNames.indexOf('Recent'));
   const assertRecentAlignment=async target=>{
     const heading=target.getByRole('button',{name:/^Recent /});
     const label=heading.locator('span').filter({hasText:/^Recent$/});
@@ -482,6 +482,46 @@ for(const stored of ['legacy','malformed','unavailable'])test(`sidebar safely ad
   assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'true');
 });
 
+test('home shows five recent owned roots from one bounded inventory page without waiting for catalogs',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holds:{'/api/session-folders':held}});
+  const owned=Array.from({length:7},(_,index)=>({...session(`owned-${index}`),source:'native',title:`Recent work ${index}`,updated_at:new Date(100000+index*1000).toISOString()}));
+  state.inventoryPages=[[
+    {...session('shared'),source:'native',owner_id:'teammate',participated:true,updated_at:new Date(900000).toISOString()},
+    {...session('child'),source:'native',parent_session_id:sessionId,updated_at:new Date(900000).toISOString()},
+    {...session('archived'),source:'native',archived:true,updated_at:new Date(900000).toISOString()},
+    {...session('deleted'),source:'native',deleted:true,updated_at:new Date(900000).toISOString()},
+    ...owned,
+    {...session(legacyId),source:'legacy',title:'Linked identity history',owner_id:'old-identity',created_by_me:true,updated_at:new Date(200000).toISOString(),url:'/#run='+legacyId},
+    {...session('not-mine'),source:'native',created_by_me:false,updated_at:new Date(900000).toISOString()},
+  ],[{...session('older'),source:'native',title:'Older page'}]];
+  const page=await pageFor(t,'#'),recent=page.getByRole('region',{name:'Recent sessions',exact:true});
+  await recent.getByRole('link',{name:'Linked identity history',exact:true}).waitFor();
+  assert.deepEqual(await recent.getByRole('link').allTextContents(),['Linked identity history','Recent work 6','Recent work 5','Recent work 4','Recent work 3']);
+  assert.equal(await recent.getByRole('link',{name:'Linked identity history',exact:true}).getAttribute('href'),'#run='+legacyId);
+  const reads=state.requests.filter(row=>row.path==='/api/history/sessions');
+  assert.equal(reads.length,1,'home and sidebar share the initial page');
+  const query=new URLSearchParams(reads[0].query);
+  assert.equal(query.get('limit'),'20');assert.equal(query.get('scope'),'mine');assert.equal(query.has('cursor'),false);
+  assert.equal(state.requests.some(row=>row.path.startsWith('/api/sessions/')),false,'no conversation detail prefetch');
+  assert.equal(await page.getByRole('button',{name:'Show more sessions',exact:true}).isVisible(),true);
+  await recent.getByRole('link',{name:'Linked identity history',exact:true}).click();
+  await page.getByText('Historical saved answer',{exact:true}).waitFor();
+});
+
+test('home recent sessions stays nonblocking while loading and supports empty results and search',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',inventoryRows:[],holds:{'/api/history/sessions':held}});
+  const page=await pageFor(t,'#'),recent=page.getByRole('region',{name:'Recent sessions',exact:true});
+  await recent.getByText('Loading recent sessions…',{exact:true}).waitFor();
+  const input=page.getByRole('textbox',{name:'Message Moyai'});await input.fill('Keep this draft');
+  release();state.holds={};
+  await recent.getByText('No recent sessions in this view. Search to find more.',{exact:true}).waitFor();
+  assert.equal(await input.innerText(),'Keep this draft');
+  await recent.getByRole('button',{name:'Search sessions',exact:true}).click();
+  await page.getByRole('dialog',{name:'Commands and session search'}).waitFor();
+});
+
 test('background inventory refresh stays quiet while explicit pagination shows loading and recovers from failure',async t=>{
   reset();
   state.inventoryPages=[[{...session(),source:'native'}],[{...session('4'.repeat(32)),source:'native',title:'Older work'}]];
@@ -505,7 +545,7 @@ test('background inventory refresh stays quiet while explicit pagination shows l
   await more.waitFor();assert.equal(await more.isEnabled(),true);
   state.inventoryError=false;state.holds={};
   await more.click();
-  await page.getByRole('link',{name:/Older work/}).waitFor();
+  await page.getByRole('navigation',{name:'Conversations',exact:true}).getByRole('link',{name:/Older work/}).waitFor();
   assert.equal(await loading.count(),0);
 });
 
@@ -2244,8 +2284,8 @@ test('source collisions and identically named legacy folders survive paged inven
   await page.getByRole('button',{name:'Show more sessions',exact:true}).click();
   const native=page.locator(`[data-session-key="native:${collision}"]`);await native.waitFor();assert.equal(await history.count(),1);
   assert.equal(await history.locator('a').getAttribute('href'),'#run='+collision);assert.equal(await native.locator('a').getAttribute('href'),'#'+collision);
-  const pageReads=state.requests.filter(req=>req.path==='/api/history/sessions'&&req.query.includes('limit=100')).length;
-  await waitFor(()=>state.requests.filter(req=>req.path==='/api/history/sessions'&&req.query.includes('limit=100')).length>pageReads,'inventory refresh');
+  const pageReads=state.requests.filter(req=>req.path==='/api/history/sessions'&&req.query.includes('limit=20')).length;
+  await waitFor(()=>state.requests.filter(req=>req.path==='/api/history/sessions'&&req.query.includes('limit=20')).length>pageReads,'inventory refresh');
   assert.equal(await history.count(),1);assert.equal(await native.count(),1);
   await page.getByRole('button',{name:'Show archived conversations',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/history/sessions'&&req.query.includes('archived=true')&&!req.query.includes('cursor=')));
