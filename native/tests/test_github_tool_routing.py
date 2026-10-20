@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
@@ -82,8 +82,9 @@ async def test_one_definition_per_operation_across_selected_repositories(routed)
         await tools.__aexit__(None, None, None)
 
 
-async def test_reads_route_to_owner_repo_and_search_injects_only_requested_repository(routed):
+async def test_reads_route_to_owner_repo_and_search_injects_only_requested_repository(bridge, routed, monkeypatch):
     f = routed
+    await live_policy(bridge, f, monkeypatch, 2, require_approval=True)
     assert await invoke(f, "github_get_file_contents", {"owner": "BerriAI", "repo": "moyai", "path": "README.md"}) == {
         "path": "README.md",
     }
@@ -286,11 +287,37 @@ async def test_per_target_allowlist_and_live_revocation_are_enforced(bridge, rou
     assert len(f.calls) == 1
 
 
-@pytest.mark.parametrize("repository", [1, 2])
-async def test_only_requested_repository_requires_approval_before_execution(bridge, routed, monkeypatch, repository):
+@pytest.mark.parametrize(("repository", "mandatory", "approval"), [
+    (1, False, False), (2, False, True), (1, True, True),
+])
+async def test_only_requested_repository_requires_approval_before_execution(
+    bridge, routed, monkeypatch, repository, mandatory, approval,
+):
     f = routed
     await live_policy(bridge, f, monkeypatch, 2, require_approval=True)
     reserved = []
+    arguments = {
+        "repository_id": repository, "branch": "feature", "commit_sha": "a" * 40,
+        "request_key": "approved-branch",
+    }
+    if mandatory:
+        factory = bridge.toolset
+
+        def with_mandatory_approval(scope, grant):
+            adapter = factory(scope, grant)
+
+            async def prepare(_ctx, definitions):
+                return [replace(tool, kind="unapproved") if tool.name == "create_branch" else tool
+                        for tool in definitions]
+
+            adapter.publications = adapter.publications.prepared(prepare)
+            return adapter
+
+        monkeypatch.setattr(bridge, "toolset", with_mandatory_approval)
+    if approval:
+        with pytest.raises(ApprovalRequired):
+            await invoke(f, "github_create_branch", arguments)
+        assert f.calls == []
 
     class Receipts(AbstractCapability):
         async def before_tool_execute(self, ctx, *, call, tool_def, args):
@@ -306,19 +333,17 @@ async def test_only_requested_repository_requires_approval_before_execution(brid
         if any(isinstance(part, ToolReturnPart) and part.tool_name == "github_create_branch"
                for message in messages for part in message.parts):
             return ModelResponse(parts=[TextPart("Done")])
-        return ModelResponse(parts=[ToolCallPart("github_create_branch", {
-            "repository_id": repository, "branch": "feature", "commit_sha": "a" * 40,
-            "request_key": "approved-branch",
-        }, tool_call_id="branch")])
+        return ModelResponse(parts=[ToolCallPart("github_create_branch", arguments, tool_call_id="branch")])
 
     agent = Agent(FunctionModel(model), capabilities=[
         f.capability, Receipts(), ConnectionToolSearch(strategy=connection_search),
     ],
                   output_type=[str, DeferredToolRequests])
     result = await agent.run("Create the selected branch.", deps=f.ctx.deps)
-    if repository == 1:
+    if not approval:
         assert result.output == "Done"
-        assert f.calls == [("branch", 1, "feature", "github_create_branch")]
+        assert f.calls == [("branch", repository, "feature", "github_create_branch")]
+        assert reserved == ["github_create_branch"]
         return
     assert isinstance(result.output, DeferredToolRequests)
     assert [call.tool_name for call in result.output.approvals] == ["github_create_branch"]
@@ -329,4 +354,4 @@ async def test_only_requested_repository_requires_approval_before_execution(brid
     )
     assert result.output == "Done"
     assert reserved == ["github_create_branch"]
-    assert f.calls == [("branch", 2, "feature", "github_create_branch")]
+    assert f.calls == [("branch", repository, "feature", "github_create_branch")]

@@ -59,7 +59,7 @@ from .api_views import (
     WorkActionDetail,
 )
 from .computer import routes as computer_routes
-from .connections import ConnectionPolicy
+from .connection_policy import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .debug_trace import debug_trace
 from .failed_action_attempts import failed_action_attempt

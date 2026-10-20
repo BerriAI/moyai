@@ -20,7 +20,7 @@ from temporalio import workflow
 from temporalio.exceptions import ActivityError, ApplicationError
 
 from .browser_outcomes import BROWSER_OUTCOME, BROWSER_WRITES, BrowserNotDispatched, BrowserOutcomeUnknown
-from .connections import read_only_tool
+from .connection_policy import read_only_tool
 from .contracts import RunScope
 from .database import Database
 from .effect_gate import EFFECT_GATE_VERSION, workflow_effect_lock

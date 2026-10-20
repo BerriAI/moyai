@@ -545,7 +545,7 @@ class ProductGitHubToolset(AbstractToolset[RunScope]):
         return github.get_toolset()
 
     async def get_tools(self, ctx: RunContext[RunScope]) -> dict[str, ToolsetTool[RunScope]]:
-        from .connections import PROHIBITED_TOOLS, read_only_tool
+        from .connection_policy import PROHIBITED_TOOLS, read_only_tool
 
         native = await self._native()
         async with native:
@@ -576,7 +576,7 @@ class ProductGitHubToolset(AbstractToolset[RunScope]):
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[RunScope], tool: ToolsetTool[RunScope],
     ) -> Any:
-        from .connections import read_only_tool
+        from .connection_policy import read_only_tool
 
         own = await self.publications.get_tools(ctx)
         if name in own:
