@@ -20,7 +20,52 @@ read_product = read_fixtures.read_product
 pytestmark = fixtures.pytestmark
 
 
-async def test_audience_releases_gate_before_queued_writer_and_token_refresh(audience):
+@pytest.mark.parametrize("path", ["/api/skills", "/api/connections"])
+@pytest.mark.parametrize("delegated", [False, True])
+async def test_query_scoped_catalog_prewarms_cold_and_expired_audiences(audience, read_product, path, delegated):
+    from moyai.delegation import DelegationService
+
+    product = audience
+    runtime = read_product.runtime
+    runtime.product_slack = product.slack
+    session_id = product.session_id
+    if delegated:
+        turn = await product.database.claim_next()
+        prepared = await product.database.prepare(turn.id)
+        child = await DelegationService(product.database).start(
+            prepared.scope, "catalog-child", "Inspect inherited catalog permissions",
+        )
+        session_id = child["session_id"]
+    product.slack.audience_reads.snapshots.clear()
+    product.state["calls"].clear()
+
+    for expected_calls in (2, 4):
+        response = await read_product.client.get(path, params={"session_id": session_id})
+        assert response.status_code == 200, response.text
+        if path == "/api/skills":
+            page = response.json()
+            assert page["skills"] == [] and page["has_more"] is False and page["next_offset"] is None
+        else:
+            assert response.json() == []
+        assert len(product.state["calls"]) == expected_calls
+        product.state["clock"] += fixtures.AUDIENCE_TTL
+
+    product.state["members"] = []
+    denied = await read_product.client.get(path, params={"session_id": session_id})
+    assert denied.status_code == 404
+
+
+async def test_ignored_session_query_does_not_add_an_authorization_scope(audience, read_product):
+    product = audience
+    read_product.runtime.product_slack = product.slack
+    product.state["failure"] = TimeoutError("Do not fetch an ignored session's audience.")
+    response = await read_product.client.get("/api/me", params={"session_id": product.session_id})
+    assert response.status_code == 200
+    assert product.state["calls"] == []
+
+
+@pytest.mark.parametrize("operation", ["messages", "search"])
+async def test_audience_releases_gate_before_queued_writer_and_token_refresh(audience, operation):
     product = audience
     url = product.settings.postgres_url
     writer, refresh, observer = [await asyncpg.connect(url) for _ in range(3)]
@@ -49,7 +94,10 @@ async def test_audience_releases_gate_before_queued_writer_and_token_refresh(aud
 
     product.slack.connectors.slack_bot_token = token
     try:
-        read = asyncio.create_task(product.database.messages(product.actor, product.session_id))
+        read = asyncio.create_task(
+            product.database.messages(product.actor, product.session_id) if operation == "messages" else
+            product.reads.native_search(product.reader, "channel input", limit=20, offset=0)
+        )
         tasks.append(read)
         await asyncio.wait_for(token_entered.wait(), 2)
         tasks.append(asyncio.create_task(write()))
@@ -67,8 +115,11 @@ async def test_audience_releases_gate_before_queued_writer_and_token_refresh(aud
         # and token refresh queues another S: neither awaited operation settles.
         await asyncio.wait_for(writer_acquired.wait(), 1)
         release_writer.set()
-        messages = await asyncio.wait_for(read, 2)
-        assert messages[0]["source"] == "slack"
+        result = await asyncio.wait_for(read, 2)
+        if operation == "messages":
+            assert result[0]["source"] == "slack"
+        else:
+            assert [row["id"] for row in result["sessions"]] == [product.session_id]
     finally:
         allow_token.set()
         release_writer.set()
@@ -133,6 +184,65 @@ async def test_cache_only_check_never_starts_provider_io_inside_admission(audien
             await product.database.allowed_session(db, product.session_id, product.actor)
         assert missing.value.status_code == 503
     assert product.state["calls"] == []
+
+
+@pytest.mark.parametrize("facts", ["cold", "ready", "expired", "rebound"])
+async def test_caller_owned_admission_uses_only_prefetched_current_facts(audience, facts):
+    from moyai.contracts import NewMessage
+
+    product = audience
+    if facts != "cold":
+        await product.database.prefetch_session_audiences(product.actor, [product.session_id])
+    calls = list(product.state["calls"])
+    if facts == "expired":
+        product.state["clock"] += fixtures.AUDIENCE_TTL
+    elif facts == "rebound":
+        async with product.database.sessions.begin() as db:
+            await db.execute(text(
+                "UPDATE moyai_product_slack_bindings SET channel_id='GNEWCHANNEL' WHERE session_id=:id",
+            ), {"id": product.session_id})
+    body = NewMessage(prompt="Caller-owned admission", request_key="caller-owned-admission")
+    if facts == "ready":
+        async with product.database.sessions.begin() as db:
+            turn = await product.database.submit(product.actor, product.session_id, body, db=db)
+        assert turn.status == "queued"
+    else:
+        with pytest.raises(HTTPException) as unavailable:
+            async with product.database.sessions.begin() as db:
+                await product.database.submit(product.actor, product.session_id, body, db=db)
+        assert unavailable.value.status_code == 503
+        async with product.database.sessions() as db:
+            assert not await db.scalar(text(
+                "SELECT count(*) FROM moyai_turns WHERE request_key='caller-owned-admission'",
+            ))
+    assert product.state["calls"] == calls
+
+
+async def test_cold_pending_action_reconciliation_prewarms_before_write(audience, read_product):
+    from sqlalchemy import select
+
+    from moyai.models import Effect, Turn
+
+    product = audience
+    read_product.runtime.product_slack = product.slack
+    async with product.database.sessions.begin() as db:
+        turn = await db.scalar(select(Turn).where(Turn.session_id == product.session_id))
+        db.add(Effect(
+            id="cold-effect", session_id=product.session_id, turn_id=turn.id, actor_id=product.actor.id,
+            tool_name="synthetic_write", arguments=product.database.security.seal("{}"),
+            fingerprint="synthetic", state="pending",
+        ))
+    me = (await read_product.client.get("/api/me")).json()
+    read_product.client.headers.update({
+        "x-csrf-token": me["csrf"], "origin": str(read_product.client.base_url).rstrip("/"),
+    })
+    response = await read_product.client.post(
+        "/api/effects/cold-effect/resolve", json={"outcome": "not_executed", "evidence": "Synthetic inspection"},
+    )
+    assert response.status_code == 200, response.text
+    assert len(product.state["calls"]) == 2
+    async with product.database.sessions() as db:
+        assert (await db.get(Effect, "cold-effect")).state == "reviewed_not_executed"
 
 
 async def test_expired_prefetch_cannot_be_used_by_a_mutation(audience):

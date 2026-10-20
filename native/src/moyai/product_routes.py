@@ -378,6 +378,16 @@ class ProductReadService:
         scanned, consumed, limited = 0, 0, False
         async with self.runtime.database.sessions() as db:
             await prepare_history_query(db)
+            planned = (await db.execute(select(Message.id, Message.session_id).join(
+                Session, Session.id == Message.session_id,
+            ).where(
+                self.visible(reader), Message.role.in_(("user", "assistant")),
+            ).order_by(Message.id.desc()).limit(SEARCH_ROWS + 1))).all()
+        await self.runtime.database.prefetch_session_audiences(
+            reader.user, list({row.session_id for row in planned}),
+        )
+        async with self.runtime.database.sessions() as db:
+            await prepare_history_query(db)
             title_rows = (await db.execute(self.native_query(reader).where(
                 self.visible(reader), func.lower(Session.title).contains(query.lower(), autoescape=True),
             ).order_by(Session.updated_at.desc(), Session.id.desc()).limit(offset + limit + 1))).mappings()
@@ -388,6 +398,7 @@ class ProductReadService:
                 func.substr(Message.content, 1, CIPHER_CHARS + 1).label("content"),
             ).join(Session, Session.id == Message.session_id).where(
                 self.visible(reader), Message.role.in_(("user", "assistant")),
+                Message.id.in_([row.id for row in planned]),
             ).order_by(Message.id.desc()).limit(SEARCH_ROWS + 1).execution_options(yield_per=16))
             try:
                 async for row in stream.mappings():

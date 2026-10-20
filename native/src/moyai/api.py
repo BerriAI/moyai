@@ -252,8 +252,6 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if runtime.product_slack is None:
             return
         session_id = request.path_params.get("session_id")
-        if session_id is None and request.url.path == "/api/connections":
-            session_id = request.query_params.get("session_id")
         if session_id is None:
             turn_id = request.path_params.get("turn_id")
             artifact_id = request.path_params.get("artifact_id")
@@ -308,6 +306,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         limit: int = Query(100, ge=1, le=100), user: User = Depends(actor), session_id: str | None = None,
     ) -> InvocableSkillPage:
         if session_id is not None:
+            await runtime.database.prefetch_session_audiences(user, [session_id])
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
                 context = await runtime.database.execution_context(db, session)
@@ -1019,6 +1018,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     ) -> list[ConnectionView]:
         surface = "web"
         if session_id is not None:
+            await runtime.database.prefetch_session_audiences(user, [session_id])
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
                 context = await runtime.database.execution_context(db, session)
@@ -1110,6 +1110,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def resolve_effect(
         effect_id: str, body: EffectResolution, user: User = Depends(actor),
     ) -> EffectResolveResult:
+        async with runtime.database.sessions() as db:
+            session_id = await db.scalar(select(Effect.session_id).where(Effect.id == effect_id))
+        if session_id is not None:
+            await runtime.database.prefetch_session_audiences(user, [session_id])
         async with runtime.database.sessions.begin() as db:
             row = await db.get(Effect, effect_id)
             if row is None or not await runtime.database.same_person(db, user, row.actor_id):
