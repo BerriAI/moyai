@@ -178,7 +178,7 @@ class ProductSecrets:
                 actor = await self.product.identity.project_native_user(db, principal)
             await self.runtime.database.prefetch_session_audiences(actor, [root.removeprefix("native:")])
             async with self.runtime.database.sessions.begin() as db:
-                await self.product.identity.authorize_admission(db, principal.grant)
+                actor = await self.product.identity.project_native_user(db, principal)
                 session = await self.runtime.database.allowed_session(db, root.removeprefix("native:"), actor)
                 if personal and session.owner_id != principal.id:
                     raise HTTPException(403, "Choose your own session for personal credentials.")

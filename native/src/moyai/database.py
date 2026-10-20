@@ -279,7 +279,7 @@ class Database:
     ) -> None:
         """Call before entering a read/admission transaction; final checks remain inside it."""
         prefetch = getattr(self, "slack_prefetch", None)
-        if prefetch is not None and session_ids:
+        if self.product_authority_enabled and prefetch is not None and session_ids:
             await prefetch(actor, session_ids, deleted=deleted)
 
     async def execution_session(self, db: AsyncSession, session_id: str, actor: User) -> Session:

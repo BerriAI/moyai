@@ -248,6 +248,9 @@ async def test_http_contention_is_503_and_rolls_back_mark_read_and_send_now(read
             ))
             assert (await product.client.get("/api/me")).status_code == 200
             replies = [
+                await product.client.post(
+                    f"/api/sessions/{product.session_id}/read", json={"message_id": 9999},
+                ),
                 await product.client.patch(f"/api/sessions/{product.session_id}", json={"unread": False}),
                 await product.client.post(f"/api/turns/{turn.id}/steer"),
             ]
@@ -259,13 +262,20 @@ async def test_http_contention_is_503_and_rolls_back_mark_read_and_send_now(read
                 assert await db.get(SessionRead, (product.actor.id, product.session_id)) is None
                 current = await db.get(Turn, turn.id)
                 assert current.status == "queued" and current.mode == "when_idle"
-        assert (await product.client.patch(
-            f"/api/sessions/{product.session_id}", json={"unread": False},
+        assert (await product.client.post(
+            f"/api/sessions/{product.session_id}/read", json={"message_id": 9999},
+        )).status_code == 200
+        async with database.sessions() as db:
+            through = (await db.get(SessionRead, (product.actor.id, product.session_id))).message_id
+        assert through > 0
+        assert (await product.client.post(
+            f"/api/sessions/{product.session_id}/read", json={"message_id": 0},
         )).status_code == 200
         assert (await product.client.post(f"/api/turns/{turn.id}/steer")).status_code == 202
         repeated = await product.client.post(f"/api/turns/{turn.id}/steer")
         assert repeated.status_code == 202 and repeated.json()["id"] == turn.id
         async with database.sessions() as db:
+            assert (await db.get(SessionRead, (product.actor.id, product.session_id))).message_id == through
             saved = await db.get(Turn, turn.id)
             assert saved.mode == "asap" and saved.status == "steering" and saved.parent_turn == parent.id
             assert await db.scalar(text(
@@ -409,7 +419,7 @@ async def test_http_role_insert_during_prefetch_denies_old_grant_without_mutatio
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             task = asyncio.create_task(
-                client.patch(f"/api/sessions/{product.session_id}", json={"unread": False})
+                client.post(f"/api/sessions/{product.session_id}/read", json={"message_id": 9999})
                 if operation == "mark_read" else client.post(f"/api/turns/{turn.id}/steer")
             )
             await asyncio.wait_for(entered.wait(), 2)
