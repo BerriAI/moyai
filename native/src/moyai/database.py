@@ -379,7 +379,9 @@ class Database:
         await self.prefetch_session_audiences(actor, ids, deleted=deleted)
         async with self.sessions() as db:
             visible = []
-            for session in await db.scalars(query):
+            # Revalidate planned rows without admitting newly ranked audiences
+            # that were never prepared while this request awaited the provider.
+            for session in await db.scalars(query.where(Session.id.in_(ids))):
                 try:
                     if deleted:
                         if not await self.same_person(db, actor, session.owner_id):
