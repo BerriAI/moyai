@@ -48,8 +48,10 @@ The envelope binds both saves to the session, turn, original workflow run,
 boundary, pause generation, preparation digest and current authority. The drain
 receipt stays blocked until capture and publication finish. Recoverable
 preconditions such as a human lease or unsettled receipt wait at that boundary
-with a durable timer and a visible explanation. A known intent change is
-rechecked, and an unpause can return the still-live graph to execution.
+with a durable timer and a visible explanation. The capture operation owns
+intent reconciliation: an unpause releases the computer fence only after the
+capture result is known. A new pause generation can reuse that confirmed image
+at the same frozen graph boundary without another provider capture.
 Confirmed expiry before capture, invalid checkpoint bindings and changed
 authority fail with a recovery-needed explanation instead of waiting forever.
 
@@ -57,10 +59,13 @@ Capture intent is persisted before calling the provider, and a returned image is
 recorded separately before checkpoint publication. The public Modal snapshot API
 does not accept a caller-owned idempotency key. A lost reply without an image
 receipt therefore stays blocked for inspection; it cannot silently dispatch
-another snapshot; the session exposes this concrete blocker. A known image receipt can finish publication after a lost
+another snapshot, even after unpause; the session exposes this concrete blocker.
+A known image receipt can finish publication after a lost
 database or object-store response without capturing again. The new activities
 have no blanket automatic retry policy. Restore retries are limited to transient
 observations of the same frozen image and stable provider creation identity.
+The durable envelope is the computer fence throughout capture; no expiring
+operation lease can release it or invalidate a slow but confirmed capture.
 
 The workflow then continues as new. Its direct successor takes ownership of the
 parked receipt and waits without constructing an agent or using the computer.

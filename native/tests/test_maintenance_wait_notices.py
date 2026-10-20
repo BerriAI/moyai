@@ -41,7 +41,7 @@ async def test_failed_notice_does_not_mask_classified_capture_refusal(monkeypatc
     original = module.uncertain_capture() if code == "capture_unknown" else preparation_blocked(code)
     monkeypatch.setattr(module, "preserve", AsyncMock(side_effect=original))
     with pytest.raises(ApplicationError) as result:
-        await module.save_maintenance_checkpoint(graph(), 22, "native_node:2")
+        await module.save_maintenance_checkpoint(graph(), "native_node:2")
     assert result.value is original
     assert module.wait_reason(result.value) == code
 
@@ -65,7 +65,7 @@ async def test_notice_timeout_is_bounded_and_preserves_capture_refusal(monkeypat
     original = preparation_blocked("workspace_in_use")
     monkeypatch.setattr(module, "preserve", AsyncMock(side_effect=original))
     with pytest.raises(ApplicationError) as result:
-        await asyncio.wait_for(module.save_maintenance_checkpoint(graph(), 22, "native_node:2"), 1)
+        await asyncio.wait_for(module.save_maintenance_checkpoint(graph(), "native_node:2"), 1)
     assert result.value is original
 
 

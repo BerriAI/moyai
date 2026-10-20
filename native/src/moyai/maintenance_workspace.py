@@ -9,22 +9,20 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
-from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from pydantic_ai.workspaces import WorkspaceRef
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from .answer_settlement import transient_checkpoint_error
 from .contracts import PreparedTurn
 from .history_handoff import AgentCheckpoint, CheckpointSave, save_history_checkpoint
-from .models import ComputerOperation, Event, Session, Turn, now
+from .models import Event, Session, Turn, now
 from .product_continuation_errors import preparation_blocked
 from .product_drain import DrainDecision
 from .product_drain_models import ProductDrainReceipt, ProductDrainState
@@ -224,7 +222,7 @@ async def maintenance_boundary(turn_id: str, boundary: str) -> DrainDecision:
 
 @activity.defn(name="moyai_save_maintenance_checkpoint_v1")
 async def save_maintenance_checkpoint(
-    graph: AgentCheckpoint, generation: int, boundary: str,
+    graph: AgentCheckpoint, boundary: str,
 ) -> CheckpointSave:
     from .runtime import current
 
@@ -234,7 +232,7 @@ async def save_maintenance_checkpoint(
     runtime = current()
     try:
         return await preserve(
-            runtime, graph, generation=generation, workflow_id=info.workflow_id,
+            runtime, graph, workflow_id=info.workflow_id,
             workflow_run_id=info.workflow_run_id, boundary=boundary,
         )
     except Exception as error:
@@ -257,29 +255,36 @@ async def save_maintenance_checkpoint(
         raise
 
 
+async def saved_checkpoint(runtime: Runtime, db: AsyncSession, point: MaintenanceWorkspace) -> CheckpointSave:
+    event = await db.scalar(select(Event).where(
+        Event.identity == point.identity, Event.turn_id == point.turn_id,
+        Event.session_id == point.session_id, Event.kind == CHECKPOINT_KIND,
+    ))
+    if event is None:
+        raise preparation_blocked("workspace_checkpoint_missing")
+    return CheckpointSave(reference=json.loads(runtime.security.unseal(event.content))["checkpoint"])
+
+
 async def preserve(
-    runtime: Runtime, graph: AgentCheckpoint, *, generation: int,
+    runtime: Runtime, graph: AgentCheckpoint, *,
     workflow_id: str, workflow_run_id: str, boundary: str,
 ) -> CheckpointSave:
+    """Own the capture until its result is known, even across intent changes.
+
+    Session.snapshot is the durable computer fence. CAPTURE_BEGIN/RESULT record
+    the external operation independently of maintenance intent. Only a confirmed
+    result can release that fence or publish a park for the current generation.
+    """
     database, scope = runtime.database, graph.prepared.scope
     service = runtime.product_drain
     if service is None:
         raise RuntimeError("Workspace preservation requires maintenance authority.")
-    # The existing saver checks provider-valid conversation, current authority
-    # and pending effects, then writes encrypted immutable bytes.
     saved_graph = await save_history_checkpoint(replace(
         graph, prepared=replace(graph.prepared, workspace=graph.workspace),
         deployment_handoff=None, allow_history_only=False,
     ))
     if saved_graph.reference is None:
         raise preparation_blocked("workspace_uncertain_effect")
-    identity = CHECKPOINT_KIND + ":" + hashlib.sha256(json.dumps([
-        scope.turn_id, workflow_id, workflow_run_id, boundary, generation, saved_graph.reference,
-    ]).encode()).hexdigest()
-    operation_id = str(uuid5(NAMESPACE_URL, identity))
-    capture_id = identity.split(":")[-1]
-    image = None
-    dispatch_capture = False
     async with database.sessions() as db:
         session = await db.get(Session, scope.session_id)
         if (
@@ -287,42 +292,23 @@ async def preserve(
             or (graph.workspace and session.workspace_scope != scope.workspace_key)
         ):
             raise preparation_blocked("workspace_checkpoint_invalid")
-        held = maintenance_workspace(session.snapshot) if session is not None else None
-        started = await db.scalar(select(Event.id).where(
-            Event.identity == CAPTURE_BEGIN + ":" + capture_id,
-        ))
-    # Confirm absence before any new capture dispatch. An already-dispatched
-    # capture instead reconciles its own receipt, even if the source later dies.
-    if graph.workspace and held is None and started is None:
+        held = maintenance_workspace(session.snapshot)
+        state = await db.get(ProductDrainState, 1)
+        needs_capture = held is None and state is not None and state.paused
+    if graph.workspace and needs_capture:
         async with asyncio.timeout(30):
             if not await capture_available(runtime, graph.workspace):
                 raise preparation_blocked("workspace_checkpoint_missing")
+    image = None
+    dispatch_capture = False
     async with database.sessions.begin() as db:
         state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
         session, turn = await locked_scope(database, db, scope, status="running")
         await database.swarms.authorize(db, turn, scope=scope)
         if turn.workflow_id != workflow_id:
             raise PermissionError("The maintenance checkpoint belongs to another workflow.")
-        existing = maintenance_workspace(session.snapshot)
-        if existing is not None:
-            if existing.identity != identity:
-                raise preparation_blocked("workspace_checkpoint_invalid")
-            if existing.phase == "captured":
-                event = await db.scalar(select(Event).where(
-                    Event.identity == identity, Event.turn_id == turn.id, Event.session_id == session.id,
-                    Event.kind == CHECKPOINT_KIND,
-                ))
-                if event is None:
-                    raise preparation_blocked("workspace_checkpoint_missing")
-                saved_reference = json.loads(runtime.security.unseal(event.content))["checkpoint"]
-                return CheckpointSave(reference=saved_reference)
         if state is None:
             raise preparation_blocked("workspace_checkpoint_invalid")
-        if not state.paused or state.generation != generation:
-            raise intent_changed()
-        await require_settled(db, session.id)
-        if any(await service._unsettled(db, turn.id)):
-            raise preparation_blocked("workspace_uncertain_effect")
         reference = json.loads(session.workspace or "null")
         if reference != graph.workspace or (reference and reference.get("provider") not in {"modal", "lambda"}):
             raise preparation_blocked("workspace_checkpoint_invalid")
@@ -330,7 +316,10 @@ async def preserve(
             raise PermissionError("The workspace authority changed.")
         digest = preparation_digest(runtime, turn)
         context, manifest = await product_bindings(db, scope, reference) if runtime.product and reference else (None, None)
-        intent = state.request_fingerprint
+        generation, intent = state.generation, state.request_fingerprint
+        identity = CHECKPOINT_KIND + ":" + hashlib.sha256(json.dumps([
+            scope.turn_id, workflow_id, workflow_run_id, boundary, generation, saved_graph.reference,
+        ]).encode()).hexdigest()
         pending = MaintenanceWorkspace(
             phase="capturing", identity=identity, session_id=scope.session_id,
             turn_id=scope.turn_id, scope=scope.workspace_key, workflow_id=workflow_id,
@@ -339,114 +328,93 @@ async def preserve(
             agent_checkpoint=saved_graph.reference, workspace=reference, image_id=None,
             product_context=context, restoration_manifest=manifest,
         )
-        if existing is not None and existing != pending:
-            raise preparation_blocked("workspace_checkpoint_invalid")
-        # This durable fence outlives the short operation lease. Queued intake
-        # may change display/revision metadata, but cannot mutate the computer.
-        expected = pending.model_dump_json()
-        session.snapshot = expected
+        existing = maintenance_workspace(session.snapshot)
+        if existing is not None:
+            # A new generation may adopt confirmed files at this same frozen
+            # boundary; it may not adopt another graph, execution or authority.
+            if existing.model_copy(update={
+                "identity": identity, "generation": generation, "intent_fingerprint": intent,
+                "phase": "capturing", "image_id": None,
+            }) != pending or (
+                existing.generation == generation and existing.intent_fingerprint != intent
+            ) or existing.generation > generation:
+                raise preparation_blocked("workspace_checkpoint_invalid")
+            if existing.phase == "captured":
+                return await saved_checkpoint(runtime, db, existing)
+            if reference:
+                result = await db.scalar(select(Event).where(
+                    Event.identity == CAPTURE_RESULT + ":" + existing.identity.split(":")[-1],
+                ))
+                if result is None:
+                    raise uncertain_capture()
+                image = json.loads(runtime.security.unseal(result.content))["image_id"]
+        if not state.paused:
+            # A lost provider reply stays fenced above. Confirmed capture has no
+            # remaining writer, so cancellation can safely resume the live graph.
+            if existing is not None:
+                session.snapshot = None
+            session.save_warning = None
+            return CheckpointSave()
+        await require_settled(db, session.id)
+        if any(await service._unsettled(db, turn.id)):
+            raise preparation_blocked("workspace_uncertain_effect")
         await service._park(
             db, turn.id, generation, workflow_id=workflow_id,
             workflow_run_id=workflow_run_id, boundary=boundary, phase="blocked",
         )
-        if reference:
-            # The public snapshot API supplies no caller-owned idempotency key.
-            # A crash after dispatch must not allocate another unknown image.
-            begins = list(await db.scalars(select(Event).where(
-                Event.turn_id == turn.id, Event.kind == CAPTURE_BEGIN,
-            )))
-            for begun in begins:
-                key = begun.identity.removeprefix(CAPTURE_BEGIN + ":")
-                completed = await db.scalar(select(Event).where(
-                    Event.identity == CAPTURE_RESULT + ":" + key,
-                ))
-                if completed is None:
-                    raise uncertain_capture()
-                if key == capture_id:
-                    original = json.loads(runtime.security.unseal(begun.content))
-                    if original != {
-                        "workspace": reference,
-                        "snapshot": expected, "preparation": digest,
-                        "product_context": context, "restoration_manifest": manifest,
-                        "agent_checkpoint": saved_graph.reference,
-                        "workflow_run_id": workflow_run_id, "generation": generation,
-                    }:
-                        raise preparation_blocked("workspace_checkpoint_invalid")
-                    image = json.loads(runtime.security.unseal(completed.content))["image_id"]
-            if image is None:
+        if existing is None:
+            session.snapshot = pending.model_dump_json()
+            if reference:
                 db.add(Event(
                     session_id=session.id, turn_id=turn.id, kind=CAPTURE_BEGIN,
-                    identity=CAPTURE_BEGIN + ":" + capture_id,
-                    content=runtime.security.seal({
-                        "workspace": reference,
-                        "snapshot": expected, "preparation": digest,
-                        "product_context": context, "restoration_manifest": manifest,
-                        "agent_checkpoint": saved_graph.reference,
-                        "workflow_run_id": workflow_run_id, "generation": generation,
-                    }),
+                    identity=CAPTURE_BEGIN + ":" + identity.split(":")[-1],
+                    content=runtime.security.seal(pending.model_dump_json()),
                 ))
                 dispatch_capture = True
-            await db.execute(delete(ComputerOperation).where(ComputerOperation.session_id == session.id))
-            lease_seconds = database.settings.lambda_checkpoint_timeout + 120 if reference["provider"] == "lambda" else 240
-            db.add(ComputerOperation(
-                session_id=session.id, identity=operation_id, expires_at=int(time.time()) + lease_seconds,
-            ))
-    try:
-        if reference and dispatch_capture:
-            try:
-                image = await database.answers.snapshots.capture(
-                    TypeAdapter(WorkspaceRef).validate_python(reference), require_live=True,
-                )
-            except Exception as error:
-                raise uncertain_capture() from error
-            await record_capture(runtime, capture_id, image)
-        point = pending.model_copy(update={"phase": "captured", "image_id": image})
-        reference_to_point = await runtime.objects.put(point.model_dump_json().encode())
-        async with database.sessions.begin() as db:
-            state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
-            session, turn = await locked_scope(database, db, scope, status="running")
-            await database.swarms.authorize(db, turn, scope=scope)
-            operation = await db.get(ComputerOperation, session.id)
-            if state is None or (state.generation == generation and state.request_fingerprint != intent):
-                raise preparation_blocked("workspace_checkpoint_invalid")
-            if not state.paused or state.generation != generation:
-                raise intent_changed()
-            if (
-                session.snapshot != expected
-                or json.loads(session.workspace or "null") != reference
-                or (reference and session.workspace_scope != scope.workspace_key)
-                or preparation_digest(runtime, turn) != digest
-                or (reference and (
-                    operation is None or operation.identity != operation_id or operation.expires_at <= time.time()
-                ))
-            ):
-                raise preparation_blocked("workspace_checkpoint_invalid")
-            if runtime.product and reference and await product_bindings(db, scope, reference) != (context, manifest):
-                raise PermissionError("The workspace context changed during preservation.")
-            # Capture itself is finished. Release only its own reservation under
-            # the session fence before counting unrelated guest operations.
-            await db.execute(delete(ComputerOperation).where(
-                ComputerOperation.session_id == session.id, ComputerOperation.identity == operation_id,
-            ))
-            await require_settled(db, session.id)
-            if any(await service._unsettled(db, turn.id)):
-                raise preparation_blocked("workspace_uncertain_effect")
-            session.snapshot = point.model_dump_json()
-            session.save_warning = None
-            db.add(Event(
-                session_id=session.id, turn_id=turn.id, kind=CHECKPOINT_KIND, identity=identity,
-                content=runtime.security.seal({"checkpoint": reference_to_point}),
-            ))
-            await service._park(
-                db, turn.id, generation, workflow_id=workflow_id,
-                workflow_run_id=workflow_run_id, boundary=boundary, phase="parked",
+        expected = session.snapshot
+    if reference and dispatch_capture:
+        try:
+            image = await database.answers.snapshots.capture(
+                TypeAdapter(WorkspaceRef).validate_python(reference), require_live=True,
             )
-        return CheckpointSave(reference=reference_to_point)
-    finally:
-        async with database.sessions.begin() as db:
-            await db.execute(delete(ComputerOperation).where(
-                ComputerOperation.session_id == scope.session_id, ComputerOperation.identity == operation_id,
-            ))
+        except Exception as error:
+            raise uncertain_capture() from error
+        # Persistence failures cannot turn a confirmed reply into a new dispatch.
+        await record_capture(runtime, identity.split(":")[-1], image)
+    point = pending.model_copy(update={"phase": "captured", "image_id": image})
+    reference_to_point = await runtime.objects.put(point.model_dump_json().encode())
+    async with database.sessions.begin() as db:
+        state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
+        session, turn = await locked_scope(database, db, scope, status="running")
+        await database.swarms.authorize(db, turn, scope=scope)
+        if state is None or (state.generation == generation and state.request_fingerprint != intent):
+            raise preparation_blocked("workspace_checkpoint_invalid")
+        if not state.paused or state.generation != generation:
+            raise intent_changed()
+        if maintenance_workspace(session.snapshot) == point:
+            return await saved_checkpoint(runtime, db, point)
+        if (
+            session.snapshot != expected or json.loads(session.workspace or "null") != reference
+            or (reference and session.workspace_scope != scope.workspace_key)
+            or preparation_digest(runtime, turn) != digest
+        ):
+            raise preparation_blocked("workspace_checkpoint_invalid")
+        if runtime.product and reference and await product_bindings(db, scope, reference) != (context, manifest):
+            raise PermissionError("The workspace context changed during preservation.")
+        await require_settled(db, session.id)
+        if any(await service._unsettled(db, turn.id)):
+            raise preparation_blocked("workspace_uncertain_effect")
+        session.snapshot = point.model_dump_json()
+        session.save_warning = None
+        db.add(Event(
+            session_id=session.id, turn_id=turn.id, kind=CHECKPOINT_KIND, identity=identity,
+            content=runtime.security.seal({"checkpoint": reference_to_point}),
+        ))
+        await service._park(
+            db, turn.id, generation, workflow_id=workflow_id,
+            workflow_run_id=workflow_run_id, boundary=boundary, phase="parked",
+        )
+    return CheckpointSave(reference=reference_to_point)
 
 
 @activity.defn(name="moyai_load_maintenance_checkpoint_v1")
@@ -466,7 +434,7 @@ async def load_maintenance_checkpoint(
     except Exception as error:
         # The frozen image and stable provider creation identity permit another
         # observation of that same restore, not an unrelated launch or tool retry.
-        if transient_checkpoint_error(error):
+        if transient_checkpoint_error(error) or wait_reason(error) == "intent_changed":
             await publish_wait(current(), turn_id, "restore_pending")
             raise ApplicationError(
                 "The saved workspace restore is awaiting provider confirmation.",
@@ -556,12 +524,6 @@ async def resume(
         # Only the direct successor may take over the park. It has not yet
         # constructed an SDK run or dispatched a model/tool operation.
         receipt.workflow_run_id = workflow_run_id
-        if state.paused:
-            if state.generation != point.generation or state.request_fingerprint != point.intent_fingerprint:
-                raise preparation_blocked("workspace_checkpoint_missing")
-            return MaintenanceResume(state.generation, True)
-        if state.generation <= point.generation:
-            raise preparation_blocked("workspace_checkpoint_missing")
         await require_settled(db, session.id)
         if any(await service._unsettled(db, turn_id)):
             raise preparation_blocked("workspace_uncertain_effect")
@@ -569,6 +531,16 @@ async def resume(
             point.product_context, point.restoration_manifest,
         ):
             raise PermissionError("The preserved workspace authority changed.")
+        if state.paused:
+            if state.generation == point.generation and state.request_fingerprint != point.intent_fingerprint:
+                raise preparation_blocked("workspace_checkpoint_missing")
+            await service._park(
+                db, turn_id, state.generation, workflow_id=workflow_id,
+                workflow_run_id=workflow_run_id, boundary=point.boundary, phase="parked",
+            )
+            return MaintenanceResume(state.generation, True)
+        if state.generation <= point.generation:
+            raise preparation_blocked("workspace_checkpoint_missing")
         generation, resume_intent = state.generation, state.request_fingerprint
     workspace = point.workspace
     if workspace:
@@ -607,14 +579,14 @@ async def resume(
         prior = await db.scalar(select(Event).where(Event.identity == resume_identity))
         if prior is not None:
             return await committed(db, prior, session, state, receipt, workspace)
+        if state.paused or state.generation != generation or state.request_fingerprint != resume_intent:
+            raise intent_changed()
         if (
-            state.paused or state.generation != generation
-            or state.request_fingerprint != resume_intent
-            or maintenance_workspace(session.snapshot) != point
+            maintenance_workspace(session.snapshot) != point
             or json.loads(session.workspace or "null") != point.workspace
             or receipt.resumed_generation is not None
         ):
-            raise PermissionError("Maintenance changed during workspace restoration.")
+            raise preparation_blocked("workspace_checkpoint_invalid")
         await require_settled(db, session.id)
         if any(await service._unsettled(db, turn_id)):
             raise preparation_blocked("workspace_uncertain_effect")

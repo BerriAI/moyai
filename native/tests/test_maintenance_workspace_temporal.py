@@ -187,12 +187,17 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
                 return
             if refusal == "uncertain":
                 await asyncio.wait_for(attempted.wait(), 30)
+                async with runtime.database.sessions.begin() as db:
+                    state = await db.get(ProductDrainState, 1)
+                    state.paused, state.generation = False, 23
+                await handle.signal("maintenance_changed", 23)
                 await asyncio.sleep(7)
                 assert captures == 1
                 async with runtime.database.sessions() as db:
                     assert (await db.get(Turn, turn.id)).status == "running"
                     assert (await db.get(ProductDrainReceipt, (turn.id, 22))).phase == "blocked"
                     assert "outcome is unknown" in (await db.get(Session, session.id)).save_warning
+                assert not any("cat checkpoint-file.txt" in str(command) for _, command in operations)
                 await handle.cancel()
                 with pytest.raises(WorkflowFailureError):
                     await asyncio.wait_for(handle.result(), 30)

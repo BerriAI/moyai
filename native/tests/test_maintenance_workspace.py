@@ -136,7 +136,7 @@ async def maintenance(runtime, active, monkeypatch):
 
 async def save(case):
     result = await preserve(
-        case.runtime, case.graph, generation=22,
+        case.runtime, case.graph,
         workflow_id=case.turn.workflow_id, workflow_run_id=RUN, boundary=BOUNDARY,
     )
     assert result.reference
@@ -203,7 +203,7 @@ async def test_expiry_enters_a_new_bound_continuation_without_rewriting_old_inpu
         assert (await db.get(ProductDrainReceipt, (turn.id, 22))).resumed_generation == 23
 
 
-async def test_capture_finishes_before_park_becomes_safe(maintenance):
+async def test_capture_finishes_before_park_becomes_safe(maintenance, actor):
     case = maintenance
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -218,10 +218,14 @@ async def test_capture_finishes_before_park_becomes_safe(maintenance):
     try:
         async with case.runtime.database.sessions() as db:
             assert (await db.get(ProductDrainReceipt, (case.turn.id, 22))).phase == "blocked"
-            assert (await db.get(Session, case.session.id)).snapshot is None
+            assert maintenance_workspace((await db.get(Session, case.session.id)).snapshot).phase == "capturing"
+            assert await db.get(ComputerOperation, case.session.id) is None
+        with pytest.raises(HTTPException) as failure:
+            await lease(case.runtime, case.session.id, actor, "claim", "browser")
+        assert failure.value.status_code == 409
     finally:
         release.set()
-    await task
+        await task
     async with case.runtime.database.sessions() as db:
         assert (await db.get(ProductDrainReceipt, (case.turn.id, 22))).phase == "parked"
 
@@ -246,7 +250,7 @@ async def test_late_or_failed_capture_cannot_certify_a_park(maintenance, actor, 
     with pytest.raises((TimeoutError, PermissionError, HTTPException, ApplicationError)):
         await save(case)
     async with case.runtime.database.sessions() as db:
-        assert (await db.get(Session, case.session.id)).snapshot is None
+        assert maintenance_workspace((await db.get(Session, case.session.id)).snapshot).phase == "capturing"
         assert (await db.get(ProductDrainReceipt, (case.turn.id, 22))).phase == "blocked"
         assert await db.get(ComputerOperation, case.session.id) is None
 
@@ -340,7 +344,111 @@ async def test_lost_capture_reply_before_durable_receipt_never_dispatches_anothe
     case.capture.assert_awaited_once()
     async with case.runtime.database.sessions() as db:
         assert (await db.get(ProductDrainReceipt, (case.turn.id, 22))).phase == "blocked"
-        assert (await db.get(Session, case.session.id)).snapshot is None
+        assert maintenance_workspace((await db.get(Session, case.session.id)).snapshot).phase == "capturing"
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_changed_intent_reconciles_confirmed_capture_before_releasing_or_reparking(maintenance, actor, paused):
+    case = maintenance
+
+    async def capture(*_args, **_kwargs):
+        async with case.runtime.database.sessions.begin() as db:
+            state = await db.get(ProductDrainState, 1)
+            state.paused, state.generation, state.request_fingerprint = paused, 24, "new-intent"
+        return "im-confirmed"
+
+    case.capture.side_effect = capture
+    with pytest.raises(ApplicationError) as failure:
+        await save(case)
+    assert wait_reason(failure.value) == "intent_changed"
+    result = await preserve(
+        case.runtime, case.graph, workflow_id=case.turn.workflow_id,
+        workflow_run_id=RUN, boundary=BOUNDARY,
+    )
+    case.capture.assert_awaited_once()
+    async with case.runtime.database.sessions() as db:
+        held = maintenance_workspace((await db.get(Session, case.session.id)).snapshot)
+        if paused:
+            assert held.phase == "captured" and held.generation == 24 and held.image_id == "im-confirmed"
+            assert (await db.get(ProductDrainReceipt, (case.turn.id, 24))).phase == "parked"
+            assert result.reference
+        else:
+            assert held is None and result.reference is None
+    if not paused:
+        await lease(case.runtime, case.session.id, actor, "claim", "browser")
+        await lease(case.runtime, case.session.id, actor, "release", "browser")
+        # A later pause at the next SDK boundary must not see a stale fence.
+        async with case.runtime.database.sessions.begin() as db:
+            state = await db.get(ProductDrainState, 1)
+            state.paused, state.generation = True, 25
+        case.capture.side_effect = None
+        result = await preserve(
+            case.runtime, case.graph, workflow_id=case.turn.workflow_id,
+            workflow_run_id=RUN, boundary="native_node:3",
+        )
+        assert result.reference and case.capture.await_count == 2
+
+
+async def test_unpause_cannot_release_an_unknown_capture_but_a_late_receipt_can(maintenance, actor):
+    from moyai.maintenance_workspace import record_capture
+
+    case = maintenance
+    case.capture.side_effect = TimeoutError("Provider response was lost.")
+    with pytest.raises(ApplicationError):
+        await save(case)
+    await unpause(case)
+    with pytest.raises(ApplicationError) as failure:
+        await save(case)
+    assert failure.value.type == "MoyaiMaintenanceCaptureUncertain"
+    with pytest.raises(HTTPException):
+        await lease(case.runtime, case.session.id, actor, "claim", "browser")
+    async with case.runtime.database.sessions() as db:
+        held = maintenance_workspace((await db.get(Session, case.session.id)).snapshot)
+    await record_capture(case.runtime, held.identity.split(":")[-1], "im-late-confirmed")
+    result = await preserve(
+        case.runtime, case.graph, workflow_id=case.turn.workflow_id,
+        workflow_run_id=RUN, boundary=BOUNDARY,
+    )
+    assert result.reference is None
+    case.capture.assert_awaited_once()
+    await lease(case.runtime, case.session.id, actor, "claim", "browser")
+
+
+async def test_successor_waits_through_a_new_pause_generation(maintenance):
+    case = maintenance
+    reference = await save(case)
+    async with case.runtime.database.sessions.begin() as db:
+        state = await db.get(ProductDrainState, 1)
+        state.generation, state.request_fingerprint = 24, "new-pause"
+    assert (await load(case, reference)).paused
+    async with case.runtime.database.sessions() as db:
+        receipt = await db.get(ProductDrainReceipt, (case.turn.id, 24))
+        assert receipt.phase == "parked" and receipt.workflow_run_id == NEXT
+    case.restore.assert_not_awaited()
+    await unpause(case)
+    assert (await load(case, reference)).checkpoint.workspace == NEW
+
+
+async def test_intent_change_during_restore_retries_the_same_named_computer(maintenance):
+    case = maintenance
+    reference = await save(case)
+    await unpause(case)
+    original = case.restore.return_value
+
+    async def changed(*_args):
+        async with case.runtime.database.sessions.begin() as db:
+            state = await db.get(ProductDrainState, 1)
+            state.paused, state.generation, state.request_fingerprint = True, 24, "new-pause"
+        return original
+
+    case.restore.side_effect = changed
+    with pytest.raises(ApplicationError) as failure:
+        await load(case, reference)
+    assert wait_reason(failure.value) == "intent_changed"
+    assert (await load(case, reference)).paused
+    case.restore.side_effect = None
+    await unpause(case)
+    assert (await load(case, reference)).checkpoint.workspace == NEW
 
 
 @pytest.mark.parametrize("failure", ["after_provider_receipt", "before_checkpoint_publication"])

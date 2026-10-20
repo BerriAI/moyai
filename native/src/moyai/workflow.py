@@ -187,7 +187,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             await workflow.wait_condition(lambda notice=notice: self.maintenance_notice != notice)
 
     async def preserve_maintenance_workspace(
-        self, checkpoint: AgentCheckpoint, generation: int, boundary: str,
+        self, checkpoint: AgentCheckpoint, boundary: str,
     ) -> CheckpointSave:
         """Keep the live graph quiescent when a lease/provider refuses capture."""
         while True:
@@ -195,7 +195,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             try:
                 return await workflow.execute_activity(
                     "moyai_save_maintenance_checkpoint_v1",
-                    args=[checkpoint, generation, boundary],
+                    args=[checkpoint, boundary],
                     result_type=CheckpointSave, **MAINTENANCE_FILES,
                 )
             except ActivityError as error:
@@ -213,13 +213,6 @@ class TurnWorkflow(PydanticAIWorkflow):
                 )
             except TimeoutError:
                 pass
-            decision = await workflow.execute_activity(
-                "moyai_maintenance_boundary_v1",
-                args=[self.turn_id, boundary], result_type=DrainDecision, **CONTROL,
-            )
-            if not decision.paused:
-                return CheckpointSave()
-            generation = decision.generation
 
     @workflow.signal
     async def steer(self, turn_id: str) -> None:
@@ -401,7 +394,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                         try:
                             if maintenance_generation is not None:
                                 saved = await self.preserve_maintenance_workspace(
-                                    checkpoint, maintenance_generation, f"native_node:{boundary}",
+                                    checkpoint, f"native_node:{boundary}",
                                 )
                             else:
                                 saved = await workflow.execute_activity(
