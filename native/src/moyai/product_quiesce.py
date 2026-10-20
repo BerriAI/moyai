@@ -81,7 +81,7 @@ class ProductQuiescence:
         if admission is not None:
             admission.require_drain(request_id)
         if self.life.role == "worker" and (admission is None or not admission.sealed):
-            raise ValueError("Worker retirement requires Temporal deployment drainage.")
+            raise ValueError("Worker retirement requires a qualified durable fleet seal.")
         # A learned durable seal immediately removes HTTP readiness. The
         # otherwise operational process must still be able to drain its work.
         if not self.life.operational:
@@ -114,6 +114,13 @@ class ProductQuiescence:
                 if slack is not None:
                     await slack.close()
             if self.life.worker is not None:
+                if not self.life.runtime.settings.worker_deployment:
+                    # Initial adoption uses saved checkpoints, not a fabricated
+                    # drainage status for the unversioned Temporal population.
+                    drain = self.life.runtime.product_drain
+                    if drain is None:
+                        raise ValueError("The adoption checkpoint service is unavailable.")
+                    await drain.require_checkpoint_retirement(self.request_id)
                 await self.life.worker.shutdown()
             await self.check_owner()
             if self.life.admission is not None:

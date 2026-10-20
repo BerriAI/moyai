@@ -5,9 +5,8 @@ the compatibility contract of an unversioned installation. Initial source and
 replacement processes must run the same application image. Changing workflow
 code while enabling versioning is a separate compatibility problem.
 
-This is a startup and registration protocol. It does not promote Temporal
-versions, change HTTP routing, install application migrations, or authorize
-retirement of unversioned workers.
+Startup and registration do not promote Temporal versions, change HTTP routing,
+install application migrations, or authorize retirement on their own.
 
 ## Runtime configuration
 
@@ -58,10 +57,37 @@ task. Already-running activities can remain on an older worker. A one-time
 history replay or an empty visibility query cannot establish that every such
 activity has settled.
 
-The runtime therefore reports
-`worker_adoption.unversioned_retirement_qualified=false`. An unversioned worker
-cannot be sealed using an invented version-drainage receipt. The supported
-versioned release path retains its existing drainage requirements.
+The runtime reports `worker_checkpoint_retirement=moyai-adoption-checkpoint-v1`
+for a separate, one-time checkpoint retirement primitive:
+
+1. Both generations use the exact same image and authorized binding. A target
+   worker must have a live registered owner; operator tooling must also verify
+   every required Temporal poller.
+2. Request the native maintenance pause and wait for saved checkpoints, settled
+   effects, and settled model requests. HTTP intake can continue queuing work.
+3. Under that pause, promote the approved Temporal version and move HTTP traffic
+   through the verified stable ingress.
+4. Seal the old worker with the exact pause generation, request key and
+   fingerprint, target binding, and routing observations. The seal takes a
+   shared lock on the native pause row, ordering it against resume.
+5. Before stopping polling, the old worker independently verifies the same pause
+   and rechecks unsafe turns, effects, and requests. Its completion receipt is
+   written only after graceful worker shutdown.
+6. Retire the exact old owner. Resume is rejected while any captured, sealed
+   unversioned owner remains live, including after it reports drained. The
+   replacement can then resume from the durable checkpoints.
+
+No connection is held across worker shutdown, so this protocol also works with
+one connection per pool. Restarting a sealed service cannot readmit it. A failed
+checkpoint check or shutdown leaves the process unqualified for retirement;
+operator tooling must inspect the saved intent and live state.
+
+This pauses task execution during initial adoption. It does not claim continuous
+execution, and does not by itself qualify provider provisioning, traffic
+switching, or recovery. Consequently
+`worker_adoption.unversioned_retirement_qualified` remains `false`. An invented
+Temporal version-drainage receipt still cannot seal an unversioned worker. Normal
+versioned releases retain their existing drainage requirements.
 
 Initial traffic promotion, unversioned-worker drain/recovery qualification,
 provider resource provisioning, and schema-upgrade qualification remain

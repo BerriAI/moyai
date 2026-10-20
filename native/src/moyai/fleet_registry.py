@@ -312,6 +312,13 @@ class FleetRegistry:
                 proof, generation=generation, role=role, service_id=service_id,
                 source_sha=row[6], deployment=row[4], build=row[5],
             )
+            if role == "worker" and not row[4] and not row[5]:
+                from .worker_adoption import WorkerAdoption
+
+                WorkerAdoption(self).verify_checkpoint_seal(
+                    fleet=fleet, generation=generation, source_sha=row[6],
+                    request_id=request_id, proof=proof["worker"],
+                )
             if row[1] in {"draining", "retired"}:
                 if row[2] != request_id or row[3] != fingerprint(proof):
                     raise FleetAdmissionError("fleet_admission_seal_identity_changed")
@@ -352,6 +359,26 @@ class FleetRegistry:
             worker = proof["worker"]
             if role != "worker":
                 if worker is not None:
+                    raise ValueError()
+                return
+            if not deployment and not build:
+                from .worker_adoption import CHECKPOINT_PROTOCOL
+
+                if (
+                    not isinstance(worker, dict)
+                    or set(worker) != {
+                        "protocol", "generation", "request_key", "request_fingerprint",
+                        "target_generation", "deployment", "build", "routing_fingerprint",
+                    }
+                    or worker["protocol"] != CHECKPOINT_PROTOCOL
+                    or type(worker["generation"]) is not int or worker["generation"] < 1
+                    or not all(isinstance(worker[key], str) and worker[key] for key in (
+                        "request_key", "target_generation", "deployment", "build",
+                    ))
+                    or not all(re.fullmatch("[a-f0-9]{64}", worker[key]) for key in (
+                        "request_fingerprint", "routing_fingerprint",
+                    ))
+                ):
                     raise ValueError()
                 return
             if (

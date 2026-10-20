@@ -161,6 +161,59 @@ async def test_old_drain_worker_must_retire_before_explicit_resume(drain):
         await replacement.service.request(paused=True, expected_generation=3, request_key="revoked-owner")
 
 
+async def test_checkpoint_retirement_requires_same_pause_and_saved_work(drain):
+    service = drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    with pytest.raises(ProductDrainError, match="pause changed"):
+        await service.require_checkpoint_retirement("start")
+    receipt = await service.request(paused=True, expected_generation=1, request_key="adopt")
+    await service.require_checkpoint_retirement("adopt")
+    with pytest.raises(ProductDrainError, match="pause changed"):
+        await service.require_checkpoint_retirement("other")
+    session = await drain.product.database.create_session(drain.product.actor, NewSession())
+    turn = await drain.product.database.submit(
+        drain.product.actor, session.id, NewMessage(prompt="queued work", request_key="queued"),
+    )
+    # Queued inputs are preserved; an uncheckpointed running turn is unsafe.
+    await service.require_checkpoint_retirement("adopt")
+    async with drain.first.sessions.begin() as db:
+        row = await db.get(Turn, turn.id)
+        row.status = "running"
+    with pytest.raises(ProductDrainError, match="unsafe work"):
+        await service.require_checkpoint_retirement("adopt")
+    assert (await service.status())["generation"] == receipt["generation"]
+
+
+async def test_sealed_unversioned_owner_blocks_resume_even_after_drain_receipt(drain):
+    import psycopg
+
+    from moyai.fleet_registry import FleetRegistry
+
+    first = drain.first
+    replacement = await drain.worker()
+    with psycopg.connect(drain.product.settings.postgres_url, autocommit=True) as connection:
+        registry = FleetRegistry(connection)
+        registry.initialize()
+        connection.execute(registry.query(
+            "INSERT INTO {schema}.fleets VALUES('adoption','moyai',%s,'drain-tests',true)",
+        ), (drain.product.schema,))
+        connection.execute(registry.query("""
+            INSERT INTO {schema}.roles VALUES(
+                'adoption','blue','worker','source','srv-test',%s,%s,%s,'','','draining','pause',%s
+            )
+        """), ("a" * 40, "a" * 64, "b" * 64, "c" * 64))
+        connection.execute(registry.query("""
+            INSERT INTO {schema}.members VALUES(
+                'adoption','blue','worker','srv-test','srv-test-local',%s,%s,%s,%s,'pause','pause',now(),now()
+            )
+        """), ("d" * 32, first.authority.owner_pid, first.authority.owner_started, "e" * 64))
+    with pytest.raises(ProductDrainError, match="sealed adoption worker"):
+        await replacement.service.request(paused=False, expected_generation=0, request_key="resume")
+    await first.owner.close()
+    receipt = await replacement.service.request(paused=False, expected_generation=0, request_key="resume")
+    assert not receipt["paused"] and receipt["generation"] == 1
+
+
 async def test_unknown_effect_blocks_park_and_resume_without_rewriting_it(drain):
     product, service = drain.product, drain.first.service
     await service.request(paused=False, expected_generation=0, request_key="start")

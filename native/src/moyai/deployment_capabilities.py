@@ -31,6 +31,7 @@ def capabilities(config: ProductConfig) -> dict:
     from .fleet_registry import PROTOCOL as ADMISSION_PROTOCOL
     from .product_continuation_restore import RESTORE_CONCURRENCY
     from .product_start import _settings
+    from .worker_adoption import CHECKPOINT_PROTOCOL
     from .worker_adoption import PROTOCOL as ADOPTION_BRIDGE_PROTOCOL
     from .worker_capacity import WORKER_SHUTDOWN_VERSION
 
@@ -65,6 +66,7 @@ def capabilities(config: ProductConfig) -> dict:
             "shutdown_protocol": WORKER_SHUTDOWN_VERSION,
             "shutdown_seconds": settings.worker_shutdown_seconds,
         },
+        "worker_checkpoint_retirement": CHECKPOINT_PROTOCOL,
         "worker_adoption": {
             "protocol": ADOPTION_BRIDGE_PROTOCOL, "bridge": settings.worker_adoption_bridge,
             "initial_same_image_required": True, "unversioned_retirement_qualified": False,
