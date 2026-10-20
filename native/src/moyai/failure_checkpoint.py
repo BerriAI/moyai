@@ -37,6 +37,13 @@ async def preserve_failed_workspace(runtime: Runtime, turn_id: str) -> None:
         turn = await db.get(Turn, turn_id)
         if turn is None or not turn.preparation or turn.result_accepted:
             return
+        from .maintenance_workspace import maintenance_workspace
+
+        session = await db.get(Session, turn.session_id)
+        if session is not None and maintenance_workspace(session.snapshot) is not None:
+            # A published maintenance graph/image is stronger evidence than a
+            # newly reconstructed failure frontier. Keep it for reviewed recovery.
+            return
         prepared = TypeAdapter(PreparedTurn).validate_json(database.security.unseal(turn.preparation))
     scope = prepared.scope
     identity = str(uuid5(NAMESPACE_URL, "moyai-failure-checkpoint:" + turn_id))
@@ -52,6 +59,8 @@ async def preserve_failed_workspace(runtime: Runtime, turn_id: str) -> None:
         digest = hashlib.sha256(conversation).hexdigest()
         async with database.sessions.begin() as db:
             session, turn = await locked_scope(database, db, scope, status="running")
+            if maintenance_workspace(session.snapshot) is not None:
+                return
             # A pending external write must retain its original review barrier.
             await require_settled(db, session.id)
             reference = json.loads(session.workspace or "null")
@@ -92,7 +101,10 @@ async def preserve_failed_workspace(runtime: Runtime, turn_id: str) -> None:
         logger.warning("Could not preserve the failed turn's workspace.", exc_info=True)
         async with database.sessions.begin() as db:
             session = await db.get(Session, scope.session_id)
-            if session and session.active_turn == turn_id and session.status == "running":
+            if (
+                session and session.active_turn == turn_id and session.status == "running"
+                and maintenance_workspace(session.snapshot) is None
+            ):
                 session.save_warning = WARNING
     finally:
         async with database.sessions.begin() as db:

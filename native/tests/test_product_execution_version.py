@@ -54,9 +54,9 @@ def test_execution_protocol_changes_all_native_contracts_but_preserves_legacy(
     assert config is not None
     settings = config.legacy_settings()
     legacy = settings.model_copy(update={"moyai_core": "legacy"})
-    assert native_contract.NATIVE_PROTOCOL_REVISION == 5
+    assert native_contract.NATIVE_PROTOCOL_REVISION == 6
     current, unchanged = fingerprints(settings), fingerprints(legacy)
-    monkeypatch.setattr(native_contract, "NATIVE_PROTOCOL_REVISION", 4)
+    monkeypatch.setattr(native_contract, "NATIVE_PROTOCOL_REVISION", 5)
     assert all(new != old for new, old in zip(current, fingerprints(settings), strict=True))
     assert fingerprints(legacy) == unchanged
 

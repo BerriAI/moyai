@@ -17,6 +17,23 @@ MESSAGES = {
         "The computer is still controlled by a person or has an unsettled desktop action. "
         "Release control and let the action settle before restoring it."
     ),
+    "workspace_checkpoint_invalid": (
+        "Workspace recovery stopped because the saved checkpoint no longer matches this task. "
+        "Saved messages and downloads are retained. No action was replayed or empty computer started."
+    ),
+    "workspace_authority_changed": (
+        "Workspace recovery stopped because this task's permissions or ownership changed. "
+        "No replacement was authorized and no action was replayed."
+    ),
+    "workspace_maintenance_recovery_required": (
+        "A filesystem image and task checkpoint were preserved before this task stopped. "
+        "They are retained, but resuming the stopped task requires a reviewed recovery. "
+        "No old action was replayed and no empty computer was started."
+    ),
+    "workspace_maintenance_capture_unverified": (
+        "This stopped task retains a maintenance capture record, but it has not been published "
+        "as a verified filesystem checkpoint. Reviewed recovery is required; no capture or old action was repeated."
+    ),
     "recovery_collection_incomplete": (
         "The earlier recovery collector could not read every visible file. "
         "The old computer has not been drained. Review its original recovery package "

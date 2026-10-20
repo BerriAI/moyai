@@ -68,6 +68,7 @@ class HistoryHandoff:
     pending_steering: list[str] = field(default_factory=list)
     deployment_handoff: DeploymentHandoff | None = None
     pending_deployment_handoff: DeploymentHandoff | None = None
+    maintenance_workspace: bool = False
 
 
 def is_turn_run(run_id: str | None, turn_id: str) -> bool:
