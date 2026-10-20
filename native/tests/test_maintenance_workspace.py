@@ -42,6 +42,7 @@ from moyai.maintenance_workspace import (
     maintenance_workspace,
     preserve,
     resume,
+    wait_reason,
 )
 from moyai.models import ComputerOperation, Effect, Event, Session, Turn, User
 from moyai.product_drain import ProductDrainService
@@ -101,9 +102,11 @@ async def maintenance(runtime, active, monkeypatch):
     )
     runtime.product_drain = service
     monkeypatch.setattr("moyai.runtime.current", lambda: runtime)
+    monkeypatch.setattr("moyai.activities.current", lambda: runtime)
     capture = AsyncMock(return_value="im-settled-files")
     monkeypatch.setattr(runtime.database.answers, "snapshots", SimpleNamespace(capture=capture))
     monkeypatch.setattr("moyai.maintenance_workspace.live_sandbox", AsyncMock(return_value=False))
+    monkeypatch.setattr("moyai.maintenance_workspace.capture_available", AsyncMock(return_value=True))
     restore = AsyncMock(return_value=SimpleNamespace(
         object_id=NEW["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
     ))
@@ -240,7 +243,7 @@ async def test_late_or_failed_capture_cannot_certify_a_park(maintenance, actor, 
         return "im-late"
 
     case.capture.side_effect = capture
-    with pytest.raises((TimeoutError, PermissionError, HTTPException)):
+    with pytest.raises((TimeoutError, PermissionError, HTTPException, ApplicationError)):
         await save(case)
     async with case.runtime.database.sessions() as db:
         assert (await db.get(Session, case.session.id)).snapshot is None
@@ -405,3 +408,174 @@ async def test_lost_named_restore_reply_reconciles_the_same_provider_computer(ma
     result = await load(case, reference)
     assert result.checkpoint.workspace == NEW
     provider_create.assert_awaited_once()
+
+
+async def test_confirmed_expiry_before_capture_is_terminal_not_an_automatic_wait(maintenance, monkeypatch):
+    case = maintenance
+    monkeypatch.setattr("moyai.maintenance_workspace.capture_available", AsyncMock(return_value=False))
+    with pytest.raises(ApplicationError) as failure:
+        await save(case)
+    assert failure.value.details == ("workspace_checkpoint_missing",)
+    assert wait_reason(failure.value) is None
+    case.capture.assert_not_awaited()
+
+
+async def test_mismatched_workspace_binding_is_terminal_before_provider_access(maintenance, monkeypatch):
+    case = maintenance
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr("moyai.maintenance_workspace.capture_available", probe)
+    case.graph.workspace = {"provider": "modal", "id": "another-task"}
+    with pytest.raises(ApplicationError) as failure:
+        await save(case)
+    assert failure.value.details == ("workspace_checkpoint_invalid",)
+    assert wait_reason(failure.value) is None
+    probe.assert_not_awaited()
+    case.capture.assert_not_awaited()
+
+
+async def test_changed_grant_cannot_be_reclassified_as_a_temporary_refusal(maintenance):
+    from moyai.contracts import Grant
+
+    case = maintenance
+    case.graph.prepared.scope = replace(
+        case.graph.prepared.scope, grants=[Grant("unavailable-grant", "github", 1, "not-a-credential")],
+    )
+    with pytest.raises(ApplicationError) as failure:
+        await save(case)
+    assert failure.value.type == "MoyaiHistoryAuthorizationDenied"
+    assert wait_reason(failure.value) is None
+    case.capture.assert_not_awaited()
+
+
+@pytest.mark.parametrize("expired", [False, True])
+async def test_stop_retains_image_and_graph_and_new_turn_reports_recovery_required(maintenance, actor, monkeypatch, expired):
+    from moyai.activities import prepare_turn
+    from moyai.contracts import NewMessage
+    from moyai.product_continuation_errors import MESSAGES
+
+    case = maintenance
+    reference = await save(case)
+    point_bytes = await case.runtime.objects.get(reference)
+    point = MaintenanceWorkspace.model_validate_json(point_bytes)
+    graph_bytes = await case.runtime.objects.get(point.agent_checkpoint)
+    await case.runtime.database.stop(actor, case.session.id)
+    await case.runtime.database.stopped(case.turn.id)
+    await unpause(case)
+    monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=not expired))
+    followup = await case.runtime.database.submit(
+        actor, case.session.id, NewMessage(prompt="Inspect my preserved files.", request_key="after-stop"),
+    )
+    assert (await case.runtime.database.claim_next()).id == followup.id
+    with pytest.raises(ApplicationError) as failure:
+        await prepare_turn(followup.id, recover_workspace=True)
+    code = "workspace_maintenance_recovery_required"
+    assert failure.value.details == (code,) and wait_reason(failure.value) is None
+    await case.runtime.database.fail(followup.id, MESSAGES[code])
+    async with case.runtime.database.sessions() as db:
+        session = await db.get(Session, case.session.id)
+        assert maintenance_workspace(session.snapshot) == point
+        assert json.loads(session.workspace) == OLD
+        assert (await db.get(Turn, followup.id)).error == MESSAGES[code]
+    assert await case.runtime.objects.get(reference) == point_bytes
+    assert await case.runtime.objects.get(point.agent_checkpoint) == graph_bytes
+    case.capture.assert_awaited_once()
+    case.restore.assert_not_awaited()
+
+
+async def test_failure_cleanup_cannot_overwrite_a_published_maintenance_checkpoint(maintenance):
+    from moyai.failure_checkpoint import preserve_failed_workspace
+
+    case = maintenance
+    reference = await save(case)
+    point = MaintenanceWorkspace.model_validate_json(await case.runtime.objects.get(reference))
+    await preserve_failed_workspace(case.runtime, case.turn.id)
+    async with case.runtime.database.sessions() as db:
+        assert maintenance_workspace((await db.get(Session, case.session.id)).snapshot) == point
+    case.capture.assert_awaited_once()
+
+
+async def test_known_image_cannot_be_published_under_changed_product_binding(maintenance, monkeypatch):
+    from moyai import maintenance_workspace as module
+
+    case = maintenance
+    monkeypatch.setattr(case.runtime, "product", SimpleNamespace())
+    binding = AsyncMock(return_value=("original-context", "original-manifest"))
+    monkeypatch.setattr(module, "product_bindings", binding)
+    record = module.record_capture
+
+    async def lose_reply(*args):
+        await record(*args)
+        raise ConnectionError("The committed image receipt response was lost.")
+
+    monkeypatch.setattr(module, "record_capture", lose_reply)
+    with pytest.raises(ConnectionError):
+        await save(case)
+    binding.return_value = ("changed-context", "changed-manifest")
+    with pytest.raises(ApplicationError) as failure:
+        await save(case)
+    assert failure.value.details == ("workspace_checkpoint_invalid",)
+    assert wait_reason(failure.value) is None
+    case.capture.assert_awaited_once()
+
+
+@pytest.mark.parametrize("drift", ["none", "workspace", "authority", "intent"])
+async def test_concurrent_identical_restore_reconciles_at_publication_boundary(maintenance, monkeypatch, drift):
+    from moyai import workspace_recovery
+
+    case = maintenance
+    reference = await save(case)
+    await unpause(case)
+    created, release = asyncio.Event(), asyncio.Event()
+    registry = {}
+    sandbox = SimpleNamespace(
+        object_id=NEW["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
+    )
+
+    async def lookup(_app, name):
+        if name not in registry:
+            raise modal.exception.NotFoundError("No named computer yet.")
+        return registry[name]
+
+    async def create(**kwargs):
+        registry[kwargs["name"]] = sandbox
+        created.set()
+        await release.wait()  # The other caller observes this same provider resource.
+        return sandbox
+
+    provider_create = AsyncMock(side_effect=create)
+    monkeypatch.setattr("moyai.maintenance_workspace.restored_sandbox", workspace_recovery.restored_sandbox)
+    monkeypatch.setattr("moyai.workspace_recovery.modal.Sandbox.from_name.aio", AsyncMock(side_effect=lookup))
+    monkeypatch.setattr("moyai.workspace_recovery.modal.App.lookup.aio", AsyncMock(return_value=object()))
+    monkeypatch.setattr("moyai.workspace_recovery.modal.Sandbox.create.aio", provider_create)
+    monkeypatch.setattr("moyai.workspace_recovery.modal.Image.from_id", lambda identity: identity)
+    waiting = asyncio.create_task(load(case, reference))
+    try:
+        await asyncio.wait_for(created.wait(), 5)
+        published = await load(case, reference)
+        async with case.runtime.database.sessions.begin() as db:
+            session = await db.get(Session, case.session.id)
+            revision = session.revision
+            if drift == "workspace":
+                session.workspace = json.dumps({"provider": "modal", "id": "unrelated"})
+            elif drift == "authority":
+                (await db.get(User, case.prepared.scope.actor_id)).enabled = False
+            elif drift == "intent":
+                (await db.get(ProductDrainState, 1)).request_fingerprint = "unrelated-intent"
+        release.set()
+        if drift == "none":
+            assert await waiting == published
+        else:
+            with pytest.raises((PermissionError, HTTPException, ApplicationError)):
+                await waiting
+        provider_create.assert_awaited_once()
+        async with case.runtime.database.sessions() as db:
+            assert (await db.get(Session, case.session.id)).revision == revision
+            receipts = list(await db.scalars(select(Event).where(
+                Event.turn_id == case.turn.id, Event.kind == RESUME_KIND,
+            )))
+            assert len(receipts) == 1
+    finally:
+        release.set()
+        if not waiting.done():
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)

@@ -46,16 +46,18 @@ executions reach a settled SDK `ModelRequestNode` before parking. They freeze
 steering, save the existing agent continuation, and capture the live filesystem.
 The envelope binds both saves to the session, turn, original workflow run,
 boundary, pause generation, preparation digest and current authority. The drain
-receipt stays blocked until capture and publication finish. A failed capture
-does not certify a safe park or fail an otherwise live graph. Recoverable
-preconditions such as a human lease wait at that settled boundary with a durable
-timer; an unpause can return the still-live graph to execution.
+receipt stays blocked until capture and publication finish. Recoverable
+preconditions such as a human lease or unsettled receipt wait at that boundary
+with a durable timer and a visible explanation. A known intent change is
+rechecked, and an unpause can return the still-live graph to execution.
+Confirmed expiry before capture, invalid checkpoint bindings and changed
+authority fail with a recovery-needed explanation instead of waiting forever.
 
 Capture intent is persisted before calling the provider, and a returned image is
 recorded separately before checkpoint publication. The public Modal snapshot API
 does not accept a caller-owned idempotency key. A lost reply without an image
 receipt therefore stays blocked for inspection; it cannot silently dispatch
-another snapshot. A known image receipt can finish publication after a lost
+another snapshot; the session exposes this concrete blocker. A known image receipt can finish publication after a lost
 database or object-store response without capturing again. The new activities
 have no blanket automatic retry policy. Restore retries are limited to transient
 observations of the same frozen image and stable provider creation identity.
@@ -82,6 +84,14 @@ invalidate a held maintenance savepoint.
 This saves filesystem bytes, not guest-process memory or external-system state.
 It does not replay process starts or external effects. A missing or expired image
 refuses restoration; it never authorizes an empty computer.
+
+Stopping the parked task retains its maintenance image and immutable graph
+reference. The ordinary new-turn recovery path deliberately does not adopt that
+stopped graph, including when the original computer has expired. It reports that
+the backup exists and a reviewed recovery is required, preserving both objects
+and the session's maintenance envelope. Automatic recovery into a different
+authorized turn is outside this change; it must not replay the stopped actions
+or silently treat the image as an ordinary completed-answer checkpoint.
 
 ### Initial adoption and older executions
 

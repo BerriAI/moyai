@@ -222,7 +222,21 @@ async def preserve_restoration(db: AsyncSession, session_id: str, old_id: str, n
 
 async def prepare_workspace(runtime: Runtime, prepared: PreparedTurn) -> PreparedTurn:
     reference = prepared.workspace
-    if not reference or reference.get("provider") not in {"modal", "lambda"}:
+    if not reference:
+        from .maintenance_workspace import maintenance_workspace
+
+        async with runtime.database.sessions.begin() as db:
+            session = await db.get(Session, prepared.scope.session_id)
+            held = maintenance_workspace(session.snapshot) if session is not None else None
+            if held is not None:
+                if held.workspace is not None or held.image_id is not None:
+                    raise preparation_blocked("workspace_checkpoint_invalid")
+                session, _ = await locked_scope(runtime.database, db, prepared.scope, status="running")
+                # A stopped text-only graph has no files to restore. Its
+                # immutable event/object remain; a new task gets no old actions.
+                session.snapshot = None
+        return prepared
+    if reference.get("provider") not in {"modal", "lambda"}:
         return prepared
     async with computer_timing(runtime.database, prepared.scope, "reuse", preparation=True) as timing:
         return await _prepare_workspace(runtime, prepared, reference, timing)
@@ -237,6 +251,18 @@ async def _prepare_workspace(
         session, turn = await locked_scope(database, db, scope, status="running")
         if json.loads(session.workspace or "null") != reference:
             raise PermissionError("The computer changed before preparation.")
+        from .maintenance_workspace import maintenance_workspace
+
+        held = maintenance_workspace(session.snapshot)
+        if held is not None:
+            # Stop can leave a valid maintenance image whose graph belongs to
+            # the stopped execution. A new task must neither consume it as an
+            # ordinary answer savepoint nor report that no backup exists.
+            code = "workspace_maintenance_capture_unverified" if held.phase == "capturing" else (
+                "workspace_maintenance_recovery_required"
+                if held.image_id and held.workspace == reference else "workspace_checkpoint_invalid"
+            )
+            raise preparation_blocked(code)
         preparation, revision = turn.preparation, session.revision
     async with asyncio.timeout(30):
         if reference["provider"] == "lambda":

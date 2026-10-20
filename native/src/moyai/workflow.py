@@ -47,7 +47,7 @@ with workflow.unsafe.imports_passed_through():
     from .input_identity import identified_prompt
     from .live_events import public_event_sink
     from .maintenance_workspace import VERSION as MAINTENANCE_WORKSPACE_VERSION
-    from .maintenance_workspace import MaintenanceResume
+    from .maintenance_workspace import MaintenanceResume, wait_reason
     from .product_continuation_errors import public_preparation_message
     from .product_drain import DRAIN_VERSION, DrainDecision
     from .request_limits import unlimited_model_requests
@@ -201,10 +201,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             except ActivityError as error:
                 if is_cancelled_exception(error):
                     raise asyncio.CancelledError from error
-                if (
-                    isinstance(error.cause, ApplicationError)
-                    and error.cause.type == "MoyaiHistoryAuthorizationDenied"
-                ):
+                if error.cause is None or wait_reason(error.cause) is None:
                     raise
                 workflow.logger.warning("Workspace capture is blocked; the settled graph remains waiting.")
             # A lease expiry or provider recovery need not change the maintenance
@@ -274,6 +271,7 @@ class TurnWorkflow(PydanticAIWorkflow):
     async def run(self, turn_id: str, handoff: HistoryHandoff | None = None) -> dict:
         prepared: PreparedTurn | None = None
         keepalive: asyncio.Task[None] | None = None
+        preserve_maintenance = False
         try:
             history_handoff = workflow.patched(HISTORY_VERSION)
             preserve_maintenance = workflow.patched(MAINTENANCE_WORKSPACE_VERSION) and history_handoff
@@ -555,7 +553,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                 "The agent could not complete this turn. "
                 "Inspect the saved activity before repeating a possibly completed action."
             )
-            if prepared is None and workflow.patched("moyai-public-preparation-errors-v1"):
+            if (prepared is None or preserve_maintenance) and workflow.patched("moyai-public-preparation-errors-v1"):
                 message = public_preparation_message(error) or message
             if prepared is not None and workflow.patched("moyai-failure-workspace-checkpoint-v1"):
                 # Capture before failure settlement clears active ownership. A

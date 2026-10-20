@@ -34,7 +34,7 @@ from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
-@pytest.mark.parametrize("refusal", ["none", "lease", "uncertain", "unpause"])
+@pytest.mark.parametrize("refusal", ["none", "lease", "uncertain", "unpause", "expired"])
 async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay(
     runtime, active, monkeypatch, refusal,
 ):
@@ -115,6 +115,8 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
         captures += 1
         capture_activities.append(activity.info().activity_type)
         attempted.set()
+        if refusal == "expired":
+            raise WorkspaceUnavailableError("The disposable source expired before capture.")
         if refusal == "uncertain":
             raise TimeoutError("The provider capture reply was lost.")
         if refusal == "unpause" and activity.info().activity_type == "moyai_save_maintenance_checkpoint_v1":
@@ -135,11 +137,22 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
     async def test_keepalive(scope: RunScope) -> Keepalive:
         return Keepalive(True, 60)
 
+    async def capture_available(_runtime, _reference):
+        nonlocal expired
+        if refusal == "expired":
+            # Expire at the settled capture boundary, after the persistent
+            # shell has finished reading its own status/output files.
+            expired = True
+            shutil.rmtree(old)
+            return False
+        return True
+
     monkeypatch.setattr(worker, "ACTIVITIES", [
         test_keepalive if item is keep_computer_alive else item for item in worker.ACTIVITIES
     ])
     monkeypatch.setattr(runtime.database.answers, "snapshots", SimpleNamespace(capture=capture))
     monkeypatch.setattr("moyai.maintenance_workspace.live_sandbox", AsyncMock(return_value=False))
+    monkeypatch.setattr("moyai.maintenance_workspace.capture_available", capture_available)
     monkeypatch.setattr("moyai.maintenance_workspace.restored_sandbox", restore)
     converter = encrypted_converter(runtime.security, runtime.objects)
     histories = []
@@ -162,6 +175,16 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
                         expires_at=int(time.time()) + 300,
                     ))
             release.set()
+            if refusal == "expired":
+                with pytest.raises(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), 30)
+                async with runtime.database.sessions() as db:
+                    failed = await db.get(Turn, turn.id)
+                    assert failed.status == "failed" and "verified checkpoint" in failed.error
+                    assert (await db.get(Session, session.id)).snapshot is None
+                assert "moyai_save_maintenance_checkpoint_v1" not in capture_activities
+                assert not restored.exists()
+                return
             if refusal == "uncertain":
                 await asyncio.wait_for(attempted.wait(), 30)
                 await asyncio.sleep(7)
@@ -169,6 +192,7 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
                 async with runtime.database.sessions() as db:
                     assert (await db.get(Turn, turn.id)).status == "running"
                     assert (await db.get(ProductDrainReceipt, (turn.id, 22))).phase == "blocked"
+                    assert "outcome is unknown" in (await db.get(Session, session.id)).save_warning
                 await handle.cancel()
                 with pytest.raises(WorkflowFailureError):
                     await asyncio.wait_for(handle.result(), 30)
@@ -199,6 +223,8 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
                 assert capture_activities == ["moyai_save_maintenance_checkpoint_v1", "moyai_save_computer_v1"]
                 assert old.joinpath("checkpoint-file.txt").read_text() == "preserved"
                 assert not restored.exists()
+                async with runtime.database.sessions() as db:
+                    assert (await db.get(Session, session.id)).save_warning is None
                 return
             async with asyncio.timeout(30):
                 while True:
