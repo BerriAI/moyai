@@ -19,8 +19,8 @@ from moyai import product_schema as product
 expansion = expansion_fixture
 product_database = product_database_fixture
 
-V23 = "2026-10-19-test-online-v23"
 V24 = "2026-10-19-test-online-v24"
+V25 = "2026-10-19-test-online-v25"
 NOTES = "moyai_online_test_notes"
 PG = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 
@@ -42,8 +42,8 @@ def later(metadata, schema):
 @pytest.fixture
 def registered(monkeypatch):
     steps = (
-        online.Expansion(online.TO_VERSION, V23, frozenset({NOTES}), (("moyai_sessions", "online_note"),), notes),
-        online.Expansion(V23, V24, frozenset(), ((NOTES, "reviewed"),), later),
+        online.Expansion(product.PRODUCT_SCHEMA_VERSION, V24, frozenset({NOTES}), (("moyai_sessions", "online_note"),), notes),
+        online.Expansion(V24, V25, frozenset(), ((NOTES, "reviewed"),), later),
     )
     monkeypatch.setattr(online, "EXPANSIONS", (*online.EXPANSIONS, *steps))
     return steps
@@ -65,9 +65,9 @@ def installed(registered, monkeypatch):
         Column("body", Text, nullable=False), Column("reviewed", Boolean, nullable=True),
         Index("moyai_online_test_notes_session", "session_id"),
     )
-    monkeypatch.setattr(product, "MIGRATIONS", (*product.MIGRATIONS, (V23, frozenset({NOTES})), (V24, frozenset())))
+    monkeypatch.setattr(product, "MIGRATIONS", (*product.MIGRATIONS, (V24, frozenset({NOTES})), (V25, frozenset())))
     monkeypatch.setattr(product, "COLUMN_MIGRATIONS", {
-        V23: frozenset({("moyai_sessions", "online_note")}), V24: frozenset({(NOTES, "reviewed")}),
+        V24: frozenset({("moyai_sessions", "online_note")}), V25: frozenset({(NOTES, "reviewed")}),
     })
     try:
         yield
@@ -77,30 +77,32 @@ def installed(registered, monkeypatch):
 
 
 def test_original_v22_plan_has_exact_historical_identity():
-    value = online.plan("moyai", "native_online", "native-q")
+    value = online.plan("moyai", "native_online", "native-q", to_version=online.TO_VERSION)
     assert value["digest"] == "2481c80e0f82eea6b84c88dcbcc032137f38f3d79b6cd5238a7fbebcbb227cbf"
-    assert online.plan("moyai", "moyai_product_authority_regression_execution_schema", "native-q")["digest"] == (
+    assert online.plan(
+        "moyai", "moyai_product_authority_regression_execution_schema", "native-q", to_version=online.TO_VERSION,
+    )["digest"] == (
         "84cd528a35a78db3c1b71e270871ef127a7c71f5fccfa443c3cb3914e8e4607d"
     )
 
 
 def test_frozen_prefixes_and_compiled_batches_are_stable(installed):
     inventories = online._inventory("native_online")
-    for version in (online.FROM_VERSION, online.TO_VERSION, V23, V24):
+    for version in (online.FROM_VERSION, online.TO_VERSION, product.PRODUCT_SCHEMA_VERSION, V24, V25):
         assert product._manifest(inventories[version]) == product._manifest(
             product.application_metadata("native_online", version=version),
         )
     legacy = online.plan("moyai", "native_online", "native-q", to_version=online.TO_VERSION)
     assert legacy["digest"] == "2481c80e0f82eea6b84c88dcbcc032137f38f3d79b6cd5238a7fbebcbb227cbf"
     value = online.plan("moyai", "native_online", "native-q")
-    assert value["to_version"] == V24
+    assert value["to_version"] == V25
     for _ in range(3):
         assert online.plan("moyai", "native_online", "native-q") == value
-    ddl = online._ddl(inventories[V24], online._steps(online.FROM_VERSION, V24))
+    ddl = online._ddl(inventories[V25], online._steps(online.FROM_VERSION, V25))
     assert sum("ADD COLUMN online_note" in item for item in ddl) == 1
     assert not any("ADD COLUMN reviewed" in item for item in ddl)  # Included in the batch's CREATE.
     assert "online_note" not in inventories[online.TO_VERSION].tables["native_online.moyai_sessions"].columns
-    assert "reviewed" not in inventories[V23].tables[f"native_online.{NOTES}"].columns
+    assert "reviewed" not in inventories[V24].tables[f"native_online.{NOTES}"].columns
 
 
 @pytest.mark.parametrize("dependency", ["index", "check"])
@@ -166,7 +168,7 @@ def test_semantic_verifier_rejects_edits_disguised_as_additions(monkeypatch, cha
         else:
             sessions._columns.remove(target)
 
-    step = online.Expansion(online.TO_VERSION, V23, frozenset(), (("moyai_sessions", "online_note"),), unsafe)
+    step = online.Expansion(product.PRODUCT_SCHEMA_VERSION, V24, frozenset(), (("moyai_sessions", "online_note"),), unsafe)
     monkeypatch.setattr(online, "EXPANSIONS", (*online.EXPANSIONS, step))
     with pytest.raises(online.OnlineSchemaError):
         online.plan("moyai", "native_online", "native-q")
@@ -190,14 +192,14 @@ def test_new_tables_do_not_admit_unknown_operations(monkeypatch, change):
         else:
             Index("unsafe", text("lower(body)"), _table=table)
     monkeypatch.setattr(online, "EXPANSIONS", (*online.EXPANSIONS, online.Expansion(
-        online.TO_VERSION, V23, frozenset({NOTES}), (), unsafe,
+        product.PRODUCT_SCHEMA_VERSION, V24, frozenset({NOTES}), (), unsafe,
     )))
     with pytest.raises(online.OnlineSchemaError):
         online.plan("moyai", "native_online", "native-q")
 
 
 def test_unregistered_gap_and_downgrade_are_never_planned(registered, monkeypatch):
-    for before, after in ((V24, V23), ("unknown", V24), (product.AUTHORITY_SCHEMA_VERSION, V24)):
+    for before, after in ((V25, V24), ("unknown", V25), (product.AUTHORITY_SCHEMA_VERSION, V25)):
         with pytest.raises(online.OnlineSchemaError):
             online.plan("moyai", "native_online", "native-q", from_version=before, to_version=after)
     monkeypatch.setattr(online, "EXPANSIONS", (online.EXPANSIONS[0], online.EXPANSIONS[2]))
@@ -206,9 +208,9 @@ def test_unregistered_gap_and_downgrade_are_never_planned(registered, monkeypatc
 
 
 def test_receipt_planner_requires_the_exact_contiguous_prefix(registered):
-    value = online.plan("moyai", "native_online", "native-q", from_version=V23)
+    value = online.plan("moyai", "native_online", "native-q", from_version=V24)
     assert online.plan_from_receipts("moyai", "native_online", "native-q", value["before"]["app"]) == value
-    for receipts in ({}, {V23: value["before"]["app"][V23]}, {**value["before"]["app"], "unknown": "f" * 64}):
+    for receipts in ({}, {V24: value["before"]["app"][V24]}, {**value["before"]["app"], "unknown": "f" * 64}):
         with pytest.raises(online.OnlineSchemaError):
             online.plan_from_receipts("moyai", "native_online", "native-q", receipts)
 
@@ -226,7 +228,9 @@ async def test_sequential_batches_preserve_original_native_and_online_receipts(e
     online.apply(connection, legacy, guard=lambda _: None)
     legacy_ledger = rows(connection, database.schema, online.LEDGER)
     batches = [legacy]
-    for before, after in ((online.TO_VERSION, V23), (V23, V24)):
+    for before, after in (
+        (online.TO_VERSION, product.PRODUCT_SCHEMA_VERSION), (product.PRODUCT_SCHEMA_VERSION, V24), (V24, V25),
+    ):
         value = online.plan("moyai", database.schema, "native-online-test", from_version=before, to_version=after)
         assert online.inspect(connection, value)["status"] == "planned"
         assert online.apply(connection, value, guard=lambda _: None)["status"] == "applied"
@@ -239,9 +243,9 @@ async def test_sequential_batches_preserve_original_native_and_online_receipts(e
         assert online.apply(connection, batch, guard=lambda _: None)["status"] == "already_applied"
     assert set(original) <= set(rows(connection, database.schema, product.RECEIPTS))
     assert rows(connection, database.schema, online.LEDGER)[0] == legacy_ledger[0]
-    assert len(rows(connection, database.schema, online.LEDGER)) == 3
+    assert len(rows(connection, database.schema, online.LEDGER)) == 4
     current = online.plan_from_receipts("moyai", database.schema, "native-online-test", value["target"]["app"])
-    assert current["from_version"] == current["to_version"] == V24
+    assert current["from_version"] == current["to_version"] == V25
     assert online.inspect(connection, current)["status"] == "current"
     before = rows(connection, database.schema, online.LEDGER)
     assert online.apply(connection, current, guard=lambda _: None)["status"] == "already_current"
@@ -258,7 +262,7 @@ async def test_sequential_batches_preserve_original_native_and_online_receipts(e
 
 
 @PG
-@pytest.mark.parametrize("target", [V23, V24])
+@pytest.mark.parametrize("target", [V24, V25])
 async def test_atomic_multi_step_receipts_and_rollback(expansion, registered, target):
     database, _, connection, _ = expansion
     value = online.plan("moyai", database.schema, "native-online-test", to_version=target)
@@ -292,10 +296,10 @@ async def test_historical_inspection_requires_an_exact_known_receipt_prefix(expa
         connection.execute(sql.SQL("INSERT INTO {}(version,manifest) VALUES('unknown',%s)").format(receipt_table),
                            ("f" * 64,))
     elif change == "gap":
-        connection.execute(sql.SQL("DELETE FROM {} WHERE version=%s").format(receipt_table), (V23,))
+        connection.execute(sql.SQL("DELETE FROM {} WHERE version=%s").format(receipt_table), (V24,))
     else:
         connection.execute(sql.SQL("UPDATE {} SET manifest=%s WHERE version=%s").format(receipt_table),
-                           ("f" * 64, V23))
+                           ("f" * 64, V24))
     saved = rows(connection, database.schema, online.LEDGER)
     current = rows(connection, database.schema, product.RECEIPTS)
     with pytest.raises(online.OnlineSchemaError, match="source_receipts_changed"):
@@ -309,9 +313,9 @@ async def test_historical_inspection_requires_an_exact_known_receipt_prefix(expa
 @PG
 async def test_offline_provisioned_current_noop_does_not_create_a_ledger(product_database, installed):
     database = product_database
-    await product.migrate_product_schema(database.source, schema=database.schema, source_schema="moyai", version=V24)
-    await product.verify_product_schema(database.source, schema=database.schema, version=V24)
-    value = online.plan("moyai", database.schema, "native-q", from_version=V24)
+    await product.migrate_product_schema(database.source, schema=database.schema, source_schema="moyai", version=V25)
+    await product.verify_product_schema(database.source, schema=database.schema, version=V25)
+    value = online.plan("moyai", database.schema, "native-q", from_version=V25)
     with psycopg.connect(database.settings.postgres_url, autocommit=True) as connection:
         # A read-only session proves there is no durable write, including a
         # hidden ledger/table initializer, even through the apply entrypoint.
@@ -325,7 +329,7 @@ async def test_offline_provisioned_current_noop_does_not_create_a_ledger(product
 async def test_nullable_addition_refuses_a_reader_without_queueing(expansion, registered):
     database, legacy, connection, dsn = expansion
     online.apply(connection, legacy, guard=lambda _: None)
-    value = online.plan("moyai", database.schema, "native-online-test", from_version=online.TO_VERSION, to_version=V23)
+    value = online.plan("moyai", database.schema, "native-online-test", from_version=online.TO_VERSION, to_version=V24)
     with psycopg.connect(dsn, autocommit=True) as reader, reader.transaction():
         reader.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(database.schema, "moyai_sessions")))
         with pytest.raises(online.OnlineSchemaError) as caught:
@@ -346,7 +350,7 @@ async def test_current_noop_rejects_drift_in_batches_or_added_structure(expansio
     online.apply(connection, value, guard=lambda _: None)
     ledger = sql.Identifier(database.schema, online.LEDGER)
     if change == "batch-row":
-        connection.execute(sql.SQL("DELETE FROM {} WHERE version=%s").format(ledger), (V23,))
+        connection.execute(sql.SQL("DELETE FROM {} WHERE version=%s").format(ledger), (V24,))
     elif change == "digest":
         connection.execute(sql.SQL("UPDATE {} SET plan_digest=%s").format(ledger), ("f" * 64,))
     elif change in {"scope", "queue"}:
@@ -377,7 +381,7 @@ async def test_current_noop_rejects_drift_in_batches_or_added_structure(expansio
             connection.execute(sql.SQL("CREATE INDEX changed ON {}(lower(online_note))").format(sessions))
         else:
             connection.execute(sql.SQL("ALTER TABLE {} ALTER COLUMN online_note SET NOT NULL").format(sessions))
-    current = online.plan("moyai", database.schema, "native-online-test", from_version=V24)
+    current = online.plan("moyai", database.schema, "native-online-test", from_version=V25)
     with pytest.raises(online.OnlineSchemaError):
         online.inspect(connection, current)
     with pytest.raises(online.OnlineSchemaError):
@@ -425,11 +429,11 @@ exec(body["engine"],engine.__dict__)
 scope=engine.__dict__
 scope.update(NOTES="moyai_online_test_notes")
 exec(body["definitions"],scope)
-v23,v24="2026-10-19-test-online-v23","2026-10-19-test-online-v24"
+v24,v25="2026-10-19-test-online-v24","2026-10-19-test-online-v25"
 engine.EXPANSIONS=(*engine.EXPANSIONS,
-    engine.Expansion(engine.TO_VERSION,v23,frozenset({scope["NOTES"]}),
+    engine.Expansion(engine.EXPANSIONS[-1].after,v24,frozenset({scope["NOTES"]}),
                      (("moyai_sessions","online_note"),),scope["notes"]),
-    engine.Expansion(v23,v24,frozenset(),((scope["NOTES"],"reviewed"),),scope["later"]))
+    engine.Expansion(v24,v25,frozenset(),((scope["NOTES"],"reviewed"),),scope["later"]))
 value=body["plan"]
 assert engine.plan(value["source_schema"],value["native_schema"],value["task_queue"])==value
 with psycopg.connect(body["dsn"],autocommit=True) as connection:
