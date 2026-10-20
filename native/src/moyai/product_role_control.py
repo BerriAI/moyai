@@ -90,6 +90,7 @@ class RoleControl:
             node = path.lstat()
             self.inode = node.st_dev, node.st_ino
             os.chmod(path, 0o600)
+            self._record_socket()
             # Own pathname cleanup under our lock, including on Python 3.13+
             # where asyncio otherwise removes the socket when closing.
             if sys.version_info >= (3, 13):
@@ -139,14 +140,32 @@ class RoleControl:
         ):
             raise ValueError("The control directory or lock changed during ownership.")
 
-    def _socket_node(self) -> os.stat_result:
+    def _socket_node(self, *, require_private: bool = True) -> os.stat_result:
         node = os.stat(self.path.name, dir_fd=self.directory_fd, follow_symlinks=False)
         if (
             not stat.S_ISSOCK(node.st_mode) or node.st_uid != os.geteuid()
-            or stat.S_IMODE(node.st_mode) & 0o077 or node.st_nlink != 1
+            or (require_private and stat.S_IMODE(node.st_mode) & 0o077) or node.st_nlink != 1
         ):
             raise ValueError("The control path must be a private, owner-owned socket.")
         return node
+
+    @staticmethod
+    def _socket_record(node: os.stat_result) -> bytes:
+        # Include ctime so an unrelated later socket cannot inherit a claim
+        # merely because the filesystem reused an old inode number.
+        return f"moyai-role-control-v1:{node.st_dev}:{node.st_ino}:{node.st_ctime_ns}\n".encode()
+
+    def _record_socket(self) -> None:
+        self._check_claim()
+        assert self.lock_fd is not None
+        node = self._socket_node()
+        if (node.st_dev, node.st_ino) != self.inode:
+            raise ValueError("The control socket changed before recording ownership.")
+        record = self._socket_record(node)
+        if os.pwrite(self.lock_fd, record, 0) != len(record):
+            raise OSError("The control socket ownership record was incomplete.")
+        os.ftruncate(self.lock_fd, len(record))
+        os.fsync(self.lock_fd)
 
     def _remove_orphan(self) -> None:
         self._check_claim()
@@ -154,9 +173,14 @@ class RoleControl:
             before = self._socket_node()
         except FileNotFoundError:
             return
-        # A legacy live listener may not hold our lock. Only a refused connect
-        # qualifies for cleanup; permission errors, timeouts and unknown errors
-        # retain the path. Do not send a command or change the old role's state.
+        assert self.lock_fd is not None
+        record = self._socket_record(before)
+        if os.pread(self.lock_fd, 256, 0) != record:
+            # Refusal alone cannot distinguish an orphan from a legacy process
+            # paused between bind and listen that does not hold our lock.
+            raise FileExistsError("The control socket has no matching ownership record.")
+        # Only a refused connect qualifies for cleanup; permission errors,
+        # timeouts and unknown errors retain the path. Never send a command.
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
             probe.settimeout(.25)
             try:
@@ -167,7 +191,7 @@ class RoleControl:
                 raise FileExistsError("The control socket already has a live listener.")
         self._check_claim()
         after = self._socket_node()
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        if self._socket_record(after) != record or os.pread(self.lock_fd, 256, 0) != record:
             raise ValueError("The control socket changed during orphan inspection.")
         os.unlink(self.path.name, dir_fd=self.directory_fd)
 
@@ -184,7 +208,9 @@ class RoleControl:
             return
         self._check_claim()
         try:
-            node = self._socket_node()
+            # This attempt captured the inode immediately after bind. It may
+            # still have umask permissions if chmod failed during startup.
+            node = self._socket_node(require_private=False)
         except (FileNotFoundError, ValueError):
             return
         if (node.st_dev, node.st_ino) == self.inode:

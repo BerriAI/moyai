@@ -25,10 +25,14 @@ def path():
         yield Path(directory) / "role.sock"
 
 
-def orphan(path):
+def orphan(path, *, recorded=True):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(path))
         path.chmod(0o600)
+    if recorded:
+        lock = path.with_name(path.name + ".lock")
+        lock.write_bytes(RoleControl._socket_record(path.lstat()))
+        lock.chmod(0o600)
     return path.lstat().st_ino
 
 
@@ -45,18 +49,45 @@ async def test_recovers_refused_socket_and_keeps_stable_lock_inode(path):
         assert path.with_name(path.name + ".lock").stat().st_ino == lock_inode
 
 
-async def test_preserves_legacy_live_listener_without_lock(path):
+@pytest.mark.parametrize("listening", [False, True])
+async def test_preserves_legacy_bound_socket_without_ownership_record(path, listening):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(path))
+        path.chmod(0o600)
+        if listening:
+            listener.listen()
+        inode = path.stat().st_ino
+        with pytest.raises(FileExistsError, match="ownership record"):
+            async with RoleControl(path, None):
+                pytest.fail("A legacy listener must survive.")
+        assert path.stat().st_ino == inode
+        if listening:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.connect(str(path))
+
+
+async def test_preserves_recorded_live_listener_even_without_held_lock(path):
+    # Defense in depth if a foreign process opens a recorded socket.
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(path))
         path.chmod(0o600)
         listener.listen()
+        lock = path.with_name(path.name + ".lock")
+        lock.write_bytes(RoleControl._socket_record(path.lstat()))
+        lock.chmod(0o600)
         inode = path.stat().st_ino
         with pytest.raises(FileExistsError, match="live listener"):
             async with RoleControl(path, None):
-                pytest.fail("A legacy listener must survive.")
+                pytest.fail("A listening socket must survive even with a matching record.")
         assert path.stat().st_ino == inode
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-            probe.connect(str(path))
+
+
+async def test_unrecorded_orphan_is_preserved(path):
+    inode = orphan(path, recorded=False)
+    with pytest.raises(FileExistsError, match="ownership record"):
+        async with RoleControl(path, None):
+            pytest.fail("A socket from an unknown producer cannot be reclaimed.")
+    assert path.stat().st_ino == inode
 
 
 @pytest.mark.parametrize("kind", ["regular", "symlink", "directory", "fifo"])
@@ -146,6 +177,7 @@ async def test_cleanup_preserves_replaced_path(path, kind):
 async def test_rejects_unsafe_lock_file_without_removing_orphan(path, kind):
     inode = orphan(path)
     lock = path.with_name(path.name + ".lock")
+    lock.unlink()
     if kind == "symlink":
         lock.symlink_to(path.with_name("absent"))
     elif kind == "shared":
@@ -178,13 +210,20 @@ async def test_changed_lock_inode_during_probe_preserves_orphan(path, monkeypatc
     assert path.stat().st_ino == inode
 
 
-async def test_startup_failure_releases_lock_and_owned_socket(path, monkeypatch):
+@pytest.mark.parametrize("stage", ["server", "chmod"])
+async def test_startup_failure_releases_lock_and_owned_socket(path, monkeypatch, stage):
     async def fail(*args, **kwargs):
         raise RuntimeError("server failed")
 
+    def chmod_failed(*args, **kwargs):
+        raise PermissionError("chmod failed")
+
     with monkeypatch.context() as patch:
-        patch.setattr(asyncio, "start_unix_server", fail)
-        with pytest.raises(RuntimeError, match="server failed"):
+        if stage == "server":
+            patch.setattr(asyncio, "start_unix_server", fail)
+        else:
+            patch.setattr(os, "chmod", chmod_failed)
+        with pytest.raises((RuntimeError, PermissionError), match="failed"):
             async with RoleControl(path, None):
                 pytest.fail("Startup must fail.")
     assert not path.exists()
