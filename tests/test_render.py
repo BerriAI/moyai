@@ -42,6 +42,7 @@ def test_render_uses_its_own_origin_and_disk_not_modal_proxy(monkeypatch):
 
 def test_render_lets_the_app_resolve_forwarded_clients(monkeypatch):
     import os
+
     import render_start
     # main() configures the process environment; keep it from leaking into other tests.
     monkeypatch.setattr(os, "environ", dict(os.environ))
@@ -62,11 +63,69 @@ def test_staging_cannot_accept_work_or_slack_events():
         assert client.post("/api/runs", json={"prompt":"Do work"}).status_code == 503
 
 
+@pytest.mark.parametrize("name,value", [
+    ("MOYAI_MAINTENANCE_TOKEN", "mistyped-token"),
+    ("MOYAI_MAINTENANCE_TOKEN", ""),
+    ("MOYAI_BUILD_SHA", "not-a-build"),
+    ("RENDER_SERVICE_ID", ""),
+    ("RENDER_SERVICE_ID", "s" * 201),
+    ("MOYAI_RUNTIME_ROLE", "standalone"),
+])
+def test_invalid_activation_identity_keeps_maintenance_available(monkeypatch, tmp_path, caplog, name, value):
+    import os
+
+    from fastapi.testclient import TestClient
+
+    import render_start
+
+    monkeypatch.setattr(os, "environ", {
+        "MOYAI_CORE": "pydantic", "MOYAI_PUBLIC_URL": "https://moyai.example",
+        "RENDER_MIGRATION_STAGE": "true", "MOYAI_BUILD_SHA": "a" * 40,
+        "MOYAI_RUNTIME_ROLE": "api", "RENDER_SERVICE_ID": "srv-local",
+        "MOYAI_MAINTENANCE_TOKEN": "c" * 32,
+        "MOYAI_MAINTENANCE_SOCKET": str(tmp_path / "control.sock"), name: value,
+    })
+    monkeypatch.setattr(render_start, "apply_maintenance_activation",
+                        lambda: pytest.fail("Invalid identity attempted receipt recovery."))
+    def serve(server):
+        with TestClient(server.config.app) as client:
+            assert client.get("/health").json() == {"status": "ok", "mode": "migration_staging"}
+            assert client.get("/").status_code == 503
+            assert client.post("/api/runs", json={"prompt": "Do work"}).status_code == 503
+    monkeypatch.setattr(render_start.uvicorn.Server, "run", serve)
+    render_start.main()
+    assert os.environ["RENDER_MIGRATION_STAGE"] == "true"
+    assert not (tmp_path / "control.sock").exists()
+    assert "mistyped-token" not in caplog.text
+    assert "c" * 32 not in caplog.text
+
+
+def test_valid_staging_identity_does_not_hide_receipt_recovery_errors(monkeypatch):
+    import os
+
+    import render_start
+
+    monkeypatch.setattr(os, "environ", {
+        "MOYAI_CORE": "pydantic", "MOYAI_PUBLIC_URL": "https://moyai.example",
+        "RENDER_MIGRATION_STAGE": "true", "MOYAI_BUILD_SHA": "a" * 40,
+        "MOYAI_RUNTIME_ROLE": "api", "RENDER_SERVICE_ID": "srv-local",
+        "MOYAI_MAINTENANCE_TOKEN": "c" * 32,
+    })
+    def reject():
+        raise ValueError("Receipt belongs to another staging attempt.")
+    monkeypatch.setattr(render_start, "apply_maintenance_activation", reject)
+    monkeypatch.setattr(render_start.uvicorn.Server, "run",
+                        lambda _: pytest.fail("Unverified receipt started a listener."))
+    with pytest.raises(ValueError, match="another staging attempt"):
+        render_start.main()
+
+
 @pytest.mark.parametrize('render_origin', ['', 'https://old.onrender.com'])
 def test_explicit_custom_origin_supports_private_render_service(monkeypatch, render_origin):
     import os
-    from docker_start import server_command
+
     from docker_healthcheck import health_request
+    from docker_start import server_command
     monkeypatch.setenv('RENDER_SERVICE_ID', 'srv-test')
     monkeypatch.setenv('RENDER_EXTERNAL_URL', render_origin)
     monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example/')
