@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import shutil
 from pathlib import Path
 
 import product_database_fixtures as database_fixtures
+import pytest
 import pytest_asyncio
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -18,6 +20,15 @@ from moyai.settings import Settings
 
 prepared_product_database = database_fixtures.prepared_product_database
 product_database_template = database_fixtures.product_database_template
+
+
+@pytest.fixture(autouse=True)
+def collect_test_cycles():
+    yield
+    # Release cycles from closed runtimes after the other fixtures tear down.
+    # Otherwise a later Temporal activation can pay for many earlier tests'
+    # garbage collection and exceed the SDK's two-second deadlock watchdog.
+    gc.collect()
 
 
 @pytest_asyncio.fixture
