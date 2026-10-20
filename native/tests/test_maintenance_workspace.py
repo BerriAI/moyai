@@ -606,7 +606,7 @@ async def test_known_image_cannot_be_published_under_changed_product_binding(mai
     from moyai import maintenance_workspace as module
 
     case = maintenance
-    monkeypatch.setattr(case.runtime, "product", SimpleNamespace())
+    monkeypatch.setattr(case.runtime, "product", SimpleNamespace(close=AsyncMock()))
     binding = AsyncMock(return_value=("original-context", "original-manifest"))
     monkeypatch.setattr(module, "product_bindings", binding)
     record = module.record_capture
