@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import test_product_automations as fixtures
 from fastapi import HTTPException
+from pydantic_ai.exceptions import ToolFailed
 from sqlalchemy import select, text, update
 
 from moyai.models import Effect, ProductTurnAuthority, Session
@@ -54,7 +55,10 @@ async def mapped_slack(ctx):
     return await fixtures.tool_context(ctx, actor=actor, surface="slack")
 
 
-async def test_mapped_direct_slack_retains_raw_effect_and_captures_canonical_owner(automations, canonical_connections):
+@pytest.mark.parametrize("destination", [None, "new_chat"])
+async def test_mapped_direct_slack_retains_raw_effect_and_captures_canonical_owner(
+    automations, canonical_connections, destination,
+):
     ctx = automations
     caller = await mapped_slack(ctx)
     principal = await ctx.service.authorize_tool(caller.deps, caller.run_id)
@@ -62,8 +66,16 @@ async def test_mapped_direct_slack_retains_raw_effect_and_captures_canonical_own
     assert caller.deps.product_grant.user_id == "slack:TTEST0001:UTEST0001"
     create = CreateRequest(
         revision=0, request_key="slack-create-owner", turn_id=caller.deps.turn_id, definition=fixtures.definition(),
+        **({"destination": destination} if destination else {}),
     )
     tools, selected, receipt = await fixtures.reserved_call(ctx, caller, "automation_create", create)
+    if destination is None:
+        with pytest.raises(ToolFailed, match="refused before dispatch"):
+            await tools.call_tool("automation_create", {"request": create}, caller, selected)
+        async with ctx.product.database.sessions() as db:
+            assert (await db.get(Effect, receipt)).state == "not_dispatched"
+            assert await db.scalar(text("SELECT count(*) FROM moyai.automations")) == 0
+        return
     row = await tools.call_tool("automation_create", {"request": create}, caller, selected)
     assert (await ctx.service.preview(principal.grant, row["id"]))["owner_id"] == ctx.grant.user_id
     caller.tool_call_id = "migrate-captured-owner"
