@@ -52,8 +52,11 @@ async def slack_parent(product):
     actor = await database.user(principal.id)
     actor.product_grant = principal.grant
     parent = await database.create_session(actor, NewSession(visibility="shared"))
+    async def installation_in(db):
+        assert db.in_transaction()
+        return {"team_id": "TLOCAL001", "authority": "a" * 64}
     slack = SimpleNamespace(runtime=SimpleNamespace(database=database),
-                            installation=lambda: {"team_id": "TLOCAL001", "authority": "a" * 64})
+                            installation_in=installation_in)
     database.slack_access = lambda db, current, viewer: can_read(slack, db, current, viewer)
     async with database.sessions.begin() as db:
         (await db.get(Session, parent.id)).surface = "slack"

@@ -715,8 +715,11 @@ async def bind_slack_test_session(database, session_id, actor):
     """A synthetic signed DM with real product identity and audience enforcement."""
     from moyai.product_slack_models import ProductSlackBinding
     from moyai.slack_audience import can_read
+    async def installation_in(db):
+        assert db.in_transaction()
+        return {"team_id": "TTEST0001", "authority": "a" * 64}
     slack = SimpleNamespace(runtime=SimpleNamespace(database=database),
-                            installation=lambda: {"team_id": "TTEST0001", "authority": "a" * 64})
+                            installation_in=installation_in)
     database.slack_access = lambda db, session, viewer: can_read(slack, db, session, viewer)
     async with database.sessions.begin() as db:
         db.add(ProductSlackBinding(session_id=session_id, requester_id=actor.id, team_id="TTEST0001",
