@@ -20,6 +20,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
+from .product_identity import ProductAuthorityBusy
+
 SOURCE_FORMAT = "moyai-product-v1"
 MAX_PAGE = 100
 MAX_OFFSET = 10_000
@@ -310,6 +312,8 @@ class ProductHistoryAdapter:
                 await prepare_history_query(conn)
                 # No commit, DDL, bootstrap or migration, including on SQLite.
                 yield conn
+        except ProductAuthorityBusy:
+            raise
         except (SQLAlchemyError, TimeoutError):
             raise HTTPException(503, "Existing product history is unavailable; check its database/schema.") from None
 

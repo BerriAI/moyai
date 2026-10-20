@@ -64,6 +64,100 @@ async def test_ignored_session_query_does_not_add_an_authorization_scope(audienc
     assert product.state["calls"] == []
 
 
+@pytest.mark.parametrize("deleted", [False, True])
+async def test_session_listing_keeps_its_prefetched_candidate_set(audience, deleted):
+    from moyai.models import Session
+    from moyai.product_slack_models import ProductSlackBinding
+
+    product = audience
+    async with product.database.sessions.begin() as db:
+        (await db.get(Session, product.session_id)).deleted = deleted
+    original = product.database.slack_prefetch
+    added_id = None
+
+    async def insert_after_prefetch(actor, ids, *, deleted=False):
+        nonlocal added_id
+        await original(actor, ids, deleted=deleted)
+        product.database.slack_prefetch = original
+        # Another request admits a differently bound Slack session while this
+        # listing is waiting for provider evidence for its planned rows.
+        async with product.database.sessions.begin() as db:
+            added = Session(
+                owner_id=actor.id, title="Newly ranked Slack task", visibility="shared",
+                surface="slack", deleted=deleted, updated_at="9999", model=product.settings.default_model,
+            )
+            db.add(added)
+            await db.flush()
+            added_id = added.id
+            db.add(ProductSlackBinding(
+                session_id=added.id, requester_id=actor.id, team_id="TLOCAL001",
+                channel_id="GNEWCHANNEL", thread_ts="1792255800.001", started_ts="1792255800.001",
+                connection_authority="a" * 64,
+            ))
+
+    product.database.slack_prefetch = insert_after_prefetch
+    rows = await product.database.list_sessions(product.actor, deleted=deleted)
+    assert [row.id for row in rows] == [product.session_id]
+    # The next request plans and prepares the new audience normally.
+    rows = await product.database.list_sessions(product.actor, deleted=deleted)
+    assert {row.id for row in rows} == {product.session_id, added_id}
+
+
+@pytest.mark.parametrize("source", ["native", "all"])
+async def test_busy_history_returns_retryable_authority_error(audience, read_product, source):
+    import httpx
+
+    from moyai.api import create_app
+
+    product = audience
+    runtime = read_product.runtime
+    # This identity fixture has native history, not a legacy transcript schema.
+    # Exercise both native-only and combined-source error handling with the
+    # optional legacy source disabled, as supported by the real router.
+    runtime.product_history = runtime.product_continuations = None
+    app = create_app(runtime, run_dispatcher=False)
+    runtime.product_slack = product.slack
+    async with product.database.engine.begin() as db:
+        await db.execute(text("SET lock_timeout='100ms'"))
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=read_product.client.base_url,
+            cookies=read_product.client.cookies,
+        ) as client:
+            assert (await client.get("/api/history/sessions", params={"source": source})).status_code == 200
+            async with product.source.begin() as writer:
+                await writer.execute(text(
+                    "SELECT pg_advisory_xact_lock(726941,'moyai'::regnamespace::oid::int)",
+                ))
+                response = await client.get("/api/history/sessions", params={"source": source})
+                assert response.status_code == 503
+                assert response.headers.get("retry-after") == "1"
+                assert response.headers["cache-control"] == "no-store"
+                assert response.json() == {"detail": "Account access is busy. Try again shortly."}
+    finally:
+        async with product.database.engine.begin() as db:
+            await db.execute(text("SET lock_timeout=0"))
+
+
+async def test_legacy_read_preserves_exact_canonical_gate_contention(read_product):
+    from moyai.product_identity import ProductAuthorityBusy
+
+    database = read_product.runtime.database
+    async with database.engine.begin() as db:
+        await db.execute(text("SET lock_timeout='100ms'"))
+    try:
+        async with read_product.writer.begin() as writer:
+            await writer.execute(text(
+                "SELECT pg_advisory_xact_lock(726941,'moyai'::regnamespace::oid::int)",
+            ))
+            with pytest.raises(ProductAuthorityBusy):
+                async with read_product.runtime.product_history.read(), database.sessions.begin() as db:
+                    await read_product.identity.authorize_admission(db, read_product.principal.grant)
+    finally:
+        async with database.engine.begin() as db:
+            await db.execute(text("SET lock_timeout=0"))
+
+
 @pytest.mark.parametrize("operation", ["messages", "search"])
 async def test_audience_releases_gate_before_queued_writer_and_token_refresh(audience, operation):
     product = audience

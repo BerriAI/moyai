@@ -40,6 +40,7 @@ from .product_history import (
     prepare_history_query,
 )
 from .product_history import routes as legacy_routes
+from .product_identity import ProductAuthorityBusy
 from .swarm_models import SwarmMember
 
 if TYPE_CHECKING:
@@ -569,6 +570,8 @@ class ProductReadService:
                 pages[selected], states[selected] = page, "available"
                 if page.get("notice"):
                     notices.append(page["notice"])
+            except ProductAuthorityBusy:
+                raise
             except (HTTPException, SQLAlchemyError, TimeoutError) as exc:
                 if isinstance(exc, HTTPException) and exc.status_code < 500:
                     raise
@@ -624,6 +627,8 @@ class ProductReadService:
             try:
                 async with asyncio.timeout(3):
                     ancestors = await self.native_ancestors(reader, chosen, archived=archived, scope=scope)
+            except ProductAuthorityBusy:
+                raise
             except (SQLAlchemyError, TimeoutError):
                 notices.append("Some parent conversations are temporarily unavailable. Refresh to retry.")
             valid = await self.native_recheck(reader, [row["id"] for row in chosen if row["source"] == "native"])
