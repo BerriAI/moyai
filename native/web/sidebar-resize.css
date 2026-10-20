@@ -1,0 +1,10 @@
+@media (min-width: 601px) {
+  .app:not(.settings-open):not(.sidebar-collapsed) { grid-template-columns: var(--sidebar-width, 240px) minmax(0, 1fr); }
+  .app > .sidebar { position: relative; min-width: 0; }
+  .sidebar-resize-handle { position: absolute; z-index: 40; inset: 0 -4px 0 auto; width: 8px; cursor: col-resize; touch-action: none; user-select: none; }
+  .sidebar-resize-handle::before { content: ""; position: absolute; inset: 0 3px; background: transparent; }
+  .sidebar-resize-handle:is(:hover, :focus-visible, .dragging)::before { background: var(--ui-primary); }
+  .sidebar-resize-handle:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
+}
+.sidebar-resize-shield { position: fixed; inset: 0; z-index: 9999; cursor: col-resize; user-select: none; }
+@media (max-width: 600px) { .sidebar-resize-handle { display: none; } }

@@ -54,6 +54,23 @@ Without the test database environment, PostgreSQL cases skip. A passing local
 SQLite-only run is not full qualification. Native tests may download Temporal
 binaries and take around 15 minutes; avoid editing runtime code during a full run.
 
+## README composer screenshots
+
+The browser fixture renders the real frontend with synthetic accounts, sessions,
+and model labels. It fills an unsent draft and widens the sidebar using its
+keyboard control. Regenerate both theme variants from the repository root:
+
+```sh
+MOYAI_README_CAPTURE_DIR=docs/assets/native node --test \
+  --test-name-pattern='README composer demo' tests/browser/native_product_shell.cjs
+```
+
+Captures are 2560 × 1600 PNGs (1280 × 800 CSS pixels at 2×). The capture waits for
+fonts and fails if General Sans did not load, rather than silently saving a
+fallback-font image. Fontshare must be reachable. Inspect both images at README
+size before committing. These images demonstrate presentation, not live model
+or connected-service execution.
+
 ## Frontend and image
 
 ```sh

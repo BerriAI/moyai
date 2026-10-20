@@ -2,6 +2,15 @@
 
 [Install Moyai](../README.md#run-locally) · [Documentation](README.md)
 
+## Resize the session sidebar
+
+On desktop, drag the right edge of the left session sidebar to change its width.
+Focus the divider and use Left/Right arrows for 10px steps, or Shift+Left/Right
+for 40px steps. Home/End select the limits; Enter or double-click restores the
+default. Escape cancels a drag. Closing and reopening the sidebar keeps its
+width in the current view; switching conversations or choosing **New session**
+resets it. Mobile navigation remains an overlay. Right-hand panels are unchanged.
+
 ## Goals
 
 `/goal` is a native Moyai command available out of the box in ordinary web chats.
