@@ -504,6 +504,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             reference = (await ProductReadService(runtime).detail(
                 Reader(user, request.state.product_principal), session_id, "native",
             ))["session"]
+        await runtime.database.prefetch_session_audiences(user, [session_id])
         async with runtime.database.sessions() as db:
             row = await runtime.database.allowed_session(db, session_id, user, metadata_only=True)
             # Only a waiting conversation needs its private checkpoint to render

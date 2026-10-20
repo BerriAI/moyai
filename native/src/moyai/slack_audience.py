@@ -162,6 +162,7 @@ async def prefetch_context(slack, context: AudienceContext) -> None:
 
 async def prefetch_sessions(slack, actor, ids: list[str], *, deleted: bool = False) -> None:
     """Resolve a bounded page and inherited audiences before any provider await."""
+    from .database import SESSION_METADATA
     from .delegation_models import DelegatedSession
     from .models import Session
     from .swarm_models import SwarmMember
@@ -178,7 +179,7 @@ async def prefetch_sessions(slack, actor, ids: list[str], *, deleted: bool = Fal
         )))
         pending = set()
         for session_id in candidates:
-            session = await db.get(Session, session_id)
+            session = await db.get(Session, session_id, options=SESSION_METADATA)
             if session is None:
                 continue
             try:
@@ -186,7 +187,7 @@ async def prefetch_sessions(slack, actor, ids: list[str], *, deleted: bool = Fal
                     if not await database.same_person(db, actor, session.owner_id):
                         continue
                 else:
-                    await database.execution_session(db, session_id, actor)
+                    await database.execution_session(db, session_id, actor, metadata_only=True)
             except HTTPException as error:
                 if error.status_code != 404:
                     raise
@@ -199,7 +200,7 @@ async def prefetch_sessions(slack, actor, ids: list[str], *, deleted: bool = Fal
             following: set[str] = set()
             for session_id in pending - seen:
                 seen.add(session_id)
-                session = await db.get(Session, session_id)
+                session = await db.get(Session, session_id, options=SESSION_METADATA)
                 if session is None:
                     continue
                 delegation = await db.get(DelegatedSession, session_id)

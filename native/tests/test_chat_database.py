@@ -1,6 +1,7 @@
 """Native chat reads over disposable PostgreSQL and deterministic Slack membership."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ import httpx
 import pytest
 import pytest_asyncio
 import test_slack_audience as fixtures
+from fastapi import APIRouter
 from sqlalchemy import event, select, text, update
 from test_product_identity import google_cookie
 
@@ -38,6 +40,8 @@ async def chat_product(audience):
     await runtime.database.close()
     runtime.database = product.database
     runtime.product_identity = product.adapter
+    product.slack.routes = APIRouter
+    runtime.product_slack = product.slack
     runtime.security = product.database.security
     # Fixtures create a unique disposable database and reject remote hosts.
     await runtime.stores.start(provision=True)
@@ -224,6 +228,42 @@ async def test_waiting_chat_that_finishes_during_authorization_has_no_stale_ques
     assert not response.json().get('pending') and not response.json().get('can_answer')
 
 
+@pytest.mark.parametrize('suffix', ['?resolve=true&include_activity=false&include_messages=true', '/workspace'])
+async def test_cold_chat_audience_does_not_hold_the_canonical_gate(chat_product, suffix):
+    product = chat_product
+    session_id = await seed_chat(product, turns=1, linked=True)
+    await seed_context(product, session_id)
+    product.slack.audience_reads.snapshots.clear()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_token():
+        entered.set()
+        await release.wait()
+        return 'synthetic-membership-token'
+
+    product.slack.connectors.slack_bot_token = slow_token
+    app = create_app(product.runtime, run_dispatcher=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test',
+                                cookies={'workspace_session': product.cookie}) as client:
+        read = asyncio.create_task(client.get(f'/api/sessions/{session_id}' + suffix))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            # A real exclusive writer must acquire the gate while this HTTP
+            # request awaits Slack. Narrow projections must preserve #637's boundary.
+            async with product.source.begin() as writer:
+                await writer.execute(text("SET LOCAL lock_timeout='1s'"))
+                await writer.execute(text("SELECT pg_advisory_xact_lock(726941,'moyai'::regnamespace::oid::int)"))
+                assert not read.done()
+            release.set()
+            response = await asyncio.wait_for(read, 3)
+            assert response.status_code == 200, response.text
+        finally:
+            release.set()
+            if not read.done():
+                read.cancel()
+            await asyncio.gather(read, return_exceptions=True)
+
+
 async def test_mixed_authors_and_transcript_pagination(chat_product):
     product = chat_product
     session_id = await seed_chat(product, turns=110, linked=True)
@@ -316,10 +356,10 @@ async def test_chat_relationship_and_access_are_fresh_on_next_read(chat_product,
 
 def baseline_app(monkeypatch, tmp_path, product):
     """Load exact original routes for opt-in comparison, without editing checkout files."""
-    base = '1b9c1a2d5f78fd90f79c54867e068a208f5a512a'
+    base = 'a4342e469aebdad0399dc167b70aa3f15016fdb3'
     root = Path(__file__).resolve().parents[2]
     modules = {}
-    for name in ('database', 'product_routes', 'history_handoff', 'workspace', 'api'):
+    for name in ('database', 'product_routes', 'slack_audience', 'history_handoff', 'workspace', 'api'):
         path = f'native/src/moyai/{name}.py'
         source = subprocess.check_output(['git', 'show', f'{base}:{path}'], cwd=root, text=True)
         saved = tmp_path / f'{name}.py'
@@ -331,6 +371,7 @@ def baseline_app(monkeypatch, tmp_path, product):
         spec.loader.exec_module(module)
         modules[name] = module
     monkeypatch.setitem(sys.modules, 'moyai.product_routes', modules['product_routes'])
+    monkeypatch.setattr(fixtures, 'prefetch_sessions', modules['slack_audience'].prefetch_sessions)
     monkeypatch.setattr('moyai.history_handoff.turn_run_ids', modules['history_handoff'].turn_run_ids)
     for name in ('allowed_session', 'execution_session', 'check_source_audience', 'session', 'messages'):
         monkeypatch.setattr(type(product.database), name, getattr(modules['database'].Database, name))
