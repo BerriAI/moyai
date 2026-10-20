@@ -296,8 +296,8 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
           placements.get(row)?.key === folder.id).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))), folder))}
         {legacyFolders.map(folder => section(`history-folder:${folder.key}`, folder.name, <Folder size={15} />, sessions.filter(row =>
           sessionIsReadOnly(row) && !row.pinned && `${row.source ?? "native"}:${row.folder_id ?? row.folder}` === folder.key)))}
-        {section("recent", "Recent", <Clock3 size={15} />, unfiled.filter(row => sessionCreatedByMe(row, userId)))}
         {section("participated", "Participated", <Users size={15} />, unfiled.filter(row => row.participated && !sessionCreatedByMe(row, userId)))}
+        {section("recent", "Recent", <Clock3 size={15} />, unfiled.filter(row => sessionCreatedByMe(row, userId)))}
       </>}
       {notice && <p className="empty-rail muted" role="status">{notice}</p>}
       {hasMore && onLoadMore && <Button className="sidebar-load-more" variant="ghost" disabled={loading} onClick={onLoadMore}>{loading ? "Loading…" : "Show more sessions"}</Button>}

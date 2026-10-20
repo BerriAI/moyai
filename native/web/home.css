@@ -21,6 +21,14 @@
 .home-composer .send-actions [data-slot="select-trigger"] { width: auto; max-width: 230px; background: transparent; border: 0; font: 10px/1.5 var(--ui-font-mono); color: var(--ui-foreground); }
 .home-composer-hint { display: flex; justify-content: flex-end; gap: 12px; color: var(--ui-muted); font-size: 11px; line-height: 1.5; margin: 10px 0 0; }
 .home-composer-hint [role="status"] { margin-right: auto; }
+.home-recent { margin-top: 24px; }
+.home-recent-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.home-recent h2 { margin: 0; font-size: 12px; font-weight: 500; }
+.home-recent-header button, .home-recent > p { font-size: 11px; }
+.home-recent ul { list-style: none; padding: 0; margin: 4px 0 0; }
+.home-recent .home-recent-link { display: flex; justify-content: flex-start; width: 100%; min-width: 0; height: 36px; gap: 12px; padding: 6px 10px; font-size: 12px; font-weight: 400; }
+.home-recent-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-recent-link svg:last-child { margin-left: auto; }
 .home-starters { display: grid; gap: 2px; margin-top: 30px; }
 .home-starters[aria-hidden="true"] { visibility: hidden; }
 .home-starters-heading { margin: 0 0 8px; color: var(--ui-foreground); font-size: 11px; line-height: 1.5; }
@@ -45,6 +53,7 @@
   .home-composer .send-actions > button { width: 44px; height: 44px; }
   .home-composer .send-actions [data-slot="select-trigger"] { max-width: 160px; font-size: 12px !important; }
   .home-composer-hint { flex-wrap: wrap; justify-content: flex-start; }
+  .home-recent .home-recent-link { min-height: 44px; }
   .home-starters { margin-top: 24px; }
   .home-starters > button { min-height: 44px; gap: 8px; }
   .home-starter-detail { display: none; }

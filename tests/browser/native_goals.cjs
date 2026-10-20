@@ -24,7 +24,7 @@ function Fixture() {
   const [goal,setGoal] = useState(initial), [open,setOpen] = useState(false), [draft,setDraft] = useState(''), [goalMode,setGoalMode] = useState(false);
   window.goalFixture = {setGoal};
   const command = value => { window.goalCommand = value; };
-  if(location.search.includes('home')) return <Home models={['test-model']} defaultModel="test-model"
+  if(location.search.includes('home')) return <Home recentSessions={[]} recentLoading={false} onSearchSessions={() => {}} models={['test-model']} defaultModel="test-model"
     preferences={{delivery_mode:'when_idle',connection_ids:location.search.includes('accounts')?['team']:[]}}
     onStarted={value=>{window.startedConversation=value;}}
     onCreated={async()=>{if(location.search.includes('refreshFailure'))throw new Error('List unavailable.');}} />;

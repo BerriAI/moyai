@@ -31,6 +31,7 @@ import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { SessionTitle } from "./session-title"
+import { sessionCreatedByMe } from "./sidebar-drag"
 import { useSessionUpdates } from "./use-session-updates"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
@@ -214,7 +215,7 @@ function App() {
       let cursor: string | null = null, hasMore = false
       for (let page = 0; page < sessionPageCount; page++) {
         const { data: next }: { data: HistorySessionList } = await listHistorySessions({ query: {
-          source: "all", scope: "mine", limit: 100, archived: listView === "archived", deleted: listView === "deleted", cursor: cursor ?? undefined,
+          source: "all", scope: "mine", limit: 20, archived: listView === "archived", deleted: listView === "deleted", cursor: cursor ?? undefined,
         }, signal })
         if (signal?.aborted || version !== refreshVersion.current || listViewRef.current !== listView) return null
         for (const row of next.sessions.map(item => historyRow(item))) {
@@ -379,6 +380,11 @@ function App() {
         : selected
         ? <div className="center" role={routeError ? "alert" : "status"}>{routeError || "Opening conversation…"}{routeError && <Button variant="outline" onClick={() => setRouteRevision(value => value + 1)}>Retry</Button>}</div>
         : <Home initiallyPrivate={startPrivate} preferences={me.preferences} models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
+          recentSessions={listView === "active" ? sessions.map(row => sessionUpdates.apply(row))
+            .filter(row => sessionCreatedByMe(row, me.user.id) && !row.parent_session_id && !row.archived && !row.deleted)
+            .sort((a, b) => (Date.parse(b.updated_at ?? "") || 0) - (Date.parse(a.updated_at ?? "") || 0)).slice(0, 5)
+            .map(row => ({ key: sessionKey(row), title: row.title, href: `#${sessionReferenceHash(row)}` })) : []}
+          recentLoading={!inventoryState.loaded && inventoryState.loading} onSearchSessions={() => setPaletteOpen(true)}
           onStarted={value => { setInitialConversation({ scope: scopeKey, value }); setSelected(value.session.id); location.hash = value.session.id }} />}
     </main>
     <AppCommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} scopeKey={`${scopeKey}:${selected}`} role={me.user.role} productMode={me.product_mode}
