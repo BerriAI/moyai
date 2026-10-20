@@ -2,7 +2,9 @@
 import asyncio
 import logging
 import os
+import re
 import signal
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,7 +13,6 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
-
 maintenance = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 LISTENER_GRACE_SECONDS = 30
 API_GRACEFUL_SHUTDOWN_SECONDS = 240
@@ -19,6 +20,22 @@ BROKER_GRACEFUL_SHUTDOWN_SECONDS = 240
 NATIVE_WORKER_GRACEFUL_SHUTDOWN_SECONDS = 240
 ROLE_CONTROL_PROTOCOL = "moyai-role-drain-v1"
 ROLE_CONTROL_SOCKET = "/tmp/moyai-release/control.sock"
+MAINTENANCE_ACTIVATION_PROTOCOL = "moyai-maintenance-activation-v1"
+
+
+def apply_maintenance_activation():
+    from moyai.maintenance_activation import apply_accepted_activation
+    return apply_accepted_activation()
+
+
+class StagingServer(uvicorn.Server):
+    """Exit the maintenance listener for activation, unless the provider is stopping it."""
+
+    externally_stopped = False
+
+    def handle_exit(self, sig, frame):
+        self.externally_stopped = True
+        super().handle_exit(sig, frame)
 
 
 class RenderOverlapServer(uvicorn.Server):
@@ -75,6 +92,10 @@ class RenderOverlapServer(uvicorn.Server):
         await super().shutdown(sockets=sockets)
 
 
+class StagingOverlapServer(StagingServer, RenderOverlapServer):
+    """Preserve provider shutdown handoff; activation itself requests no signal grace."""
+
+
 @maintenance.get("/health")
 def health():
     return {"status": "ok", "mode": "migration_staging"}
@@ -120,9 +141,11 @@ def main():
     from docker_start import selected_core
     selected_core()
     configure_environment()
+    activation_receipt = apply_maintenance_activation()
     stage = os.environ.get("RENDER_MIGRATION_STAGE", "true").lower()
     if stage not in {"true", "false"}:
         raise RuntimeError("RENDER_MIGRATION_STAGE must be true or false.")
+    host = "127.0.0.1" if os.environ.get("MOYAI_PRODUCT_LOCAL_REHEARSAL") == "true" else "0.0.0.0"
     target = maintenance
     if stage == "false":
         # No legacy bootstrap or app.main import in this branch. Native startup
@@ -133,20 +156,30 @@ def main():
         assert product_config is not None
         control_socket = os.environ.get("MOYAI_ROLE_CONTROL_SOCKET", ROLE_CONTROL_SOCKET)
         target = create_application(
-            product_config, host="0.0.0.0",
+            product_config, host=host,
             control_socket=Path(control_socket) if control_socket else None,
         )
+        if activation_receipt is not None:
+            from moyai.maintenance_activation import ActivationHeaders
+            target.add_middleware(ActivationHeaders, receipt=activation_receipt)
     role = os.environ.get("MOYAI_RUNTIME_ROLE")
     config = uvicorn.Config(
-        target, host="0.0.0.0",
+        target, host=host,
         port=int(os.environ.get("PORT", "10000")), workers=1,
         timeout_graceful_shutdown=(API_GRACEFUL_SHUTDOWN_SECONDS if role == "api" else
                                    BROKER_GRACEFUL_SHUTDOWN_SECONDS if role == "broker" else 20),
         # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
         proxy_headers=False,
     )
-    server = (RenderOverlapServer(config)
-              if role in {'api', 'broker', 'coordinator'} else uvicorn.Server(config))
+    overlap = role in {'api', 'broker', 'coordinator'}
+    server = ((StagingOverlapServer(config) if overlap else StagingServer(config)) if stage == "true" else
+              RenderOverlapServer(config) if role in {'api', 'broker', 'coordinator'} else uvicorn.Server(config))
+    activation = None
+    if (stage == "true" and os.environ.get("MOYAI_MAINTENANCE_TOKEN")
+            and re.fullmatch("[0-9a-f]{40}", os.environ.get("MOYAI_BUILD_SHA", ""))):
+        from moyai.maintenance_activation import StagedActivation
+        activation = StagedActivation(lambda: setattr(server, "should_exit", True))
+        maintenance.router.lifespan_context = activation.lifespan
     lifecycle = None
     if stage == "false":
         lifecycle = getattr(getattr(target, "state", None), "product_lifecycle", None)
@@ -156,6 +189,11 @@ def main():
         server.run()
     except KeyboardInterrupt:
         pass
+    if (activation is not None and activation.receipt is not None
+            and isinstance(server, StagingServer) and not server.externally_stopped):
+        # The container and provider deployment stay the same. Exec the normal
+        # startup path so its full schema, ownership and lifecycle checks apply.
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
     if getattr(server, 'retired', False) or (lifecycle is not None and lifecycle.failed):
         raise SystemExit(1)
 
