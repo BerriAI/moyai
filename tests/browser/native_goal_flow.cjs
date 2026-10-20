@@ -53,6 +53,7 @@ async function scenario(t,width=1440,light=false){
       state.turns.forEach(turn=>turn.status='stopped');state.session.status='stopped';state.session.active_turn=null;
       return json({stopped:true},202);
     }
+    if(p==='/api/sessions/chat'&&state.holdReload)await state.holdReload;
     if(p==='/api/sessions/chat')return state.deny?json({detail:'Access revoked.'},403):json({session:state.session,turns:state.turns,messages:state.messages,goal:state.goal,transcript_version:String(state.messages.length),pending:null});
     if(p==='/api/sessions/chat/messages')return json(state.messages);
     if(p.endsWith('/events'))return route.fulfill({contentType:'text/event-stream',body:'event: connected\ndata: {}\n\n'});
@@ -129,4 +130,31 @@ test('failed replacement preserves the original goal and the new draft, with an 
   await page.getByRole('button',{name:'Remove goal mode'}).waitFor();state.reject=false;
   await input.press('Enter');await page.getByRole('region',{name:'Conversation goal'}).getByText('Replacement objective.',{exact:true}).waitFor();
   assert.deepEqual(state.posts[1],state.posts[2]);
+});
+test('saving acknowledges the goal generation before a slow refresh, while external edits still warn',async t=>{
+  const {page,input,state}=await scenario(t);
+  await selectGoal(page,input);await input.fill('Original objective.');await input.press('Enter');
+  const bar=page.getByRole('region',{name:'Conversation goal'});await bar.waitFor();
+  await page.getByRole('button',{name:'Expand goal',exact:true}).click();
+  const editor=page.getByRole('form',{name:'Edit goal'}),objective=editor.getByLabel('Objective',{exact:true});
+  await objective.fill('Updated objective.');
+  let release;
+  state.holdReload=new Promise(resolve=>{release=resolve;});
+  try {
+    await editor.getByRole('button',{name:'Save goal'}).click();
+    await bar.getByText('Updated objective.',{exact:true}).waitFor();
+    assert.equal(await editor.getByRole('alert').count(),0,'own acknowledged save must not appear stale');
+    assert.equal(await objective.inputValue(),'Updated objective.');
+  } finally {release();state.holdReload=null;}
+  await editor.locator('.goal-editor-toolbar').getByText('Saved',{exact:true}).waitFor();
+  assert.equal(await editor.getByRole('alert').count(),0);
+  await objective.fill('Keep this unsaved draft.');
+  state.goal={...state.goal,objective:'Changed elsewhere.',generation:state.goal.generation+1};
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await editor.getByRole('alert').filter({hasText:'The goal changed.'}).waitFor();
+  assert.equal(await objective.inputValue(),'Keep this unsaved draft.');
+  assert.equal(await editor.getByRole('button',{name:'Save goal'}).isDisabled(),true);
+  await editor.getByRole('button',{name:'Load current goal'}).click();
+  assert.equal(await objective.inputValue(),'Changed elsewhere.');
+  assert.equal(await editor.getByRole('alert').count(),0);
 });

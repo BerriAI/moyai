@@ -30,7 +30,8 @@ export function GoalMessageLabel() {
 }
 
 export function GoalEditor({ goal, canControl, busy, onSubmit }: {
-  goal: Goal; canControl: boolean; busy: boolean; onSubmit: (command: string) => Promise<void>
+  goal: Goal; canControl: boolean; busy: boolean
+  onSubmit: (command: string, onSaved: (goal: Goal) => void) => Promise<void>
 }) {
   const id = useId()
   const [saved, setSaved] = useState(goal)
@@ -45,7 +46,9 @@ export function GoalEditor({ goal, canControl, busy, onSubmit }: {
     if (!canControl || busy || saving || stale) return
     setSaving(true); setError("")
     const command = `/goal edit --budget ${budget || "none"} ${objective.trim()}`
-    void onSubmit(command).then(() => { setObjective(objective.trim()); setSaved({ ...goal, objective: objective.trim(), token_budget: budget ? Number(budget) : null }) })
+    void onSubmit(command, updated => {
+      setSaved(updated); setObjective(updated.objective); setBudget(updated.token_budget?.toString() ?? "")
+    })
       .catch(reason => setError(String(reason))).finally(() => setSaving(false))
   }}>
     <div className="goal-editor-toolbar"><span>{saving ? "Saving…" : changed ? "Unsaved changes" : "Saved"}</span>

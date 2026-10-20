@@ -834,7 +834,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     followWork()
   }, [liveText, followWork])
 
-  async function applyGoal(command: string): Promise<void> {
+  async function applyGoal(command: string, onSaved?: (goal: Goal) => void): Promise<void> {
     if (goalSending.current || submitting.current || busy) throw new Error("Wait for the current submission to finish, then retry.")
     const startingGoal = goalCommandAction(command) === "set"
     if (startingGoal && (pictures.uploading || pictures.hasErrors)) {
@@ -854,7 +854,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       const { data: result } = await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: attempt.key } })
       if (lastGoalRequest.current === attempt) lastGoalRequest.current = null
       if (!current()) return
-      if ("goal" in result) setView(previous => previous ? { ...previous, goal: result.goal } : previous)
+      if ("goal" in result) {
+        setView(previous => previous ? { ...previous, goal: result.goal } : previous)
+        if (result.goal) onSaved?.(result.goal)
+      }
       if (startingGoal && "id" in result && viewNow.current) {
         const message = firstMessage({ session: viewNow.current.session, turn: result, prompt: command, attachments: pictures.readyFiles })
         message.id = receiptMessageId.current--

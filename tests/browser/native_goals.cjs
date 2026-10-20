@@ -30,7 +30,12 @@ function Fixture() {
     onCreated={async()=>{if(location.search.includes('refreshFailure'))throw new Error('List unavailable.');}} />;
   return <main style={{maxWidth:900,margin:'auto'}}>
     <GoalPanel goal={goal} canControl={true} busy={false} onCommand={command} onEdit={()=>setOpen(true)} />
-    {open && <GoalEditor goal={goal} canControl={true} busy={false} onSubmit={async value=>command(value)} />}
+    {open && <GoalEditor goal={goal} canControl={true} busy={false} onSubmit={async (value,onSaved)=>{
+      command(value);
+      const [,budget,objective]=value.match(new RegExp('^/goal edit --budget (none|[0-9]+) (.*)$'));
+      const updated={...goal,objective,token_budget:budget==='none'?null:Number(budget),generation:goal.generation+1};
+      setGoal(updated);onSaved(updated);
+    }} />}
     <SkillComposer value={draft} onChange={setDraft} onGoalSelect={()=>{setGoalMode(true);setDraft('');}} onSend={value=>command(goalMode?'/goal --budget none '+value:value)} placeholder="Message Moyai" />
     {goalMode && <GoalChip onRemove={()=>setGoalMode(false)} />}
     <output aria-label="Composer value">{draft}</output>
