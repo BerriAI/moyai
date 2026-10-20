@@ -37,13 +37,17 @@ test('folders and unreadable drops fail explicitly instead of silently attaching
   assert.throws(() => droppedFiles({ files: [], items: [] }), /No files/);
 });
 
-test('batch limits include existing attachments and distinguish image/file size limits', async () => {
-  const { attachmentError, MAX_FILE_BYTES, MAX_IMAGE_BYTES } = await loaded;
+test('batch limits include existing attachments and accept images up to the general file limit', async () => {
+  const { attachmentError, MAX_FILE_BYTES } = await loaded;
   const doc = { name: 'readme.txt', type: 'text/plain', size: 12 };
   assert.match(attachmentError([doc, doc], 7), /up to 8 files/);
   assert.equal(attachmentError([{ ...doc, size: MAX_FILE_BYTES }], 7), undefined);
   assert.match(attachmentError([{ ...doc, size: MAX_FILE_BYTES + 1 }], 0), /20 MB/);
-  assert.match(attachmentError([{ name: 'clipboard.PNG', type: '', size: MAX_IMAGE_BYTES + 1 }], 0), /8 MB/);
+  for (const type of ['', 'image/png']) {
+    assert.equal(attachmentError([{ name: 'clipboard.PNG', type, size: 9 * 1024 * 1024 }], 0), undefined);
+    assert.equal(attachmentError([{ name: 'clipboard.PNG', type, size: MAX_FILE_BYTES }], 0), undefined);
+    assert.match(attachmentError([{ name: 'clipboard.PNG', type, size: MAX_FILE_BYTES + 1 }], 0), /20 MB/);
+  }
 });
 
 test('active SVG and HTML are file cards, never inline image documents', async () => {

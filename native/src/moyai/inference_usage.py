@@ -170,12 +170,11 @@ class UsageCapture:
         # alias; never retain or write input, metadata, headers, or credentials.
         self.request_streaming: bool | None = None
         try:
-            if len(request.content) <= 8 * 1024 * 1024:
-                body = json.loads(request.content)
-                if isinstance(body, dict):
-                    self.request_streaming = body.get("stream", False) is True
-                    if model := _identity(body.get("model")):
-                        self.values["model"] = model
+            body = json.loads(request.content)
+            if isinstance(body, dict):
+                self.request_streaming = body.get("stream", False) is True
+                if model := _identity(body.get("model")):
+                    self.values["model"] = model
         except (ValueError, httpx.RequestNotRead, RecursionError):
             pass
         self.streaming = False

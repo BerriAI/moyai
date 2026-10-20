@@ -209,12 +209,10 @@ class ProductInferenceService:
             raise InferenceAdmissionError("The inference gateway or credential scope changed before admission.")
         allowed = {self.settings.resolve_model(name) for name in self.settings.allowed_models()}
         try:
-            if len(request.content) > 8 * 1024 * 1024:
-                raise ValueError
             body = json.loads(request.content)
             selected = body.get("model") if isinstance(body, dict) else None
         except (ValueError, RecursionError, httpx.RequestNotRead):
-            raise InferenceAdmissionError("The native inference request is invalid or exceeds its bound.") from None
+            raise InferenceAdmissionError("The native inference request is invalid.") from None
         if not isinstance(selected, str) or selected != capture.values["model"] or selected not in allowed:
             raise InferenceAdmissionError("The requested inference model is not currently allowed.")
         if capture.activity.scope.surface == "memory_review" and (body.get("tools") or body.get("stream")):

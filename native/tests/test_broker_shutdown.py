@@ -182,7 +182,7 @@ async def test_oversized_maintenance_reply_is_not_an_unsent_denial(maintenance, 
         return httpx.Response(200, stream=WireStream(b"x" * 65))
 
     await inference_fixtures.install_broker_upstream(ctx, oversized)
-    monkeypatch.setattr(routes, "MAX_REQUEST_BYTES", 64)
+    monkeypatch.setattr(routes, "MAX_MEMORY_REVIEW_RESPONSE_BYTES", 64)
     signed = memory_fixtures.signed_review(ctx, {"model": "test"})
     app = FastAPI()
     app.include_router(product_inference_routes(ctx.service))

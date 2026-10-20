@@ -186,6 +186,24 @@ async def test_nonstream_actual_header_and_only_billing_fields_are_persisted(run
     assert len(await rows(runtime)) == 1
 
 
+async def test_large_request_preserves_route_and_streaming_accounting(runtime):
+    adapter, stream = transport(sse(cost="0.12"), headers={
+        # Some gateways omit the SSE content type. The request still declares
+        # streaming, so a provisional cost header must not become the final bill.
+        "content-type": "application/octet-stream", "x-litellm-response-cost": "0.01",
+    })
+    with bound(runtime) as context:
+        async with httpx.AsyncClient(transport=adapter) as client:
+            response = await client.post("https://gateway.invalid/v1/responses", json={
+                "model": "actual-large-image-route", "stream": True, "input": "x" * (9 * 1024 * 1024),
+            })
+    assert response.is_success and stream.closed
+    assert context.latest.request_streaming is True
+    row, = await rows(runtime)
+    assert row.model == "actual-large-image-route"
+    assert row.cost_usd == "0.12" and row.status == "completed"
+
+
 @pytest.mark.parametrize("cost", [None, "0", "0.000000123400"])
 async def test_stream_final_usage_prices_without_trusting_early_header(runtime, cost):
     body = sse(cost=cost)

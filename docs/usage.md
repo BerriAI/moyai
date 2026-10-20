@@ -84,8 +84,8 @@ an existing conversation beside the Computer, Activity, Plan and Files panel.
 Drop files anywhere in the chat column, choose **Attach**, or paste an image
 with Command/Ctrl+V. New-session, main-chat and side-chat composers show
 removable attachment cards and support file-only messages. A message can contain
-eight files, each up to 20 MB; PNG, JPEG, GIF and WebP images are limited to 8 MB
-and 20 megapixels each. Zip a folder before attaching it.
+eight files, each up to 20 MB, including PNG, JPEG, GIF and WebP images.
+Images must also be no larger than 20 megapixels. Zip a folder before attaching it.
 Uploads are stored in encrypted objects; admission binds each upload to its
 owner's chosen conversation. Images use native Pydantic `BinaryContent`,
 including when steering a run. Other originals are available through the shared

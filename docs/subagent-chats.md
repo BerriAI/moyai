@@ -19,9 +19,11 @@ not hide accessible children. Explicit child pins and folder placements retain
 their own location; otherwise children follow their parent's sidebar group.
 Search continues to return matching conversations independently.
 
-Children begin with the delegated task and copies of input attachment references,
-not the parent's private conversation history. Each has its own computer and
-filesystem; pass necessary context and share saved outputs explicitly. Children
+Children begin with the delegated task, copies of input attachment references,
+and a frozen snapshot of the parent's model-visible conversation. Images copied
+into the assignment are sent once; inherited occurrences point to that assignment
+instead of repeating the bytes. Other historical image evidence remains available.
+Each child has its own computer and filesystem; share saved outputs explicitly. Children
 are private to the requester because their assignments may contain private
 working context. Existing-product callers need an individual sign-in capable of
 creating a private conversation.
