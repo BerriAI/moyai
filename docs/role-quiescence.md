@@ -13,9 +13,19 @@ python -m moyai.product_start serve --host 0.0.0.0 --port 8787 \
 ```
 
 The socket directory must be owned by the process user and inaccessible to other
-users (mode 0700); the socket has mode 0600. Startup refuses to replace an existing
-socket. Each container/process needs its own socket. There is no HTTP admin
-endpoint and no reusable fleet-wide bearer credential.
+users (mode 0700); the socket has mode 0600. Each container/process needs its own
+socket. A private sibling `.lock` file is held with an OS lock for the listener's
+lifetime and remains on disk after exit. Do not remove or replace that file:
+concurrent starters must coordinate through the same inode.
+
+After an abrupt process death, startup can recover an orphaned socket owned by
+the same user. It requires an exclusive lock, a refused connection and an
+unchanged socket inode. Live listeners, ambiguous connection failures, symlinks,
+foreign files and unsafe permissions stop startup without removing the path.
+This relies on the private directory and cooperating processes; the filesystem
+lock is not a security boundary against other code running as the same OS user.
+Recovery does not bypass canonical ownership, fleet admission or Temporal drain
+checks. There is no HTTP admin endpoint or reusable fleet-wide bearer credential.
 
 On Render, the existing `docker_start` / `render_start` entrypoint enables
 `/tmp/moyai-release/control.sock` by default. `MOYAI_ROLE_CONTROL_SOCKET` can
