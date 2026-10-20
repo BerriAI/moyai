@@ -195,9 +195,10 @@ async def test_warm_read_refuses_changed_target_provider_schema(routed, monkeypa
     tools = await catalog(f.capability, f.ctx)
     try:
         await tools.get_tools(f.ctx)
-        cache, key = tools.catalog, tools.key
     finally:
         await tools.__aexit__(None, None, None)
+    native = ProductGitHubToolset._native
+    initial_discoveries = len(f.discoveries)
 
     async def changed(adapter, *, write=False):
         assert adapter.grant.policy["product"]["repository_id"] == 2
@@ -213,7 +214,13 @@ async def test_warm_read_refuses_changed_target_provider_schema(routed, monkeypa
     with pytest.raises(ToolFailed, match="definition changed"):
         await invoke(f, "github_get_file_contents", {"owner": "BerriAI", "repo": "moyai", "path": "README.md"})
     assert f.calls == []
-    assert cache.get(key) is None
+    monkeypatch.setattr(ProductGitHubToolset, "_native", native)
+    tools = await catalog(f.capability, f.ctx)
+    try:
+        await tools.get_tools(f.ctx)
+        assert len(f.discoveries) == initial_discoveries + 2
+    finally:
+        await tools.__aexit__(None, None, None)
 
 
 @pytest.mark.parametrize(("extra", "model"), [
