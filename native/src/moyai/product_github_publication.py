@@ -151,7 +151,8 @@ class Publications:
         if not ctx.tool_call_id:
             raise ToolFailed("Publication needs a native tool identity.")
         await self.check_target(request)
-        name = f"github_{kind}" if ctx.tool_name == f"github_{kind}" else f"github_{self.grant.id[:8]}_{kind}"
+        shared_name = f"github_{kind}"
+        name = shared_name if ctx.tool_name == shared_name else f"github_{self.grant.id[:8]}_{kind}"
         stored_kind = {
             "request_pull_request_write_access": "pr_write_access",
             "request_pr_lifecycle_access": "pr_lifecycle_access",

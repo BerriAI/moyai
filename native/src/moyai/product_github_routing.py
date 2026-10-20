@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import Sequence
-from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal
 
 from app.connector_errors import ConnectorError
 from app.db import database as source_database
@@ -18,12 +19,12 @@ from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_core import SchemaValidator, core_schema
 
-from .connections import PROHIBITED_TOOLS, ConnectionPolicy, read_only_tool
+from .connection_policy import ConnectionPolicy, approval_requirement, read_only_tool
 from .contracts import Grant, RunScope
 from .github_workflow_types import RepositorySelector, RepositoryTarget, repository_target
 
 if TYPE_CHECKING:
-    from .product_connections import ProductConnections
+    from .product_connections import ProductConnections, ProductGitHubToolset
 
 ROUTING = "moyai_github_routing"
 PROVIDER = "moyai_github_provider"
@@ -38,12 +39,10 @@ class RepositoryGrant(BaseModel):
 
 
 def permits(grant: Grant, operation: str, *, writing: bool) -> bool:
+    if writing and grant.read_only:
+        return False
     policy = ConnectionPolicy.model_validate(grant.policy)
-    return (
-        operation not in PROHIBITED_TOOLS
-        and (policy.allowed_tools is None or operation in policy.allowed_tools)
-        and not (writing and grant.read_only)
-    )
+    return policy.allows(operation)
 
 
 async def resolve_grant(
@@ -73,93 +72,121 @@ async def resolve_grant(
     return selected[0]
 
 
+@dataclass(frozen=True, slots=True)
+class GitHubToolBinding:
+    tool: ToolsetTool[RunScope]
+    source: Literal["native", "provider"]
+
+    def compatible_with(self, other: GitHubToolBinding) -> bool:
+        previous, current = self.tool.tool_def, other.tool.tool_def
+        return (
+            self.source == other.source
+            and previous.parameters_json_schema == current.parameters_json_schema
+            and previous.metadata == current.metadata
+            and previous.kind == current.kind
+            and self.tool.max_retries == other.tool.max_retries
+        )
+
+
+def search_validator(tool: ToolsetTool[RunScope]) -> SchemaValidator:
+    def validate(value: object) -> dict[str, object]:
+        arguments = ARGUMENTS.validate_python(value)
+        target = RepositoryTarget.model_validate(arguments)
+        provider = ARGUMENTS.validate_python(tool.args_validator.validate_python({
+            key: item for key, item in arguments.items() if key not in {"repository", "repository_id"}
+        }))
+        return {**provider, **target.model_dump()}
+
+    return SchemaValidator(core_schema.no_info_plain_validator_function(validate))
+
+
 class RoutedGitHubToolset(AbstractToolset[RunScope]):
     def __init__(
         self, service: ProductConnections, scope: RunScope, grants: Sequence[Grant],
-        operation: str | None = None, *, recorded: ToolDefinition | None = None,
+        selection: str | ToolDefinition | None = None,
     ) -> None:
         self.service, self.scope, self.grants = service, scope, tuple(grants)
-        self.operation = operation
-        self.recorded = recorded
-        self.originals: dict[str, ToolsetTool[RunScope]] = {}
-        self.providers: set[str] = set()
+        self.selection = selection
+        self._bindings: Mapping[str, GitHubToolBinding] = MappingProxyType({})
 
     @property
     def id(self) -> str:
         return "product_github_routing"
 
-    async def get_tools(self, ctx: RunContext[RunScope]) -> dict[str, ToolsetTool[RunScope]]:
+    def adapter(self, grant: Grant) -> ProductGitHubToolset:
         from .product_connections import ProductGitHubToolset
 
-        if self.recorded is not None:
-            if not read_only_tool(self.recorded):
-                raise ToolFailed("Only GitHub provider reads can reconstruct a recorded schema.")
-            operation = self.recorded.name.removeprefix("github_")
-            schema = copy.deepcopy(self.recorded.parameters_json_schema)
-            if operation in SEARCHES:
-                schema["properties"] = {
-                    key: value for key, value in schema["properties"].items()
-                    if key not in {"repository", "repository_id"}
-                }
-            original = ToolsetTool(
-                toolset=self, tool_def=replace(
-                    self.recorded, name=operation, parameters_json_schema=schema,
-                    metadata={key: value for key, value in (self.recorded.metadata or {}).items()
-                              if key not in {ROUTING, PROVIDER}},
-                ), max_retries=1, args_validator=SchemaValidator(ARGUMENTS.core_schema),
-            )
-            self.originals[operation] = original
-            self.providers.add(operation)
-            return {self.recorded.name: replace(
-                self.shared(operation, original), tool_def=self.recorded,
-            )}
-        adapters = [(grant, ProductGitHubToolset(self.service, self.scope, grant)) for grant in self.grants]
+        adapter = self.service.toolset(self.scope, grant)
+        if not isinstance(adapter, ProductGitHubToolset):
+            raise TypeError("Canonical GitHub grants require the repository-scoped adapter.")
+        return adapter
+
+    def restore(self, recorded: ToolDefinition) -> ToolsetTool[RunScope]:
+        if not read_only_tool(recorded):
+            raise ToolFailed("Only GitHub provider reads can reconstruct a recorded schema.")
+        operation = recorded.name.removeprefix("github_")
+        schema = copy.deepcopy(recorded.parameters_json_schema)
+        if operation in SEARCHES:
+            schema["properties"] = {
+                key: value for key, value in schema["properties"].items()
+                if key not in {"repository", "repository_id"}
+            }
+        original = ToolsetTool(
+            toolset=self, tool_def=replace(
+                recorded, name=operation, parameters_json_schema=schema,
+                metadata={key: value for key, value in (recorded.metadata or {}).items()
+                          if key not in {ROUTING, PROVIDER}},
+            ), max_retries=1, args_validator=SchemaValidator(ARGUMENTS.core_schema),
+        )
+        self._bindings = MappingProxyType({operation: GitHubToolBinding(original, "provider")})
+        validator = search_validator(original) if operation in SEARCHES else original.args_validator
+        return replace(original, tool_def=recorded, args_validator=validator)
+
+    async def discover(
+        self, ctx: RunContext[RunScope], operation: str | None,
+    ) -> dict[str, GitHubToolBinding]:
+        adapters = [(grant, self.adapter(grant)) for grant in self.grants]
         local_tools = [(grant, adapter, await adapter.publications.get_tools(ctx)) for grant, adapter in adapters]
-        local_only = self.operation is not None and any(self.operation in local for _, _, local in local_tools)
+        local_only = operation is not None and any(operation in local for _, _, local in local_tools)
         discovered = (
             [local for _, _, local in local_tools] if local_only
             else await asyncio.gather(*(adapter.get_tools(ctx) for _, adapter, _ in local_tools))
         )
+        bindings: dict[str, GitHubToolBinding] = {}
         for (grant, _adapter, local), definitions in zip(local_tools, discovered, strict=True):
             for name, tool in definitions.items():
                 if (
-                    name == "checkout" or self.operation not in {None, name}
+                    name == "checkout" or operation not in {None, name}
                     or not permits(grant, name, writing=not read_only_tool(tool.tool_def))
                 ):
                     continue
-                previous = self.originals.get(name)
-                if previous is not None and (
-                    previous.tool_def.parameters_json_schema != tool.tool_def.parameters_json_schema
-                    or previous.tool_def.metadata != tool.tool_def.metadata
-                    or previous.tool_def.kind != tool.tool_def.kind
-                ):
+                binding = GitHubToolBinding(tool, "native" if name in local else "provider")
+                previous = bindings.get(name)
+                if previous is not None and not previous.compatible_with(binding):
                     raise ToolFailed("Selected GitHub repositories expose incompatible tool definitions.")
-                self.originals[name] = tool
-                if name not in local:
-                    self.providers.add(name)
-            if self.operation in self.originals:
+                bindings[name] = binding
+            if operation in bindings:
                 break
-        return {f"github_{name}": self.shared(name, tool) for name, tool in self.originals.items()}
+        return bindings
 
-    def shared(self, name: str, tool: ToolsetTool[RunScope]) -> ToolsetTool[RunScope]:
+    async def get_tools(self, ctx: RunContext[RunScope]) -> dict[str, ToolsetTool[RunScope]]:
+        if isinstance(self.selection, ToolDefinition):
+            return {self.selection.name: self.restore(self.selection)}
+        bindings = await self.discover(ctx, self.selection)
+        self._bindings = MappingProxyType(bindings)
+        return {f"github_{name}": self.shared(name, binding) for name, binding in bindings.items()}
+
+    def shared(self, name: str, binding: GitHubToolBinding) -> ToolsetTool[RunScope]:
+        tool = binding.tool
         schema = copy.deepcopy(tool.tool_def.parameters_json_schema)
-        selector: RepositorySelector = "owner_repo" if {"owner", "repo"} <= set(schema.get("properties", {})) else "repository"
+        properties = schema.get("properties", {})
+        selector: RepositorySelector = "owner_repo" if {"owner", "repo"} <= set(properties) else "repository"
         validator = tool.args_validator
         if name in SEARCHES:
-            if {"repository", "repository_id"} & set(schema.get("properties", {})):
+            if {"repository", "repository_id"} & set(properties):
                 raise ToolFailed("The GitHub search schema conflicts with repository routing.")
-            schema["properties"] = {
-                **schema.get("properties", {}), **RepositoryTarget.model_json_schema()["properties"],
-            }
-            def search_arguments(value: object) -> dict[str, object]:
-                arguments = ARGUMENTS.validate_python(value)
-                target = RepositoryTarget.model_validate(arguments)
-                provider = ARGUMENTS.validate_python(tool.args_validator.validate_python({
-                    key: item for key, item in arguments.items() if key not in {"repository", "repository_id"}
-                }))
-                return {**provider, **target.model_dump()}
-
-            validator = SchemaValidator(core_schema.no_info_plain_validator_function(search_arguments))
+            schema["properties"] = {**properties, **RepositoryTarget.model_json_schema()["properties"]}
+            validator = search_validator(tool)
         description = tool.tool_def.description or ""
         if description.startswith("Connected GitHub repository: "):
             description = description.split(". ", 1)[1]
@@ -167,16 +194,14 @@ class RoutedGitHubToolset(AbstractToolset[RunScope]):
             tool.tool_def, name=f"github_{name}", parameters_json_schema=schema,
             description=description + " The server routes to the explicitly requested repository selected for this task.",
             metadata={**(tool.tool_def.metadata or {}), ROUTING: selector,
-                      **({PROVIDER: True} if name in self.providers else {})},
+                      **({PROVIDER: True} if binding.source == "provider" else {})},
         ))
 
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[RunScope], tool: ToolsetTool[RunScope],
     ) -> Any:
-        from .product_connections import ProductGitHubToolset
-
         operation = name.removeprefix("github_")
-        original = self.originals[operation]
+        original = self._bindings[operation].tool
         selector = (tool.tool_def.metadata or {})[ROUTING]
         try:
             target = repository_target(tool_args, selector)
@@ -185,13 +210,11 @@ class RoutedGitHubToolset(AbstractToolset[RunScope]):
         writing = not read_only_tool(original.tool_def)
         grant = await resolve_grant(self.service, self.scope, self.grants, target, operation, writing=writing)
         policy = ConnectionPolicy.model_validate(grant.policy)
-        if not ctx.tool_call_approved and (
-            original.tool_def.kind == "unapproved" or (writing and policy.require_approval)
-        ):
+        if policy.needs_approval(approval_requirement(original.tool_def)) and not ctx.tool_call_approved:
             raise ApprovalRequired
         arguments = (
             {key: value for key, value in tool_args.items() if key not in {"repository", "repository_id"}}
             if operation in SEARCHES else tool_args
         )
-        adapter = ProductGitHubToolset(self.service, self.scope, grant)
+        adapter = self.adapter(grant)
         return await adapter.call_tool(operation, arguments, replace(ctx, tool_name=name), original)

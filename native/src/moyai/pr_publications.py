@@ -18,9 +18,28 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .analytics import utc
-from .contracts import RunScope
+from .contracts import Grant, RunScope
 from .models import Base, Effect
 from .pull_requests import parse_pr_url
+
+SHARED_CREATIONS = frozenset({"github_create_pull_request", "github_open_pull_request"})
+
+
+def scoped_creations(connection_id: str) -> frozenset[str]:
+    return frozenset({
+        f"github_{connection_id[:8]}_create_pull_request",
+        f"github_{connection_id[:8]}_open_pull_request",
+    })
+
+
+def matches_creation(grant: Grant, tool_name: str, connection_id: str | None) -> bool:
+    if grant.kind != "github":
+        return False
+    if tool_name in scoped_creations(grant.id):
+        return True
+    if grant.id != connection_id:
+        return False
+    return tool_name in SHARED_CREATIONS
 
 
 class PRPublication(Base):
@@ -67,9 +86,7 @@ def creation_receipt(
     """Only a successful exact creation tool and its selected grant can attest creation."""
     selected = [
         grant for grant in scope.grants
-        if grant.kind == "github" and (tool_name in {
-            f"github_{grant.id[:8]}_create_pull_request", f"github_{grant.id[:8]}_open_pull_request",
-        } or grant.id == connection_id and tool_name in {"github_create_pull_request", "github_open_pull_request"})
+        if matches_creation(grant, tool_name, connection_id)
     ]
     if len(selected) != 1 or selected[0].read_only:
         return None
@@ -123,17 +140,14 @@ async def persist_publication(database: Any, scope: RunScope, identity: str, rec
     """Project already-confirmed evidence; never authorize or repeat an external write."""
     async with database.sessions.begin() as db:
         effect = await db.get(Effect, identity)
+        creation_tools = scoped_creations(receipt.connection_id) | SHARED_CREATIONS
         if (
             effect is None or effect.state != "confirmed" or effect.session_id != scope.session_id
             or effect.actor_id != scope.actor_id or effect.turn_id != scope.turn_id
-            or effect.tool_name not in {
-                f"github_{receipt.connection_id[:8]}_create_pull_request",
-                f"github_{receipt.connection_id[:8]}_open_pull_request",
-                "github_create_pull_request", "github_open_pull_request",
-            }
+            or effect.tool_name not in creation_tools
         ):
             raise ValueError("A matching confirmed native effect is required.")
-        if effect.tool_name in {"github_create_pull_request", "github_open_pull_request"}:
+        if effect.tool_name in SHARED_CREATIONS:
             from .product_github_models import ProductGitOperation
 
             operation = await db.scalar(select(ProductGitOperation).where(
