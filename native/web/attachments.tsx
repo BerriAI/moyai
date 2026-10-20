@@ -105,7 +105,7 @@ export function useFileDrop(add: (files: File[]) => Promise<void>, onError: (mes
 }
 
 export function FileDropOverlay() {
-  return <div className="file-drop-overlay" role="status"><Upload size={28} /><strong>Drop files to attach</strong><span>Up to 8 files · 20 MB each · Images up to 8 MB</span></div>
+  return <div className="file-drop-overlay" role="status"><Upload size={28} /><strong>Drop files to attach</strong><span>Up to 8 files · 20 MB each</span></div>
 }
 
 export function AttachButton({ add, disabled, compact = false }: { add: (files: File[]) => Promise<void>; disabled?: boolean; compact?: boolean }) {

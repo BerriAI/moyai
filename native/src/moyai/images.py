@@ -23,7 +23,6 @@ from .models import Upload, User
 if TYPE_CHECKING:
     from .runtime import Runtime
 
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MEDIA_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "GIF": "image/gif", "WEBP": "image/webp"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -73,6 +72,10 @@ async def hydrate(runtime: Runtime, value: PreparedTurn | SteeringInput) -> None
     if isinstance(value, PreparedTurn) and value.conversation:
         conversation = ConversationTypeAdapter.validate_json(value.conversation)
         changed = False
+        inherited_images = {
+            (image.digest, image.media_type) for image in value.images
+            if value.scope.delegation_generated and image.media_type in MEDIA_TYPES.values()
+        }
         for message in conversation.messages:
             identity = (message.metadata or {}).get("moyai_public_turn")
             if isinstance(message, ModelRequest) and identity:
@@ -83,6 +86,21 @@ async def hydrate(runtime: Runtime, value: PreparedTurn | SteeringInput) -> None
                         if isinstance(part, UserPromptPart) and isinstance(part.content, str):
                             part.content = prompt_content(part.content, images) or ""
                             changed = True
+            if inherited_images and isinstance(message, ModelRequest):
+                for part in message.parts:
+                    if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                        content = []
+                        for item in part.content:
+                            if isinstance(item, BinaryContent) and (
+                                runtime.security.object_id(item.data), item.media_type
+                            ) in inherited_images:
+                                # The child keeps its own upload references and receives
+                                # these bytes in the assignment appended to this history.
+                                content.append("This image is attached to the delegated assignment below.")
+                                changed = True
+                            else:
+                                content.append(item)
+                        part.content = content
         if changed:
             value.conversation = ConversationTypeAdapter.dump_json(conversation).decode()
 
@@ -110,18 +128,15 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             raise HTTPException(422, "Use a filename up to 200 characters without directories or control characters.")
         declared = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         expected_image = declared in MEDIA_TYPES.values() or PurePosixPath(name).suffix.lower() in IMAGE_EXTENSIONS
-        limit = MAX_IMAGE_BYTES if expected_image else MAX_UPLOAD_BYTES
         raw = bytearray()
         async for chunk in request.stream():
-            if len(raw) + len(chunk) > limit:
-                raise HTTPException(413, "Images must be 8 MB or smaller." if expected_image else "Files must be 20 MB or smaller.")
+            if len(raw) + len(chunk) > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, "Files must be 20 MB or smaller.")
             raw.extend(chunk)
         raster = raw.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")) or (
             raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
         )
         if expected_image or raster:
-            if len(raw) > MAX_IMAGE_BYTES:
-                raise HTTPException(413, "Images must be 8 MB or smaller.")
             try:
                 media_type = await asyncio.to_thread(image_type, bytes(raw))
             except ValueError as error:

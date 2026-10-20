@@ -1,9 +1,11 @@
 """Delegation carries the parent's evidence without adopting its live computer."""
 
 from copy import deepcopy
+from dataclasses import replace
 
 from pydantic_ai import Agent, ConversationTypeAdapter, RunContext, RunUsage
 from pydantic_ai.messages import (
+    BinaryContent,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -14,9 +16,79 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.step_persistence import is_provider_valid
+from test_application_boundaries import sign_in
+from test_images_and_computer import image_bytes
 
 from moyai.delegation import DelegationService, InteractiveDelegation
+from moyai.images import hydrate, prompt_content
 from moyai.work_progress import WorkProgress
+
+
+async def test_child_and_grandchild_send_copied_images_once_and_keep_other_evidence(runtime):
+    raw = image_bytes()
+    older = BinaryContent(data=b"older image evidence", media_type="image/jpeg")
+    async with sign_in(runtime) as client:
+        upload = (await client.post("/api/uploads?name=evidence.png", content=raw)).json()
+        session = (await client.post("/api/sessions", json={})).json()
+        await client.post(f"/api/sessions/{session['id']}/messages", json={
+            "prompt": "Inspect the evidence.", "attachments": [upload["id"]], "request_key": "images",
+        })
+        turn = await runtime.database.claim_next()
+        parent = await runtime.database.prepare(turn.id)
+        parent.images = await runtime.database.input_images(turn.id, session_id=session["id"])
+        await hydrate(runtime, parent)
+        history = [
+            ModelRequest(parts=[UserPromptPart(["Older evidence", older])]),
+            ModelResponse(parts=[TextPart("Older evidence inspected.")]),
+            ModelRequest(parts=[UserPromptPart(prompt_content(parent.prompt, parent.images))]),
+        ]
+        scope = parent.scope
+        previous_upload = upload["id"]
+        for depth in (1, 2):
+            frozen = deepcopy(history)
+            child = await DelegationService(runtime.database).start(
+                scope, f"image-child-{depth}", "Inspect the evidence.", messages=history,
+            )
+            turn = await runtime.database.claim_next()
+            saved = await runtime.database.prepare(turn.id)
+            saved.images = await runtime.database.input_images(turn.id, session_id=child["session_id"])
+            assert saved.scope.delegation_generated
+            assert len(saved.images) == 1 and saved.images[0].upload_id != previous_upload
+            assert (await client.get(f"/api/uploads/{saved.images[0].upload_id}")).content == raw
+
+            # Human follow-ups retain the old image occurrence even when the
+            # human intentionally attaches the same bytes again.
+            human = deepcopy(saved)
+            human.scope = replace(human.scope, delegation_generated=False)
+            await hydrate(runtime, human)
+            human_history = ConversationTypeAdapter.validate_json(human.conversation).messages
+            assert any(
+                isinstance(item, BinaryContent) and item.data == raw
+                for message in human_history if isinstance(message, ModelRequest)
+                for part in message.parts if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+                for item in part.content
+            )
+
+            await hydrate(runtime, saved)
+            hydrated = saved.conversation
+            await hydrate(runtime, saved)
+            assert saved.conversation == hydrated
+            conversation = ConversationTypeAdapter.validate_json(saved.conversation)
+            result = await Agent(FunctionModel(
+                lambda messages, info: ModelResponse(parts=[TextPart("Evidence inspected.")]),
+            )).run(
+                prompt_content(saved.prompt, saved.images), conversation=conversation,
+            )
+            seen = [
+                item for message in result.all_messages() if isinstance(message, ModelRequest)
+                for part in message.parts if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+                for item in part.content if isinstance(item, BinaryContent)
+            ]
+            assert [item.data for item in seen] == [older.data, raw]
+            assert history == frozen
+            assert upload["id"] in str(conversation.messages)
+            history = result.all_messages()
+            scope, previous_upload = saved.scope, saved.images[0].upload_id
 
 
 async def test_child_model_receives_frozen_parent_evidence_without_reexecuting_pending_calls(runtime, active):
