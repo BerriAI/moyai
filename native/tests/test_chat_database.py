@@ -192,6 +192,38 @@ async def test_idle_chat_never_loads_private_checkpoints(chat_product, linked):
     assert result['chat']['messages'] and result['workspace']['links']
 
 
+async def test_waiting_chat_that_finishes_during_authorization_has_no_stale_question(chat_product, monkeypatch):
+    from pydantic_ai import Conversation, ConversationTypeAdapter
+
+    product = chat_product
+    session_id = await seed_chat(product, turns=1, linked=False)
+    checkpoint = product.database.security.seal(ConversationTypeAdapter.dump_json(Conversation(messages=[])))
+    async with product.database.sessions.begin() as db:
+        await db.execute(update(Session).where(Session.id == session_id).values(
+            status='waiting', active_turn='chat-turn-0', conversation=checkpoint))
+    original = product.database.check_source_audience
+    changed = False
+
+    async def finish_during_read(db, session, actor, **kwargs):
+        nonlocal changed
+        await original(db, session, actor, **kwargs)
+        if not changed and session.id == session_id:
+            changed = True
+            async with product.database.sessions.begin() as writer:
+                await writer.execute(update(Session).where(Session.id == session_id).values(
+                    status='idle', active_turn=None))
+
+    monkeypatch.setattr(product.database, 'check_source_audience', finish_during_read)
+    app = create_app(product.runtime, run_dispatcher=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test',
+                                cookies={'workspace_session': product.cookie}) as client:
+        response = await client.get(f'/api/sessions/{session_id}?include_activity=false&include_messages=true')
+    assert response.status_code == 200, response.text
+    assert response.json()['session']['status'] == 'idle'
+    assert response.json()['session']['active_turn'] is None
+    assert not response.json().get('pending') and not response.json().get('can_answer')
+
+
 async def test_mixed_authors_and_transcript_pagination(chat_product):
     product = chat_product
     session_id = await seed_chat(product, turns=110, linked=True)

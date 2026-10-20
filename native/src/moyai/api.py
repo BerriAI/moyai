@@ -509,7 +509,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             # Only a waiting conversation needs its private checkpoint to render
             # pending questions. Ordinary reads must not transfer megabytes of it.
             if row.status == "waiting":
-                await db.refresh(row, ["conversation"])
+                # Keep the state and active turn aligned with this checkpoint if
+                # execution advanced while the source audience was checked.
+                await db.refresh(row, ["status", "active_turn", "conversation"])
         turn_columns = load_only(
             Turn.id, Turn.session_id, Turn.actor_id, Turn.model, Turn.status, Turn.mode,
             Turn.parent_turn, Turn.enqueue_id, Turn.connections, Turn.accepted_at, Turn.usage,
