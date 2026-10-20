@@ -47,7 +47,18 @@ steering, save the existing agent continuation, and capture the live filesystem.
 The envelope binds both saves to the session, turn, original workflow run,
 boundary, pause generation, preparation digest and current authority. The drain
 receipt stays blocked until capture and publication finish. A failed capture
-does not certify a safe park.
+does not certify a safe park or fail an otherwise live graph. Recoverable
+preconditions such as a human lease wait at that settled boundary with a durable
+timer; an unpause can return the still-live graph to execution.
+
+Capture intent is persisted before calling the provider, and a returned image is
+recorded separately before checkpoint publication. The public Modal snapshot API
+does not accept a caller-owned idempotency key. A lost reply without an image
+receipt therefore stays blocked for inspection; it cannot silently dispatch
+another snapshot. A known image receipt can finish publication after a lost
+database or object-store response without capturing again. The new activities
+have no blanket automatic retry policy. Restore retries are limited to transient
+observations of the same frozen image and stable provider creation identity.
 
 The workflow then continues as new. Its direct successor takes ownership of the
 parked receipt and waits without constructing an agent or using the computer.
@@ -56,7 +67,8 @@ resume, the activity checks the saved binding, permissions, maintenance state,
 effects, inference requests and computer-control fences again. It prefers the
 original live computer. Only confirmed provider expiry or disappearance permits
 restoration from the exact saved image, using the existing idempotent creation
-path.
+path. Restore has a separate bounded deadline that accommodates Lambda's running,
+bootstrap and initialization phases; provider maximum lifetimes are unchanged.
 
 Resume creates a new immutable continuation with the verified workspace in both
 `AgentCheckpoint.workspace` and `PreparedTurn.workspace`. Application publication
@@ -86,8 +98,13 @@ existing history Continue-As-New path has run.
 Initial installation requires a verified fleet-wide empty execution boundary:
 no admitted old execution owning workspace state that must survive, no uncertain
 effects or inference requests, and separate checks for never-prepared tasks and
-deferred waits. Keep the API serving and queue new inputs through the reviewed
-admission controls, adopt the protocol, verify the new owners, then resume.
+deferred waits. Queue new inputs through the reviewed admission controls before
+retiring incompatible owners, adopting the protocol, verifying the new owners,
+and resuming. The existing canonical policy gate requires incompatible owners,
+including APIs, to retire before changing the shared contract. This PR does not
+provide an uninterrupted HTTP bridge for that initial transition, and it must
+not be combined with an independently compatible API-only deployment.
+
 Live old executions require their own qualified adoption mechanism; this change
 does not supply one. Computers already expired without a current verified
 snapshot cannot be reconstructed by this upgrade.

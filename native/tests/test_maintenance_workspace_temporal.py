@@ -4,16 +4,19 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef, WorkspaceUnavailableError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from temporalio import activity, workflow
+from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 from test_bundled_skills_startup import scripted_model
@@ -22,7 +25,7 @@ from moyai.agent import make_agent
 from moyai.computer_keepalive import Keepalive, keep_computer_alive
 from moyai.contracts import RunScope
 from moyai.maintenance_workspace import VERSION
-from moyai.models import Effect, Session, Turn
+from moyai.models import ComputerLease, Effect, Session, Turn
 from moyai.product_drain import ProductDrainService
 from moyai.product_drain_models import ProductDrainReceipt, ProductDrainState
 from moyai.storage import encrypted_converter
@@ -31,15 +34,21 @@ from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
-async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay(runtime, active, monkeypatch):
+@pytest.mark.parametrize("refusal", ["none", "lease", "uncertain", "unpause"])
+async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay(
+    runtime, active, monkeypatch, refusal,
+):
     from moyai import worker
 
-    session, turn, _ = active
+    session, turn, prepared = active
     root = runtime.settings.data_dir.parent
     old, image, restored = root / "computer", root / "image", root / "restored"
     wrote, release, captured = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    attempted = asyncio.Event()
     expired = False
     operations = []
+    captures = 0
+    capture_activities = []
 
     class Backend(LocalWorkspaceBackend):
         def __init__(self, ref):
@@ -81,7 +90,8 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
             return ModelResponse(parts=[ToolCallPart(
                 "shell", {"command": "cat checkpoint-file.txt"}, tool_call_id="read-after-expiry",
             )])
-        assert restored.joinpath("checkpoint-file.txt").read_text() == "preserved"
+        completed_directory = old if refusal == "unpause" else restored
+        assert completed_directory.joinpath("checkpoint-file.txt").read_text() == "preserved"
         return ModelResponse(parts=[TextPart("The original files survived.")])
 
     runtime.models = {"test": scripted_model(respond)}
@@ -101,6 +111,16 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
         db.add(ProductDrainState(id=1, generation=21, paused=False))
 
     async def capture(*_args, **_kwargs):
+        nonlocal captures
+        captures += 1
+        capture_activities.append(activity.info().activity_type)
+        attempted.set()
+        if refusal == "uncertain":
+            raise TimeoutError("The provider capture reply was lost.")
+        if refusal == "unpause" and activity.info().activity_type == "moyai_save_maintenance_checkpoint_v1":
+            async with runtime.database.sessions.begin() as db:
+                state = await db.get(ProductDrainState, 1)
+                state.paused, state.generation = False, 23
         if image.exists():
             shutil.rmtree(image)
         shutil.copytree(restored if restored.exists() else old, image)
@@ -136,8 +156,50 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
             async with runtime.database.sessions.begin() as db:
                 state = await db.get(ProductDrainState, 1)
                 state.paused, state.generation = True, 22
+                if refusal == "lease":
+                    db.add(ComputerLease(
+                        session_id=session.id, actor_id=prepared.scope.actor_id,
+                        expires_at=int(time.time()) + 300,
+                    ))
             release.set()
+            if refusal == "uncertain":
+                await asyncio.wait_for(attempted.wait(), 30)
+                await asyncio.sleep(7)
+                assert captures == 1
+                async with runtime.database.sessions() as db:
+                    assert (await db.get(Turn, turn.id)).status == "running"
+                    assert (await db.get(ProductDrainReceipt, (turn.id, 22))).phase == "blocked"
+                await handle.cancel()
+                with pytest.raises(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), 30)
+                return
+            if refusal == "lease":
+                # The non-retryable preparation refusal must leave the graph
+                # running and blocked, then retry without a new generation hint.
+                async with asyncio.timeout(30):
+                    while True:
+                        async with runtime.database.sessions() as db:
+                            receipt = await db.get(ProductDrainReceipt, (turn.id, 22))
+                            if receipt is not None:
+                                assert receipt.phase == "blocked"
+                                assert (await db.get(Turn, turn.id)).status == "running"
+                                break
+                        await asyncio.sleep(.05)
+                await asyncio.sleep(.2)
+                async with runtime.database.sessions.begin() as db:
+                    await db.execute(delete(ComputerLease).where(ComputerLease.session_id == session.id))
             await asyncio.wait_for(captured.wait(), 30)
+            if refusal == "unpause":
+                assert (await asyncio.wait_for(handle.result(), 30))["status"] == "completed"
+                history = await handle.fetch_history()
+                await Replayer(
+                    workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+                    interceptors=[ActivityCapacity()],
+                ).replay_workflow(history)
+                assert capture_activities == ["moyai_save_maintenance_checkpoint_v1", "moyai_save_computer_v1"]
+                assert old.joinpath("checkpoint-file.txt").read_text() == "preserved"
+                assert not restored.exists()
+                return
             async with asyncio.timeout(30):
                 while True:
                     async with runtime.database.sessions() as db:
@@ -162,6 +224,17 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
                     if last.HasField("workflow_execution_continued_as_new_event_attributes") else None
                 )
         assert len(histories) == 2
+        loads = [
+            event.activity_task_scheduled_event_attributes
+            for event in histories[1].events
+            if event.HasField("activity_task_scheduled_event_attributes")
+            and event.activity_task_scheduled_event_attributes.activity_type.name == "moyai_load_maintenance_checkpoint_v1"
+        ]
+        assert loads
+        # The configured Lambda maximum allows running + health + initialize
+        # phases totaling 21 minutes, before provider/storage overhead.
+        assert all(item.start_to_close_timeout.seconds > 21 * 60 for item in loads)
+        assert all(item.retry_policy.maximum_attempts == 1 for item in loads)
         for history in histories:
             await Replayer(
                 workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,

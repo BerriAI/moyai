@@ -70,7 +70,14 @@ PREPARE = {
 MAINTENANCE_FILES = {
     "start_to_close_timeout": timedelta(minutes=17),
     "schedule_to_close_timeout": timedelta(minutes=20),
-    "retry_policy": RetryPolicy(maximum_attempts=3),
+    "retry_policy": RetryPolicy(maximum_attempts=1),
+}
+MAINTENANCE_RESTORE = {
+    # Lambda permits 3 minutes to run, 3 to bootstrap, then 15 to restore.
+    # Leave bounded room for provider/storage requests and publication.
+    "start_to_close_timeout": timedelta(minutes=25),
+    "schedule_to_close_timeout": timedelta(minutes=30),
+    "retry_policy": RetryPolicy(maximum_attempts=1),
 }
 
 
@@ -159,16 +166,63 @@ class TurnWorkflow(PydanticAIWorkflow):
             raise ValueError("A maintenance workspace requires its direct workflow continuation.")
         while True:
             notice = self.maintenance_notice
-            state = await workflow.execute_activity(
-                "moyai_load_maintenance_checkpoint_v1",
-                args=[self.turn_id, handoff.checkpoint, previous],
-                result_type=MaintenanceResume, **MAINTENANCE_FILES,
-            )
+            try:
+                state = await workflow.execute_activity(
+                    "moyai_load_maintenance_checkpoint_v1",
+                    args=[self.turn_id, handoff.checkpoint, previous],
+                    result_type=MaintenanceResume, **MAINTENANCE_RESTORE,
+                )
+            except ActivityError as error:
+                if (
+                    isinstance(error.cause, ApplicationError)
+                    and error.cause.type == "MoyaiMaintenanceRestorePending"
+                ):
+                    await workflow.sleep(5)
+                    continue
+                raise
             if not state.paused:
                 if state.checkpoint is None:
                     raise ValueError("The maintenance continuation has no verified workspace binding.")
                 return state.checkpoint
             await workflow.wait_condition(lambda notice=notice: self.maintenance_notice != notice)
+
+    async def preserve_maintenance_workspace(
+        self, checkpoint: AgentCheckpoint, generation: int, boundary: str,
+    ) -> CheckpointSave:
+        """Keep the live graph quiescent when a lease/provider refuses capture."""
+        while True:
+            notice = self.maintenance_notice
+            try:
+                return await workflow.execute_activity(
+                    "moyai_save_maintenance_checkpoint_v1",
+                    args=[checkpoint, generation, boundary],
+                    result_type=CheckpointSave, **MAINTENANCE_FILES,
+                )
+            except ActivityError as error:
+                if is_cancelled_exception(error):
+                    raise asyncio.CancelledError from error
+                if (
+                    isinstance(error.cause, ApplicationError)
+                    and error.cause.type == "MoyaiHistoryAuthorizationDenied"
+                ):
+                    raise
+                workflow.logger.warning("Workspace capture is blocked; the settled graph remains waiting.")
+            # A lease expiry or provider recovery need not change the maintenance
+            # generation. A durable timer makes those cases retryable as well.
+            try:
+                await workflow.wait_condition(
+                    lambda notice=notice: self.maintenance_notice != notice,
+                    timeout=timedelta(seconds=5),
+                )
+            except TimeoutError:
+                pass
+            decision = await workflow.execute_activity(
+                "moyai_maintenance_boundary_v1",
+                args=[self.turn_id, boundary], result_type=DrainDecision, **CONTROL,
+            )
+            if not decision.paused:
+                return CheckpointSave()
+            generation = decision.generation
 
     @workflow.signal
     async def steer(self, turn_id: str) -> None:
@@ -348,10 +402,8 @@ class TurnWorkflow(PydanticAIWorkflow):
                             checkpoint.allow_history_only = self.history_full(limits)
                         try:
                             if maintenance_generation is not None:
-                                saved = await workflow.execute_activity(
-                                    "moyai_save_maintenance_checkpoint_v1",
-                                    args=[checkpoint, maintenance_generation, f"native_node:{boundary}"],
-                                    result_type=CheckpointSave, **MAINTENANCE_FILES,
+                                saved = await self.preserve_maintenance_workspace(
+                                    checkpoint, maintenance_generation, f"native_node:{boundary}",
                                 )
                             else:
                                 saved = await workflow.execute_activity(
@@ -361,7 +413,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                                 )
                         except ActivityError as error:
                             if maintenance_generation is not None:
-                                raise
+                                raise  # Only cancellation/authority failures escape the waiting loop.
                             if (
                                 isinstance(error.cause, ApplicationError)
                                 and error.cause.type == "MoyaiHistoryAuthorizationDenied"

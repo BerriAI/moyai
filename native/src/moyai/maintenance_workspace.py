@@ -17,8 +17,11 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from pydantic_ai.workspaces import WorkspaceRef
 from sqlalchemy import delete, select
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
-from .history_handoff import AgentCheckpoint, CheckpointSave, record_segment, save_history_checkpoint
+from .answer_settlement import transient_checkpoint_error
+from .contracts import PreparedTurn
+from .history_handoff import AgentCheckpoint, CheckpointSave, save_history_checkpoint
 from .models import ComputerOperation, Event, Session, Turn, now
 from .product_continuation_errors import preparation_blocked
 from .product_drain import DrainDecision
@@ -41,6 +44,8 @@ if TYPE_CHECKING:
 VERSION = "moyai-maintenance-workspace-continuation-v1"
 CHECKPOINT_KIND = "maintenance_workspace_checkpoint"
 RESUME_KIND = "maintenance_workspace_resume"
+CAPTURE_BEGIN = "maintenance_capture_begin"
+CAPTURE_RESULT = "maintenance_capture_result"
 
 
 class MaintenanceWorkspace(BaseModel):
@@ -86,6 +91,35 @@ def preparation_digest(runtime: Runtime, turn: Turn) -> str:
     return hashlib.sha256(runtime.security.unseal(turn.preparation)).hexdigest()
 
 
+def uncertain_capture() -> ApplicationError:
+    return ApplicationError(
+        "The filesystem capture outcome is unknown. Inspect its saved receipt; no new capture was dispatched.",
+        type="MoyaiMaintenanceCaptureUncertain", non_retryable=True,
+    )
+
+
+async def record_capture(runtime: Runtime, identity: str, image_id: str) -> None:
+    """Record a factual provider reply even if authority was revoked afterward."""
+    if not image_id:
+        raise uncertain_capture()
+    async with runtime.database.sessions.begin() as db:
+        started = await db.scalar(select(Event).where(
+            Event.kind == CAPTURE_BEGIN, Event.identity == CAPTURE_BEGIN + ":" + identity,
+        ).with_for_update())
+        if started is None:
+            raise uncertain_capture()
+        existing = await db.scalar(select(Event).where(Event.identity == CAPTURE_RESULT + ":" + identity))
+        if existing is not None:
+            if json.loads(runtime.security.unseal(existing.content))["image_id"] != image_id:
+                raise uncertain_capture()
+            return
+        db.add(Event(
+            session_id=started.session_id, turn_id=started.turn_id, kind=CAPTURE_RESULT,
+            identity=CAPTURE_RESULT + ":" + identity,
+            content=runtime.security.seal({"image_id": image_id}),
+        ))
+
+
 @activity.defn(name="moyai_maintenance_boundary_v1")
 async def maintenance_boundary(turn_id: str, boundary: str) -> DrainDecision:
     """Observe intent; a graph without its filesystem is never a safe park."""
@@ -98,6 +132,12 @@ async def maintenance_boundary(turn_id: str, boundary: str) -> DrainDecision:
     info = activity.info()
     if not info.workflow_id or not info.workflow_run_id:
         raise PermissionError("Maintenance requires a workflow execution.")
+    async with runtime.database.sessions() as db:
+        turn = await db.get(Turn, turn_id)
+        if turn is None or not turn.preparation:
+            raise PermissionError("Maintenance requires the original preparation.")
+        prepared = TypeAdapter(PreparedTurn).validate_json(runtime.security.unseal(turn.preparation))
+    await runtime.database.authorize_scope(prepared.scope)
     async with runtime.database.sessions.begin() as db:
         state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
         turn = await db.get(Turn, turn_id)
@@ -146,10 +186,11 @@ async def preserve(
         scope.turn_id, workflow_id, workflow_run_id, boundary, generation, saved_graph.reference,
     ]).encode()).hexdigest()
     operation_id = str(uuid5(NAMESPACE_URL, identity))
+    capture_id = identity.split(":")[-1]
+    image = None
+    dispatch_capture = False
     async with database.sessions.begin() as db:
         state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
-        if state is None or not state.paused or state.generation != generation:
-            raise PermissionError("The maintenance intent changed before preservation.")
         session, turn = await locked_scope(database, db, scope, status="running")
         await database.swarms.authorize(db, turn, scope=scope)
         if turn.workflow_id != workflow_id:
@@ -166,6 +207,8 @@ async def preserve(
                 raise preparation_blocked("workspace_checkpoint_missing")
             saved_reference = json.loads(runtime.security.unseal(event.content))["checkpoint"]
             return CheckpointSave(reference=saved_reference)
+        if state is None or not state.paused or state.generation != generation:
+            raise PermissionError("The maintenance intent changed before preservation.")
         await require_settled(db, session.id)
         if any(await service._unsettled(db, turn.id)):
             raise preparation_blocked("workspace_uncertain_effect")
@@ -182,17 +225,47 @@ async def preserve(
             workflow_run_id=workflow_run_id, boundary=boundary, phase="blocked",
         )
         if reference:
+            # The public snapshot API supplies no caller-owned idempotency key.
+            # A crash after dispatch must not allocate another unknown image.
+            begins = list(await db.scalars(select(Event).where(
+                Event.turn_id == turn.id, Event.kind == CAPTURE_BEGIN,
+            )))
+            for begun in begins:
+                key = begun.identity.removeprefix(CAPTURE_BEGIN + ":")
+                completed = await db.scalar(select(Event).where(
+                    Event.identity == CAPTURE_RESULT + ":" + key,
+                ))
+                if completed is None:
+                    raise uncertain_capture()
+                if key == capture_id:
+                    original = json.loads(runtime.security.unseal(begun.content))
+                    if original != {
+                        "workspace": reference, "revision": revision,
+                        "snapshot": expected, "preparation": digest,
+                    }:
+                        raise preparation_blocked("workspace_checkpoint_missing")
+                    image = json.loads(runtime.security.unseal(completed.content))["image_id"]
+            if image is None:
+                db.add(Event(
+                    session_id=session.id, turn_id=turn.id, kind=CAPTURE_BEGIN,
+                    identity=CAPTURE_BEGIN + ":" + capture_id,
+                    content=runtime.security.seal({
+                        "workspace": reference, "revision": revision,
+                        "snapshot": expected, "preparation": digest,
+                    }),
+                ))
+                dispatch_capture = True
             await db.execute(delete(ComputerOperation).where(ComputerOperation.session_id == session.id))
             lease_seconds = database.settings.lambda_checkpoint_timeout + 120 if reference["provider"] == "lambda" else 240
             db.add(ComputerOperation(
                 session_id=session.id, identity=operation_id, expires_at=int(time.time()) + lease_seconds,
             ))
     try:
-        image = None
-        if reference:
+        if reference and dispatch_capture:
             image = await database.answers.snapshots.capture(
                 TypeAdapter(WorkspaceRef).validate_python(reference), require_live=True,
             )
+            await record_capture(runtime, capture_id, image)
         point = MaintenanceWorkspace(
             identity=identity, session_id=scope.session_id, turn_id=scope.turn_id, scope=scope.workspace_key,
             workflow_id=workflow_id, workflow_run_id=workflow_run_id, boundary=boundary,
@@ -246,10 +319,20 @@ async def load_maintenance_checkpoint(
     info = activity.info()
     if not info.workflow_id or not info.workflow_run_id:
         raise PermissionError("Restoration requires a workflow execution.")
-    return await resume(
-        current(), turn_id, reference, workflow_id=info.workflow_id,
-        workflow_run_id=info.workflow_run_id, previous_run_id=previous_run_id,
-    )
+    try:
+        return await resume(
+            current(), turn_id, reference, workflow_id=info.workflow_id,
+            workflow_run_id=info.workflow_run_id, previous_run_id=previous_run_id,
+        )
+    except Exception as error:
+        # The frozen image and stable provider creation identity permit another
+        # observation of that same restore, not an unrelated launch or tool retry.
+        if transient_checkpoint_error(error):
+            raise ApplicationError(
+                "The saved workspace restore is awaiting provider confirmation.",
+                type="MoyaiMaintenanceRestorePending", non_retryable=True,
+            ) from error
+        raise
 
 
 async def resume(
@@ -271,6 +354,14 @@ async def resume(
     if service is None:
         raise RuntimeError("Workspace restoration requires maintenance authority.")
     resume_identity = f"{RESUME_KIND}:{turn_id}:{point.generation}"
+    async with database.sessions() as db:
+        published = await db.scalar(select(Event).where(Event.identity == resume_identity))
+        published_content = published.content if published is not None else None
+    saved = json.loads(runtime.security.unseal(published_content)) if published_content else None
+    continued_saved = (
+        TypeAdapter(AgentCheckpoint).validate_json(await runtime.objects.get(saved["checkpoint"]))
+        if saved is not None else None
+    )
 
     async def validate(db: AsyncSession) -> tuple[Session, ProductDrainState, ProductDrainReceipt]:
         state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
@@ -291,13 +382,16 @@ async def resume(
         session, state, receipt = await validate(db)
         prior = await db.scalar(select(Event).where(Event.identity == resume_identity))
         if prior is not None:
-            saved = json.loads(runtime.security.unseal(prior.content))
+            if prior.content != published_content or saved is None or continued_saved is None:
+                raise ApplicationError(
+                    "The restore committed concurrently; observe its saved receipt.",
+                    type="MoyaiMaintenanceRestorePending", non_retryable=True,
+                )
             if saved["workflow_run_id"] != workflow_run_id or saved["source"] != reference:
                 raise PermissionError("The maintenance continuation receipt changed.")
-            continued = TypeAdapter(AgentCheckpoint).validate_json(await runtime.objects.get(saved["checkpoint"]))
-            if json.loads(session.workspace or "null") != continued.workspace:
+            if json.loads(session.workspace or "null") != continued_saved.workspace:
                 raise preparation_blocked("workspace_checkpoint_missing")
-            return MaintenanceResume(saved["generation"], False, continued)
+            return MaintenanceResume(saved["generation"], False, continued_saved)
         if maintenance_workspace(session.snapshot) != point or json.loads(session.workspace or "null") != point.workspace:
             raise preparation_blocked("workspace_checkpoint_missing")
         # Only the direct successor may take over the park. It has not yet
@@ -353,7 +447,6 @@ async def resume(
         workspace=workspace,
     )
     continued_ref = await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(continued))
-    await record_segment(runtime, continued_scope)
     async with database.sessions.begin() as db:
         session, state, receipt = await validate(db)
         if (
@@ -371,6 +464,18 @@ async def resume(
                 raise PermissionError("The preserved workspace authority changed.")
             if workspace is not None and workspace != point.workspace:
                 await preserve_restoration(db, session.id, point.workspace["id"], workspace["id"], scope.workspace_key)
+        segment_identity = f"history_segment:{continued_scope.root_run_id}"
+        segment = await db.scalar(select(Event).where(Event.identity == segment_identity))
+        if segment is None:
+            db.add(Event(
+                session_id=session.id, turn_id=turn_id, kind="history_segment", identity=segment_identity,
+                content=runtime.security.seal({"run_id": continued_scope.root_run_id}),
+            ))
+        elif (
+            segment.turn_id != turn_id or segment.session_id != session.id
+            or json.loads(runtime.security.unseal(segment.content)) != {"run_id": continued_scope.root_run_id}
+        ):
+            raise PermissionError("The continuation history segment changed.")
         db.add(Event(
             session_id=session.id, turn_id=turn_id, kind=RESUME_KIND, identity=resume_identity,
             content=runtime.security.seal({

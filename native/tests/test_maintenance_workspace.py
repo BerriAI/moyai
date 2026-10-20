@@ -3,16 +3,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
+import asyncpg
+import modal
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
 from pydantic import TypeAdapter
 from pydantic_ai import Conversation, ConversationTypeAdapter
-from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.usage import RunUsage
 from sqlalchemy import select
 from temporalio.exceptions import ApplicationError
@@ -30,12 +46,50 @@ from moyai.maintenance_workspace import (
 from moyai.models import ComputerOperation, Effect, Event, Session, Turn, User
 from moyai.product_drain import ProductDrainService
 from moyai.product_drain_models import ProductDrainReceipt, ProductDrainState
+from moyai.runtime import Runtime
+from moyai.settings import Settings
 
 OLD = {"provider": "modal", "id": "sb-maintenance-old"}
 NEW = {"provider": "modal", "id": "sb-maintenance-restored"}
 RUN = "maintenance-source-workflow-run"
 NEXT = "maintenance-successor-workflow-run"
 BOUNDARY = "native_node:2"
+
+
+@pytest_asyncio.fixture(params=["sqlite", "postgres"])
+async def runtime(request, tmp_path):
+    """The same fence tests run against real local PostgreSQL transactions."""
+    address, admin, database_name = "", None, None
+    if request.param == "postgres":
+        configured = os.getenv("MOYAI_TEST_POSTGRES")
+        if not configured:
+            pytest.skip("Set a disposable local PostgreSQL URL.")
+        parsed = urlsplit(configured)
+        assert parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        database_name = "moyai_maintenance_" + uuid4().hex
+        admin = await asyncpg.connect(configured)
+        await admin.execute(f'CREATE DATABASE "{database_name}" ENCODING \'UTF8\' TEMPLATE template0')
+        address = urlunsplit(parsed._replace(path="/" + database_name))
+    directory = tmp_path / "computer"
+    directory.mkdir()
+    shutil.copytree(Path(__file__).parents[1] / "skills", directory / "skills")
+    settings = Settings(
+        _env_file=None, data_dir=tmp_path / "data", database_url=address,
+        workspace_password="test-password-12345", default_model="test",
+        encryption_key="maintenance-fixture-local-encryption-key",
+    )
+    runtime = Runtime(settings)
+    try:
+        await runtime.start(
+            models={"test": FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("Done.")]))},
+            workspace=LocalWorkspace(directory), skills_directory="skills",
+        )
+        yield runtime
+    finally:
+        await runtime.close()
+        if admin is not None:
+            await admin.execute(f'DROP DATABASE "{database_name}" WITH (FORCE)')
+            await admin.close()
 
 
 @pytest_asyncio.fixture
@@ -66,7 +120,8 @@ async def maintenance(runtime, active, monkeypatch):
         ], conversation_id=prepared.scope.conversation_id, usage=RunUsage(requests=3, input_tokens=71),
     )
     graph = AgentCheckpoint(
-        prepared=replace(prepared, prompt="", workspace=OLD),
+        # On-demand allocation can occur after the original preparation.
+        prepared=replace(prepared, prompt=""),
         workspace=OLD, conversation=ConversationTypeAdapter.dump_json(conversation).decode(),
         run_step=4, output_retries_used=1, tool_retries={"other_tool": 1},
     )
@@ -107,6 +162,9 @@ async def test_expiry_enters_a_new_bound_continuation_without_rewriting_old_inpu
             arguments=case.runtime.security.seal("{}"), fingerprint="original", state="confirmed",
         ))
     reference = await save(case)
+    point = MaintenanceWorkspace.model_validate_json(await case.runtime.objects.get(reference))
+    frozen = TypeAdapter(AgentCheckpoint).validate_json(await case.runtime.objects.get(point.agent_checkpoint))
+    assert frozen.workspace == frozen.prepared.workspace == OLD
     # Lost capture reply reuses the same immutable envelope without a second image.
     assert await save(case) == reference
     case.capture.assert_awaited_once()
@@ -264,3 +322,86 @@ async def test_missing_snapshot_never_creates_an_empty_computer(maintenance):
     with pytest.raises(ApplicationError):
         await load(case, reference)
     case.restore.assert_not_awaited()
+
+
+async def test_lost_capture_reply_before_durable_receipt_never_dispatches_another_capture(maintenance, monkeypatch):
+    case = maintenance
+    monkeypatch.setattr(
+        "moyai.maintenance_workspace.record_capture", AsyncMock(side_effect=ConnectionError("receipt unavailable")),
+    )
+    with pytest.raises(ConnectionError):
+        await save(case)
+    with pytest.raises(ApplicationError) as failure:
+        await save(case)
+    assert failure.value.type == "MoyaiMaintenanceCaptureUncertain"
+    case.capture.assert_awaited_once()
+    async with case.runtime.database.sessions() as db:
+        assert (await db.get(ProductDrainReceipt, (case.turn.id, 22))).phase == "blocked"
+        assert (await db.get(Session, case.session.id)).snapshot is None
+
+
+@pytest.mark.parametrize("failure", ["after_provider_receipt", "before_checkpoint_publication"])
+async def test_known_capture_reconciles_without_allocating_another_image(maintenance, monkeypatch, failure):
+    from moyai import maintenance_workspace as module
+
+    case = maintenance
+    if failure == "after_provider_receipt":
+        original = module.record_capture
+
+        async def lose_receipt_reply(*args):
+            await original(*args)
+            raise ConnectionError("Committed provider receipt reply was lost.")
+
+        monkeypatch.setattr(module, "record_capture", lose_receipt_reply)
+    else:
+        original_put = case.runtime.objects.put
+        calls = 0
+
+        async def lose_envelope_write(data):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise ConnectionError("Envelope store is temporarily unavailable.")
+            return await original_put(data)
+
+        monkeypatch.setattr(case.runtime.objects, "put", lose_envelope_write)
+    with pytest.raises(ConnectionError):
+        await save(case)
+    reference = await save(case)
+    assert reference
+    case.capture.assert_awaited_once()
+    async with case.runtime.database.sessions() as db:
+        assert (await db.get(ProductDrainReceipt, (case.turn.id, 22))).phase == "parked"
+
+
+async def test_lost_named_restore_reply_reconciles_the_same_provider_computer(maintenance, monkeypatch):
+    from moyai import workspace_recovery
+
+    case = maintenance
+    reference = await save(case)
+    await unpause(case)
+    registry = {}
+    sandbox = SimpleNamespace(
+        object_id=NEW["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
+    )
+
+    async def lookup(_app, name):
+        if name not in registry:
+            raise modal.exception.NotFoundError("No named computer yet.")
+        return registry[name]
+
+    async def create(**kwargs):
+        registry[kwargs["name"]] = sandbox
+        raise ConnectionError("Provider created the named computer; response was lost.")
+
+    provider_create = AsyncMock(side_effect=create)
+    monkeypatch.setattr("moyai.maintenance_workspace.restored_sandbox", workspace_recovery.restored_sandbox)
+    monkeypatch.setattr("moyai.workspace_recovery.modal.Sandbox.from_name.aio", AsyncMock(side_effect=lookup))
+    monkeypatch.setattr("moyai.workspace_recovery.modal.App.lookup.aio", AsyncMock(return_value=object()))
+    monkeypatch.setattr("moyai.workspace_recovery.modal.Sandbox.create.aio", provider_create)
+    monkeypatch.setattr("moyai.workspace_recovery.modal.Image.from_id", lambda identity: identity)
+    with pytest.raises(ConnectionError):
+        await load(case, reference)
+    result = await load(case, reference)
+    assert result.checkpoint.workspace == NEW
+    provider_create.assert_awaited_once()
