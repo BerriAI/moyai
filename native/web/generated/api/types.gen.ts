@@ -4034,6 +4034,10 @@ export type GoalView = {
      */
     created_at: string;
     /**
+     * Elapsed Seconds
+     */
+    elapsed_seconds: number;
+    /**
      * Generation
      */
     generation: number;
@@ -8716,6 +8720,10 @@ export type SessionMessage = {
      * Role
      */
     role: string;
+    /**
+     * Sent As Goal
+     */
+    sent_as_goal: boolean;
     /**
      * Slack Mentions
      */
@@ -14220,7 +14228,7 @@ export type CreateSessionMessageResponses = {
      *
      * Successful Response
      */
-    202: TurnView | GoalStartedResult | GoalCommandResult;
+    202: GoalStartedResult | TurnView | GoalCommandResult;
 };
 
 export type CreateSessionMessageResponse = CreateSessionMessageResponses[keyof CreateSessionMessageResponses];

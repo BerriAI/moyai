@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react"
 import { ArrowUpRight, Bug, Code2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
-import { GoalDialog, goalCommandAction } from "./goal"
+import { GoalChip, goalCommandAction } from "./goal"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
@@ -36,7 +36,7 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
   const isPrivate = individual && privateSession
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  const [goalDialog, setGoalDialog] = useState(false)
+  const [goalMode, setGoalMode] = useState(false)
   const pictures = useAttachments(setError)
   const fileDrop = useFileDrop(pictures.add, setError, busy)
   const [accountsVersion, setAccountsVersion] = useState(0)
@@ -70,9 +70,10 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
   }, [needsAccounts, accountScope, isPrivate])
 
   async function send(prompt = draft) {
-    if (prompt.trim() === "/goal") { setGoalDialog(true); return }
+    if (prompt.trim() === "/goal") { setGoalMode(true); setDraft(""); setComposerFocus(value => value + 1); return }
+    if (goalMode && !prompt.trim()) return
     const auth = csrfToken()
-    try { await submit(prompt) }
+    try { await submit(goalMode ? `/goal --budget none ${prompt}` : prompt) }
     catch (reason) { if (mounted.current && csrfToken() === auth) setError(String(reason)) }
   }
 
@@ -115,7 +116,6 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
   }
 
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
-    <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} onSubmit={async command => { setDraft(command); await submit(command) }} />
     {fileDrop.dragging && <FileDropOverlay />}
     <SpaceBackdrop />
     <div className="home-content">
@@ -131,7 +131,7 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
         </div>}
         <div className="composer home-composer">
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <div className="home-editor-input"><SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe a change, paste an error, or ask a question…" onPaste={pictures.paste} /></div>
+          <div className="home-editor-input"><SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} onGoalSelect={() => { setGoalMode(true); setDraft("") }} shared={!isPrivate} disabled={busy} placeholder={goalMode ? "Describe a goal to keep pursuing…" : "Describe a change, paste an error, or ask a question…"} onPaste={pictures.paste} /></div>
           <div className="composer-actions">
             <div className="home-composer-tools">
               <AttachButton add={pictures.add} disabled={busy} compact />
@@ -140,9 +140,10 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
                 onClick={() => { setSkippedScope(""); setPrivateSession(value => !value) }}>
                 {isPrivate ? <LockKeyhole /> : <Globe />}{isPrivate ? "Private" : "Public"}
               </Button>
+              {goalMode && <GoalChip disabled={busy} onRemove={() => { setGoalMode(false); setComposerFocus(value => value + 1) }} />}
             </div>
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>
-              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><Send /></Button>
+              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && (goalMode || !pictures.files.length))}><Send /></Button>
             </div>
           </div>
         </div>
