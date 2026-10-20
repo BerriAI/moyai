@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import defer
 
 from .answer_settlement import AnswerSettlement
 from .contracts import (
@@ -78,6 +79,11 @@ def grant_fingerprint(grants: list[Grant]) -> str:
     return hashlib.sha256(json.dumps(
         sorted((grant.id, grant.revision) for grant in grants)
     ).encode()).hexdigest()
+
+
+# Read projections and authorization do not need the agent's private checkpoint.
+# Fail explicitly if a caller accidentally tries to use an omitted field.
+SESSION_METADATA = (defer(Session.conversation, raiseload=True), defer(Session.snapshot, raiseload=True))
 
 
 class Database:
@@ -263,15 +269,17 @@ class Database:
         if limited:
             raise HTTPException(429, "Too many sign-in attempts. Wait one minute.")
 
-    async def allowed_session(self, db: AsyncSession, session_id: str, actor: User) -> Session:
+    async def allowed_session(
+        self, db: AsyncSession, session_id: str, actor: User, *, metadata_only: bool = False,
+    ) -> Session:
         """Authorize a fresh reader or input, including its current source audience."""
-        session = await self.execution_session(db, session_id, actor)
-        await self.check_source_audience(db, session, actor)
+        session = await self.execution_session(db, session_id, actor, metadata_only=metadata_only)
+        await self.check_source_audience(db, session, actor, metadata_only=metadata_only)
         member = await db.get(SwarmMember, session_id)
         if member is not None and member.mission_id != session_id:
-            root = await db.get(Session, member.mission_id)
+            root = await db.get(Session, member.mission_id, options=SESSION_METADATA if metadata_only else ())
             assert root is not None  # Checked by execution_session.
-            await self.check_source_audience(db, root, actor)
+            await self.check_source_audience(db, root, actor, metadata_only=metadata_only)
         return session
 
     async def prefetch_session_audiences(
@@ -282,14 +290,16 @@ class Database:
         if self.product_authority_enabled and prefetch is not None and session_ids:
             await prefetch(actor, session_ids, deleted=deleted)
 
-    async def execution_session(self, db: AsyncSession, session_id: str, actor: User) -> Session:
+    async def execution_session(
+        self, db: AsyncSession, session_id: str, actor: User, *, metadata_only: bool = False,
+    ) -> Session:
         """Local session checks for work whose saved turn authority is revalidated by the caller.
 
         Provider audience lookups belong at read/admission boundaries, not inside
         every worker/tool authorization. The original product grant and selected
         connection checks still fence execution, including Slack disconnection.
         """
-        session = await db.get(Session, session_id)
+        session = await db.get(Session, session_id, options=SESSION_METADATA if metadata_only else ())
         if session is None or session.deleted:
             raise HTTPException(404, "Conversation not found.")
         if session.visibility == "private" and session.owner_id != actor.id:
@@ -298,22 +308,24 @@ class Database:
                 raise HTTPException(404, "Conversation not found.")
         member = await db.get(SwarmMember, session_id)
         if member is not None and member.mission_id != session_id:
-            root = await db.get(Session, member.mission_id)
+            root = await db.get(Session, member.mission_id, options=SESSION_METADATA if metadata_only else ())
             if root is None or root.deleted or (root.visibility == "private" and root.owner_id != actor.id):
                 raise HTTPException(404, "Conversation not found.")
         return session
 
-    async def check_source_audience(self, db: AsyncSession, session: Session, actor: User) -> None:
+    async def check_source_audience(
+        self, db: AsyncSession, session: Session, actor: User, *, metadata_only: bool = False,
+    ) -> None:
         delegated = await db.get(DelegatedSession, session.id)
         member = await db.get(SwarmMember, session.id) if session.surface == "slack" else None
         parent_id = delegated.parent_session_id if delegated else member.mission_id if member else None
         if parent_id and parent_id != session.id:
-            parent = await db.get(Session, parent_id)
+            parent = await db.get(Session, parent_id, options=SESSION_METADATA if metadata_only else ())
             if parent is None:
                 raise HTTPException(404, "Conversation not found.")
             # Inherit provider audience, not the parent's navigation state. An
             # archived/deleted web parent must not hide its owner's private child.
-            await self.check_source_audience(db, parent, actor)
+            await self.check_source_audience(db, parent, actor, metadata_only=metadata_only)
             return
         if (session.surface == "slack" and self.product_authority_enabled
                 and (self.slack_access is None or not await self.slack_access(db, session, actor))):
@@ -382,17 +394,17 @@ class Database:
                     visible.append(session)
             return visible
 
-    async def session(self, actor: User, session_id: str) -> Session:
+    async def session(self, actor: User, session_id: str, *, metadata_only: bool = False) -> Session:
         await self.prefetch_session_audiences(actor, [session_id])
         async with self.sessions() as db:
-            return await self.allowed_session(db, session_id, actor)
+            return await self.allowed_session(db, session_id, actor, metadata_only=metadata_only)
 
     async def messages(self, actor: User, session_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         from .message_sources import public_messages, source_view
 
         await self.prefetch_session_audiences(actor, [session_id])
         async with self.sessions() as db:
-            await self.allowed_session(db, session_id, actor)
+            await self.allowed_session(db, session_id, actor, metadata_only=True)
             rows = list((await db.scalars(select(Message).where(
                 Message.session_id == session_id, Message.id > after
             ).order_by(Message.id).limit(200))).all())
@@ -435,7 +447,7 @@ class Database:
         if self.slack_mentions is not None and await self.slack_mentions(
             result, {key: value[1] for key, value in projected.items()},
         ):
-            await self.session(actor, session_id)
+            await self.session(actor, session_id, metadata_only=True)
         return result
 
     async def same_person(self, db: AsyncSession, actor: User, author_id: str | None) -> bool:
