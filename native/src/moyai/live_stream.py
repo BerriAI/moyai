@@ -8,6 +8,8 @@ from contextlib import suppress
 
 from fastapi import HTTPException
 
+from .product_identity import ProductAuthorityBusy
+
 
 async def authorized_events(
     source: AsyncIterator[str],
@@ -51,8 +53,8 @@ async def authorized_events(
                 return
             pending = None
             yield item
-    except HTTPException as error:
-        if error.status_code in {401, 403, 404}:
+    except (HTTPException, ProductAuthorityBusy) as error:
+        if isinstance(error, HTTPException) and error.status_code in {401, 403, 404}:
             yield 'event: access_revoked\ndata: {}\n\n'
         else:
             yield 'event: refresh\ndata: {}\n\n'

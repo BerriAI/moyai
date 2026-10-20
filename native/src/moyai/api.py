@@ -252,6 +252,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if runtime.product_slack is None:
             return
         session_id = request.path_params.get("session_id")
+        if session_id is None and request.url.path == "/api/connections":
+            session_id = request.query_params.get("session_id")
         if session_id is None:
             turn_id = request.path_params.get("turn_id")
             artifact_id = request.path_params.get("artifact_id")

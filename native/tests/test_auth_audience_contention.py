@@ -229,6 +229,11 @@ async def test_http_contention_is_503_and_rolls_back_mark_read_and_send_now(read
 
     product = read_product
     database = product.runtime.database
+    parent = await database.submit(
+        product.actor, product.session_id, NewMessage(prompt="Active parent", request_key="busy-parent"),
+    )
+    assert (await database.claim_next()).id == parent.id
+    await database.prepare(parent.id)
     turn = await database.submit(
         product.actor, product.session_id, NewMessage(prompt="Queued input", request_key="busy-input"),
     )
@@ -258,8 +263,14 @@ async def test_http_contention_is_503_and_rolls_back_mark_read_and_send_now(read
             f"/api/sessions/{product.session_id}", json={"unread": False},
         )).status_code == 200
         assert (await product.client.post(f"/api/turns/{turn.id}/steer")).status_code == 202
+        repeated = await product.client.post(f"/api/turns/{turn.id}/steer")
+        assert repeated.status_code == 202 and repeated.json()["id"] == turn.id
         async with database.sessions() as db:
-            assert (await db.get(Turn, turn.id)).mode == "asap"
+            saved = await db.get(Turn, turn.id)
+            assert saved.mode == "asap" and saved.status == "steering" and saved.parent_turn == parent.id
+            assert await db.scalar(text(
+                "SELECT count(*) FROM moyai_events WHERE turn_id=:id AND kind='steering_admitted'",
+            ), {"id": turn.id}) == 1
     finally:
         async with database.engine.begin() as connection:
             await connection.execute(text("SET lock_timeout=0"))
@@ -288,3 +299,141 @@ async def test_authority_contention_is_not_a_permanent_worker_permission_failure
         await interceptor.execute_activity(request)
     assert observed.value is error
     next_activity.execute_activity.assert_not_awaited()
+
+
+@pytest.mark.parametrize("after_expiry", ["healthy", "membership", "busy", "role", "gate"])
+async def test_sse_refreshes_expired_audience_before_authorizing_each_frame(audience, after_expiry):
+    from app.connector_errors import ConnectorError
+    from fastapi import Request
+
+    from moyai.live_stream import authorized_events
+    from moyai.product_identity import ProductAuthorityBusy
+    from moyai.stream_authority import authorize_stream_viewer
+
+    product = audience
+    request = Request({"type": "http", "state": {"product_identity_grant": product.principal.grant}})
+
+    async def authorize():
+        await authorize_stream_viewer(
+            product.database, product.adapter, request, product.actor,
+            product.session_id, product.raw_principal.id,
+        )
+
+    async def disconnected():
+        return False
+
+    async def events():
+        yield "id: 0\ndata: first\n\n"
+        product.state["clock"] += fixtures.AUDIENCE_TTL
+        if after_expiry == "membership":
+            product.state["members"] = []
+        elif after_expiry == "busy":
+            product.state["failure"] = ConnectorError(
+                "private provider detail", code="rate_limited", status_code=429, retryable=True, retry_after=1,
+            )
+        elif after_expiry == "role":
+            async with product.source.begin() as db:
+                await db.execute(text(
+                    "INSERT INTO moyai.user_roles VALUES "
+                    "('admin@example.test','member',1,'other@example.test','now')",
+                ))
+        elif after_expiry == "gate":
+            async def unavailable(*args, **kwargs):
+                raise ProductAuthorityBusy("Account access is busy. Try again shortly.")
+            product.database.slack_prefetch = unavailable
+        yield "id: 1\ndata: second\n\n"
+
+    frames = [frame async for frame in authorized_events(events(), authorize, disconnected)]
+    assert frames[0] == "id: 0\ndata: first\n\n"
+    if after_expiry == "healthy":
+        assert frames == ["id: 0\ndata: first\n\n", "id: 1\ndata: second\n\n"]
+        assert len(product.state["calls"]) == 4
+    else:
+        assert not any("id: 1" in frame or "second" in frame for frame in frames)
+        assert frames[-1] == (
+            "event: refresh\ndata: {}\n\n" if after_expiry in {"busy", "gate"} else
+            "event: access_revoked\ndata: {}\n\n"
+        )
+
+
+async def test_cold_non_http_answer_actor_prewarms_before_its_transaction(audience):
+    from sqlalchemy import select
+
+    from moyai.models import Turn
+    from moyai.product_requester import answer_actor
+
+    product = audience
+    async with product.database.sessions() as db:
+        turn = await db.scalar(select(Turn).where(Turn.session_id == product.session_id))
+    runtime = SimpleNamespace(database=product.database, product=SimpleNamespace(identity=product.adapter))
+    actor = await answer_actor(runtime, product.actor, turn)
+    assert actor.id == product.raw_principal.id
+    assert len(product.state["calls"]) == 2
+
+
+@pytest.mark.parametrize("operation", ["mark_read", "send_now"])
+async def test_http_role_insert_during_prefetch_denies_old_grant_without_mutation(audience, runtime, operation):
+    import httpx
+
+    from moyai.api import create_app
+    from moyai.contracts import NewMessage
+    from moyai.models import SessionRead, Turn
+
+    product = audience
+    original_database = runtime.database
+    runtime.database = product.database
+    turn = await product.database.submit(
+        product.actor, product.session_id,
+        NewMessage(prompt="Queued browser input", request_key="role-race-input", mode="when_idle"),
+    )
+    product.slack.audience_reads.snapshots.clear()
+    product.state["calls"].clear()
+    app = create_app(runtime, run_dispatcher=False)
+    route = next(route for route in app.routes if getattr(route, "path", "") == "/api/sessions/{session_id}")
+    dependency = next(item.call for item in route.dependant.dependencies if item.name == "user")
+    entered, release = asyncio.Event(), asyncio.Event()
+    request_provider = product.slack.connectors.request
+
+    async def delayed(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await request_provider(*args, **kwargs)
+
+    async def user():
+        await product.database.prefetch_session_audiences(product.actor, [product.session_id])
+        return product.actor
+
+    product.slack.connectors.request = delayed
+    app.dependency_overrides[dependency] = user
+    task = None
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            task = asyncio.create_task(
+                client.patch(f"/api/sessions/{product.session_id}", json={"unread": False})
+                if operation == "mark_read" else client.post(f"/api/turns/{turn.id}/steer")
+            )
+            await asyncio.wait_for(entered.wait(), 2)
+            async with product.source.begin() as db:
+                await db.execute(text("SET LOCAL lock_timeout='500ms'"))
+                await db.execute(text(
+                    "SELECT pg_advisory_xact_lock(726941,'moyai'::regnamespace::oid::int)",
+                ))
+                await db.execute(text(
+                    "INSERT INTO moyai.user_roles VALUES "
+                    "('admin@example.test','member',1,'other@example.test','now')",
+                ))
+            release.set()
+            response = await asyncio.wait_for(task, 2)
+            assert response.status_code == 401
+        async with product.database.sessions() as db:
+            assert await db.get(SessionRead, (product.actor.id, product.session_id)) is None
+            saved = await db.get(Turn, turn.id)
+            assert saved.status == "queued" and saved.mode == "when_idle"
+    finally:
+        release.set()
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*list(product.slack.audience_reads.pending.values()), return_exceptions=True)
+        runtime.database = original_database
