@@ -40,7 +40,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/auth/google/start')return json({url:'https://accounts.google.com/fixture'});
   if(url.pathname==='/api/logout'){state.signedIn=false;return json({signed_out:true});}
   if(!state.signedIn)return json({detail:'Sign in.'},401);
-  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:'test-model',product_mode:state.mode,preferences:state.preferences||{delivery_mode:'when_idle',connection_ids:null}});
+  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:state.viewerName||'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:state.defaultModel||'test-model',product_mode:state.mode,preferences:state.preferences||{delivery_mode:'when_idle',connection_ids:null}});
   if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;const id='c'.repeat(32);state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],model:data.model||'test-model'}};return json(session(id));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections') {
@@ -193,6 +193,23 @@ async function handle(req,res,next) {
     return json(result);
   }
   return json({detail:'Fixture endpoint not implemented: '+url.pathname},404);
+}
+// Synthetic presentation data only. No provider requests or real account details.
+function resetReadmeDemo() {
+  reset({status:'idle',viewerName:'Alex Morgan',models:['Claude Sonnet 4.5'],defaultModel:'Claude Sonnet 4.5'});
+  const examples=[
+    ['Polish command palette','idle'],
+    ['Fix streaming reconnects','running'],
+    ['Add keyboard navigation','idle'],
+    ['Review API migration','idle'],
+    ['Refresh onboarding copy','idle'],
+    ['Trace gateway latency','idle'],
+  ];
+  state.inventoryRows=examples.map(([title,status],index)=>({
+    ...session((index+1).toString(16).repeat(32)),title,status,source:'native',
+    ...(index>=4?{owner_id:'demo-teammate',participated:true}:{}),
+    updated_at:new Date(Date.now()-(index+1)*3600000).toISOString(),
+  }));
 }
 async function waitFor(predicate,label='condition',timeout=10000) {const end=Date.now()+timeout;while(!predicate()){if(Date.now()>end)throw new Error('Timed out: '+label);await new Promise(resolve=>setTimeout(resolve,25));}}
 function emit(value,id,event) {for(const client of clients)client.write(`${id===undefined?'':`id: ${id}\n`}${event?`event: ${event}\n`:''}data: ${JSON.stringify(value)}\n\n`);}
@@ -2881,4 +2898,84 @@ for(const width of [1440,768,320])test(`subagent failure before first output sho
   assert.equal(new URL(page.url()).hash,'#'+sessionId);
   await side.getByText('Inspect the repository.',{exact:true}).waitFor();
   assert.ok(state.requests.some(row=>row.path===`/api/sessions/${childId}`));
+});
+
+for(const theme of ['dark','light'])for(const width of [1440,768])test(`session sidebar resizes and resets at ${width}px in ${theme}`,async t=>{
+  reset({status:'idle'});
+  const page=await pageFor(t,'',width,p=>p.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme));
+  const handle=page.getByRole('separator',{name:'Resize session sidebar'});
+  await handle.waitFor();
+  const sidebar=page.locator('#session-sidebar');
+  const size=async()=>Math.round((await sidebar.boundingBox()).width);
+  const initial=width>1250?240:230;
+  assert.equal(await size(),initial);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Keep this draft while resizing.');
+  await handle.focus();await page.keyboard.press('ArrowRight');
+  assert.equal(await size(),initial+10);
+  await page.keyboard.press('Shift+ArrowRight');assert.equal(await size(),initial+50);
+  await page.keyboard.press('End');assert.equal(await size(),Math.min(440,width-360));
+  await page.keyboard.press('Home');assert.equal(await size(),200);
+  await page.keyboard.press('Enter');assert.equal(await size(),initial);
+  const drag=async delta=>{
+    const box=await handle.boundingBox();
+    await page.mouse.move(box.x+box.width/2,box.y+100);await page.mouse.down();
+    await page.mouse.move(box.x+box.width/2+delta,box.y+100,{steps:6});
+  };
+  await drag(80);await page.mouse.up();assert.equal(await size(),initial+80);
+  await drag(50);await page.keyboard.press('Escape');await page.mouse.up();assert.equal(await size(),initial+80);
+  assert.equal(await page.locator('.sidebar-resize-shield').count(),0);
+  await handle.dblclick();assert.equal(await size(),initial);
+  await drag(-1000);await page.mouse.up();assert.equal(await size(),200);
+  await drag(1500);await page.mouse.up();assert.equal(await size(),Math.min(440,width-360));
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).innerText(),'Keep this draft while resizing.');
+  assert.equal(await page.locator('.app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+  await handle.waitFor({state:'hidden'});assert.equal(await size(),52);
+  await page.getByRole('button',{name:'Open sidebar',exact:true}).click();
+  assert.equal(await size(),Math.min(440,width-360));
+  await page.locator('.new-chat').click();assert.equal(await size(),initial);
+  await handle.focus();await page.keyboard.press('Shift+ArrowRight');
+  await page.locator(`[data-session-key="native:${sessionId}"] > a`).click();
+  await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();assert.equal(await size(),initial);
+  await handle.focus();await page.keyboard.press('Shift+ArrowRight');
+  await page.locator('.new-chat').click();
+  await page.getByRole('heading',{name:'What are we building?'}).waitFor();assert.equal(await size(),initial);
+  await handle.focus();await page.keyboard.press('End');
+  await page.setViewportSize({width:650,height:1000});
+  await page.waitForFunction(()=>document.querySelector('[aria-label="Resize session sidebar"]').getAttribute('aria-valuenow')==='290');
+  assert.equal(await size(),290);
+  await page.setViewportSize({width:320,height:700});
+  await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await handle.waitFor({state:'hidden'});
+  assert.equal(await page.locator('.app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+});
+
+for(const theme of ['dark','light'])test(`README composer demo in ${theme}`,async t=>{
+  resetReadmeDemo();
+  const page=await browser.newPage({viewport:{width:1280,height:800},deviceScaleFactor:2,reducedMotion:'reduce'});
+  t.after(()=>page.close());
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme);
+  await page.goto(base+'/');
+  await page.getByRole('heading',{name:'What are we building?',exact:true}).waitFor();
+  const editor=page.getByRole('textbox',{name:'Message Moyai'});
+  await editor.fill('Add keyboard shortcuts to the command palette.\nMatch the existing components, test the interactions, and open a PR with a preview.');
+  await page.getByText('Alex Morgan',{exact:true}).waitFor();
+  await page.getByText('Fix streaming reconnects',{exact:true}).waitFor();
+  const resize=page.getByRole('separator',{name:'Resize session sidebar'});
+  await resize.focus();await page.keyboard.press('Shift+ArrowRight');await page.keyboard.press('Shift+ArrowRight');
+  assert.equal(await resize.getAttribute('aria-valuenow'),'320');
+  await page.evaluate(()=>document.fonts.ready);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isEnabled(),true);
+  assert.equal(await page.locator('.app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.equal(await page.locator('.session-row').count(),6);
+  assert.deepEqual(errors,[]);
+  if(process.env.MOYAI_README_CAPTURE_DIR){
+    // Fail capture rather than silently publishing a fallback-font screenshot.
+    assert.equal(await page.evaluate(()=>[...document.fonts].some(font=>font.family.includes('General Sans')&&font.status==='loaded')),true);
+    await fs.mkdir(process.env.MOYAI_README_CAPTURE_DIR,{recursive:true});
+    await page.getByRole('heading',{name:'What are we building?',exact:true}).click();
+    await page.mouse.move(1260,780);
+    await page.screenshot({path:path.join(process.env.MOYAI_README_CAPTURE_DIR,theme==='dark'?'home.png':'home-light.png'),animations:'disabled'});
+  }
 });

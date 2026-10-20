@@ -45,6 +45,7 @@ import { ActionPanel } from "./action-panel"
 import { useWorkProgress } from "./use-work-progress"
 import { currentWorkTool, orderedWorkMessages, unanchoredWorkSegments, workSegments, type WorkSegment } from "./work-timeline"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
+import { SidebarResizeHandle } from "./sidebar-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, reconcileHistory, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
@@ -142,6 +143,7 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [sidebarHidden, setSidebarHidden] = useState(false)
+  const [sidebarReset, setSidebarReset] = useState(0)
   const [currentSession, setCurrentSession] = useState<Session | null>(null)
   const [initialConversation, setInitialConversation] = useState<{ scope: string; value: NewConversation } | null>(null)
   const [routeRevision, setRouteRevision] = useState(0)
@@ -328,14 +330,15 @@ function App() {
 
   if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
   if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError(""); setRefreshError("") }} />
-  const newSession = () => { setStartPrivate(false); location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
+  const newSession = () => { setStartPrivate(false); location.hash = ""; setMobileNav(false); setWorkspaceRequest(null); setSidebarReset(value => value + 1) }
   const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
   const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
   return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} updates={sessionUpdates} optimisticSession={optimisticSession} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
     setWorkspaceRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1, tab: "computer" }))
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
-    {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
+    {!settingsOpen && <aside id="session-sidebar" className={`sidebar ${mobileNav ? "open" : ""}`}>
+      <SidebarResizeHandle key={`${scopeKey}:${selected}:${sidebarReset}`} enabled={!sidebarHidden} />
       <div className="sidebar-brand-row"><MoyaiBrand /><Button variant="ghost" size="icon-sm" className="rail-palette-trigger" aria-label="Search sessions & commands" title="Search sessions & commands (⌘K)" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={15} /></Button><SidebarToggle collapsed={sidebarHidden} onToggle={toggleSidebar} /></div>
       <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <nav className="rail-destinations" aria-label="Workspace tools">
