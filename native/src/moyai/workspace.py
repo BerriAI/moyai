@@ -13,7 +13,9 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai_harness.step_persistence import RunRecord
 from sqlalchemy import delete, select, update
+from sqlalchemy.orm import load_only
 
+from .database import SESSION_METADATA
 from .delegation_models import DelegatedSession
 from .links import PR_MENTION, LinkInput, save_link
 from .models import Artifact, Message, Session, SessionLink, SubagentLabel, Turn, Upload, User
@@ -157,11 +159,12 @@ async def run_lineage(
 ) -> tuple[list[tuple[RunRecord, Turn, int]], bool]:
     # Always enter the native lineage through authorized product turns. Never
     # enumerate the global run store, which contains other people's contexts.
-    from .history_handoff import turn_run_ids
+    from .history_handoff import turn_run_ids_many
 
     queue = deque()
+    roots = await turn_run_ids_many(runtime, [turn.id for turn in turns])
     for turn in turns:
-        queue.extend((run_id, turn, 0) for run_id in await turn_run_ids(runtime, turn.id))
+        queue.extend((run_id, turn, 0) for run_id in roots[turn.id])
     seen: set[str] = set()
     found: list[tuple[RunRecord, Turn, int]] = []
     while queue and len(found) < limit:
@@ -214,19 +217,20 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         current = await runtime.database.user(user.id)
         if current.auth_version != user.auth_version:
             raise HTTPException(401, "Your session expired.")
-        await runtime.database.session(user, session_id)
+        await runtime.database.session(user, session_id, metadata_only=True)
 
     @router.get("/api/sessions/{session_id}/workspace", operation_id="getWorkspace")
     async def overview(session_id: str, user: User = Depends(actor)) -> SessionWorkspace:
         async with runtime.database.sessions() as db:
-            session = await runtime.database.allowed_session(db, session_id, user)
+            session = await runtime.database.allowed_session(db, session_id, user, metadata_only=True)
+            turn_columns = load_only(Turn.id, Turn.actor_id, Turn.status, raiseload=True)
             turns = list(await db.scalars(select(Turn).where(
                 Turn.session_id == session_id, Turn.preparation.is_not(None),
-            ).order_by(Turn.created_at.desc()).limit(21)))
+            ).options(turn_columns).order_by(Turn.created_at.desc()).limit(21)))
             recent_limited = len(turns) > 20
             turns = turns[:20]
             if session.active_turn and not any(turn.id == session.active_turn for turn in turns):
-                active = await db.get(Turn, session.active_turn)
+                active = await db.get(Turn, session.active_turn, options=[turn_columns])
                 if active:
                     turns.insert(0, active)
             attached = [
@@ -245,11 +249,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             } for row in await db.scalars(select(Upload).where(
                 Upload.session_id == session_id,
             ).order_by(Upload.created_at.desc()).limit(100))]
-            public_messages = list(await db.scalars(select(Message).where(
+            message_rows = list(await db.scalars(select(Message).where(
                 Message.session_id == session_id,
             ).order_by(Message.id.desc()).limit(100)))
-            from .message_sources import public_message
-            public_messages = [(await public_message(runtime.database, db, row))[0] for row in public_messages]
+            from .message_sources import public_messages as project_messages
+            projected = await project_messages(runtime.database, db, message_rows)
+            public_messages = [projected[row.id][0] for row in message_rows]
         # Only public transcript URLs become "mentioned" PRs, never URLs found in
         # private tool output, reasoning, memory, or a delegate's working context.
         known = {row["url"] for row in attached if row["kind"] == "pull_request"}
@@ -271,7 +276,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 Session, Session.id == DelegatedSession.session_id,
             ).where(
                 DelegatedSession.parent_session_id == session_id, Session.deleted.is_(False),
-            ).order_by(DelegatedSession.created_at).limit(101))).all()
+            ).options(*SESSION_METADATA).order_by(DelegatedSession.created_at).limit(101))).all()
             owners = {owner: await runtime.database.same_person(db, user, owner)
                       for owner in {link.actor_id for link, _ in children[:100]}}
             subagents = [{

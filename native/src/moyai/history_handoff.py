@@ -79,12 +79,23 @@ def is_turn_run(run_id: str | None, turn_id: str) -> bool:
 
 async def turn_run_ids(runtime: Runtime, turn_id: str) -> list[str]:
     """Only server-recorded continuations of this authorized turn."""
+    return (await turn_run_ids_many(runtime, [turn_id]))[turn_id]
+
+
+async def turn_run_ids_many(runtime: Runtime, turn_ids: list[str]) -> dict[str, list[str]]:
+    """Batch lineage roots for turns the caller has already authorized."""
+    run_ids = {turn_id: [turn_id] for turn_id in turn_ids}
+    if not run_ids:
+        return run_ids
     async with runtime.database.sessions() as db:
-        rows = list(await db.scalars(select(Event).where(
-            Event.turn_id == turn_id, Event.kind == "history_segment",
-        ).order_by(Event.id)))
-    run_ids = [json.loads(runtime.security.unseal(row.content))["run_id"] for row in rows]
-    return list(dict.fromkeys([turn_id, *(run_id for run_id in run_ids if is_turn_run(run_id, turn_id))]))
+        rows = (await db.execute(select(Event.turn_id, Event.content).where(
+            Event.turn_id.in_(run_ids), Event.kind == "history_segment",
+        ).order_by(Event.id))).all()
+    for turn_id, content in rows:
+        run_id = json.loads(runtime.security.unseal(content))["run_id"]
+        if is_turn_run(run_id, turn_id):
+            run_ids[turn_id].append(run_id)
+    return {turn_id: list(dict.fromkeys(values)) for turn_id, values in run_ids.items()}
 
 
 async def latest_turn_snapshot(

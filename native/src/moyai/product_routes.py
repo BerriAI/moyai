@@ -23,6 +23,7 @@ from sqlalchemy import and_, case, column, false, func, or_, select, table
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased
 
+from .database import SESSION_METADATA
 from .delegation_models import DelegatedSession
 from .models import Message, Session, SessionPreference, SessionRead, Turn, User
 from .product_files import routes as file_routes
@@ -320,12 +321,12 @@ class ProductReadService:
                 session_id = row["id"]
                 try:
                     if deleted:
-                        session = await db.get(Session, session_id)
+                        session = await db.get(Session, session_id, options=SESSION_METADATA)
                         if session is None or not await self.runtime.database.same_person(db, reader.user, session.owner_id):
                             raise HTTPException(404, "Conversation not found.")
-                        await self.runtime.database.check_source_audience(db, session, reader.user)
+                        await self.runtime.database.check_source_audience(db, session, reader.user, metadata_only=True)
                     else:
-                        await self.runtime.database.allowed_session(db, session_id, reader.user)
+                        await self.runtime.database.allowed_session(db, session_id, reader.user, metadata_only=True)
                 except HTTPException as error:
                     if error.status_code != 404:
                         raise
