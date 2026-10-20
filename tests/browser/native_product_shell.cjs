@@ -3111,7 +3111,7 @@ for(const theme of ['dark','light'])test(`README composer demo in ${theme}`,asyn
   const editor=page.getByRole('textbox',{name:'Message Moyai'});
   await editor.fill('Add keyboard shortcuts to the command palette.\nMatch the existing components, test the interactions, and open a PR with a preview.');
   await page.getByText('Alex Morgan',{exact:true}).waitFor();
-  await page.getByText('Fix streaming reconnects',{exact:true}).waitFor();
+  await page.locator('#session-sidebar').getByText('Fix streaming reconnects',{exact:true}).waitFor();
   const resize=page.getByRole('separator',{name:'Resize session sidebar'});
   await resize.focus();await page.keyboard.press('Shift+ArrowRight');await page.keyboard.press('Shift+ArrowRight');
   assert.equal(await resize.getAttribute('aria-valuenow'),'320');
