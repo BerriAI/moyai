@@ -57,6 +57,24 @@ async def test_explicit_release_store_preserves_application_migration_receipts(s
         )) == 0
 
 
+async def test_receipt_constraints_match_the_running_postgres_catalog(store):
+    product, receipt = store
+    activation.provision(receipt.guard)
+    async with product.source.connect() as connection:
+        version = int(await connection.scalar(text("SHOW server_version_num")))
+        constraints = (await connection.execute(text(
+            "SELECT c.contype::text, a.attname FROM pg_constraint c "
+            "LEFT JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey) "
+            "WHERE c.conrelid=to_regclass(:table) ORDER BY c.contype,a.attname",
+        ), {"table": f'"{product.schema}"."{activation.RECEIPT_TABLE}"'})).all()
+    expected = [("p", "token")]
+    if version >= 180000:
+        expected = [("n", "created_at"), ("n", "receipt"), ("n", "token"), *expected]
+    assert constraints == expected
+    activation.accept_durable(receipt)
+    assert activation.durable_receipt() == receipt
+
+
 async def test_live_canonical_owner_prevents_receipt_provisioning(store):
     import psycopg
     product, receipt = store
@@ -67,12 +85,19 @@ async def test_live_canonical_owner_prevents_receipt_provisioning(store):
     assert activation.durable_receipt() is None
 
 
-async def test_unexpected_release_store_shape_is_never_adopted_or_repaired(store):
+@pytest.mark.parametrize("alteration", [
+    "ADD COLUMN unexpected text",
+    "ALTER COLUMN receipt DROP NOT NULL",
+    "ALTER COLUMN created_at DROP NOT NULL",
+    "ADD CONSTRAINT unexpected_check CHECK (receipt <> '')",
+    "ADD CONSTRAINT unexpected_unique UNIQUE (receipt)",
+])
+async def test_unexpected_release_store_shape_is_never_adopted_or_repaired(store, alteration):
     product, receipt = store
     activation.provision(receipt.guard)
     async with product.source.begin() as connection:
         await connection.execute(text(
-            f'ALTER TABLE "{product.schema}"."{activation.RECEIPT_TABLE}" ADD COLUMN unexpected text',
+            f'ALTER TABLE "{product.schema}"."{activation.RECEIPT_TABLE}" {alteration}',
         ))
     for operation in (
         lambda: activation.provision(receipt.guard),

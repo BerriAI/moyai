@@ -79,6 +79,17 @@ def service_id() -> str:
     return os.environ.get("RENDER_SERVICE_ID", "")
 
 
+def stage_identity() -> StageIdentity:
+    """Validate the full opt-in identity before receipt recovery or socket setup."""
+    return StageIdentity(
+        build=os.environ.get("MOYAI_BUILD_SHA", ""),
+        role=os.environ.get("MOYAI_RUNTIME_ROLE", ""),  # type: ignore[arg-type]
+        service=service_id(),
+        instance=uuid4().hex,
+        token=os.environ.get("MOYAI_MAINTENANCE_TOKEN", ""),
+    )
+
+
 def private_directory(path: Path, *, create: bool = False) -> None:
     if not path.is_absolute() or path.resolve() != path:
         raise ValueError("Maintenance control requires an absolute private directory.")
@@ -231,7 +242,10 @@ def verify_receipt_table(connection, schema: str) -> None:
         (schema, RECEIPT_TABLE),
     ).fetchall()
     constraints = connection.execute(
-        "SELECT contype,pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid=to_regclass(%s)",
+        # PostgreSQL 18 also stores NOT NULL constraints here. Column nullability
+        # is checked above on every supported version; retain all other checks.
+        "SELECT contype,pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid=to_regclass(%s) AND contype <> 'n'",
         (table.as_string(connection),),
     ).fetchall()
     triggers = connection.execute(
@@ -313,16 +327,12 @@ def accept_durable(receipt: ActivationReceipt) -> None:
 
 
 class StagedActivation:
-    def __init__(self, stop: Callable[[], None], *, path: Path | None = None):
+    def __init__(
+        self, stop: Callable[[], None], *, path: Path | None = None, identity: StageIdentity | None = None,
+    ):
         self.path = path or socket_path()
         self.stop = stop
-        self.identity = StageIdentity(
-            build=os.environ.get("MOYAI_BUILD_SHA", ""),
-            role=os.environ.get("MOYAI_RUNTIME_ROLE", ""),  # type: ignore[arg-type]
-            service=service_id(),
-            instance=uuid4().hex,
-            token=os.environ.get("MOYAI_MAINTENANCE_TOKEN", ""),
-        )
+        self.identity = identity if identity is not None else stage_identity()
         self.receipt: ActivationReceipt | None = None
         self.lock = asyncio.Lock()
         self.server: asyncio.AbstractServer | None = None

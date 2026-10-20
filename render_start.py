@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import os
-import re
 import signal
 import sys
 import time
@@ -141,10 +140,24 @@ def main():
     from docker_start import selected_core
     selected_core()
     configure_environment()
-    activation_receipt = apply_maintenance_activation()
     stage = os.environ.get("RENDER_MIGRATION_STAGE", "true").lower()
     if stage not in {"true", "false"}:
         raise RuntimeError("RENDER_MIGRATION_STAGE must be true or false.")
+    identity = None
+    if stage == "true" and os.environ.get("MOYAI_MAINTENANCE_TOKEN"):
+        from moyai.maintenance_activation import stage_identity
+        try:
+            identity = stage_identity()
+        except ValueError:
+            # A malformed opt-in must not take down the maintenance page or
+            # recover a receipt. Never log validation inputs (including tokens).
+            logging.getLogger("uvicorn.error").warning(
+                "Maintenance activation is disabled: invalid staging identity.",
+            )
+    activation_receipt = None
+    if stage == "false" or identity is not None:
+        activation_receipt = apply_maintenance_activation()
+        stage = os.environ.get("RENDER_MIGRATION_STAGE", "true").lower()
     host = "127.0.0.1" if os.environ.get("MOYAI_PRODUCT_LOCAL_REHEARSAL") == "true" else "0.0.0.0"
     target = maintenance
     if stage == "false":
@@ -175,10 +188,9 @@ def main():
     server = ((StagingOverlapServer(config) if overlap else StagingServer(config)) if stage == "true" else
               RenderOverlapServer(config) if role in {'api', 'broker', 'coordinator'} else uvicorn.Server(config))
     activation = None
-    if (stage == "true" and os.environ.get("MOYAI_MAINTENANCE_TOKEN")
-            and re.fullmatch("[0-9a-f]{40}", os.environ.get("MOYAI_BUILD_SHA", ""))):
+    if stage == "true" and identity is not None:
         from moyai.maintenance_activation import StagedActivation
-        activation = StagedActivation(lambda: setattr(server, "should_exit", True))
+        activation = StagedActivation(lambda: setattr(server, "should_exit", True), identity=identity)
         maintenance.router.lifespan_context = activation.lifespan
     lifecycle = None
     if stage == "false":

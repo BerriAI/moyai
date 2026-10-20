@@ -17,6 +17,12 @@ listener exposes an owner-only Unix socket, by default
 absolute path in a private per-container directory. Do not mount that directory
 from another container.
 
+The entrypoint validates the complete staging identity before recovering a
+receipt or opening the socket. A malformed token, build, role or service identity
+leaves the activation protocol disabled: `/health` still reports staging and work
+requests still receive 503. A valid identity with an unreadable or mismatched
+receipt remains a startup failure.
+
 Run `python -m moyai.maintenance_activation status` inside the exact staged
 container to obtain its protocol, build, role, service, instance and staging
 token. The `activate` subcommand accepts an `ActivationRequest` JSON object on
@@ -30,6 +36,8 @@ lock before creating the independently versioned `moyai_maintenance_activation_v
 release table. It verifies the exact table shape and never repairs a mismatch.
 Normal startup never creates this table. Application and rolling schema migration
 versions remain unchanged.
+The shape check supports PostgreSQL 17 and 18, including PostgreSQL 18's separate
+`NOT NULL` catalog entries; column nullability and other constraints remain checked.
 
 Acceptance rechecks the canonical schema and locks the exact native pause while
 committing a receipt. A conflicting request for an accepted token is rejected.
