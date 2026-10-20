@@ -14,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .analytics_identity import ReportIdentities
 from .product_billing import BillingReadError, SourceRef
-from .product_billing_routes import ProductBillingService, _totals
+from .product_billing_routes import ProductBillingService, _totals, accounting_failure
 
 
 def identity_map(service: ProductBillingService, identities: ReportIdentities) -> dict[str, str]:
@@ -86,8 +86,8 @@ async def read(
             "Too many accounting records; narrow the date range." if bounded else
             "Accounting evidence is unavailable or needs reconciliation. No partial total was substituted.",
         ) from None
-    except (SQLAlchemyError, TimeoutError):
-        raise HTTPException(503, "Product accounting is temporarily unavailable.") from None
+    except (SQLAlchemyError, TimeoutError) as error:
+        raise accounting_failure(error) from None
 
 
 def apply(

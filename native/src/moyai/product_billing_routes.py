@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
+import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -24,7 +26,8 @@ from typing import Any, Literal, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .analytics import ReportRange, csv_export, report_range
@@ -48,7 +51,41 @@ from .product_billing import (
 from .settings_views import AnalyticsReport
 
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
-REPORT_TIMEOUT_SECONDS = 15.0
+log = logging.getLogger(__name__)
+
+
+class _ReportTiming:
+    """Fixed phase names and durations only; never SQL, identities or credentials."""
+
+    def __init__(self) -> None:
+        self.started = self.phase_started = time.monotonic()
+        self.phase = "connect"
+        self.phases: dict[str, float] = {}
+
+    def mark(self, phase: str) -> None:
+        now = time.monotonic()
+        self.phases[self.phase] = round((now - self.phase_started) * 1000, 2)
+        self.phase, self.phase_started = phase, now
+
+    def finish(self) -> dict[str, Any]:
+        self.mark(self.phase)
+        return {
+            "phase": self.phase, "elapsed_ms": round((time.monotonic() - self.started) * 1000, 2),
+            "phase_ms": self.phases,
+        }
+
+
+def accounting_failure(error: SQLAlchemyError | TimeoutError) -> HTTPException:
+    if isinstance(error, (TimeoutError, DatabaseTimeoutError)):
+        return HTTPException(503, "The accounting database did not respond. Please try again.")
+    if isinstance(error, DBAPIError) and (
+        getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
+    ) == "57014":
+        # PostgreSQL uses query_canceled for statement timeouts and explicit
+        # server cancellation. Inspect the driver code, never exception text:
+        # SQLAlchemy's message can contain SQL, parameters and credentials.
+        return HTTPException(503, "The accounting database query was cancelled. Please try again.")
+    return HTTPException(503, "Product accounting is temporarily unavailable.")
 
 
 class BillingResponse(BaseModel):
@@ -406,11 +443,28 @@ class ProductBillingService:
         )
 
     @asynccontextmanager
+    async def _report_read(self) -> AsyncIterator[_ReportTiming]:
+        timing = _ReportTiming()
+        try:
+            yield timing
+        except (SQLAlchemyError, TimeoutError, BillingReadError) as error:
+            log.warning("Accounting report failed: %s", {
+                **timing.finish(), "error_type": type(error).__name__,
+            })
+            raise
+        else:
+            log.info("Accounting report completed: %s", timing.finish())
+
+    @asynccontextmanager
     async def _reader(self, engine: AsyncEngine, schema: str | None) -> AsyncIterator[BillingReader]:
         async with engine.connect() as connection:
             if engine.dialect.name == "postgresql":
                 await connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
-                await connection.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+                # Reports have no fixed execution deadline. Override the source
+                # engine's five-second query cap only inside this transaction;
+                # caller cancellation still closes the reader and rolls back.
+                await connection.execute(text("SET LOCAL statement_timeout = '0'"))
+                await connection.execute(text("SET LOCAL jit = off"))
             elif engine.dialect.name == "sqlite":
                 # sqlite3's legacy transaction mode does not begin on SELECT.
                 # Retained period rows and later aliases need one snapshot.
@@ -549,25 +603,30 @@ class ProductBillingService:
             raise HTTPException(422, "Choose a valid report page.")
         period = _period(preset, start, end)
         mappings = identities.accounting_mappings(self.mappings) if identities is not None else self.mappings
-        async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
+        async with self._report_read() as timing:
             async with self._reader(self.source_engine, self.schema) as old:
                 async with self._reader(self.native_engine, self.native_schema) as new:
                     from .billing_storage import active_storage
 
+                    timing.mark("storage")
                     storage = await active_storage(
                         new.connection, source_schema=self.schema, native_schema=self.native_schema,
                     )
                     old.storage = new.storage = storage
                     old.billing_connection = new.connection
                     policy = self.recovery_policy() if callable(self.recovery_policy) else self.recovery_policy
+                    timing.mark("accounting")
                     projection = await read_product_billing(
                         old, new, period, rules=self.rules, mappings=mappings, policy=policy,
                         clock=datetime.now(UTC), native_bindings=self.native_bindings, links=self.observation_links,
                     )
+                    timing.mark("cohorts")
                     cohorts = await self._root_cohorts(old, new, projection.charges) if (
                         root_model is not None or turn_status is not None or include_root_cohorts
                     ) else {}
+                timing.mark("identities")
                 labels = await self._labels(old, mappings)
+            timing.mark("aggregates")
             charges = [row for row in projection.charges if
                        (user_id is None or row.actor_id == user_id) and (model is None or row.model == model)
                        and (root_model is None and turn_status is None or any(
@@ -627,6 +686,7 @@ class ProductBillingService:
                         pricing_status="partial" if daily[-1]["spend"] is not None else "unpriced",
                         undated_coverage=len(undated),
                     )
+            timing.mark("infrastructure")
             infra = (
                 None if personal else _unavailable_infrastructure("not_attributed_to_selected_filter")
                 if any(value is not None for value in (user_id, model, root_model, turn_status))
@@ -634,11 +694,13 @@ class ProductBillingService:
             )
             # Infrastructure may have awaited a worker thread. Re-read privacy
             # in fresh snapshots at the detail release boundary.
+            timing.mark("privacy")
             async with (
                 self._reader(self.source_engine, self.schema) as old,
                 self._reader(self.native_engine, self.native_schema) as new,
             ):
                 visible = await self._visible_details(old, new, tuple(charges), viewer_id)
+            timing.mark("response")
             actual = Decimal(total["spend"]) if total["spend"] is not None else None
             estimate = Decimal(total["estimated"]) if total["estimated"] is not None else None
             infra_total = Decimal(infra["spend"]) if infra and infra["spend"] is not None else None
@@ -784,8 +846,8 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
                 "Too many accounting records; narrow the date range." if bounded else
                 "Accounting evidence is unavailable or needs reconciliation. No partial total was substituted.",
             ) from None
-        except (SQLAlchemyError, TimeoutError):
-            raise HTTPException(503, "Product accounting is temporarily unavailable.") from None
+        except (SQLAlchemyError, TimeoutError) as error:
+            raise accounting_failure(error) from None
         fresh = await service.identity.require_current(principal.grant)
         if not fresh.enabled or (not personal and fresh.role != "admin"):
             raise HTTPException(403, "Your accounting access changed.")
@@ -810,7 +872,7 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
         start: str | None = None, end: str | None = None,
     ) -> BillingInfrastructure:
         try:
-            async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
+            async with service._report_read():
                 value = await service.infrastructure(_period(preset, start, end))
         except (BillingReadError, SQLAlchemyError, TimeoutError):
             raise HTTPException(503, "Product infrastructure accounting is temporarily unavailable.") from None

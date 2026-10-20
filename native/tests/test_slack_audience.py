@@ -496,3 +496,20 @@ async def test_rejected_refresh_token_explains_connection_recovery_without_expos
     assert error.value.status_code == 503
     assert 'reconnect Slack' in error.value.detail and 'Settings → Connections' in error.value.detail
     assert 'private-provider-body' not in error.value.detail
+
+
+async def test_failure_report_exports_slack_trace_with_saved_authority(audience, monkeypatch):
+    from sqlalchemy import select
+
+    from moyai.failure_report import FailureReport
+    async with audience.database.sessions.begin() as db:
+        turn = await db.scalar(select(Turn).where(Turn.session_id == audience.session_id))
+        turn.status, turn.error = 'failed', 'The agent could not complete this turn.'
+
+    async def export(runtime, actor, session_id):
+        session = await runtime.database.session(actor, session_id)
+        return {'session_id': session.id, 'steps': []}
+
+    monkeypatch.setattr('moyai.failure_report.debug_trace', export)
+    report = await FailureReport.for_turn(SimpleNamespace(database=audience.database), turn)
+    assert json.loads(report.debug_log.content) == {'session_id': audience.session_id, 'steps': []}

@@ -6,10 +6,10 @@
 .swarm-space-details > .swarm-window { flex: none; padding-bottom: 10px; }
 .swarm-space { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
 .swarm-space-mission { text-align: center; padding: 10px 16px 8px; }
-.swarm-space-kicker { color: var(--ui-muted); font-family: var(--ui-font); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 10px; }
+.swarm-space-kicker { color: var(--ui-foreground); font-family: var(--ui-font); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 10px; }
 .swarm-space-goal { max-width: 760px; margin: 0 auto; font-size: clamp(15px, 1.7vw, 23px); font-weight: 400; line-height: 1.4; overflow-wrap: anywhere; }
 .swarm-details .swarm-space-goal summary { display: flex; gap: 6px; justify-content: center; font-size: inherit; padding: 0; }
-.swarm-space-goal summary::after { content: "+"; color: var(--ui-muted); }
+.swarm-space-goal summary::after { content: "+"; color: var(--ui-foreground); }
 .swarm-space-goal summary > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .swarm-space-goal[open] summary::after { content: "−"; }
 .swarm-space-goal > p { font-size: 14px; text-align: left; margin: 12px 0; white-space: pre-wrap; }
@@ -25,7 +25,7 @@
 .swarm-space-agent:hover .swarm-space-mark { background: var(--ui-secondary); }
 .swarm-space-state { position: absolute; right: -4px; bottom: -3px; width: 18px; height: 18px; display: grid; place-items: center; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 50%; }
 .swarm-space-model { max-width: 100%; font-size: 10px; color: var(--ui-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.swarm-space-status, .swarm-space-empty { color: var(--ui-muted); font-size: 11px; }
+.swarm-space-status, .swarm-space-empty { color: var(--ui-foreground); font-size: 11px; }
 .swarm-space-empty { margin: 10px 0; }
 .swarm-space-preview { display: flex; flex-direction: column; gap: 6px; text-align: left; margin-top: 10px; padding: 10px 12px; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 10px; color: inherit; text-decoration: none; font-size: 12px; line-height: 1.45; }
 .swarm-space-preview > span { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }

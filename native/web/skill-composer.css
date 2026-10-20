@@ -10,7 +10,7 @@
 .home-composer .skill-editor { min-height: 160px; padding: 22px 24px; font-size: 15px; }
 .home-composer .skill-editor-placeholder { top: 22px; left: 24px; right: 24px; font-size: 15px; }
 .skill-picker { width: min(var(--radix-popover-trigger-width), calc(100vw - 24px)); max-height: min(360px, var(--radix-popover-content-available-height)); padding: 6px; overflow: auto; border-radius: 12px; box-shadow: var(--ui-shadow); }
-.skill-picker-heading { padding: 7px 10px 5px; color: var(--ui-muted); font-size: 12px; font-weight: 400; }
+.skill-picker-heading { padding: 7px 10px 5px; color: var(--ui-foreground); font-size: 12px; font-weight: 400; }
 .skill-picker > p, .skill-picker > [role=alert] { padding: 12px; font-size: 13px; }
 .skill-picker a { text-decoration: underline; }
 .skill-options { display: grid; gap: 1px; }

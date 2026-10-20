@@ -21,6 +21,7 @@ from moyai.models import Delivery, Turn
 from moyai.slack import deliver_one, stage_deliveries
 from moyai.slack_messages import navigation_action, pr_cards, session_url, thread_message
 from moyai.slack_progress import stage_progress
+from moyai.slack_questions import CHOICE_ACTION, SUBMIT_ACTION, SlackQuestions
 
 PR = "https://github.com/BerriAI/moyai/pull/495"
 URL = "https://moyai.example/#session"
@@ -85,6 +86,45 @@ def test_empty_text_has_only_the_ambient_session_link():
     }]
     assert message["text"] == "\n\nOpen session: " + URL
     assert message["attachments"] == []
+
+
+def test_question_blocks_render_choices_and_precede_the_submit_action():
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai_harness.ask_user import AskUserRequest
+
+    request = AskUserRequest.from_tool_call(ToolCallPart("ask_user_question", {"questions": [
+        {
+            "header": "Color", "question": "Choose a color?",
+            "options": [{"label": "Red"}, {"label": "Blue", "description": "x" * 100}],
+        },
+        {
+            "header": "Sizes", "question": "Choose sizes?", "multi_select": True,
+            "options": [{"label": "S"}, {"label": "M"}, {"label": "L"}],
+        },
+    ]}, tool_call_id="questions"))
+    questions = SlackQuestions.blocks([request])
+    choices = [block["elements"][0] for block in questions if block["type"] == "actions"]
+    assert [choice["type"] for choice in choices] == ["radio_buttons", "checkboxes"]
+    assert [option["value"] for option in choices[0]["options"]] == ["0", "1"]
+    assert len(choices[0]["options"][1]["description"]["text"]) == 75
+    assert choices[0]["options"][1]["description"]["text"].endswith("…")
+    assert choices[1]["options"][-1]["value"] == "2"
+    assert [block["block_id"] for block in questions if block["type"] == "actions"] == [
+        "moyai_question:0", "moyai_question:1",
+    ]
+
+    stacked = SlackQuestions.blocks([request, request])
+    assert [block["block_id"] for block in stacked if block["type"] == "actions"] == [
+        f"moyai_question:{index}" for index in range(4)
+    ]
+
+    submit = SlackQuestions.submit("turn-123")
+    message = thread_message("Moyai needs your response.", URL, questions=questions, controls=[submit])
+    assert message["blocks"][1:5] == questions
+    assert message["blocks"][-1]["type"] == "actions"
+    assert message["blocks"][-1]["elements"] == [submit]
+    assert submit["action_id"] == SUBMIT_ACTION
+    assert choices[0]["action_id"] == CHOICE_ACTION
 
 
 @pytest.mark.parametrize("reference", [

@@ -139,7 +139,7 @@ def without_pr_references(text: str, cards: list[dict[str, Any]] | None) -> str:
 
 def thread_message(
     text: str, url: str, *, cards: list[dict[str, Any]] | None = None,
-    controls: list[dict[str, Any]] | None = None,
+    controls: list[dict[str, Any]] | None = None, questions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Keep fallback text accessible and all section text inside Slack's limit."""
     from app.slack_format import split_reply
@@ -166,6 +166,7 @@ def thread_message(
         {"type": "section", "text": {"type": "mrkdwn", "text": part, "verbatim": True}}
         for part in parts
     ]
+    blocks.extend(questions or [])
     actions = list(controls or [])
     if actions:
         blocks.append({"type": "actions", "elements": actions})

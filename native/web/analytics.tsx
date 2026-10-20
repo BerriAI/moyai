@@ -176,7 +176,7 @@ export function UsersReport({ data, search, onSearch, sort, onSort }: {
 function UsageHistory({ data, exportUrl }: { data: AnalyticsReport; exportUrl: (format: string) => string }) {
   const history = useMemo(() => modelHistory(data), [data])
   return <>
-    <section className="analytics-section"><h2>Usage history</h2><div className="analytics-history-card"><span className="analytics-muted">Model spend</span><strong className="analytics-total">{dollars(data.summary.cost_usd)}</strong>
+    <section className="analytics-section"><h2>Usage history</h2><div className="analytics-history-card"><span>Model spend</span><strong className="analytics-total">{dollars(data.summary.cost_usd)}</strong>
       {data.by_model ? <>
         <AnalyticsLegend series={history.series} cumulative={history.cumulative} />
         <AnalyticsChart rows={history.rows} series={history.series} title="Daily reported spend by model and cumulative subtotal" money cumulative={history.cumulative} cumulativeKey="cumulative_cost_usd" />

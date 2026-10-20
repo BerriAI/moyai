@@ -315,7 +315,7 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
                 {!!files.data.files.length && <div className="ph-files"><h3>Outputs</h3>{resourceRows(files.data.files)}</div>}
                 {!!files.data.sources.length && <div className="ph-files"><h3>Attachments</h3>{resourceRows(files.data.sources)}</div>}
                 {files.data.capture_inventory_truncated && <Notice>The capture inventory is limited. More files may be available in the original ZIP.</Notice>}
-                {!!files.data.limitations?.length && <details className="ph-muted"><summary>File compatibility</summary><ul>{files.data.limitations.map(note => <li key={note}>{note}</li>)}</ul></details>}
+                {!!files.data.limitations?.length && <details><summary>File compatibility</summary><ul>{files.data.limitations.map(note => <li key={note}>{note}</li>)}</ul></details>}
               </> : null}
             <Pager offset={fileOffset} step={20} next={files.data?.next_offset} loading={files.loading} label="files" change={setFileOffset} />
           </section>

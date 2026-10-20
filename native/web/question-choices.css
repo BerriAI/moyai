@@ -7,7 +7,7 @@
   background: transparent;
   font: inherit;
 }
-.question-form-header { display: flex; align-items: center; gap: 6px; color: var(--ui-muted); }
+.question-form-header { display: flex; align-items: center; gap: 6px; color: var(--ui-foreground); }
 .question-form-header h3 { color: inherit; font-size: 12px; font-weight: 400; }
 .question-send-status { margin-left: auto; font-size: 12px; }
 .question-reply-hint { margin: 0 12px 8px; color: var(--ui-muted); }
@@ -46,12 +46,12 @@
   height: 20px;
   border: 1px solid var(--ui-border);
   border-radius: 4px;
-  color: var(--ui-muted);
+  color: var(--ui-foreground);
   font-size: 12px;
 }
 .question-choice-row[data-state="checked"] .question-choice-number { color: var(--ui-primary); border-color: var(--ui-primary); }
 .question-choice-copy { display: flex; align-items: baseline; flex-wrap: wrap; gap: 1px 8px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
-.question-choice-copy small { display: inline; line-height: 1.45; }
+.question-choice-copy small { display: inline; line-height: 1.45; color: var(--ui-foreground); }
 .question-choice-check { display: flex; flex: none; color: var(--ui-primary); }
 .question-choice-check svg { width: 14px; height: 14px; }
 .question-custom-answer { display: flex; align-items: flex-start; gap: 8px; margin-top: 6px; padding: 0 6px; }

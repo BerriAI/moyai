@@ -24,7 +24,7 @@
 .session-title-trigger > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .session-title-input { height: 32px; padding: 0 4px; font: inherit; }
 .conversation .topbar .status { flex: none; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conversation .topbar .privacy-icon { display: inline-flex; align-items: center; color: var(--ui-muted); flex: none; }
+.conversation .topbar .privacy-icon { display: inline-flex; align-items: center; color: var(--ui-foreground); flex: none; }
 .conversation .header-controls { gap: 2px; }
 .conversation .header-controls > button,
 .conversation .header-controls [data-slot="popover-trigger"] { width: 28px; height: 28px; padding: 0; }
@@ -44,11 +44,11 @@
 .panel-tablist { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; flex: 1; align-items: center; }
 .panel-tab { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; max-width: 220px; border: 1px solid transparent; border-radius: 7px; }
 .panel-tab.selected { background: var(--ui-background); border-color: var(--ui-border); }
-.panel-tab > [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 32px; padding: 6px 5px 6px 9px; font: 11px/18px var(--ui-font-mono); text-align: left; cursor: pointer; color: var(--ui-muted); }
+.panel-tab > [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 32px; padding: 6px 5px 6px 9px; font: 11px/18px var(--ui-font-mono); text-align: left; cursor: pointer; color: var(--ui-foreground); }
 .panel-tab.selected > [role="tab"] { color: var(--ui-foreground); }
 .panel-tab > [role="tab"] > svg { flex: none; }
 .panel-tab > [role="tab"] > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.panel-tab .panel-tab-close { width: 24px; height: 28px; min-height: 28px; flex: none; padding: 0; color: var(--ui-muted); }
+.panel-tab .panel-tab-close { width: 24px; height: 28px; min-height: 28px; flex: none; padding: 0; color: var(--ui-foreground); }
 .panel-tab-actions { display: flex; align-items: center; gap: 1px; flex: none; }
 .panel-tab-actions > button, .panel-tab-actions > [data-slot="popover-trigger"] { width: 28px; height: 30px; padding: 0; }
 .panel-tab-content { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
@@ -80,7 +80,7 @@
 .side-conversation .chat { --chat-gutter: 16px; }
 .side-conversation .side-chat-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 8px 16px; border-bottom: 1px solid var(--ui-border); }
 .side-chat-heading h2 { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.side-chat-heading a { flex: none; color: var(--ui-muted); }
+.side-chat-heading a { flex: none; color: var(--ui-foreground); }
 .side-conversation .transcript { padding-block: 20px; }
 .side-conversation .message { margin-bottom: 24px; }
 .side-conversation .message-content { font-size: 13px; line-height: 1.65; }

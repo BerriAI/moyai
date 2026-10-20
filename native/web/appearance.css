@@ -1,4 +1,4 @@
-.appearance-toggle { flex: none; width: 28px; height: 28px; min-height: 28px; padding: 0; color: var(--ui-muted); }
+.appearance-toggle { flex: none; width: 28px; height: 28px; min-height: 28px; padding: 0; color: var(--ui-foreground); }
 .appearance-toggle:hover { color: var(--ui-foreground); }
 .appearance-toggle:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; }
 .native-settings .ns-breadcrumb > .appearance-toggle { margin-inline-start: auto; }

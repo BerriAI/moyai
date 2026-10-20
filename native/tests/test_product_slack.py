@@ -27,6 +27,7 @@ from moyai.models import Delivery, ProductTurnAuthority, SlackThread, Turn, new_
 from moyai.product_identity import ProductGrant, ProductPrincipal
 from moyai.product_slack import ProductSlack
 from moyai.product_slack_models import ProductSlackBinding
+from moyai.slack_questions import CHOICE_ACTION, SUBMIT_ACTION
 
 bridge = canonical_connections
 
@@ -654,6 +655,113 @@ async def test_approval_actions_are_scoped_to_original_requester_and_native_pend
     assert len(rows) == 2
     continuation = next(row for row in rows if row.id != active[1].id)
     assert json.loads(slack.runtime.security.unseal(continuation.deferred_results))["approvals"] == {"local-call": True}
+
+
+async def question_interaction(slack, active, actor, monkeypatch):
+    from pydantic_ai import Conversation, ConversationTypeAdapter, DeferredToolRequests
+    from pydantic_ai.messages import ToolCallPart
+
+    thread = await bind(slack, active)
+    call = ToolCallPart("ask_user_question", {"questions": [
+        {"header": "Color", "question": "Choose a color?", "options": [{"label": "Red"}, {"label": "Blue"}]},
+        {
+            "header": "Sizes", "question": "Choose sizes?", "multi_select": True,
+            "options": [{"label": "S"}, {"label": "M"}, {"label": "L"}],
+        },
+    ]}, tool_call_id="ask-call")
+    pending = DeferredToolRequests(calls=[call])
+    async with slack.runtime.database.sessions.begin() as db:
+        turn = await db.get(Turn, active[1].id)
+        turn.status = "waiting"
+        turn.conversation = slack.runtime.security.seal(
+            ConversationTypeAdapter.dump_json(Conversation(deferred_tool_requests=pending)).decode(),
+        )
+        (await db.get(type(active[0]), active[0].id)).status = "waiting"
+
+    async def same_actor(team, user):
+        assert team == thread.team_id and user == "UTEST0001"
+        return actor, None
+
+    monkeypatch.setattr(slack.service, "actor", same_actor)
+    await slack.service.stage()
+    async with slack.runtime.database.sessions.begin() as db:
+        delivery = await db.scalar(select(Delivery).where(
+            Delivery.identity == f"product-slack:{active[1].id}:waiting:0",
+        ))
+        content = json.loads(slack.runtime.security.unseal(delivery.content))
+        assert "/answer" not in content["text"] and "Choices:" not in content["text"]
+        assert content["text"].startswith("Moyai needs your response.")
+        elements = [
+            element for block in content["blocks"] if block["type"] == "actions"
+            for element in block["elements"]
+        ]
+        assert [element["type"] for element in elements if element.get("action_id") == CHOICE_ACTION] == [
+            "radio_buttons", "checkboxes",
+        ]
+        submit = next(element for element in elements if element.get("action_id") == SUBMIT_ACTION)
+        assert submit["text"]["text"] == "Submit answer" and submit["value"] == active[1].id
+        delivery.status = "sent"
+        delivery.receipt = slack.runtime.security.seal({
+            "ok": True, "channel": thread.channel_id, "ts": "1792100000.001",
+        })
+    payload = {
+        "team": {"id": thread.team_id}, "channel": {"id": thread.channel_id}, "user": {"id": "UTEST0001"},
+        "message": {"thread_ts": thread.thread_ts, "ts": "1792100000.001"},
+        "actions": [{"action_id": SUBMIT_ACTION, "value": active[1].id, "action_ts": "1792100000.002"}],
+    }
+    return thread, call, payload
+
+
+async def test_native_question_actions_submit_selected_answers(slack, active, actor, monkeypatch):
+    from pydantic import TypeAdapter
+    from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse, ask_user_result
+
+    _thread, call, payload = await question_interaction(slack, active, actor, monkeypatch)
+    async with slack.runtime.database.sessions() as db:
+        before = list(await db.scalars(select(Turn).where(Turn.session_id == active[0].id)))
+    await slack.service.interact({
+        **payload,
+        "actions": [{"action_id": CHOICE_ACTION, "block_id": "moyai_question:0"}],
+    })
+    async with slack.runtime.database.sessions() as db:
+        assert len(list(await db.scalars(select(Turn).where(Turn.session_id == active[0].id)))) == len(before)
+
+    await slack.service.interact({
+        **payload,
+        "state": {"values": {
+            "moyai_question:0": {CHOICE_ACTION: {"selected_option": {"value": "1"}}},
+            "moyai_question:1": {CHOICE_ACTION: {
+                "selected_options": [{"value": "0"}, {"value": "2"}],
+            }},
+        }},
+    })
+    async with slack.runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn).where(Turn.session_id == active[0].id)))
+    continuation = next(turn for turn in turns if turn.id != active[1].id)
+    result = json.loads(slack.runtime.security.unseal(continuation.deferred_results))
+    expected = ask_user_result(AskUserRequest.from_tool_call(call), TypeAdapter(AskUserResponse).validate_python({
+        "answers": [
+            {"header": "Color", "selected": ["Blue"]},
+            {"header": "Sizes", "selected": ["S", "L"]},
+        ],
+    }))
+    assert result["calls"]["ask-call"] == expected
+
+
+async def test_native_question_submit_notifies_when_an_answer_is_missing(slack, active, actor, monkeypatch):
+    _thread, _call, payload = await question_interaction(slack, active, actor, monkeypatch)
+    await slack.service.interact({
+        **payload,
+        "state": {"values": {
+            "moyai_question:0": {CHOICE_ACTION: {"selected_option": {"value": "1"}}},
+        }},
+    })
+    async with slack.runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn).where(Turn.session_id == active[0].id)))
+    notices = [turn for turn in turns if turn.workflow_id.startswith("moyai-slack-control-")]
+    continuations = [turn for turn in turns if turn.id != active[1].id and turn not in notices]
+    assert not continuations and len(notices) == 1
+    assert "Choose an answer for Sizes" in slack.runtime.security.unseal(notices[0].result).decode()
 
 
 async def test_cancelled_confirmed_receipt_drains_and_contender_never_reposts(slack, active, receiver):
