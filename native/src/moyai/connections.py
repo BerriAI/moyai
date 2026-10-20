@@ -162,9 +162,11 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
                 )
             selected.append(tools.prefixed(prefix).defer_loading())
         if github_grants and (
-            tool_name is None or tool_name.startswith("github_")
-            and tool_name != "github_checkout"
-            and not any(tool_name.startswith(f"github_{grant.id[:8]}_") for grant in github_grants)
+            tool_name is None or (
+                tool_name.startswith("github_")
+                and tool_name != "github_checkout"
+                and not any(tool_name.startswith(f"github_{grant.id[:8]}_") for grant in github_grants)
+            )
         ):
             from .product_github_routing import RoutedGitHubToolset
             from .runtime import current

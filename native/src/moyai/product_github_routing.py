@@ -186,7 +186,7 @@ class RoutedGitHubToolset(AbstractToolset[RunScope]):
         grant = await resolve_grant(self.service, self.scope, self.grants, target, operation, writing=writing)
         policy = ConnectionPolicy.model_validate(grant.policy)
         if not ctx.tool_call_approved and (
-            original.tool_def.kind == "unapproved" or writing and policy.require_approval
+            original.tool_def.kind == "unapproved" or (writing and policy.require_approval)
         ):
             raise ApprovalRequired
         arguments = (
