@@ -85,7 +85,7 @@ class Goals:
         end = datetime.now(UTC) if goal.status == "active" else datetime.fromisoformat(goal.checked_at)
         return sum(max(0.0, ((datetime.fromisoformat(finished) if finished else end)
                             - datetime.fromisoformat(started)).total_seconds())
-                   for started, finished in rows)
+                   for started, finished in rows if started is not None)
 
     async def lock(self, db: AsyncSession, actor: User, session_id: str) -> Session:
         await self.database._actor_product_grant(db, actor)
