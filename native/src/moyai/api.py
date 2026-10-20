@@ -1004,6 +1004,12 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                                 yield f"id: {native.offset}\ndata: " + json.dumps(
                                     redact(item, secret_values), ensure_ascii=False, default=str
                                 ) + "\n\n"
+                    # Workflow Streams can end its iterator normally when its
+                    # poll is cancelled. Preserve our reader's cancellation:
+                    # reopening here would keep the old API alive during drain.
+                    reader = asyncio.current_task()
+                    if reader is not None and reader.cancelling():
+                        raise asyncio.CancelledError
                     if next_offset == previous_offset:
                         break
             except asyncio.CancelledError:
