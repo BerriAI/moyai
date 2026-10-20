@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from .fleet_registry import FleetAdmissionError, FleetRegistry, fingerprint
 
 PROTOCOL = "moyai-worker-adoption-v1"
+CHECKPOINT_PROTOCOL = "moyai-adoption-checkpoint-v1"
 NAME = r"[a-z][a-z0-9_-]{0,62}"
 SCHEMA = r"[a-z][a-z0-9_]{0,62}"
 VERSION = r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
@@ -241,3 +242,50 @@ class WorkerAdoption:
                 UPDATE {schema}.worker_adoption SET phase='active'
                 WHERE fleet=%s AND binding_digest=%s AND request_id=%s
             """), (binding.fleet, binding.digest, request_id))
+
+    def verify_checkpoint_seal(
+        self, *, fleet: str, generation: str, source_sha: str, request_id: str, proof: dict,
+    ) -> None:
+        """Qualify initial retirement without inventing Temporal version drainage.
+
+        Called inside the registry seal transaction. The native pause row orders
+        the seal against resume; resume checks the resulting live sealed members.
+        The runtime independently checks saved-work safety before stopping polls.
+        """
+        saved = self.load(fleet, lock=True)
+        if saved is None or saved[1] != "source_registered":
+            raise FleetAdmissionError("worker_adoption_checkpoint_not_registered")
+        binding = saved[0]
+        if (
+            generation != binding.source_generation or source_sha != binding.source_sha
+            or proof["target_generation"] != binding.target_generation
+            or proof["deployment"] != binding.deployment or proof["build"] != binding.build
+            or proof["request_key"] != request_id
+        ):
+            raise FleetAdmissionError("worker_adoption_checkpoint_binding_changed")
+        scope = self.registry.scope(binding.source_schema, lock=True)
+        if scope is None or not scope["enabled"] or any(scope[key] != value for key, value in {
+            "fleet": fleet, "native_schema": binding.native_schema, "task_queue": binding.queue,
+        }.items()):
+            raise FleetAdmissionError("worker_adoption_checkpoint_scope_changed")
+        paused = self.connection.execute(sql.SQL("""
+            SELECT generation,paused,request_key,request_fingerprint,source_policy
+            FROM {}.moyai_product_drain_state WHERE id=1 FOR SHARE
+        """).format(sql.Identifier(binding.native_schema))).fetchone()
+        if paused != (
+            proof["generation"], True, request_id, proof["request_fingerprint"], binding.cluster_policy,
+        ):
+            raise FleetAdmissionError("worker_adoption_checkpoint_pause_changed")
+        self.connection.execute("SELECT pg_stat_clear_snapshot()")
+        target = self.connection.execute(self.registry.query("""
+            SELECT 1 FROM {schema}.roles r JOIN {schema}.members m
+                ON (r.fleet,r.generation,r.role)=(m.fleet,m.generation,m.role)
+            JOIN pg_stat_activity a ON a.pid=m.owner_pid AND a.backend_start=m.owner_started
+            WHERE r.fleet=%s AND r.generation=%s AND r.role='worker'
+                AND r.state IN ('preparing','accepting') AND r.source_sha=%s
+                AND r.worker_deployment=%s AND r.worker_build=%s AND r.cluster_policy=%s
+                AND m.service_id=r.service_id
+        """), (fleet, binding.target_generation, binding.source_sha,
+               binding.deployment, binding.build, binding.cluster_policy)).fetchone()
+        if target is None:
+            raise FleetAdmissionError("worker_adoption_checkpoint_target_missing")

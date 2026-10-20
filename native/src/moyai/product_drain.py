@@ -156,11 +156,46 @@ class ProductDrainService:
             if not paused:
                 if expected[0].requested_drain or any(w.requested_drain for w in workers):
                     raise ProductDrainError("A live maintenance worker has not retired.")
+                await self._require_adoption_retired(db)
                 counts = await self._counts(db, state)
                 if counts["unsafe_turns"] or counts["effects"] or counts["requests"]:
                     raise ProductDrainError("Execution or unknown outcomes still prevent resume.")
             self._write_intent(state, owner, paused=paused, request_key=request_key, fingerprint=fingerprint)
             return self._receipt(state)
+
+    async def _require_adoption_retired(self, db: AsyncSession) -> None:
+        # Seal holds this same native pause row FOR SHARE until its role/member
+        # capture commits. Resume already holds it FOR UPDATE, so it cannot miss
+        # a concurrent seal. No pool or connection is retained through shutdown.
+        from .fleet_registry import SCHEMA
+
+        installed = await db.scalar(text("SELECT to_regclass(:table)"), {"table": SCHEMA + ".schema_version"})
+        if installed is None:
+            return
+        live = await db.scalar(text(f"""
+            SELECT EXISTS(
+                SELECT 1 FROM {SCHEMA}.fleets f
+                JOIN {SCHEMA}.roles r ON r.fleet=f.fleet
+                JOIN {SCHEMA}.members m
+                    ON (m.fleet,m.generation,m.role)=(r.fleet,r.generation,r.role)
+                JOIN pg_stat_activity a ON a.pid=m.owner_pid AND a.backend_start=m.owner_started
+                WHERE f.native_schema=:schema AND f.task_queue=:queue AND f.enabled
+                    AND r.role='worker' AND r.worker_deployment='' AND r.worker_build=''
+                    AND r.state IN ('draining','retired') AND m.drain_request=r.drain_request
+            )
+        """), {"schema": self.native_schema, "queue": self.task_queue})
+        if live:
+            raise ProductDrainError("The sealed adoption worker has not retired.")
+
+    async def require_checkpoint_retirement(self, request_id: str) -> None:
+        """Recheck durable safety immediately before an unversioned poller stops."""
+        async with self.sessions().begin() as db:
+            state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
+            if state is None or not state.paused or state.request_key != request_id:
+                raise ProductDrainError("The adoption checkpoint pause changed.")
+            counts = await self._counts(db, state)
+            if any(counts[key] for key in ("unsafe_turns", "effects", "requests")):
+                raise ProductDrainError("The adoption worker still has unsafe work.")
 
     def _receipt(self, state: ProductDrainState) -> dict:
         return {
