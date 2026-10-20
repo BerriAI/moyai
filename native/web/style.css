@@ -139,6 +139,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .send-actions [data-slot="select-trigger"] { font-size: 12px; width: 112px; }
 .composer-save-icon { display: none; }
 .composer-hint { text-align: center; color: var(--ui-muted); font-size: 11px; margin-top: 8px; }
+.slack-conversation-hint { margin-bottom: 10px; }
 .working { display: flex; gap: 10px; align-items: center; color: var(--ui-foreground); margin: 24px auto; font-size: 13px; max-width: var(--chat-width); }
 .running-dot { width: 6px; height: 6px; background: var(--ui-success); border-radius: 50%; flex: none; }
 .details-panel { border-left: 1px solid var(--ui-border); background: var(--ui-subtle); display: flex; flex-direction: column; min-height: 0; }

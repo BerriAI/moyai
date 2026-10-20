@@ -26,7 +26,7 @@ type OverviewProps = {
   onSubagent: (agent: Subagent) => void; onOutput: (output: OutputResource) => void
   onSubagentSideChat?: (agent: Subagent) => void
 }
-const statusText: Record<string, string> = { completed: "Ready", running: "Working", failed: "Failed", waiting: "Needs input", interrupted: "Interrupted", stopped: "Stopped", starting: "Starting", queued: "Queued" }
+const statusText: Record<string, string> = { completed: "Completed", idle: "Completed", running: "Working", failed: "Failed", waiting: "Needs input", interrupted: "Interrupted", stopped: "Stopped", starting: "Starting", queued: "Queued" }
 const isAccessError = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status)
 const message = (error: unknown) => error instanceof Error ? error.message : "The request could not be completed."
 const avatarIndex = (value: number) => Number.isFinite(value) ? Math.abs(Math.trunc(value)) % 4 : 0
