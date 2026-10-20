@@ -26,9 +26,28 @@ are private to the requester because their assignments may contain private
 working context. Existing-product callers need an individual sign-in capable of
 creating a private conversation.
 
-The parent waits for the original delegated turn, including steering accepted
-into that turn. At settlement it receives a saved report that later child
-conversations cannot rewrite. Queued follow-ups run independently and are not
+For independent work, the parent can use `spawn_agent(task)`. It returns a
+`session_id` as soon as the child is admitted, so the parent can continue its
+own model and tool steps while the child runs. This is an acceptance receipt,
+not a completed result. The synchronous `delegate_task` tool still waits.
+
+Completed reports are added to the parent's next model request. The parent can
+also call `wait_agent(agent_ids, timeout_seconds=60)` to wait for any selected
+child, or use `timeout_seconds=0` to check status immediately. A timeout leaves
+children running. Each report identifies completed, failed, stopped, deleted,
+or human-input work; a non-completed status is not a successful result.
+Automatic reports are bounded previews; `wait_agent` can reread the saved
+original report. Pending handles travel with the parent's durable execution
+and history checkpoints. If the parent asks a human question, its authenticated
+answer continuation retains access to those original reports. Ordinary later
+follow-ups do not acquire that access. Before finalizing an answer, a parent with outstanding
+spawned children waits for their reports or human steering, then gets another
+model step to incorporate the evidence. Stop still affects only the selected
+conversation; it does not automatically cancel independently admitted children.
+
+The parent receives the original delegated turn's report, including steering
+accepted into that turn. At settlement this report is saved and later child
+conversations cannot rewrite it. Queued follow-ups run independently and are not
 exported back into the parent, which may have a different visibility or account
 context. A child
 needing a human answer, stopped by the user, failed, or deleted produces that
@@ -63,6 +82,9 @@ silently converted into new conversations, and in-flight recorded workflows keep
 their original delegation path through the Temporal version marker.
 The workflow carries that decision into its activities; older activity payloads
 retain the SDK's shared parent computer setup.
+The background-delegation marker likewise keeps recorded synchronous histories
+on their original tool catalog and request lifecycle. Swarm members and
+depth-limited children cannot use either background tool.
 
 Instructions, available tools, execution and computer startup use one delegation
 policy. New ordinary root/child chats can delegate; swarm members and chats at the
@@ -95,6 +117,10 @@ Standalone local databases add the new link table at startup.
 
 ## Regression coverage
 
+`test_background_delegation.py` proves parent/child model overlap through the
+real SDK and Temporal, explicit waits and nonblocking status checks, automatic
+report delivery, final-answer continuation, checkpoint rollover and replay,
+idempotent starts, stopped children, and private follow-up isolation.
 `test_delegation_authority.py` covers shared web, Slack and private parents;
 personal skills, memory namespaces, legacy snapshots, grandchildren, direct
 follow-ups, computer reuse, account pickers and promoted-message ordering.

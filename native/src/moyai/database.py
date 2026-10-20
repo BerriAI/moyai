@@ -990,6 +990,10 @@ class Database:
                 if delegation or context.surface == "automation":
                     prepared.scope.execution_context = context
                 return prepared
+            if turn.deferred_results:
+                from .delegation import resumed_agents
+                scope.background_agents = list(await resumed_agents(self, db, scope))
+                scope.background_delegation = bool(scope.background_agents)
             conversation = None
             if (
                 session.last_actor_id == actor.id and session.last_model == turn.model
@@ -1400,6 +1404,9 @@ class Database:
             delegated = await db.get(DelegatedTurn, previous.id)
             if delegated is not None:
                 db.add(DelegatedTurn(turn_id=turn.id, session_id=delegated.session_id))
+            if original.scope.background_delegation:
+                from .delegation import bind_background_resume
+                await bind_background_resume(self, db, previous, turn, original.scope)
             if automated is not None:
                 db.add(ProductAutomationTurn(turn_id=turn.id, origin_turn_id=automated.origin_turn_id))
             previous.status = "resumed"

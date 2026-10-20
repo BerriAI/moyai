@@ -149,6 +149,8 @@ class AnswerSettlement:
         }
         if checkpoint_workspace:
             result_identity["checkpoint_workspace"] = True
+        if deferred and scope.background_delegation:
+            result_identity["background_agents"] = scope.background_agents
         fingerprint = hashlib.sha256(json.dumps(result_identity, sort_keys=True).encode()).hexdigest()
         checkpointing = checkpoint_workspace and bool(workspace and workspace.get("provider") in {"modal", "lambda"})
         async with self.database.sessions.begin() as db:
@@ -200,6 +202,11 @@ class AnswerSettlement:
             if deferred:
                 from .questions import record_optional_deadline
                 record_optional_deadline(self.database, db, turn)
+                if scope.background_delegation and turn.preparation:
+                    prepared = TypeAdapter(PreparedTurn).validate_json(self.database.security.unseal(turn.preparation))
+                    prepared.scope.background_delegation = True
+                    prepared.scope.background_agents = list(scope.background_agents)
+                    turn.preparation = self.database.security.seal(TypeAdapter(PreparedTurn).dump_json(prepared))
             if checkpointing:
                 if turn.preparation is None or workspace is None:
                     raise ValueError("A checkpoint requires the original prepared workspace.")
