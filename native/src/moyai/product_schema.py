@@ -66,7 +66,8 @@ SLACK_ACTIVITY_SCHEMA_VERSION = "2026-10-17-slack-activity-v19"
 SLACK_TURN_SOURCE_SCHEMA_VERSION = "2026-10-17-slack-turn-source-v20"
 MESSAGE_SOURCE_SCHEMA_VERSION = "2026-10-18-message-sources-v21"
 GOAL_SCHEMA_VERSION = "2026-10-17-goals-v22"
-PRODUCT_SCHEMA_VERSION = GOAL_SCHEMA_VERSION
+AUTOMATION_CHAT_SCHEMA_VERSION = "2026-10-19-automation-chats-v23"
+PRODUCT_SCHEMA_VERSION = AUTOMATION_CHAT_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -146,6 +147,7 @@ MIGRATIONS = (
     (SLACK_TURN_SOURCE_SCHEMA_VERSION, SLACK_TURN_SOURCE_TABLES),
     (MESSAGE_SOURCE_SCHEMA_VERSION, frozenset({"moyai_message_sources", "moyai_delivery_schedule"})),
     (GOAL_SCHEMA_VERSION, frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})),
+    (AUTOMATION_CHAT_SCHEMA_VERSION, frozenset({"moyai_product_automation_turns"})),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing

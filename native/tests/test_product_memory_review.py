@@ -157,7 +157,7 @@ async def test_review_applies_exact_evidence_atomically_with_canonical_policy_an
         )
 
 
-@pytest.mark.parametrize("private,surface", [(True, "web"), (False, "automation")])
+@pytest.mark.parametrize("private,surface", [(True, "web"), (False, "automation"), (False, "continued")])
 async def test_review_does_not_admit_private_or_automated_sources(review_product, private, surface):
     product = review_product
     _, turn, _, _, admitted = await completed_review(product, private=private, surface=surface)

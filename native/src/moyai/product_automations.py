@@ -54,8 +54,10 @@ with workflow.unsafe.imports_passed_through():
     from .product_automation_models import (
         ProductAutomationOperation as Operation,
     )
+    from .product_automation_models import ProductAutomationTurn
     from .product_config import CORE_IDENTITY
-    from .product_continuation_models import ProductContinuation
+    from .product_continuation_models import ProductContinuation, ProductExecutionContext
+    from .product_continuation_workspace import fingerprint as workspace_fingerprint
     from .product_identity import ProductGrant
 
 MAX_TRIGGERS = 16
@@ -232,7 +234,8 @@ def _digest(value: Any) -> str:
 
 
 def definition_digest(definition: Definition) -> str:
-    return _digest(definition.model_dump(mode="json"))
+    # Preserve digests of enabled definitions written before chat destinations.
+    return _digest(definition.model_dump(mode="json", exclude={"session_id"} if definition.session_id is None else None))
 
 
 def _definition(row: dict[str, Any]) -> Definition:
@@ -334,6 +337,11 @@ class ProductAutomationService:
     ) -> list[str]:
         result = []
         project_grants = []
+        if definition.session_id:
+            try:
+                await self.database.automation_session(db, row["owner_id"], definition.session_id)
+            except HTTPException:
+                result.append("scheduled_chat_unavailable")
         if definition.mode != "modal":
             result.append("execution_mode_not_supported")
         if len(definition.triggers) > MAX_TRIGGERS:
@@ -343,7 +351,7 @@ class ProductAutomationService:
                 result.append("event_trigger_adapter_required")
             else:
                 result.extend(await self.events.blockers(db, row, definition))
-        if definition.plugins:
+        if definition.plugins and not definition.session_id:
             if self.connections is None:
                 result.append("connection_mapping_required")
             else:
@@ -353,7 +361,9 @@ class ProductAutomationService:
                     )
                 except (HTTPException, ValueError):
                     result.append("selected_connections_require_onboarding_or_authorization")
-        if self.workspace is None:
+        if definition.session_id:
+            pass  # The existing chat supplies its computer and connected accounts.
+        elif self.workspace is None:
             if definition.repo_url or definition.github_repository_id:
                 result.append("repository_bootstrap_adapter_required")
             if definition.environment_id != "none":
@@ -427,6 +437,26 @@ class ProductAutomationService:
         identity = workspace.get("repository_id")
         return not workspace.get("repo_url") or (type(identity) is int and identity > 0)
 
+    async def _chat_context(self, db: AsyncSession, owner: str, session_id: str) -> tuple[list[str], dict]:
+        session = await self.database.automation_session(db, owner, session_id)
+        latest = await db.scalar(select(Turn).where(Turn.session_id == session.id).order_by(
+            Turn.created_at.desc(), Turn.id.desc(),
+        ).limit(1))
+        connections = json.loads(latest.connections) if latest else []
+        selected = await db.scalar(select(ProductExecutionContext).join(
+            Turn, Turn.id == ProductExecutionContext.turn_id,
+        ).where(Turn.session_id == session.id).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
+        if selected:
+            workspace = json.loads(self.database.security.unseal(selected.descriptor))
+        else:
+            origin = await db.scalar(select(ProductContinuation).where(
+                ProductContinuation.native_session_id == session.id,
+            ))
+            workspace = json.loads(self.database.security.unseal(origin.workspace))["context"] if origin else {}
+        if selected and workspace_fingerprint(workspace) != selected.fingerprint:
+            raise HTTPException(409, "The chat's saved project context changed.")
+        return sorted(connections), workspace
+
     async def _capture_context(
         self, db: AsyncSession, binding: Binding, definition: Definition, principal: Any,
         *, capture: bool, previous_generation: int,
@@ -434,15 +464,21 @@ class ProductAutomationService:
         if capture:
             connections = []
             grants = []
-            if definition.plugins:
-                grants = await self.connections.resolve_grants(
-                    binding.owner_id, definition.plugins, shared_session=True, surface="automation", db=db,
+            if definition.session_id:
+                connections, workspace = await self._chat_context(db, binding.owner_id, definition.session_id)
+                grants = await self.database.resolve_grants(
+                    db, binding.owner_id, connections, shared_session=True, surface="automation",
                 )
-                connections = sorted({grant.id for grant in grants})
-            workspace = await self.workspace.capture_workspace_context(db, principal, {
-                "repo_url": definition.repo_url, "github_repository_id": definition.github_repository_id,
-                "environment_id": definition.environment_id,
-            }) if self.workspace else {}
+            else:
+                if definition.plugins:
+                    grants = await self.connections.resolve_grants(
+                        binding.owner_id, definition.plugins, shared_session=True, surface="automation", db=db,
+                    )
+                    connections = sorted({grant.id for grant in grants})
+                workspace = await self.workspace.capture_workspace_context(db, principal, {
+                    "repo_url": definition.repo_url, "github_repository_id": definition.github_repository_id,
+                    "environment_id": definition.environment_id,
+                }) if self.workspace else {}
             if not self._repository_identity_known(workspace):
                 raise HTTPException(409, "Verify the repository's permanent identity before enabling this automation.")
             if self.workspace is not None:
@@ -489,6 +525,14 @@ class ProductAutomationService:
             if self.events is None:
                 raise HTTPException(409, "The canonical event adapter is unavailable.")
             await self.events.validate_authority(db, binding, definition, event_authority)
+        if definition.session_id:
+            selected, current_workspace = await self._chat_context(db, binding.owner_id, definition.session_id)
+            if selected != connections or current_workspace != workspace:
+                raise HTTPException(409, "The chat's accounts or project changed. Review and enable the schedule again.")
+            await self.database.resolve_grants(
+                db, binding.owner_id, connections, shared_session=True, surface="automation",
+            )
+            return connections, workspace
         current = []
         if connections:
             if self.connections is None:
@@ -730,11 +774,12 @@ class ProductAutomationService:
             or turn.parent_turn is not None
         ):
             raise HTTPException(403, "Private, delegated and automated work cannot export into shared automations.")
-        if await self.automated_session(db, session.id) or await self.human_origin(db, scope) is None:
+        if scope.authority.surface == "automation" or await self.automated_session(db, session.id) or await self.human_origin(db, scope) is None:
             raise HTTPException(403, "Private, delegated and automated work cannot export into shared automations.")
 
     async def automated_session(self, db: AsyncSession, session_id: str) -> bool:
-        if await db.scalar(select(Occurrence.occurrence).where(Occurrence.session_id == session_id).limit(1)):
+        session = await db.get(Session, session_id)
+        if session and session.surface == "automation":
             return True
         original = await db.scalar(select(ProductContinuation.source_session_id).where(
             ProductContinuation.native_session_id == session_id, ProductContinuation.source_schema == self.schema,
@@ -755,6 +800,8 @@ class ProductAutomationService:
             ):
                 return None
             seen.add(current.id)
+            if await db.get(ProductAutomationTurn, current.id) is not None:
+                return None
             if await self.database._saved_product_grant(db, current) != scope.product_grant:
                 return None
             authored = await db.scalar(select(Message.id).where(
@@ -841,7 +888,7 @@ class ProductAutomationService:
                 required.add(connection_id)
             return value
 
-        if definition.repo_url or definition.github_repository_id:
+        if not definition.session_id and (definition.repo_url or definition.github_repository_id):
             repository = definition.repo_url.removeprefix("https://github.com/").removesuffix(".git")
             value = await resolve(repository, definition.github_repository_id, selected="github" in definition.plugins)
             definition.repo_url, definition.github_repository_id = value["repo_url"], value["repository_id"]
@@ -862,7 +909,10 @@ class ProductAutomationService:
     ) -> dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z0-9_:-]{1,80}", operation_scope):
             raise HTTPException(422, "Invalid operation scope.")
-        fingerprint = _digest({"action": action, "id": identity, "body": body.model_dump(mode="json")})
+        payload = body.model_dump(mode="json")
+        if isinstance(body, Save) and body.definition.session_id is None:
+            payload["definition"].pop("session_id", None)
+        fingerprint = _digest({"action": action, "id": identity, "body": payload})
         identified, repository_grants = await self.repository_preflight(
             grant, action, identity, body, operation_scope, fingerprint, scope,
         )
@@ -944,6 +994,8 @@ class ProductAutomationService:
                         )
                         db.add(binding)
                     binding.authority_version = grant.authority_version
+                if action in {"create", "update"} and definition.session_id:
+                    await self.database.automation_session(db, principal.id, definition.session_id)
                 revision = row["revision"] + (action != "create")
                 if action != "create":
                     await db.execute(text(
@@ -1260,7 +1312,7 @@ class ProductAutomationService:
                 db, grant=original, title=f"Automation · {definition.name}",
                 prompt=definition.prompt, model=self.settings.resolve_model(definition.model or None),
                 request_key="automation-" + hashlib.sha256(key.encode()).hexdigest(),
-                connections=connections,
+                connections=connections, session_id=definition.session_id,
             )
             if self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
@@ -1304,6 +1356,7 @@ class ProductAutomationService:
                 db, grant=original, title=f"Automation · {definition.name}", prompt=definition.prompt,
                 model=self.settings.resolve_model(definition.model or None),
                 request_key="automation-" + hashlib.sha256(key.encode()).hexdigest(), connections=connections,
+                session_id=definition.session_id,
             )
             if self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
@@ -1347,6 +1400,12 @@ class ProductAutomationService:
             for row in rows[:limit]:
                 link = await db.get(Occurrence, row["occurrence"])
                 turn = await db.get(Turn, link.turn_id) if link and link.turn_id else None
+                if turn and turn.status == "resumed":
+                    turn = await db.scalar(select(Turn).join(
+                        ProductAutomationTurn, ProductAutomationTurn.turn_id == Turn.id,
+                    ).where(ProductAutomationTurn.origin_turn_id == link.turn_id).order_by(
+                        Turn.created_at.desc(), Turn.id.desc(),
+                    ).limit(1)) or turn
                 session = await db.get(Session, link.session_id) if link and link.session_id else None
                 if session and (session.visibility == "private" or session.deleted):
                     continue

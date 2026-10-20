@@ -44,13 +44,24 @@ async def memory_execution(product, *, private=False, surface="web"):
     session = await product.database.create_session(
         product.actor, NewSession(visibility="private" if private else "shared"),
     )
-    if surface != "web":
+    if surface not in {"web", "continued"}:
         from moyai.models import Session
         async with product.database.sessions.begin() as db:
             (await db.get(Session, session.id)).surface = surface
-    turn = await product.database.submit(product.actor, session.id, NewMessage(
-        prompt="Please remember: Prefer pytest for focused backend tests.", request_key="memory-input",
-    ))
+    if surface == "continued":
+        async with product.database.sessions.begin() as db:
+            await db.execute(text(
+                "SELECT pg_advisory_xact_lock(726941, CAST(CAST(:schema AS regnamespace) AS oid)::int)"
+            ), {"schema": product.adapter.schema})
+            _, turn = await product.database.admit_automation(
+                db, grant=product.principal.grant, title="Continued automation", model="test",
+                prompt="Please remember: Prefer pytest for focused backend tests.", request_key="memory-input",
+                session_id=session.id,
+            )
+    else:
+        turn = await product.database.submit(product.actor, session.id, NewMessage(
+            prompt="Please remember: Prefer pytest for focused backend tests.", request_key="memory-input",
+        ))
     assert (await product.database.claim_next()).id == turn.id
     prepared = await product.database.prepare(turn.id)
     async with product.database.sessions() as db:
@@ -179,12 +190,12 @@ async def test_native_manual_mode_failure_is_not_presented_as_success(memory_pro
 
 
 @pytest.mark.parametrize("forbidden", [
-    "foreign_message", "missing_quote", "root_file", "other_namespace", "child", "delegated_session", "automation",
+    "foreign_message", "missing_quote", "root_file", "other_namespace", "child", "delegated_session", "automation", "continued",
 ])
 async def test_untrusted_evidence_paths_and_nonhuman_mutations_fail_closed(memory_product, forbidden):
     product = memory_product
     _, turn, scope, message_id = await memory_execution(
-        product, surface="automation" if forbidden == "automation" else "web",
+        product, surface=forbidden if forbidden in {"automation", "continued"} else "web",
     )
     if forbidden == "delegated_session":
         scope = replace(scope, delegation_generated=True)

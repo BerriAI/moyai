@@ -83,7 +83,7 @@ async def event_automation(ctx, *, provider="webhook", **overrides):
                 "id": row["id"], "encrypted": ctx.product.adapter.legacy_security.encrypt("synthetic-signing-secret"),
             })
     result = await ctx.service.mutate(
-        ctx.grant, "migrate", row["id"], Migration(revision=1, request_key="event-migrate", activate=True),
+        ctx.grant, "migrate", row["id"], Migration(revision=1, request_key="event-migrate-" + row["id"], activate=True),
     )
     await ctx.service.reconcile(row["id"])
     return result
@@ -386,3 +386,50 @@ async def test_verified_slack_uses_saved_bot_authority_without_granting_agent_to
         await db.execute(text("DELETE FROM moyai.connections WHERE provider='slack'"))
     queued = (await pending(ctx))[1]
     assert (await ctx.events.admit(queued["occurrence"]))["status"] == "skipped"
+
+
+@requires_pg
+async def test_event_runs_continue_chat_without_reexporting_scheduled_messages(events):
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from test_automation_continuity import run_turn
+    ctx = events
+    database = ctx.product.database
+    session = await database.create_session(ctx.product.actor, NewSession(visibility="shared"))
+    row = await event_automation(ctx, session_id=session.id)
+    watcher = await event_automation(ctx, provider="session")
+    await deliver(ctx, row)
+    inbox = await pending(ctx)
+    event = next(item for item in inbox if item["automation_id"] == row["id"])
+    first = await ctx.events.admit(event["occurrence"])
+    assert first["session_id"] == session.id
+    await run_turn(ctx, first["turn_id"], lambda *_: ModelResponse(parts=[TextPart("Event answer")]))
+    await ctx.events.capture_sessions()
+    assert not [item for item in await pending(ctx) if item["automation_id"] == watcher["id"]]
+    await database.submit(ctx.product.actor, session.id, NewMessage(prompt="A real follow-up", request_key="human-followup"))
+    await ctx.events.capture_sessions()
+    captured = [item for item in await pending(ctx) if item["automation_id"] == watcher["id"]]
+    assert len(captured) == 1 and "A real follow-up" in captured[0]["context"]
+
+
+@requires_pg
+async def test_event_queue_tracks_resumed_run_in_shared_chat(events):
+    ctx = events
+    database = ctx.product.database
+    session = await database.create_session(ctx.product.actor, NewSession(visibility="shared"))
+    row = await event_automation(ctx, session_id=session.id, queue_events=True)
+    await deliver(ctx, row, 1)
+    await deliver(ctx, row, 2)
+    first, second = await pending(ctx)
+    admitted = await ctx.events.admit(first["occurrence"])
+    await database.claim_next()
+    await database.prepare(admitted["turn_id"])
+    async with database.sessions.begin() as db:
+        (await db.get(Turn, admitted["turn_id"])).status = "waiting"
+        (await db.get(Session, session.id)).status = "waiting"
+    resumed = await database.resume(ctx.product.actor, session.id, admitted["turn_id"], "answer", {"approvals": {}})
+    assert (await ctx.events.admit(second["occurrence"]))["status"] == "waiting"
+    async with database.sessions.begin() as db:
+        (await db.get(Turn, resumed.id)).status = "completed"
+        (await db.get(Session, session.id)).active_turn = None
+        (await db.get(Session, session.id)).status = "idle"
+    assert (await ctx.events.admit(second["occurrence"]))["status"] == "admitted"

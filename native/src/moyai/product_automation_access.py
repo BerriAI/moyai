@@ -16,6 +16,7 @@ from .product_automation_access_models import ProductAutomationChatGrant as Chat
 from .product_automation_models import ProductAutomationBinding as Binding
 from .product_automation_models import ProductAutomationOccurrence as Occurrence
 from .product_automation_models import ProductAutomationOperation as Operation
+from .product_automation_models import ProductAutomationTurn
 from .product_config import CORE_IDENTITY
 from .product_identity import ProductGrant
 
@@ -47,7 +48,13 @@ class ProductAutomationAccess:
             raise HTTPException(403, "Scoped controls require the current shared execution.")
         if individual:
             principal = await service.management_principal(db, scope)
-        occurrence = await db.scalar(select(Occurrence).where(Occurrence.session_id == scope.session_id))
+        generated = await db.get(ProductAutomationTurn, scope.turn_id)
+        occurrence = await db.scalar(select(Occurrence).where(
+            Occurrence.turn_id == (generated.origin_turn_id if generated else scope.turn_id),
+        ))
+        if occurrence is None and generated is None and session.surface == "automation":
+            # Pre-continuity runs used one session per occurrence, including resumptions.
+            occurrence = await db.scalar(select(Occurrence).where(Occurrence.session_id == session.id))
         if occurrence is None:
             await service._tool_source(db, scope, lock=True)
         elif occurrence.owner_id != principal.id or occurrence.session_id != scope.session_id:
@@ -231,10 +238,12 @@ class ProductAutomationAccess:
         elif claimed:
             original = json.loads(claimed.result)
             session = await db.get(Session, original["session_id"])
-            result = {"claimed": original["session_id"] == scope.session_id, "engine": CORE_IDENTITY,
+            same_run = (original["turn_id"] == source.turn_id if "turn_id" in original
+                        else original["session_id"] == scope.session_id)
+            result = {"claimed": same_run, "engine": CORE_IDENTITY,
                       "session_id": session.id if session and not session.deleted and session.visibility == "shared" else None}
         else:
-            result = {"claimed": True, "engine": CORE_IDENTITY, "session_id": scope.session_id}
+            result = {"claimed": True, "engine": CORE_IDENTITY, "session_id": scope.session_id, "turn_id": source.turn_id}
             db.add(Operation(
                 owner_id=scope.actor_id, operation_scope=operation_scope, request_key=key,
                 fingerprint=key, automation_id=source.automation_id, source_revision=source.source_revision,

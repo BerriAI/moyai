@@ -13,7 +13,7 @@ import { ApiError, csrfToken } from "./api"
 import {
   configureProductAutomationWebhook, createProductAutomation, getMe, getProductAutomationPreview, getProductAutomationWebhook,
   listProductAutomationHistory, listProductAutomations, migrateProductAutomation, runProductAutomation, setProductAutomationState,
-  testProductAutomationEvent, updateProductAutomation,
+  testProductAutomationEvent, updateProductAutomation, listSessions, type SessionListItem,
 } from "./generated/api"
 import {
   AutomationRequestKeys, automationActions, automationBlocker, automationMetadata, automationSamplePayload, automationStatus, calendarFrequencies, changeAutomationEvent, changeAutomationEventField, changeAutomationRepository, eventFieldVisible, historySessionHash, isAutomationProvider,
@@ -257,6 +257,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
   const preview = useRead(id ? `${base}/${encodeURIComponent(id)}/preview` : null,
     signal => getProductAutomationPreview({ path: { identity: id! }, signal }).then(({ data }) => data))
   const models = useRead("/me", signal => getMe({ signal }).then(({ data }) => data))
+  const chats = useRead(mode !== "review" ? "/sessions" : null, signal => listSessions({ signal }).then(({ data }) => data))
   const environments = useRead(mode !== "review" ? "/product/environments" : null, signal => listProductEnvironments({ signal }).then(({ data }) => data))
   const connections = useRead<AutomationConnection[]>(mode !== "review" ? "/product/connections" : null, signal => listOrganizationConnections({ signal }).then(({ data }) => data))
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [historyVersion, setHistoryVersion] = useState(0)
@@ -303,6 +304,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
       <AutomationReadiness preview={ready} />
       <ul className="pa-triggers">{automationTriggers(ready.definition).map(trigger => <li key={trigger.id}><TriggerSummary trigger={trigger} /></li>)}</ul>
       <details><summary>Workflow instructions</summary><pre>{ready.definition.prompt}</pre></details>
+      <p>{ready.definition.session_id ? <><a className="ns-link" href={`#${encodeURIComponent(ready.definition.session_id)}`} onClick={onClose}>Continue existing chat</a> · Each run uses this chat’s history and computer.</> : "New chat each run · Runs start with fresh conversation history."}</p>
       <UnsupportedSettings definition={ready.definition} />
       <div className="ns-row-actions pa-actions">
         {actions?.edit && <Button variant="outline" disabled={busy || preview.loading} onClick={() => { setError(""); onMode("edit") }}>Edit definition</Button>}
@@ -314,10 +316,10 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
         {actions?.retire && <Button variant="outline" disabled={busy || preview.loading} onClick={() => setConfirm("retire")}>Retire automation</Button>}
       </div>
       {confirm && <div className="pa-confirm" role="group" aria-label="Confirm automation change">
-        <h3>{{ migrate: "Move execution to the new runtime?", enable: "Enable this shared automation?", pause: "Pause future automation work?", run: "Start one shared session now?", retire: "Retire this automation?" }[confirm]}</h3>
+        <h3>{{ migrate: "Move execution to the new runtime?", enable: "Enable this shared automation?", pause: "Pause future automation work?", run: "Run this automation now?", retire: "Retire this automation?" }[confirm]}</h3>
         <p>{confirm === "migrate" ? "The service will pause the old schedule and bind this saved definition to the new runtime. It stays paused until you explicitly resume it. Existing history is retained."
-          : confirm === "enable" ? "Future occurrences create shared workspace sessions with these instructions. The service rechecks your access and this definition before admission."
-            : confirm === "run" ? "This starts one session using the saved definition and connected accounts. Model usage may incur costs. It does not enable recurring execution."
+          : confirm === "enable" ? "Future occurrences run in the selected chat destination. The service rechecks your access and this definition before admission."
+            : confirm === "run" ? "This runs the saved definition in its selected chat destination. Model usage may incur costs. It does not enable recurring execution."
               : confirm === "retire" ? "This removes the native execution binding from future scheduling. The canonical definition and recorded history are retained."
                 : "Future scheduling will pause. Work already admitted and saved history are kept."}</p>
         <div className="ns-dialog-actions"><Button autoFocus variant="outline" disabled={busy} onClick={() => setConfirm(null)}>Cancel</Button><Button disabled={busy || preview.loading || !actions?.[confirm]} onClick={() => {
@@ -335,6 +337,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
     </>}
     {mode !== "review" && models.data && (mode === "new" ? canCreate : ready && caps?.update) && <DefinitionEditor
       key={mode === "new" ? "new" : `${ready!.id}:${ready!.revision}`} existing={mode === "new" ? undefined : ready!.definition} models={models.data.models} defaultModel={models.data.default_model} eventChoices={eventChoices}
+      chats={(chats.data ?? []).filter(chat => chat.owner_id === models.data!.user.id && chat.visibility === "shared" && chat.surface === "web" && !chat.archived && !chat.deleted)} chatError={chats.error} chatLoading={chats.loading} onRefreshChats={chats.refresh}
       environments={environments.data ?? []} environmentError={environments.error} environmentLoading={environments.loading} onRefreshEnvironments={environments.refresh} busy={busy}
       connections={connections.data ?? []} connectionError={connections.error} connectionLoading={connections.loading} onRefreshConnections={connections.refresh}
       onCancel={mode === "new" ? onClose : () => { setError(""); onMode("review") }}
@@ -347,14 +350,14 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
 
 export function UnsupportedSettings({ definition }: { definition: AutomationDefinition }) {
   const entries = [
-    definition.plugins.length ? ["Connections", definition.plugins.join(", ")] : null,
-    definition.repo_url || definition.github_repository_id ? ["Repository", definition.repo_url || `Repository ID ${definition.github_repository_id}`] : null,
-    ["Environment", definition.environment_id],
+    !definition.session_id && definition.plugins.length ? ["Connections", definition.plugins.join(", ")] : null,
+    !definition.session_id && (definition.repo_url || definition.github_repository_id) ? ["Repository", definition.repo_url || `Repository ID ${definition.github_repository_id}`] : null,
+    definition.session_id ? ["Project and connections", "From the selected chat"] : ["Environment", definition.environment_id],
     definition.mode !== "modal" ? ["Execution mode", definition.mode] : null,
     definition.self_management.instructions || definition.self_management.schedule ? ["Self-management", "Instructions or schedule permissions are enabled."] : null,
     Object.keys(definition.metadata).length ? ["Metadata", Object.entries(definition.metadata).map(([key, value]) => `${key}: ${value}`).join("\n")] : null,
     ["Hourly limit", definition.max_runs_per_hour === null ? "No cap" : `${definition.max_runs_per_hour} runs`],
-    ["Event handling", definition.queue_events ? "Queue while another run is active" : "Allow overlapping runs"],
+    ["Event handling", definition.session_id ? "Wait for the selected chat to be idle" : definition.queue_events ? "Queue while another run is active" : "Allow overlapping runs"],
   ].filter((entry): entry is string[] => Boolean(entry))
   return entries.length > 0 && <div className="pa-preserved"><h3>Saved execution settings</h3><p>These settings are part of the saved definition. Current readiness determines whether they can be used.</p><dl>{entries.map(([name, value]) => <React.Fragment key={name}><dt>{name}</dt><dd>{value}</dd></React.Fragment>)}</dl></div>
 }
@@ -410,15 +413,16 @@ export function EventFields({ event, choices, disabled, onChange }: {
   </div>
 }
 
-export function DefinitionEditor({ existing, models, defaultModel, eventChoices = {}, environments = [], environmentError = "", environmentLoading = false, onRefreshEnvironments, connections = [], connectionError = "", connectionLoading = false, onRefreshConnections, busy, onCancel, onSave }: {
+export function DefinitionEditor({ existing, models, defaultModel, chats = [], chatError = "", chatLoading = false, onRefreshChats, eventChoices = {}, environments = [], environmentError = "", environmentLoading = false, onRefreshEnvironments, connections = [], connectionError = "", connectionLoading = false, onRefreshConnections, busy, onCancel, onSave }: {
   existing?: AutomationDefinition; models: string[]; defaultModel: string; busy: boolean
+  chats?: SessionListItem[]; chatError?: string; chatLoading?: boolean; onRefreshChats?: () => void
   eventChoices?: Record<string, [string, string][]>
   environments?: AutomationEnvironment[]; environmentError?: string; environmentLoading?: boolean; onRefreshEnvironments?: () => void
   connections?: AutomationConnection[]; connectionError?: string; connectionLoading?: boolean; onRefreshConnections?: () => void
   onCancel: () => void; onSave: (definition: AutomationDefinition) => Promise<void>
 }) {
   const [definition, setDefinition] = useState<AutomationDefinition>(() => existing ? structuredClone(existing) : {
-    name: "", prompt: "", model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null,
+    name: "", prompt: "", session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null,
     environment_id: "auto", plugins: [], metadata: {}, queue_events: false, max_runs_per_hour: 50,
     self_management: { instructions: false, schedule: false },
     triggers: [{ id: crypto.randomUUID(), schedule: { ...automationDefaultSchedule(), cron: "", run_at: null } }],
@@ -433,6 +437,12 @@ export function DefinitionEditor({ existing, models, defaultModel, eventChoices 
   const changeTrigger = (id: string, trigger: AutomationTrigger) => changeTriggers(definition.triggers.map(item => item.id === id ? trigger : item))
   const sourceOptions = [{ value: "schedule", label: "Schedule" }, ...Object.keys(eventChoices).filter(provider => automationEventFields[provider]).map(value => ({ value, label: automationSources[value] || value }))]
   const availableModels = [...new Set([definition.model, ...models])].map(value => ({ value: value || "__default__", label: value ? `${value}${models.includes(value) ? "" : " (not currently enabled)"}` : "Workspace default" }))
+  const chatOptions = [
+    { value: "__new__", label: "New chat each run" },
+    ...chats.map(chat => ({ value: chat.id, label: chat.title })),
+    ...(definition.session_id && !chats.some(chat => chat.id === definition.session_id)
+      ? [{ value: definition.session_id, label: "Saved chat (unavailable in recent chats)" }] : []),
+  ]
   const environmentOptions = [
     { value: "auto", label: "Automatic · Match repository or workspace default" },
     { value: "none", label: "Base tools · No project environment" },
@@ -449,12 +459,17 @@ export function DefinitionEditor({ existing, models, defaultModel, eventChoices 
     <div className="ns-fields">
       <div className="ns-field"><label htmlFor={`${id}-name`}>Automation name</label><Input id={`${id}-name`} ref={nameRef} value={definition.name} required minLength={2} maxLength={100} disabled={busy} onChange={event => change({ name: event.target.value })} /></div>
       <div className="ns-field"><label htmlFor={`${id}-prompt`}>Instructions</label><Textarea id={`${id}-prompt`} rows={6} required minLength={3} maxLength={500000} disabled={busy} value={definition.prompt} onChange={event => change({ prompt: event.target.value })} /></div>
+      <div className="ns-field"><label htmlFor={`${id}-destination`}>Run in</label><Choice id={`${id}-destination`} label="Run in" value={definition.session_id || "__new__"} options={chatOptions} disabled={busy || chatLoading} onChange={value => change({ session_id: value === "__new__" ? null : value })} />
+        <p className="ns-field-hint">{definition.session_id ? "Each run continues this chat with its earlier messages, results, computer and connected accounts. Runs wait while the chat is busy." : "Each run starts a new chat with fresh conversation history. Choose a recent shared chat you own to keep context between runs."}</p>
+        {chatLoading && <p role="status" className="ns-field-hint">Loading recent chats…</p>}
+        {chatError && <p className="ns-error" role="alert">{chatError}{onRefreshChats && <Button type="button" variant="outline" onClick={onRefreshChats}>Retry chats</Button>}</p>}
+      </div>
       <div className="ns-field"><label htmlFor={`${id}-model`}>Model</label><Choice id={`${id}-model`} label="Automation model" value={definition.model || "__default__"} options={availableModels} disabled={busy} onChange={value => change({ model: value === "__default__" ? "" : value })} /></div>
-      <div className="ns-field"><label htmlFor={`${id}-repository`}>Repository</label><Input id={`${id}-repository`} type="url" maxLength={500} placeholder="https://github.com/owner/repository" value={definition.repo_url} disabled={busy} onChange={event => setDefinition(previous => changeAutomationRepository(previous, event.target.value))} /><p className="ns-field-hint">Public repositories use a credential-free checkout. Private repositories require their selected GitHub connection. Choose a validated environment below when the workflow needs prepared dependencies.</p></div>
+      {!definition.session_id && <><div className="ns-field"><label htmlFor={`${id}-repository`}>Repository</label><Input id={`${id}-repository`} type="url" maxLength={500} placeholder="https://github.com/owner/repository" value={definition.repo_url} disabled={busy} onChange={event => setDefinition(previous => changeAutomationRepository(previous, event.target.value))} /><p className="ns-field-hint">Public repositories use a credential-free checkout. Private repositories require their selected GitHub connection. Choose a validated environment below when the workflow needs prepared dependencies.</p></div>
       <div className="ns-field"><label htmlFor={`${id}-environment`}>Execution environment</label><Choice id={`${id}-environment`} label="Execution environment" value={definition.environment_id} options={environmentOptions} disabled={busy || environmentLoading} onChange={value => change({ environment_id: value })} />
         {environmentLoading && <p className="ns-field-hint" role="status">Loading saved environments…</p>}
         {environmentError && <p className="ns-error" role="alert">{environmentError}{onRefreshEnvironments && <Button type="button" variant="outline" onClick={onRefreshEnvironments}>Retry environments</Button>}</p>}
-        <p className="ns-field-hint">The service checks the selected environment and its validated build before admission. Selecting base tools removes the saved environment dependency.</p></div>
+        <p className="ns-field-hint">The service checks the selected environment and its validated build before admission. Selecting base tools removes the saved environment dependency.</p></div></>}
     </div>
     <fieldset className="pa-trigger-editor"><legend>Start when any trigger matches</legend>
       {definition.triggers.map((trigger, index) => {
@@ -473,7 +488,7 @@ export function DefinitionEditor({ existing, models, defaultModel, eventChoices 
       })}
       <Button type="button" variant="outline" disabled={busy || definition.triggers.length >= 16} onClick={() => changeTriggers([...definition.triggers, { id: crypto.randomUUID(), schedule: { ...automationDefaultSchedule(), cron: "", run_at: null } }])}><Plus size={16} />Add trigger</Button>
     </fieldset>
-    <section className="pa-editor-section"><h3>Connections and tools</h3><p className="ns-field-hint">Choose which connected apps this workflow may use. The service rechecks account permissions for shared automation sessions before activation.</p>
+    {!definition.session_id && <section className="pa-editor-section"><h3>Connections and tools</h3><p className="ns-field-hint">Choose which connected apps this workflow may use. The service rechecks account permissions for shared automation sessions before activation.</p>
       {connectionLoading && <p role="status" className="ns-muted">Loading connected apps…</p>}
       {connectionError && <p className="ns-error" role="alert">{connectionError}{onRefreshConnections && <Button type="button" variant="outline" onClick={onRefreshConnections}>Retry connections</Button>}</p>}
       {(["linear", "github", "slack", "notion"] as const).map(provider => {
@@ -483,7 +498,7 @@ export function DefinitionEditor({ existing, models, defaultModel, eventChoices 
           {Boolean(account?.tools?.length) && <details><summary>{account!.tools!.length} tools</summary><ul>{account!.tools!.map((tool, index) => <li key={`${tool.name}:${index}`}>{tool.name && <code>{tool.name} </code>}{tool.description}</li>)}</ul></details>}
         </div>
       })}
-    </section>
+    </section>}
     <section className="pa-editor-section"><h3>Self-management</h3><p className="ns-field-hint">Allow this automation and its workers to change only the selected parts of this workflow. Schedule changes may affect frequency and cost within your invocation limit.</p>
       <CheckField label="May revise its instructions" disabled={busy} checked={definition.self_management.instructions} onChange={instructions => change({ self_management: { ...definition.self_management, instructions } })} />
       <CheckField label="May adjust existing schedules" disabled={busy} checked={definition.self_management.schedule} onChange={schedule => change({ self_management: { ...definition.self_management, schedule } })} />
@@ -498,7 +513,7 @@ export function DefinitionEditor({ existing, models, defaultModel, eventChoices 
     </section>
     <section className="pa-editor-section"><h3>Limits and queueing</h3>
       <div className="ns-field"><label htmlFor={`${id}-limit`}>Maximum runs per hour</label><Input id={`${id}-limit`} type="number" min={1} step={1} disabled={busy} value={definition.max_runs_per_hour ?? ""} placeholder="No hourly cap" onChange={event => { capEdited.current = true; change({ max_runs_per_hour: event.target.value === "" ? null : Number(event.target.value) }) }} /><p className="ns-field-hint">Shared across all triggers. Clear for no hourly cap. Defaults to 50, or 150 for Slack message watching.</p></div>
-      <CheckField label="Queue overlapping event runs" checked={definition.queue_events} disabled={busy} onChange={queue_events => change({ queue_events })} /><p className="ns-field-hint">Events wait for the previous run when queueing is selected. Scheduled runs remain independent; workspace capacity limits still apply.</p>
+      <CheckField label="Queue overlapping event runs" checked={definition.queue_events} disabled={busy} onChange={queue_events => change({ queue_events })} /><p className="ns-field-hint">Events wait for the previous run when queueing is selected. Runs that continue the same chat always wait for that chat to be idle. Workspace capacity limits still apply.</p>
     </section>
     {definition.mode !== "modal" && <p className="pa-warning">This saved execution mode ({definition.mode}) is unsupported by the native service. Its value is retained; migration remains blocked.</p>}
     {!models.length && <p className="pa-warning">No models are currently available. Activation remains unavailable until model access is configured.</p>}
