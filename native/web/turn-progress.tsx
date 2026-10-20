@@ -6,7 +6,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import type { Turn } from "./conversation-state"
 import type { LiveTranscript } from "./live-transcript"
 import { AgentAvatar } from "./workspace"
-import { workItems, type AgentProgress, type ToolProgress, type WorkEntry, type WorkSegment } from "./work-timeline"
+import { currentWorkTool, workItems, type AgentProgress, type ToolProgress, type WorkEntry, type WorkSegment } from "./work-timeline"
 import type { ActionSelection } from "./workspace-types"
 import "./turn-progress.css"
 
@@ -75,7 +75,6 @@ function AgentWork({ agent, now, onOpen, ...controls }: {
   agent: AgentProgress; now: number; onOpen?: (agent: AgentProgress) => void
 } & ActionControls) {
   const [open, setOpen] = useState(false)
-  const latest = agent.messages.at(-1)
   const working = ["running", "starting", "stopping"].includes(agent.status)
   const elapsed = duration(agent.created_at, working ? now : agent.updated_at)
   const currentTool = agent.tools.filter(tool => tool.status === "running").at(-1)
@@ -91,13 +90,10 @@ function AgentWork({ agent, now, onOpen, ...controls }: {
       {onOpen && <Button type="button" variant="ghost" size="icon-sm"
         aria-label={`Open ${agent.name} details`} onClick={() => onOpen(agent)}><ExternalLink size={13} /></Button>}
     </div>
-    {agent.parent_name && <p className="work-agent-parent">Delegated by {agent.parent_name}</p>}
-    {!open && latest && <div className="work-agent-preview message-content">
-      <SkillMarkdown>{latest.text}</SkillMarkdown>
-    </div>}
-    {!latest && <p className="muted work-agent-preview">{working ? "Waiting for the first update…" : "No public update was recorded."}</p>}
-    {currentTool && <p className="work-agent-action" role="status">{toolLabel(currentTool.name)}…</p>}
     <CollapsibleContent className="work-agent-history">
+      {agent.parent_name && <p className="work-agent-parent">Delegated by {agent.parent_name}</p>}
+      {!agent.messages.length && <p className="muted">{working ? "Waiting for the first update…" : "No public update was recorded."}</p>}
+      {currentTool && <p className="work-agent-action" role="status">{toolLabel(currentTool.name)}…</p>}
       {agent.messages.map(message => <div key={message.id} className="turn-progress-entry message-content">
         {message.phase === "final_answer" && <small className="work-result-label">{agent.name} result</small>}
         <SkillMarkdown>{message.text}</SkillMarkdown>
@@ -143,7 +139,16 @@ export function TurnProgress({ segment, entry, live, visible, request, onSubagen
     : running ? "Working" : turn.status === "waiting" ? "Waiting for your response"
       : turn.status === "failed" ? "Work stopped with an error" : turn.status === "stopped" ? "Work stopped" : "Activity"
   const latest = items.filter(item => item.kind === "message").at(-1)
-  if (turn.status === "queued" || (earlier && !items.length && !entry?.loading)) return null
+  // Steering splits history, but an earlier action or subagent can still be
+  // running. Describe that work in the current segment without moving its card.
+  const continuingAgents = running && !entry?.error ? (entry?.data?.subagents ?? []).filter(agent =>
+    activeStates.includes(agent.status) && !items.some(item => item.kind === "agent" && item.agent.id === agent.id)) : []
+  const currentTool = running ? currentWorkTool(entry) : undefined
+  const activeWork = continuingAgents.length
+    ? `${continuingAgents.length === 1 ? "Subagent" : "Subagents"} ${continuingAgents.map(agent => agent.name).join(", ")} ${continuingAgents.length === 1 ? "is" : "are"} working…`
+    : !items.length && currentTool ? `${toolLabel(currentTool.name)}…` : undefined
+  // A shared background refresh is not new activity in every historical segment.
+  if (turn.status === "queued" || (earlier && !items.length)) return null
   return <section className={`turn-progress ${running ? "is-working" : "is-finished"}`}
     aria-label="Work progress" data-turn-id={turn.id} data-segment-id={segment.id}>
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -162,7 +167,10 @@ export function TurnProgress({ segment, entry, live, visible, request, onSubagen
           </div>
           : item.kind === "tools" ? <ToolGroup key={item.id} tools={item.tools} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />
             : <AgentWork key={item.id} agent={item.agent} now={running ? now : Date.now()} onOpen={onSubagent} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />)}
-        {!items.length && !entry?.error && <p className="muted">{running ? "Waiting for the first update…" : entry?.loading ? "Loading saved activity…" : "No progress updates were recorded."}</p>}
+        {activeWork && <p className="muted" role="status">{activeWork}</p>}
+        {!items.length && !activeWork && !entry?.error && <p className="muted">{running
+          ? segment.after !== null ? "Continuing the current task with your update…" : "Waiting for the first update…"
+          : entry?.loading ? "Loading saved activity…" : "No progress updates were recorded."}</p>}
         {entry?.error && <p className="error" role="alert">Could not refresh work details.
           <Button variant="ghost" size="sm" onClick={() => void request(turn)}>Retry</Button></p>}
         {(entry?.data?.tools_limited || entry?.data?.subagents_limited) && <p className="muted">Showing recent work details.</p>}

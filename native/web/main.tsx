@@ -496,6 +496,12 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [streamAttempt, setStreamAttempt] = useState(0)
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  const announcedDelegation = useRef("")
+  const automaticWorkspace = useRef(false)
+  const changeWorkspaceOpen = useCallback((open: boolean) => {
+    if (open) automaticWorkspace.current = false
+    setWorkspaceOpen(open)
+  }, [])
   const openedBrowserLogin = useRef("")
   const panelReturnFocus = useRef<HTMLElement | null>(null)
   const sessionActions = useSessionActions()
@@ -769,6 +775,19 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     (active?.is_self ?? active?.actor_id === me.user.id) ? active : undefined, visible && !swarmSpace,
     () => clearSensitiveNow.current(),
   )
+  const activeProgress = active ? work.entries[active.id] : undefined
+  const hasWorkingSubagent = !activeProgress?.error && activeProgress?.data?.subagents?.some(agent =>
+    ["queued", "starting", "running", "saving", "stopping"].includes(agent.status))
+  useEffect(() => {
+    if (sideMode || !visible || swarmSpace || !active || !activeSession(active.status) || !hasWorkingSubagent) return
+    const identity = `${authorityKey}:${connectionVersion}:${id}:${active.id}`
+    if (announcedDelegation.current === identity) return
+    announcedDelegation.current = identity
+    if (!workspaceOpen) {
+      automaticWorkspace.current = true
+      setWorkspaceOpen(true)
+    }
+  }, [sideMode, visible, swarmSpace, active?.id, active?.status, hasWorkingSubagent, authorityKey, connectionVersion, id, workspaceOpen])
   const requestAnswered = Boolean(active && answeredRequest === active.id)
   const browserLoginIds = view?.pending?.calls.filter(call => call.tool_name === "request_browser_login")
     .map(call => call.tool_call_id).join(",") ?? ""
@@ -1091,7 +1110,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {sending && <p className="composer-hint" role="status">Sending…</p>}
-          {session.surface === "slack" && <p className="composer-hint"><img src={slackLogo} width={14} height={14} alt="Slack" /> Messages and replies appear in the linked Slack conversation.</p>}
+          {session.surface === "slack" && <p className="composer-hint slack-conversation-hint"><img src={slackLogo} width={14} height={14} alt="Slack" /> Messages and replies appear in the linked Slack conversation.</p>}
           {[
             { key: "action", message: error, clear: () => setError("") },
             { key: "session", message: loadError, clear: () => setLoadError("") },
@@ -1144,7 +1163,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {pictures.uploading && <p className="composer-hint" role="status">Uploading files…</p>}
         </form>
       </div>
-      {!sideMode && <WorkspaceOverlayContent>
+      {!sideMode && <WorkspaceOverlayContent
+        onFocusCapture={() => { automaticWorkspace.current = false }}
+        onOpenAutoFocus={event => { if (automaticWorkspace.current) event.preventDefault() }}
+        onCloseAutoFocus={event => { if (automaticWorkspace.current) event.preventDefault() }}>
         <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
           onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
           onSubagent={agent => {
@@ -1164,7 +1186,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   </div>
   return <div className="conversation">
     <WorkspaceResourceProvider id={id} visible={visible} expanded={workspaceOpen}>
-    <WorkspaceOverlay open={workspaceOpen} onOpenChange={setWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
+    <WorkspaceOverlay open={workspaceOpen} onOpenChange={changeWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
     <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
       <header className={`topbar${traceError ? " has-trace-error" : ""}`}>
         <div className="session-heading"><h1 ref={heading} tabIndex={-1} title={session.title} aria-label={session.title}>
@@ -1194,7 +1216,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         if (tab.kind === "action") return <ActionPanel
           key={JSON.stringify([authorityKey, connectionVersion, me.user.id, me.csrf, tab.action])}
           action={tab.action} active={activeTab} onDenied={() => clearSensitiveNow.current()} />
-        if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); setWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
+        if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); changeWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
         if (tab.kind === "subagent") return <SubagentPanel sessionId={id} agent={{ id: tab.runId, name: tab.name, status: tab.status, avatar: tab.avatar }} active={activeTab} onOpenFile={openOutput} />
         if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
           onOpenFile={openOutput} onName={title => dispatchPanel({ type: "rename", id: tab.id, title })} />

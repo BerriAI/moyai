@@ -1851,7 +1851,9 @@ for(const width of [1440,768,320])test(`live work and subagents survive steering
   const progress=page.locator('.turn-progress');
   await progress.getByText('First inspection.',{exact:true}).waitFor();
   await progress.getByText('Checking recorded behavior.',{exact:true}).waitFor();
-  await progress.getByText('I found the renderer.',{exact:true}).waitFor();
+  await progress.locator('[data-agent-id="child"]').waitFor();
+  await page.getByRole('button',{name:'Close workspace',exact:true}).click();
+  assert.equal(await progress.getByText('I found the renderer.',{exact:true}).count(),0);
   assert.equal(await progress.locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
   const input=page.getByRole('textbox',{name:'Message Moyai'});
   await input.fill('Also check keyboard use.');
@@ -1881,6 +1883,113 @@ for(const width of [1440,768,320])test(`live work and subagents survive steering
   await progress.nth(0).getByText('First inspection.',{exact:true}).waitFor();
   assert.equal(await progress.nth(1).locator('.turn-progress-toggle').getAttribute('aria-expanded'),'false');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+
+for(const width of [1440,768,320])test(`empty steering activity stays hidden during refresh at ${width}px`,async t=>{
+  const start=Date.now()-60000,at=seconds=>new Date(start+seconds*1000).toISOString();
+  const progressPath=`/api/sessions/${sessionId}/progress/${turnId}`;
+  reset({
+    turns:[{id:turnId,actor_id:'viewer',status:'running',created_at:at(0),connections:[],usage:{}},
+      ...[2,3].map(id=>({id:`steer-${id}`,actor_id:'viewer',status:'included',parent_turn:turnId,
+        created_at:at(id*10),guidance_at:at(id*10),connections:[],usage:{}}))],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect the renderer.',created_at:at(0)},
+      ...[2,3].map(id=>({id,turn_id:`steer-${id}`,role:'user',author_id:'viewer',content:`Follow-up ${id}.`,created_at:at(id*10)}))],
+    workProgress:{messages:[{id:'inspection',phase:'commentary',text:'Inspecting the renderer.',created_at:at(5)}],
+      tools:[{id:'delegate',name:'delegate_task',status:'running',created_at:at(8),finished_at:null}],
+      subagents:[{id:'child',parent_id:turnId,parent_name:null,name:'Kepler',avatar:0,depth:0,status:'running',
+        created_at:at(9),updated_at:at(12),messages:[{id:'child-update',phase:'commentary',text:'Checking the composer.',created_at:at(12)}],
+        tools:[],messages_limited:false,tools_limited:false}]},
+  });
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.locator('[data-agent-id="child"]').waitFor();
+  await page.getByRole('button',{name:'Close workspace',exact:true}).click();
+  const empty=page.locator(`[data-segment-id="${turnId}:2"]`),latest=page.locator(`[data-segment-id="${turnId}:3"]`);
+  assert.equal(await empty.count(),0);
+  // Hold a real background poll so the loading state is observable, rather than
+  // checking only the settled DOM after a fast synthetic response.
+  let release;
+  state.holds={[progressPath]:new Promise(resolve=>{release=resolve})};
+  t.after(()=>release());
+  const reads=()=>state.requests.filter(req=>req.path===progressPath).length;
+  const before=reads();
+  await waitFor(()=>reads()>before,'held progress refresh');
+  assert.equal(await empty.count(),0,'a refresh must not insert an empty historical activity section');
+  assert.equal(await page.getByText('Loading saved activity…',{exact:true}).count(),0);
+  await latest.getByText('Subagent Kepler is working…',{exact:true}).waitFor();
+  assert.equal(await latest.getByText('Waiting for the first update…',{exact:true}).count(),0);
+  assert.equal(await page.locator('[data-agent-id="child"]').count(),1,'keep the actual subagent card in its original position');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.MOYAI_UI_CAPTURE_DIR) {
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`steering-progress-${width}.png`)});
+  }
+  state.workProgress.subagents[0].status='completed';
+  state.workProgress.subagents[0].updated_at=at(40);
+  state.workProgress.tools[0].status='completed';
+  state.workProgress.tools[0].finished_at=at(40);
+  delete state.holds[progressPath];release();
+  await latest.getByText('Continuing the current task with your update…',{exact:true}).waitFor();
+  assert.equal(await latest.getByText('Subagent Kepler is working…',{exact:true}).count(),0);
+  state.httpErrors={[`GET:${progressPath}`]:{status:503,body:'Temporarily unavailable'}};
+  await latest.getByRole('alert').waitFor();
+  assert.equal(await empty.count(),0);
+  await page.getByText('Inspecting the renderer.',{exact:true}).waitFor();
+  state.httpErrors={};
+  state.workProgress.messages.push({id:'continued',phase:'commentary',text:'Applying your update.',created_at:at(45)});
+  await latest.getByRole('button',{name:'Retry',exact:true}).click();
+  await latest.getByText('Applying your update.',{exact:true}).waitFor();
+  assert.equal(await latest.getByRole('alert').count(),0);
+  assert.equal(await empty.count(),0);
+});
+
+for(const width of [1440,768,320])test(`delegation opens workspace once without stealing the draft at ${width}px`,async t=>{
+  const start=Date.now()-60000,at=seconds=>new Date(start+seconds*1000).toISOString();
+  const agent={id:'child',session_id:'d'.repeat(32),parent_id:turnId,parent_name:null,name:'Kepler',avatar:0,
+    depth:0,status:'running',created_at:at(5),updated_at:at(5),messages:[],tools:[],messages_limited:false,tools_limited:false};
+  reset({sessionOverrides:{[sessionId]:{surface:'slack'}},
+    turns:[{id:turnId,actor_id:'viewer',status:'running',created_at:at(0),connections:[],usage:{}}],
+    workProgress:{messages:[],tools:[],subagents:[]},
+    workspace:{links:[],files:[],sources:[],subagents:[],subagents_limited:false}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const input=page.getByRole('textbox',{name:'Message Moyai'}),menu=page.getByRole('dialog',{name:'Workspace resources',exact:true});
+  await input.fill('Keep this draft while the subagent starts.');
+  const chat=await page.locator('.chat-content').boundingBox();
+  state.workProgress.subagents.push(agent);
+  state.workspace.subagents.push({...agent,can_inspect:true,started_at:at(5)});
+  await menu.getByRole('region',{name:'Subagents',exact:true}).getByText('Kepler',{exact:true}).waitFor();
+  assert.equal(await input.evaluate(el=>el===document.activeElement),true,'automatic discovery must not steal typing focus');
+  assert.equal(await input.innerText(),'Keep this draft while the subagent starts.');
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(),chat,'the menu floats without moving chat');
+  const card=page.locator('[data-agent-id="child"]');
+  assert.equal(await card.locator('.work-agent-history').isVisible(),false,'collapsed cards show no report preview');
+  if(process.env.MOYAI_UI_CAPTURE_DIR) {
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`delegation-open-${width}.png`)});
+  }
+  await input.press('Escape');
+  await menu.waitFor({state:'hidden'});
+  assert.equal(await input.evaluate(el=>el===document.activeElement),true);
+  const reads=()=>state.requests.filter(req=>req.path.endsWith(`/progress/${turnId}`)).length;
+  const before=reads();
+  await waitFor(()=>reads()>before,'progress poll after dismissal');
+  assert.equal(await menu.count(),0,'polling must respect dismissal');
+  agent.status='completed';agent.updated_at=at(35);
+  agent.messages.push({id:'report',phase:'final_answer',text:'Inspected the repository.\n\n### Current composer\n\nThe full report is available here.',created_at:at(35)});
+  state.workspace.subagents[0].status='idle';
+  await card.getByRole('button',{name:/Kepler Completed/}).waitFor();
+  assert.equal(await card.getByRole('heading').count(),0);
+  assert.equal(await card.getByText('Inspected the repository.',{exact:true}).count(),0);
+  assert.equal(await menu.count(),0,'completion must not reopen the menu');
+  if(process.env.MOYAI_UI_CAPTURE_DIR)await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`delegation-complete-${width}.png`)});
+  await card.locator('.work-agent-heading .work-detail-toggle').click();
+  await card.getByRole('heading',{name:'Current composer',exact:true}).waitFor();
+  await card.getByText('The full report is available here.',{exact:true}).waitFor();
+  await card.locator('.work-agent-heading .work-detail-toggle').click();
+  assert.equal(await card.getByRole('heading').count(),0);
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  await menu.getByRole('region',{name:'Subagents',exact:true}).getByText('Completed',{exact:true}).waitFor();
+  assert.equal(await menu.evaluate(el=>el.contains(document.activeElement)),true,'manual opening retains keyboard focus behavior');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });
 
 test('stopped work without a final answer keeps its updates expanded',async t=>{
@@ -2365,7 +2474,7 @@ for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and 
   const page=await pageFor(t,'#'+sessionId);
   await page.setViewportSize({width,height:900});
   await page.getByRole('button',{name:'Open workspace',exact:true}).click();
-  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Curie idle',exact:true}).click();
+  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Curie Completed',exact:true}).click();
   await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
   assert.equal(new URL(page.url()).hash,'#'+childId);
   await page.getByText('Parent agent',{exact:true}).waitFor();
@@ -2872,6 +2981,7 @@ for(const width of [1440,768,320])test(`subagent failure before first output sho
       messages:[{id:'failure:child-turn',phase:'commentary',text:failure,created_at:updated_at}]}]}});
   const page=await pageFor(t,'#'+sessionId,width);
   const card=page.locator('[data-agent-id="child-turn"]');
+  await card.locator('.work-agent-heading .work-detail-toggle').click();
   await card.getByText(failure,{exact:true}).waitFor();
   assert.equal(await card.getByText('No public update was recorded.',{exact:true}).count(),0);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
