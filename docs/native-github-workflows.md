@@ -1,20 +1,22 @@
 # GitHub workflows in the Pydantic core
 
-The selected organization GitHub connection exposes scoped native Pydantic tools.
-Discover their current schemas through the normal connection catalog. Checkout is
-one `github_checkout` tool: pass `repository` or `repository_id`, and the server
-selects the matching connection admitted to this task. If both are supplied, they
-must identify the same repository. Other operations retain a
-`github_<connection>_` prefix.
+The selected organization GitHub connection exposes shared native Pydantic tools.
+Discover their current schemas through the normal connection catalog. Each
+operation has one `github_<operation>` name across selected repositories. For
+native workflows and searches, pass `repository` or `repository_id`; if both are
+supplied they must identify the same repository. Provider reads retain their
+`owner` and `repo` inputs. The server selects the matching connection admitted to
+this task, including its per-operation policy and write approval requirements.
 
-Checkout retains the selected connection's access checks and tool policy. It
-cannot use an organization repository that was not selected for this task.
-Recorded calls to the old prefixed checkout tools retain their original scope;
-new discovery exposes only the shared checkout.
+No operation can use an organization repository that was not selected for this
+task. Searches accept plain terms and the server adds the selected repository
+scope. Recorded calls to the old connection-prefixed tools retain their original
+scope; new discovery exposes only the shared operations. The operation names in
+the table below have a `github_` prefix in the model-visible catalog.
 
 | Task | Tool |
 | --- | --- |
-| Check out a repository's branch, exact commit, or PR in a fresh directory | `github_checkout` |
+| Check out a repository's branch, exact commit, or PR in a fresh directory | `checkout` |
 | Publish files as a regular PR with optional base/head branches | `create_pull_request` |
 | Create a named branch at an exact commit | `create_branch` |
 | Publish files to a new or acknowledged Moyai-owned branch without a PR | `publish_branch` |
@@ -54,6 +56,12 @@ lock before dispatch. Ambiguous effects are never automatically repeated.
 Saved acknowledgments can finish interrupted operations. A branch merely
 appearing in readback is not proof that Moyai created it; an existing PR likewise
 does not establish new PR authorship.
+
+Shared write receipts retain their actual public tool name and bind the resolved
+connection revision and repository through the operation record. PR creation
+tracking accepts a shared name only with a matching persisted operation. Historical
+connection-prefixed receipts remain valid. Approval happens before effect
+reservation; dispatch rechecks the selected grant after approval resumes.
 
 Status lookup uses the original operation name and request key; follow-ups use
 `operation="update_pull_request"`. A saved terminal acknowledgment is checked

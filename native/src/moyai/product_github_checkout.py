@@ -9,8 +9,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from app.connector_errors import ConnectorError
-from app.db import database as source_database
 from app.github import REPOSITORY
 from pydantic import Field, JsonValue, model_validator
 from pydantic_ai import RunContext
@@ -18,7 +16,7 @@ from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.toolsets import FunctionToolset
 
 from .contracts import Grant, RunScope
-from .github_workflow_types import Checkout, PullRequest
+from .github_workflow_types import Checkout, PullRequest, RepositoryTarget
 from .product_github_bootstrap import INSTALL, fetch_bundle
 from .product_github_workflows import Workflows, parse
 
@@ -67,26 +65,13 @@ def checkout_toolset(
         Existing files are never replaced. GitHub credentials remain on the trusted worker.
         """
         from .product_github_publication import Publications
+        from .product_github_routing import resolve_grant
 
-        # Check the entire admitted snapshot before looking up a repository name.
-        # Organization-wide access alone is insufficient: the chosen grant must
-        # also belong to this task and allow checkout.
-        await service.check(scope, grants[0])
-
-        try:
-            github = service.connectors.github
-            repository_id = await source_database(github.target, request.repository_id or request.repository)
-            if request.repository_id is not None and request.repository:
-                named = await source_database(github.target, request.repository)
-                if named != repository_id:
-                    raise ToolFailed("The repository name and ID identify different repositories.")
-        except ConnectorError as error:
-            raise ToolFailed(str(error)) from error
-        selected = [grant for grant in grants if grant.policy["product"]["repository_id"] == repository_id]
-        if len(selected) != 1:
-            raise ToolFailed("This task has no unique selected GitHub connection permitting checkout of that repository.")
-        grant = selected[0]
-        await service.check(scope, grant)
+        grant = await resolve_grant(
+            service, scope, grants,
+            RepositoryTarget(repository=request.repository, repository_id=request.repository_id),
+            "checkout", writing=False,
+        )
         return await checkout(Publications(service, scope, grant), ctx, request)
 
     return tools

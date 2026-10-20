@@ -3,12 +3,18 @@
 Moyai discovers connected tools through Pydantic AI's local `search_tools`
 capability. Selected connections remain available, but their full schemas are
 deferred until a search reveals matching tools. The model can discover additional
-tools later in the same turn. GitHub definitions identify their selected repository
-so a search can distinguish otherwise identical tools from different connections.
-Checkout is shared across the selected GitHub repositories: `github_checkout`
-routes its explicit repository argument to the matching admitted grant. Its
-dispatch reconstructs only the local checkout schema, without GitHub MCP
-discovery. Other GitHub operations remain scoped to their selected connection.
+tools later in the same turn. Canonical GitHub connections expose one
+`github_<operation>` definition across the selected repositories. Native workflows
+and search tools take `repository` or `repository_id`; other provider reads retain
+their `owner` and `repo` inputs. The server resolves each call to an admitted grant.
+Native workflow dispatch reconstructs local schemas without GitHub MCP discovery.
+Provider reads retain live provider schema validation.
+
+Each target retains its allowlist, read-only policy, and approval requirements.
+Shared write validation resolves the target before reserving an effect, so an
+approval request does not leave a pending write. Recorded connection-prefixed
+calls retain their original repository, schemas, approvals, and receipt identity.
+Token-backed noncanonical accounts retain their connection-specific tool names.
 
 The local search path is intentional. Provider-native search can still upload the
 entire deferred corpus on every inference request. Moyai sends the local search

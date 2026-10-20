@@ -250,17 +250,20 @@ def create_request():
                    files=[{"path": "hello.txt", "content": "Updated"}])
 
 
-async def reserve(f, kind, request):
-    name = f"github_{f.grant.id[:8]}_{kind}"
+async def reserve(f, kind, request, *, name=None):
+    name = name or f"github_{f.grant.id[:8]}_{kind}"
     identity = effect_id(f.ctx, ToolCallPart(name, {}, tool_call_id=f.ctx.tool_call_id))
     await EffectReceipts(f.product.database).reserve(f.scope, identity, name, {"request": request.model_dump(mode="json")})
     return identity
 
 
-async def test_regular_publication_and_update_use_receipts_and_never_force(publication):
+@pytest.mark.parametrize("shared", [False, True])
+async def test_regular_publication_and_update_use_receipts_and_never_force(publication, shared):
     f = publication
     request = create_request()
-    effect = await reserve(f, "create_pull_request", request)
+    if shared:
+        f.ctx = replace(f.ctx, tool_name="github_create_pull_request")
+    effect = await reserve(f, "create_pull_request", request, name="github_create_pull_request" if shared else None)
     result = await f.publisher.create(f.ctx, request)
     assert result["draft"] is False and result["number"] == 7
     assert await f.publisher.create(f.ctx, request) == result
@@ -268,21 +271,31 @@ async def test_regular_publication_and_update_use_receipts_and_never_force(publi
     async with f.product.database.sessions() as db:
         assert (await db.get(Effect, effect)).state == "confirmed"
         assert await db.scalar(select(func.count()).select_from(PRPublication)) == 1
+    from moyai.github_workflow_types import PublicationStatus
+    status = await f.publisher.status(PublicationStatus(
+        repository_id=123, request_key=request.request_key, operation="create_pull_request",
+    ))
+    assert status["status"] == "confirmed" and status["result"] == result
     f.ctx.tool_call_id = "followup"
     update = Update(repository_id=123, number=7, base_sha="e" * 40, request_key="follow-up-once",
                     title="Follow-up", files=[{"path": "hello.txt", "content": "Next"}])
-    await reserve(f, "update_pull_request", update)
+    if shared:
+        f.ctx = replace(f.ctx, tool_name="github_update_pull_request")
+    await reserve(f, "update_pull_request", update, name="github_update_pull_request" if shared else None)
     changed = await f.publisher.update(f.ctx, update)
     assert changed["commit"] == "f" * 40
     patches = [args["json"] for method, _path, args in f.provider.calls if method == "PATCH"]
     assert patches == [{"sha": "f" * 40, "force": False}]
 
 
-async def test_uncertain_creation_does_not_invent_authorship_from_readback(publication):
+@pytest.mark.parametrize("shared", [False, True])
+async def test_uncertain_creation_does_not_invent_authorship_from_readback(publication, shared):
     f = publication
     f.provider.lost_create = True
     request = create_request()
-    await reserve(f, "create_pull_request", request)
+    if shared:
+        f.ctx = replace(f.ctx, tool_name="github_create_pull_request")
+    await reserve(f, "create_pull_request", request, name="github_create_pull_request" if shared else None)
     with pytest.raises(ToolFailed):
         await f.publisher.create(f.ctx, request)
     with pytest.raises(ToolFailed, match="acknowledgment"):

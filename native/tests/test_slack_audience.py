@@ -369,8 +369,10 @@ async def test_slack_turn_reaches_model_with_parallel_repository_discovery_durin
     result = await agent.run(prepared.prompt, deps=prepared.scope)
     assert result.output == 'Hello back' and result.usage.requests == 1
     assert len(credentials) == 8
-    assert len([tool for tool in model.last_model_request_parameters.function_tools
-                if tool.name.endswith('_read_repository')]) == 8
+    assert set(credentials) == {grant.id for grant in prepared.scope.grants}
+    # Every repository is discovered concurrently; the model sees one shared operation.
+    assert [tool.name for tool in model.last_model_request_parameters.function_tools
+            if tool.name.endswith('_read_repository')] == ['github_read_repository']
     assert product.state['calls'] == []  # Admission, prepare and 16 credential fences: no Slack API.
 
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import Annotated, Literal, Self
 
-from app.github import Change, Changes, Repository
+from app.github import REPOSITORY, Change, Changes, Repository
 from app.github import Publish as FilePublication
 from app.github_coding import InlineComment
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -35,6 +36,35 @@ SHA = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$", strict=True), AfterValidat
 Identifier = Annotated[int, Field(gt=0, strict=True)]
 RequestKey = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")]
 ReviewEvent = Literal["COMMENT", "REQUEST_CHANGES"]
+RepositorySelector = Literal["repository", "owner_repo"]
+
+
+class RepositoryTarget(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    repository: str = Field(
+        default="", pattern="^(?:" + REPOSITORY + ")?$",
+        description="Selected owner/repository. Supply this or repository_id.",
+    )
+    repository_id: int | None = Field(
+        default=None, gt=0, strict=True,
+        description="Permanent selected repository ID. If repository is also supplied, both must match.",
+    )
+
+    @model_validator(mode="after")
+    def explicit(self) -> Self:
+        if not self.repository and self.repository_id is None:
+            raise ValueError("Supply repository or repository_id.")
+        return self
+
+
+def repository_target(arguments: Mapping[str, object], selector: RepositorySelector) -> RepositoryTarget:
+    request = arguments.get("request", arguments)
+    if isinstance(request, BaseModel):
+        request = request.model_dump()
+    if selector == "owner_repo":
+        return RepositoryTarget(repository=f"{arguments.get('owner', '')}/{arguments.get('repo', '')}")
+    return RepositoryTarget.model_validate(request)
 
 
 class Publish(FilePublication):
