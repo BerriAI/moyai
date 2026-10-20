@@ -105,6 +105,12 @@ async def test_shared_operation_refuses_unselected_or_conflicting_target(routed,
     assert routed.calls == []
 
 
+async def test_shared_native_read_requires_explicit_repository(routed):
+    with pytest.raises(ToolFailed, match="explicit repository"):
+        await invoke(routed, "github_publication_status", {"request_key": "missing-selector"})
+    assert routed.calls == []
+
+
 async def test_cached_local_dispatch_rebuilds_without_provider_discovery(routed):
     f = routed
     tools = await catalog(f.capability, f.ctx)
@@ -190,35 +196,44 @@ async def test_warm_read_never_discovers_an_unrelated_repository(routed, monkeyp
     assert f.calls[-1] == ("search", 2, '"checkout" repo:BerriAI/moyai', 30)
 
 
-async def test_warm_read_refuses_changed_target_provider_schema(routed, monkeypatch):
+@pytest.mark.parametrize("warm", [False, True])
+async def test_provider_schema_drift_refreshes_same_activity_and_accepts_new_arguments(routed, monkeypatch, warm):
     f = routed
     tools = await catalog(f.capability, f.ctx)
-    try:
-        await tools.get_tools(f.ctx)
-    finally:
+    definitions = await tools.get_tools(f.ctx)
+    if warm:
         await tools.__aexit__(None, None, None)
-    native = ProductGitHubToolset._native
-    initial_discoveries = len(f.discoveries)
+        tools = await catalog(f.capability, f.ctx)
+    discoveries = []
 
     async def changed(adapter, *, write=False):
-        assert adapter.grant.policy["product"]["repository_id"] == 2
+        identity = adapter.grant.policy["product"]["repository_id"]
+        discoveries.append(identity)
         tools = FunctionToolset(id="changed-provider")
 
         @tools.tool_plain(metadata={"annotations": {"readOnlyHint": True}})
         async def get_file_contents(owner: str, repo: str, path: str, revision: str) -> dict:
-            pytest.fail("Changed provider schemas must not dispatch.")
+            f.calls.append(("updated-schema", identity, revision))
+            return {"path": path, "revision": revision}
 
         return tools
 
     monkeypatch.setattr(ProductGitHubToolset, "_native", changed)
-    with pytest.raises(ToolFailed, match="definition changed"):
-        await invoke(f, "github_get_file_contents", {"owner": "BerriAI", "repo": "moyai", "path": "README.md"})
-    assert f.calls == []
-    monkeypatch.setattr(ProductGitHubToolset, "_native", native)
-    tools = await catalog(f.capability, f.ctx)
     try:
-        await tools.get_tools(f.ctx)
-        assert len(f.discoveries) == initial_discoveries + 2
+        name = "github_get_file_contents"
+        tool = await tools.get_tool_for_tool_def(definitions[name].tool_def, f.ctx)
+        args = {"owner": "BerriAI", "repo": "moyai", "path": "README.md"}
+        with pytest.raises(ToolFailed, match="definition changed"):
+            await tools.call_tool(name, tool.args_validator.validate_python(args), f.ctx, tool)
+        assert f.calls == [] and discoveries == [2]
+        refreshed = (await tools.get_tools(f.ctx))[name]
+        assert "revision" in refreshed.tool_def.parameters_json_schema["required"]
+        assert len(discoveries) == 3 and set(discoveries[1:]) == {1, 2}
+        result = await tools.call_tool(
+            name, refreshed.args_validator.validate_python({**args, "revision": "new-sha"}), f.ctx, refreshed,
+        )
+        assert result == {"path": "README.md", "revision": "new-sha"}
+        assert f.calls == [("updated-schema", 2, "new-sha")]
     finally:
         await tools.__aexit__(None, None, None)
 

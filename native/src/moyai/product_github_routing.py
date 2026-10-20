@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.connector_errors import ConnectorError
 from app.db import database as source_database
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
 from pydantic_ai.tools import ToolDefinition
@@ -178,7 +178,10 @@ class RoutedGitHubToolset(AbstractToolset[RunScope]):
         operation = name.removeprefix("github_")
         original = self.originals[operation]
         selector = (tool.tool_def.metadata or {})[ROUTING]
-        target = repository_target(tool_args, selector)
+        try:
+            target = repository_target(tool_args, selector)
+        except ValidationError as error:
+            raise ToolFailed("Supply a valid explicit repository name or ID.") from error
         writing = not read_only_tool(original.tool_def)
         grant = await resolve_grant(self.service, self.scope, self.grants, target, operation, writing=writing)
         policy = ConnectionPolicy.model_validate(grant.policy)

@@ -262,8 +262,12 @@ class CatalogToolset(AbstractToolset[RunScope]):
         # listing. Durable calls already validated against this native validator.
         args = current.args_validator.validate_python(tool_args)
         assert self.native is not None
+        native = self.native
         try:
-            return await self.native.call_tool(name, args, ctx, current)
+            return await native.call_tool(name, args, ctx, current)
         except ConnectionDefinitionChanged:
             self.catalog.discard(self.key)
+            if self.native is native:
+                self.native, self.live_tools, self.selection = None, None, None
+                await native.__aexit__(None, None, None)
             raise
