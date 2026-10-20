@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { Tabs as TabsPrimitive } from "radix-ui"
-import { Activity, CheckSquare, File, Files, GitPullRequest, Maximize2, MessageSquare, Minimize2, Monitor, PanelRightClose, Plus, Search, Sparkles, Terminal, X } from "lucide-react"
+import { Activity, CheckSquare, File, Files, GitPullRequest, Maximize2, MessageSquare, Minimize2, Monitor, PanelRightClose, Plus, Search, Sparkles, Target, Terminal, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -55,7 +55,7 @@ export function panelReducer(state: PanelState, action: PanelAction): PanelState
 
 const icons = {
   "pull-request": GitPullRequest, subagent: Sparkles, output: File, computer: Monitor,
-  action: Terminal, activity: Activity, plan: CheckSquare, files: Files, "side-chat": MessageSquare,
+  goal: Target, action: Terminal, activity: Activity, plan: CheckSquare, files: Files, "side-chat": MessageSquare,
 }
 export type AddTabKind = "side-chat" | "files" | "computer" | "activity" | "plan"
 const choices: { kind: AddTabKind; label: string; description: string }[] = [
@@ -102,7 +102,11 @@ export function PanelTabs({ state, dispatch, onAdd, children, returnFocus }: {
     wasVisible.current = state.visible
     if (!target) return
     target.scrollIntoView({ block: "nearest", inline: "nearest" })
-    const frame = requestAnimationFrame(() => target.focus({ preventScroll: true }))
+    const previousFocus = document.activeElement
+    const frame = requestAnimationFrame(() => {
+      // Do not steal focus if the user has already returned to the composer.
+      if (document.activeElement === previousFocus || document.activeElement === document.body) target.focus({ preventScroll: true })
+    })
     return () => cancelAnimationFrame(frame)
   }, [state.activeId, state.visible, returnFocus])
   const selected = Math.max(0, state.tabs.findIndex(tab => tab.id === state.activeId))

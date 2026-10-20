@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import HTTPException
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .contracts import NewMessage, RunScope
 from .delegation_models import DelegatedSession
 from .goal_models import Goal, GoalReceipt, GoalTurn
-from .models import Effect, Message, Session, Turn, TurnImage, User, now
+from .models import Effect, Message, MessageSource, Session, Turn, TurnImage, User, now
 from .swarm_models import SwarmMember
 
 if TYPE_CHECKING:
@@ -61,12 +62,30 @@ class Goals:
         if goal is None or goal.status == "cleared":
             return None
         return {
-            "objective": self.database.security.unseal(goal.objective).decode(),
+            "objective": self.database.security.unseal(goal.objective).decode(), "elapsed_seconds": 0,
             "status": goal.status, "generation": goal.generation, "owner_id": goal.owner_id,
             "token_budget": goal.token_budget, "tokens_used": goal.tokens_used,
             "turns": goal.turns, "blocked_count": goal.blocked_count, "created_at": goal.created_at,
             "reason": self.database.security.unseal(goal.reason).decode() if goal.reason else "",
         }
+
+    async def mark_source(self, db: AsyncSession, turn_id: str) -> None:
+        source = await db.get(MessageSource, f"user:{turn_id}")
+        if source is not None:
+            provenance = json.loads(self.database.security.unseal(source.data))
+            source.data = self.database.security.seal({**provenance, "sent_as_goal": True})
+
+    async def elapsed_seconds(self, db: AsyncSession, goal: Goal) -> float:
+        rows = (await db.execute(select(Turn.accepted_at, Turn.finished_at).join(
+            GoalTurn, GoalTurn.turn_id == Turn.id,
+        ).where(
+            GoalTurn.session_id == goal.session_id, Turn.created_at >= goal.created_at,
+            Turn.accepted_at.is_not(None), Turn.preparation.is_not(None), Turn.status != "included",
+        ))).all()
+        end = datetime.now(UTC) if goal.status == "active" else datetime.fromisoformat(goal.checked_at)
+        return sum(max(0.0, ((datetime.fromisoformat(finished) if finished else end)
+                            - datetime.fromisoformat(started)).total_seconds())
+                   for started, finished in rows)
 
     async def lock(self, db: AsyncSession, actor: User, session_id: str) -> Session:
         await self.database._actor_product_grant(db, actor)
@@ -97,12 +116,12 @@ class Goals:
         active_binding = await db.get(GoalTurn, session.active_turn) if session.active_turn else None
         if (
             active_binding is not None and active_binding.generation == goal.generation
-            and session.status not in {"saving", "waiting"}
+            and session.status != "saving" and (not keep_queued or session.status != "waiting")
         ):
             session.status = "stopped"
         stopped = list(await db.scalars(update(Turn).where(
             Turn.id.in_(bound), Turn.status.in_(tuple(
-                s for s in BUSY if s not in {"saving", "waiting"} and (not keep_queued or s != "queued")
+                s for s in BUSY if s != "saving" and (not keep_queued or s not in {"queued", "waiting"})
             )),
         ).values(status="stopped", finished_at=now()).returning(Turn.id)))
         if keep_queued and stopped:
@@ -151,8 +170,12 @@ class Goals:
             if session.archived and action in {"set", "resume"}:
                 raise HTTPException(409, "Unarchive the conversation before starting or resuming a goal.")
             if action == "set":
-                if goal is not None and goal.status not in {"complete", "cleared"}:
-                    raise HTTPException(409, "A goal already exists. Use /goal edit, /goal resume, or /goal clear.")
+                if goal is not None:
+                    if goal.status not in {"complete", "cleared"}:
+                        await self.halt(db, session, goal)
+                    # Preserve the label on goals created before provenance was recorded.
+                    if goal.source_turn_id:
+                        await self.mark_source(db, goal.source_turn_id)
                 grants = await self.database.resolve_grants(
                     db, actor.id, body.connections, shared_session=session.visibility == "shared",
                     surface=session.surface,
@@ -176,6 +199,8 @@ class Goals:
                     db, actor, goal, body.request_key, objective, generated=False, attachments=body.attachments,
                 )
                 goal.source_turn_id = turn.id
+                # Keep the original goal message identifiable after replacement/clear.
+                await self.mark_source(db, turn.id)
             else:
                 if goal is None or goal.status == "cleared":
                     raise HTTPException(409, "There is no goal in this conversation. " + HELP)
@@ -218,6 +243,8 @@ class Goals:
                         self.change(goal, "active")
             await db.flush()
             result: dict[str, Any] = {"goal": self.view(goal)}
+            if result["goal"] is not None:
+                result["goal"]["elapsed_seconds"] = await self.elapsed_seconds(db, goal)
             if turn is not None:
                 from .api import turn_view
                 result.update(turn_view(turn))

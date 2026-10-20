@@ -138,7 +138,7 @@ async function handle(req,res,next) {
           state.goalAccepted=true;
           if(data.prompt==='/goal pause')state.goal={...state.goal,status:'paused'};
           else if(data.prompt==='/goal resume')state.goal={...state.goal,status:'active'};
-          else if(data.prompt.startsWith('/goal edit '))state.goal={...state.goal,objective:data.prompt.slice(11),generation:state.goal.generation+1};
+          else if(data.prompt.startsWith('/goal edit '))state.goal={...state.goal,objective:data.prompt.slice(11).replace(/^--budget (?:none|[0-9]+) /,''),generation:state.goal.generation+1};
           return json({goal:state.goal});
         }
         if(state.afterWriteErrors)state.httpErrors={...state.httpErrors,...state.afterWriteErrors};
@@ -1470,31 +1470,31 @@ test('skill catalog retries and excludes personal skills in shared sessions',asy
 });
 
 const testGoal=()=>({objective:'Verify the original result.',status:'active',generation:1,owner_id:'viewer',
-  tokens_used:0,token_budget:null,turns:0,blocked_count:0,reason:'',created_at:''});
+  elapsed_seconds:0,tokens_used:0,token_budget:null,turns:0,blocked_count:0,reason:'',created_at:''});
 test('chat goal retries keep their request identity and preserve the edit after a failure',async t=>{
   reset({mode:'standalone',status:'idle',goal:testGoal(),goalError:true});
   const page=await pageFor(t);
-  await page.getByRole('button',{name:'Edit goal',exact:true}).click();
-  const dialog=page.getByRole('dialog',{name:'Edit goal',exact:true});
+  await page.getByRole('button',{name:'Expand goal',exact:true}).click();
+  const dialog=page.getByRole('form',{name:'Edit goal',exact:true});
   await dialog.getByLabel('Objective',{exact:true}).fill('Verify the new criterion.');
   await dialog.getByRole('button',{name:'Save goal',exact:true}).click();
   await dialog.getByRole('alert').filter({hasText:'Goal update temporarily unavailable'}).waitFor();
   assert.equal(await dialog.getByLabel('Objective',{exact:true}).inputValue(),'Verify the new criterion.');
   state.goalError=false;
   await dialog.getByRole('button',{name:'Save goal',exact:true}).click();
-  await dialog.waitFor({state:'hidden'});
-  const requests=state.requests.filter(row=>row.method==='POST'&&row.body?.prompt==='/goal edit Verify the new criterion.');
+  await page.waitForFunction(()=>document.querySelector('.goal-editor button[type=submit]').disabled);
+  const requests=state.requests.filter(row=>row.method==='POST'&&row.body?.prompt==='/goal edit --budget none Verify the new criterion.');
   assert.equal(requests.length,2);
   assert.deepEqual(requests[0].body,requests[1].body);
 });
 test('confirmed chat goal edits recover refresh errors without resubmitting',async t=>{
   reset({mode:'standalone',status:'idle',goal:testGoal(),goalRefreshError:true});
   const page=await pageFor(t);
-  await page.getByRole('button',{name:'Edit goal',exact:true}).click();
-  const dialog=page.getByRole('dialog',{name:'Edit goal',exact:true});
+  await page.getByRole('button',{name:'Expand goal',exact:true}).click();
+  const dialog=page.getByRole('form',{name:'Edit goal',exact:true});
   await dialog.getByLabel('Objective',{exact:true}).fill('The confirmed new objective.');
   await dialog.getByRole('button',{name:'Save goal',exact:true}).click();
-  await dialog.waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'Close Edit goal tab'}).click();
   await page.getByRole('alert').filter({hasText:'goal was updated'}).waitFor();
   assert.equal(state.requests.filter(row=>row.method==='POST'&&row.body?.prompt?.startsWith('/goal ')).length,1);
   assert.equal(state.goal.objective,'The confirmed new objective.');
@@ -1513,7 +1513,7 @@ test('typed goal controls preserve staged files and work while connection select
   await page.locator('.image-preview[aria-busy="false"]').waitFor();
   const input=page.getByRole('textbox',{name:'Message Moyai',exact:true});
   await input.fill('/goal pause');await input.press('Enter');
-  await page.getByText('Goal paused',{exact:true}).waitFor();
+  await page.getByText('Paused goal',{exact:true}).waitFor();
   const request=state.requests.find(row=>row.method==='POST'&&row.body?.prompt==='/goal pause');
   assert.equal(request.body.attachments,undefined);
   assert.equal(request.body.connections,undefined);

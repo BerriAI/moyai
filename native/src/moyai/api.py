@@ -560,7 +560,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 result["slack_delivery"] = await delivery_status(runtime.database, db, session_id)
             swarm_member = await runtime.database.swarms.member(db, session_id)
             from .goal_models import Goal
-            result["goal"] = runtime.database.goals.view(await db.get(Goal, session_id))
+            goal = await db.get(Goal, session_id)
+            result["goal"] = runtime.database.goals.view(goal)
+            if goal is not None and result["goal"] is not None:
+                result["goal"]["elapsed_seconds"] = await runtime.database.goals.elapsed_seconds(db, goal)
             if swarm_member is not None:
                 result["session"]["swarm_id"] = swarm_member.mission_id
             from .delegation_models import DelegatedSession
@@ -802,7 +805,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.post("/api/sessions/{session_id}/messages", status_code=202, operation_id="createSessionMessage")
     async def send(
         session_id: str, body: NewMessage, request: Request, user: User = Depends(actor),
-    ) -> TurnView | GoalStartedResult | GoalCommandResult:
+    ) -> GoalStartedResult | TurnView | GoalCommandResult:
         from .goals import is_goal_command
         from .skill_invocations import has_invocations
         if is_goal_command(body.prompt):

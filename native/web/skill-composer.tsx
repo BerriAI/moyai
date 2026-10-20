@@ -11,6 +11,7 @@ import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin"
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin"
 import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary"
 import { mergeRegister } from "@lexical/utils"
+import { Target } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { csrfToken } from "./api"
@@ -23,13 +24,14 @@ import "./skill-composer.css"
 type Query = { key: string; start: number; end: number; text: string }
 type Props = {
   value: string; onChange: (value: string) => void; onSend: (value: string) => void
+  onGoalSelect?: () => void
   onPaste?: React.ClipboardEventHandler<HTMLElement>
   placeholder: string; shared?: boolean; disabled?: boolean; sessionId?: string; focusRequest?: number
 }
 const CLIPBOARD_TYPE = "application/x-moyai-message"
 const GOAL_COMMAND: ComposerSkill = {
   id: "command:goal", reference: "goal", name: "goal", scope: "Command",
-  description: "Keep working until a goal is complete. Set, view, pause, or resume.",
+  description: "Set a goal to keep pursuing.",
 }
 
 function $textNodes(text: string): LexicalNode[] {
@@ -70,7 +72,7 @@ export const SkillComposer = React.forwardRef<HTMLDivElement, Props>(function Sk
   }}><InlineComposer {...props} inputRef={ref} /><HistoryPlugin /></LexicalComposer>
 })
 
-function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared = false, disabled = false, sessionId, focusRequest = 0, inputRef }: Props & { inputRef: React.ForwardedRef<HTMLDivElement> }) {
+function InlineComposer({ value, onChange, onSend, onGoalSelect, onPaste, placeholder, shared = false, disabled = false, sessionId, focusRequest = 0, inputRef }: Props & { inputRef: React.ForwardedRef<HTMLDivElement> }) {
   const [editor] = useLexicalComposerContext()
   const input = useRef<HTMLDivElement | null>(null), latest = useRef({ onChange, onSend })
   const bindInput = useCallback((node: HTMLDivElement | null) => {
@@ -151,6 +153,10 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
   const open = wantsPicker && !dismissed
   function pick(skill: ComposerSkill) {
     if (!query) return
+    if (skill.id === "command:goal" && onGoalSelect) {
+      editor.update(() => { $setContent(""); $getRoot().selectEnd() }, { tag: HISTORY_PUSH_TAG })
+      onGoalSelect(); setDismissed(true); editor.focus(); return
+    }
     editor.update(() => {
       const node = $getNodeByKey(query.key)
       if (!$isTextNode(node)) return
@@ -231,7 +237,7 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
               id={`${id}-${index}`} key={skill.reference} className="skill-option"
               title={`${skillDisplayName(skill.name)} · ${skillScopeName(skill.scope)}\n${skill.description}`}
               onMouseDown={event => event.preventDefault()} onClick={() => pick(skill)}>
-              <span className="skill-option-icon"><SkillIcon /></span>
+              <span className="skill-option-icon">{skill.id === "command:goal" ? <Target size={16} /> : <SkillIcon />}</span>
               <span className="skill-option-copy"><span className="skill-option-title">{skillDisplayName(skill.name)}</span><span className="skill-option-description">{skill.description}</span></span>
               <span className="skill-option-scope">{skillScopeName(skill.scope)}</span>
             </button>)}</div>

@@ -5,23 +5,32 @@
 ## Goals
 
 `/goal` is a native Moyai command available out of the box in ordinary web chats.
-No personal skill, connector, or installation is required. Select **Goal** from
-the `/` picker, or send `/goal <objective>`. Moyai saves the objective with the
-conversation and continues across turns until it verifies completion.
+No personal skill, connector, or installation is required. Type `/goal` and
+select **Goal** from the picker. A **Goal** chip appears below the input; type
+your objective and send it. Hover or focus the chip to remove goal mode without
+losing your draft. You can also send `/goal <objective>` directly.
+Moyai saves the objective with the conversation and continues across turns until
+it reports verified completion. Sending another goal stops the previous goal's
+work and starts the replacement, retaining your conversation history.
 Files attached when starting a goal are retained with its first message, using
 the same upload permissions as ordinary chat. Goal controls leave unsent files
 in the composer.
 
 | Command | Action |
 | --- | --- |
-| `/goal <objective>` | Start a goal, or replace a completed goal. |
-| `/goal` | View the goal; open the setup dialog if none exists. |
+| `/goal <objective>` | Start a goal, replacing any existing goal. |
+| `/goal` | Select goal mode in the composer. |
 | `/goal edit <objective>` | Revise the objective; active goals continue with the revision. |
 | `/goal pause` | Pause work and automatic continuation. |
 | `/goal resume` | Resume the saved goal with its original model and accounts. |
 | `/goal clear` | Stop goal work and remove the goal; retain the conversation. |
 
-The goal panel shows its status, completed turns, token usage, and controls.
+The compact bar above the input shows the objective, status, elapsed turn time,
+completed turns, and token usage. Use **Pause goal** or **Resume goal** to control
+work, **Clear goal** to stop and remove it, or **Expand goal** to edit it in the
+side panel. The original message keeps its **Sent as goal** label after editing
+or clearing. No token budget is set by default; the editor's **Goal details**
+contains the optional budget.
 Objectives accept up to 4,000 characters. Follow-up messages steer the work
 without replacing the objective. Questions and approval requests still require
 their normal answers; goal mode never grants additional permissions.

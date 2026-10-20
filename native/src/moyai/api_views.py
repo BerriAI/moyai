@@ -142,6 +142,7 @@ class TurnView(ApiView):
 
 
 class GoalView(ApiView):
+    elapsed_seconds: float
     objective: str
     status: Literal["active", "paused", "complete", "blocked", "budget_limited"]
     owner_id: str
@@ -186,6 +187,7 @@ class MessageAttachmentStatus(ApiView):
 
 
 class SessionMessage(ApiView):
+    sent_as_goal: bool = False
     id: int
     turn_id: str
     role: str

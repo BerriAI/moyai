@@ -3,10 +3,11 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useR
 import { createRoot } from "react-dom/client"
 import { Send, Bug, Download, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
-import { GoalDialog, GoalPanel, goalCommandAction, type Goal } from "./goal"
+import { GoalChip, GoalEditor, GoalMessageLabel, GoalPanel, goalCommandAction, type Goal } from "./goal"
 import { SkillMessage } from "./skill-content"
 import { SkillMarkdown, SkillMarkdownProvider } from "./skill-markdown"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -468,7 +469,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
-  const [goalDialog, setGoalDialog] = useState(false)
+  const [goalMode, setGoalMode] = useState(false)
+  const [goalEditorOpen, setGoalEditorOpen] = useState(false)
+  const [composerFocus, setComposerFocus] = useState(0)
   const [model, setModel] = useState(view?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(() => {
     const latest = view?.turns[0]
@@ -534,7 +537,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     ++loadVersion.current
     ++sensitiveVersion.current
     historyRequest.current?.controller.abort(); historyRequest.current = null
-    setGoalDialog(false); lastGoalRequest.current = null; setBusy(false)
+    setGoalMode(false); setGoalEditorOpen(false); lastGoalRequest.current = null; setBusy(false)
     resolvedOnce.current = undefined
     composerInitialized.current = false
     readThrough.current = null
@@ -848,13 +851,20 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     const attempt = lastGoalRequest.current
     goalSending.current = true; setBusy(true); setError("")
     try {
-      await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: attempt.key } })
+      const { data: result } = await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: attempt.key } })
       if (lastGoalRequest.current === attempt) lastGoalRequest.current = null
       if (!current()) return
-      if (startingGoal) pictures.clear()
+      if ("goal" in result) setView(previous => previous ? { ...previous, goal: result.goal } : previous)
+      if (startingGoal && "id" in result && viewNow.current) {
+        const message = firstMessage({ session: viewNow.current.session, turn: result, prompt: command, attachments: pictures.readyFiles })
+        message.id = receiptMessageId.current--
+        setMessages(previous => [...previous, message])
+        setDraft(""); setGoalMode(false); pictures.clear()
+      }
+      if (goalCommandAction(command) === "clear") { dispatchPanel({ type: "close", id: "goal" }); setGoalEditorOpen(false) }
       // The mutation is acknowledged. Refresh errors must not retry that mutation.
       await reloadAfterAction("Your goal was updated, but the conversation could not be refreshed.")
-      if (current()) await refreshList()
+      if (current()) await refreshList().catch(reason => { if (current()) setLoadError(`Your goal was updated, but the conversation list could not be refreshed: ${String(reason)}`) })
     } finally {
       goalSending.current = false
       if (current()) setBusy(false)
@@ -863,13 +873,19 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
 
   async function send(promptOverride?: string) {
     if (submitting.current || goalSending.current) return
-    const prompt = promptOverride ?? (editing ? editText : draft)
+    const input = promptOverride ?? (editing ? editText : draft)
+    const prompt = !editing && goalMode && input.trim() ? `/goal --budget none ${input}` : input
     const version = sensitiveVersion.current, auth = csrfToken()
     const current = () => version === sensitiveVersion.current && auth === csrfToken()
-    if (!editing && ["/goal", "/goal edit"].includes(prompt.trim())) {
-      if (prompt.trim() === "/goal" && view?.goal) { setDraft(""); return }
-      setGoalDialog(true); setDraft(""); return
+    if (!editing && prompt.trim() === "/goal") {
+      setGoalMode(true); setDraft(""); setComposerFocus(value => value + 1); return
     }
+    if (!editing && prompt.trim() === "/goal edit") {
+      if (view?.goal) { openGoal(); setDraft("") }
+      else setError("There is no goal to edit. Select /goal to start one.")
+      return
+    }
+    if (!editing && goalMode && !input.trim()) return
     if (!editing && goalCommandAction(prompt)) {
       try { await applyGoal(prompt); if (version === sensitiveVersion.current) setDraft("") }
       catch (reason) { if (version === sensitiveVersion.current) setError(String(reason)) }
@@ -1004,16 +1020,21 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               })}
             />
   }
+  function openGoal() {
+    if (sideMode) setGoalEditorOpen(true)
+    else {
+      panelReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      openTab({ id: "goal", kind: "goal", title: "Edit goal" })
+    }
+  }
   const chat = <SkillMarkdownProvider messages={visibleMessages}><section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
-        {view.goal && <GoalPanel goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy}
-          onCommand={command => {
-            const version = sensitiveVersion.current
-            void applyGoal(command).catch(reason => { if (version === sensitiveVersion.current) setError(String(reason)) })
-          }} onEdit={() => setGoalDialog(true)} />}
-        <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} goal={view.goal} onSubmit={applyGoal} />
+        {sideMode && view.goal && <Dialog open={goalEditorOpen} onOpenChange={setGoalEditorOpen}><DialogContent className="goal-side-dialog">
+          <DialogHeader><DialogTitle>Edit goal</DialogTitle><DialogDescription>Review the objective and its budget.</DialogDescription></DialogHeader>
+          <GoalEditor goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy} onSubmit={applyGoal} />
+        </DialogContent></Dialog>}
         {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
           space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
         {originalSessionId && !space && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>
@@ -1047,7 +1068,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.legacy_review_required && <p>Open this older message in Slack to review its files and text.</p>}
                 {message.attachment_status?.filter(file => file.error || file.preview_error).map((file, index) => <p role="status" key={file.file_id ?? index}>{file.name || "Slack attachment"}: {file.error ? "File unavailable. Open the message in Slack to retry or share it again." : "Preview unavailable. The original file is attached."}</p>)}
               </div>
-
+              {message.role === "user" && message.sent_as_goal && <GoalMessageLabel />}
             </article>{segment && renderProgress(segment)}</React.Fragment>
           })}
           {unanchored.get(null)?.map(renderProgress)}
@@ -1089,17 +1110,23 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             )}><X size={14} /></Button>
           </div>)}</div>}
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
+          {view.goal && <GoalPanel goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy}
+            onCommand={command => {
+              const version = sensitiveVersion.current
+              void applyGoal(command).catch(reason => { if (version === sensitiveVersion.current) setError(String(reason)) })
+            }} onEdit={openGoal} />}
           <div className="composer">
             <div className="composer-entry">
               <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
-              <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} sessionId={id} disabled={busy} placeholder={answeringQuestion ? "Type your answer to the pending question…" : "Ask Moyai to help with your work…"} onPaste={editing ? undefined : pictures.paste} />
+              <SkillComposer ref={composerInput} focusRequest={composerFocus} onGoalSelect={editing ? undefined : () => { setGoalMode(true); setDraft("") }} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} sessionId={id} disabled={busy} placeholder={goalMode && !editing ? view.goal ? "Describe a goal to replace the current one…" : "Describe a goal to keep pursuing…" : answeringQuestion ? "Type your answer to the pending question…" : "Ask Moyai to help with your work…"} onPaste={editing ? undefined : pictures.paste} />
               <div className="send-actions">
-                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? <><Check className="composer-save-icon" /><span className="composer-optional-label">Save message</span></> : <Send size={16} />}</Button>
+                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && (goalMode || !pictures.files.length)) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? <><Check className="composer-save-icon" /><span className="composer-optional-label">Save message</span></> : <Send size={16} />}</Button>
               </div>
             </div>
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} compact />
-              {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={() => void runConversationAction(() => stopSession({ path: { session_id: id } }))}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
+              {!editing && goalMode && <GoalChip disabled={busy} replacing={Boolean(view.goal)} onRemove={() => { setGoalMode(false); setComposerFocus(value => value + 1) }} />}
+              {(session.active_turn || view.goal?.status === "active") && <Button type="button" variant="outline" aria-label="Stop task" onClick={() => void runConversationAction(() => stopSession({ path: { session_id: id } }))}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
             </div>
           </div>
@@ -1158,6 +1185,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
 
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
       <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab} returnFocus={panelReturnFocus}>{(tab, activeTab) => {
+        if (tab.kind === "goal") return view.goal
+          ? <GoalEditor goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy} onSubmit={applyGoal} />
+          : <div className="panel-empty">This goal was cleared.</div>
         if (tab.kind === "action") return <ActionPanel
           key={JSON.stringify([authorityKey, connectionVersion, me.user.id, me.csrf, tab.action])}
           action={tab.action} active={activeTab} onDenied={() => clearSensitiveNow.current()} />

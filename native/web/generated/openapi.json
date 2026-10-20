@@ -7311,6 +7311,10 @@
             "title": "Created At",
             "type": "string"
           },
+          "elapsed_seconds": {
+            "title": "Elapsed Seconds",
+            "type": "number"
+          },
           "generation": {
             "title": "Generation",
             "type": "integer"
@@ -7359,6 +7363,7 @@
           }
         },
         "required": [
+          "elapsed_seconds",
           "objective",
           "status",
           "owner_id",
@@ -15626,6 +15631,11 @@
             "title": "Role",
             "type": "string"
           },
+          "sent_as_goal": {
+            "default": false,
+            "title": "Sent As Goal",
+            "type": "boolean"
+          },
           "slack_mentions": {
             "additionalProperties": {
               "type": "string"
@@ -15676,6 +15686,7 @@
           }
         },
         "required": [
+          "sent_as_goal",
           "id",
           "turn_id",
           "role",
@@ -23890,10 +23901,10 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "$ref": "#/components/schemas/TurnView"
+                      "$ref": "#/components/schemas/GoalStartedResult"
                     },
                     {
-                      "$ref": "#/components/schemas/GoalStartedResult"
+                      "$ref": "#/components/schemas/TurnView"
                     },
                     {
                       "$ref": "#/components/schemas/GoalCommandResult"

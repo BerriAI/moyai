@@ -781,3 +781,96 @@ async def test_slash_command_routes_before_skills_and_is_owner_only(runtime, act
         db.add(viewer)
     with pytest.raises(HTTPException, match="Only the conversation owner"):
         await command(runtime, viewer, session["id"], "/goal pause")
+
+
+@pytest.mark.parametrize("phase", ["queued", "running", "waiting", "saving", "paused", "complete", "budget_limited"])
+async def test_new_goal_replaces_existing_work_and_rejects_old_completion(runtime, actor, phase):
+    session, original = await start(runtime, actor, "/goal --budget 100 Original objective.")
+    if phase in {"running", "saving"}:
+        await runtime.database.claim_next()
+        prepared = await runtime.database.prepare(original)
+        if phase == "saving":
+            await runtime.database.save_result(
+                prepared.scope, conversation='{"messages":[]}', output="Old result.", workspace=None, usage={},
+            )
+    elif phase == "waiting":
+        await finish(runtime, deferred=True)
+    elif phase in {"paused", "complete", "budget_limited"}:
+        await finish(runtime, decision="complete" if phase == "complete" else None,
+                     usage={"input_tokens": 100} if phase == "budget_limited" else {})
+        await runtime.database.goals.tick(session.id)
+        if phase == "paused":
+            await command(runtime, actor, session.id, "/goal pause")
+    old_generation = (await goal(runtime, session.id))["generation"]
+    replacement = await command(runtime, actor, session.id, "/goal Replacement objective.", key="replace")
+    assert replacement == await command(runtime, actor, session.id, "/goal Replacement objective.", key="replace")
+    current = replacement["goal"]
+    assert current["status"] == "active" and current["objective"] == "Replacement objective."
+    assert current["generation"] > old_generation
+    assert current["token_budget"] is None and current["tokens_used"] == 0
+    async with runtime.database.sessions.begin() as db:
+        old = await db.get(Turn, original)
+        assert old.status == ("saving" if phase == "saving" else "completed" if phase in {"paused", "complete", "budget_limited"} else "stopped")
+        binding = await db.get(GoalTurn, original)
+        binding.decision = "complete"
+        binding.evidence = runtime.security.seal("Old goal complete.")
+    if phase == "saving":
+        await runtime.database.settle(original)
+    elif phase in {"running", "waiting"}:
+        await runtime.database.stopped(original)
+    await runtime.database.goals.tick(session.id)
+    assert (await goal(runtime, session.id))["status"] == "active"
+    assert (await runtime.database.claim_next()).id == replacement["id"]
+    messages = [row for row in await runtime.database.messages(actor, session.id) if row["role"] == "user"]
+    assert [row["content"] for row in messages] == ["Original objective.", "Replacement objective."]
+    assert all(row["sent_as_goal"] for row in messages)
+    await command(runtime, actor, session.id, "/goal clear")
+    assert all(row["sent_as_goal"] for row in await runtime.database.messages(actor, session.id) if row["role"] == "user")
+
+
+async def test_failed_replacement_keeps_the_original_goal_and_execution(runtime, actor):
+    session, original = await start(runtime, actor)
+    await runtime.database.claim_next()
+    await runtime.database.prepare(original)
+    with pytest.raises(HTTPException):
+        await command(runtime, actor, session.id, "/goal Replacement.", attachments=["missing-upload"])
+    assert (await goal(runtime, session.id))["objective"] == "Finish the verified task."
+    assert (await runtime.database.session(actor, session.id)).active_turn == original
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Turn, original)).status == "running"
+
+
+async def test_clear_stops_a_waiting_goal_and_releases_it(runtime, actor):
+    session, original = await start(runtime, actor)
+    await finish(runtime, deferred=True)
+    await command(runtime, actor, session.id, "/goal clear")
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Turn, original)).status == "stopped"
+    await runtime.database.stopped(original)
+    assert (await runtime.database.session(actor, session.id)).active_turn is None
+    assert await goal(runtime, session.id) is None
+
+
+async def test_goal_marker_is_server_authored_and_does_not_mark_followups(runtime, actor):
+    session, _ = await start(runtime, actor)
+    await runtime.database.submit(actor, session.id, NewMessage.model_validate({
+        "prompt": "A normal follow-up", "request_key": "follow-up", "sent_as_goal": True,
+        "source": {"sent_as_goal": True},
+    }))
+    rows = await runtime.database.messages(actor, session.id)
+    assert [row["sent_as_goal"] for row in rows] == [True, False]
+
+
+@pytest.mark.parametrize("status", ["completed", "resumed", "waiting", "stopped"])
+async def test_goal_elapsed_counts_execution_and_excludes_queue_time(runtime, actor, status):
+    session, original = await start(runtime, actor)
+    async with runtime.database.sessions.begin() as db:
+        stored = await db.get(Goal, session.id)
+        stored.created_at = "2026-01-01T00:00:00+00:00"
+        turn = await db.get(Turn, original)
+        turn.created_at = "2026-01-01T00:00:00+00:00"
+        turn.accepted_at = "2026-01-01T00:00:10+00:00"
+        turn.finished_at = "2026-01-01T00:00:25+00:00"
+        turn.status = status
+        turn.preparation = runtime.security.seal("{}")
+        assert await runtime.database.goals.elapsed_seconds(db, stored) == 15

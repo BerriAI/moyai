@@ -24,6 +24,6 @@ export type WorkspaceTab = {
   | { kind: "pull-request"; url: string }
   | { kind: "subagent"; runId: string; name: string; status: string; avatar: number }
   | { kind: "output"; resource: OutputResource; sessionId?: string }
-  | { kind: "computer" | "activity" | "plan" | "files" }
+  | { kind: "computer" | "activity" | "plan" | "files" | "goal" }
   | { kind: "side-chat"; sessionId?: string }
 )

@@ -424,6 +424,7 @@ class Database:
             originals = {item.id: item for item in await db.scalars(select(Upload).where(
                 Upload.session_id == session_id,
             ))}
+            goal = await db.get(Goal, session_id)
             result = []
             for row in rows:
                 content, source = projected[row.id]
@@ -438,6 +439,9 @@ class Database:
                     "id": row.id, "turn_id": row.turn_id, "role": row.role,
                     "author_id": row.author_id, "author_name": author.display_name if author else None,
                     "is_self": identities.get(row.author_id or "", False), "content": content,
+                    "sent_as_goal": row.role == "user" and bool(
+                        (source or {}).get("sent_as_goal") or (goal and row.turn_id == goal.source_turn_id)
+                    ),
                     "created_at": row.created_at, **source_view(source, session_id=session_id, message_id=row.id),
                     **({"source": "delegation"} if row.identity.startswith("delegation:") else {}),
                     "attachments": files if row.role == "user" or row.identity.startswith("delegation:") else [],
