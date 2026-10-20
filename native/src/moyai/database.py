@@ -89,6 +89,7 @@ class Database:
         self.dispatch_timings = DispatchRecorder(self)
         self.product_identity: ProductIdentityAdapter | None = None
         self.slack_access: Any = None
+        self.slack_prefetch: Any = None
         self.slack_mentions: Any = None
         self.product_connections: ProductConnections | None = None
         self.product_drain: ProductDrainService | None = None
@@ -273,6 +274,14 @@ class Database:
             await self.check_source_audience(db, root, actor)
         return session
 
+    async def prefetch_session_audiences(
+        self, actor: User, session_ids: list[str], *, deleted: bool = False,
+    ) -> None:
+        """Call before entering a read/admission transaction; final checks remain inside it."""
+        prefetch = getattr(self, "slack_prefetch", None)
+        if self.product_authority_enabled and prefetch is not None and session_ids:
+            await prefetch(actor, session_ids, deleted=deleted)
+
     async def execution_session(self, db: AsyncSession, session_id: str, actor: User) -> Session:
         """Local session checks for work whose saved turn authority is revalidated by the caller.
 
@@ -354,6 +363,9 @@ class Database:
                         SwarmMember.session_id == Session.id, SwarmMember.position > 0,
                     ).exists(),
                 )
+            ids = list(await db.scalars(query.with_only_columns(Session.id)))
+        await self.prefetch_session_audiences(actor, ids, deleted=deleted)
+        async with self.sessions() as db:
             visible = []
             for session in await db.scalars(query):
                 try:
@@ -371,12 +383,14 @@ class Database:
             return visible
 
     async def session(self, actor: User, session_id: str) -> Session:
+        await self.prefetch_session_audiences(actor, [session_id])
         async with self.sessions() as db:
             return await self.allowed_session(db, session_id, actor)
 
     async def messages(self, actor: User, session_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         from .message_sources import public_messages, source_view
 
+        await self.prefetch_session_audiences(actor, [session_id])
         async with self.sessions() as db:
             await self.allowed_session(db, session_id, actor)
             rows = list((await db.scalars(select(Message).where(
@@ -429,6 +443,8 @@ class Database:
         if actor.id == author_id:
             return True
         if not author_id or self.product_identity is None:
+            return False
+        if not author_id.startswith("slack:") and not actor.id.startswith("slack:"):
             return False
         if not db.in_transaction():
             await db.begin()
@@ -487,6 +503,8 @@ class Database:
         swarm_generated: bool = False, admitted_at: str | None = None,
         delegated_authority: DelegatedAuthority | None = None,
     ) -> Turn:
+        if db is None and not swarm_generated and delegated_authority is None:
+            await self.prefetch_session_audiences(actor, [session_id])
         async with self._admission_session(db) as transaction:
             product_grant = await self._actor_product_grant(transaction, actor)
             # Account changes and admission must serialize across API/worker
@@ -759,6 +777,10 @@ class Database:
 
     async def steer_queued(self, actor: User, turn_id: str) -> Turn:
         """Promote saved input into the SDK's existing durable enqueue path."""
+        async with self.sessions() as lookup:
+            session_id = await lookup.scalar(select(Turn.session_id).where(Turn.id == turn_id))
+        if session_id is not None:
+            await self.prefetch_session_audiences(actor, [session_id])
         async with self._admission_session(None) as db:
             actor_grant = await self._actor_product_grant(db, actor)
             turn = await db.get(Turn, turn_id)
@@ -1069,6 +1091,7 @@ class Database:
 
     async def delete_session(self, actor: User, session_id: str) -> None:
         """Hide a session and fence work atomically; the existing Stop dispatcher cancels execution."""
+        await self.prefetch_session_audiences(actor, [session_id])
         async with self._admission_session(None) as db:
             member = await self.swarms.member(db, session_id)
             # Keep the mission-before-session lock order and commit the deletion
@@ -1105,6 +1128,7 @@ class Database:
             ).values(status="stopped", finished_at=now()))
 
     async def restore_session(self, actor: User, session_id: str) -> None:
+        await self.prefetch_session_audiences(actor, [session_id], deleted=True)
         async with self.sessions.begin() as db:
             owned = await db.get(Session, session_id)
             if owned is None or not await self.same_person(db, actor, owned.owner_id):
@@ -1242,6 +1266,8 @@ class Database:
         *, received_at: str | None = None, admitted_at: str | None = None,
         transaction: AsyncSession | None = None, reply: NewMessage | None = None,
     ) -> Turn:
+        if transaction is None:
+            await self.prefetch_session_audiences(actor, [session_id])
         async with self._admission_session(transaction) as db:
             product_grant = await self._actor_product_grant(db, actor)
             locked_actor = await db.scalar(update(User).where(

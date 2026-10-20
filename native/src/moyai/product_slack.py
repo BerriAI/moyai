@@ -15,6 +15,7 @@ import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
+from typing import cast as typing_cast
 from urllib.parse import parse_qs, urlsplit
 from uuid import NAMESPACE_URL, uuid5
 
@@ -163,10 +164,22 @@ class ProductSlack:
         from .slack_mentions import SlackMentionNames
         self.mention_names = SlackMentionNames(self)
         runtime.database.slack_mentions = self.mention_names.decorate
-        from .slack_audience import can_read, historical_access, historical_messages
+        from .slack_audience import (
+            can_read,
+            historical_access,
+            historical_messages,
+            prefetch_historical,
+            prefetch_sessions,
+        )
         runtime.database.slack_access = lambda db, session, actor: can_read(self, db, session, actor)
+        runtime.database.slack_prefetch = lambda actor, ids, deleted=False: prefetch_sessions(
+            self, actor, ids, deleted=deleted,
+        )
         if runtime.product_history is not None:
-            runtime.product_history.slack_access = lambda conn, principal, ids: historical_access(self, conn, principal, ids)
+            runtime.product_history.slack_prefetch = lambda principal, ids: prefetch_historical(self, principal, ids)
+            runtime.product_history.slack_access = lambda conn, principal, ids, **options: historical_access(
+                self, conn, principal, ids, **options,
+            )
             runtime.product_history.decorate_messages = lambda conn, principal, run, rows: historical_messages(self, conn, principal, run, rows)
         self.inbox = HookInbox(self.store, self, list, security=self.product.security)
         self.delivery_task: asyncio.Task[None] | None = None
@@ -256,11 +269,14 @@ class ProductSlack:
             raise HTTPException(401, "Invalid Slack request.")
 
     def installation(self) -> dict[str, Any]:
+        return self._installation(self.store, self.connectors)
+
+    def _installation(self, store, connectors) -> dict[str, Any]:
         from app.connection_authority import authority
 
-        rows = self.store.rows("SELECT * FROM connections WHERE provider='slack'")
-        bot = self.connectors.slack_installation()
-        if not rows or not bot.get("installed") or not self.connectors.policy("slack")["enabled"]:
+        rows = store.rows("SELECT * FROM connections WHERE provider=?", ("slack",))
+        bot = connectors.slack_installation()
+        if not rows or not bot.get("installed") or not connectors.policy("slack")["enabled"]:
             raise SlackInstallationUnavailable()
         value = json.loads(self.product.security.decrypt(rows[0]["encrypted"]))
         bot["authority"] = hashlib.sha256(json.dumps({
@@ -268,6 +284,19 @@ class ProductSlack:
             "team": bot.get("team_id"), "bot": bot.get("user_id"),
         }, sort_keys=True).encode()).hexdigest()
         return bot
+
+    async def installation_in(self, db) -> dict[str, Any]:
+        """Use the caller's canonical snapshot without borrowing another pool slot."""
+        from app.connectors import Connectors
+
+        from .product_connection_store import ConnectionSnapshot
+
+        def snapshot(session):
+            source = ConnectionSnapshot(session, self.product.identity.schema)
+            connectors = Connectors(typing_cast(Any, source), self.product.security, self.settings)
+            return self._installation(source, connectors)
+
+        return await db.run_sync(snapshot)
 
     async def actor(self, team: str, user: str, *, refresh_profile: bool = False) -> tuple[User, ProductPrincipal]:
         def enroll():

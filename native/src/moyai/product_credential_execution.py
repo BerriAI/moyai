@@ -305,7 +305,21 @@ class ProductCredentialExecution:
                 "value": self.vault.security.decrypt(secret["encrypted"]),
             } for row, secret in accepted]
 
+    async def prefetch_audience(
+        self, principal: ProductPrincipal, *, session_id: str | None = None, request_id: str | None = None,
+    ) -> None:
+        async with self.database.sessions() as db:
+            actor = await self.current_actor(db, principal)
+            if request_id is not None:
+                row = await db.get(AccessRequest, request_id)
+                if row is None:
+                    raise HTTPException(404, "Native credential request not found.")
+                session_id = row.session_id
+        if session_id is not None:
+            await self.database.prefetch_session_audiences(actor, [session_id])
+
     async def pending(self, principal: ProductPrincipal, session_id: str) -> dict:
+        await self.prefetch_audience(principal, session_id=session_id)
         async with self.database.sessions.begin() as db:
             await self.identity.authorize_admission(db, principal.grant)
             actor = await self.current_actor(db, principal)
@@ -323,6 +337,7 @@ class ProductCredentialExecution:
             )]}
 
     async def describe(self, principal: ProductPrincipal, request_id: str) -> dict:
+        await self.prefetch_audience(principal, request_id=request_id)
         async with self.database.sessions.begin() as db:
             await self.identity.authorize_admission(db, principal.grant)
             actor = await self.current_actor(db, principal)
@@ -355,6 +370,7 @@ class ProductCredentialExecution:
     async def resolve(
         self, request: Request, principal: ProductPrincipal, request_id: str, body: Resolve,
     ) -> dict:
+        await self.prefetch_audience(principal, request_id=request_id)
         resolution = body.model_dump(mode="json", exclude={"value"})
         resolution["value_hash"] = hashlib.sha256(body.value.get_secret_value().encode()).hexdigest()
         resolution["actor_id"] = principal.id
@@ -502,6 +518,13 @@ class ProductCredentialExecution:
         return calls
 
     async def resume_resolved(self, turn_id: str, session_id: str) -> dict:
+        async with self.database.sessions() as db:
+            source = await db.get(Turn, turn_id)
+            if source is None or source.session_id != session_id:
+                raise HTTPException(409, "The requesting task is unavailable.")
+            grant = await self.database._saved_product_grant(db, source)
+        current = await self.identity.require_current(grant)
+        await self.prefetch_audience(current, session_id=session_id)
         async with self.database.sessions.begin() as db:
             turn = await db.get(Turn, turn_id)
             if turn is None or not turn.conversation:

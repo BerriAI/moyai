@@ -296,6 +296,7 @@ class ProductReadService:
 
     async def native_recheck(self, reader: Reader, ids: list[str], *, deleted: bool = False) -> set[str]:
         await self.current(reader)
+        await self.runtime.database.prefetch_session_audiences(reader.user, ids, deleted=deleted)
         mapped: dict[str, str] = {}
         async with self.runtime.database.sessions() as db:
             await prepare_history_query(db)
@@ -377,6 +378,16 @@ class ProductReadService:
         scanned, consumed, limited = 0, 0, False
         async with self.runtime.database.sessions() as db:
             await prepare_history_query(db)
+            planned = (await db.execute(select(Message.id, Message.session_id).join(
+                Session, Session.id == Message.session_id,
+            ).where(
+                self.visible(reader), Message.role.in_(("user", "assistant")),
+            ).order_by(Message.id.desc()).limit(SEARCH_ROWS + 1))).all()
+        await self.runtime.database.prefetch_session_audiences(
+            reader.user, list({row.session_id for row in planned}),
+        )
+        async with self.runtime.database.sessions() as db:
+            await prepare_history_query(db)
             title_rows = (await db.execute(self.native_query(reader).where(
                 self.visible(reader), func.lower(Session.title).contains(query.lower(), autoescape=True),
             ).order_by(Session.updated_at.desc(), Session.id.desc()).limit(offset + limit + 1))).mappings()
@@ -387,6 +398,7 @@ class ProductReadService:
                 func.substr(Message.content, 1, CIPHER_CHARS + 1).label("content"),
             ).join(Session, Session.id == Message.session_id).where(
                 self.visible(reader), Message.role.in_(("user", "assistant")),
+                Message.id.in_([row.id for row in planned]),
             ).order_by(Message.id.desc()).limit(SEARCH_ROWS + 1).execution_options(yield_per=16))
             try:
                 async for row in stream.mappings():
@@ -589,6 +601,8 @@ class ProductReadService:
             page["sessions"] = [row for row in page["sessions"] if row["id"] in valid]
         merged = merge_session_lists(pages.get("native", {}).get("sessions", []),
                                      pages.get("legacy", {}).get("sessions", []))
+        if not merged and "unavailable" in states.values():
+            raise HTTPException(503, "Session history is temporarily unavailable. Refresh to retry.")
         chosen = merged[:limit]
         has_more = len(merged) > limit or any(page["has_more"] for page in pages.values())
         for selected, page in pages.items():
@@ -630,6 +644,8 @@ class ProductReadService:
 
     async def detail(self, reader: Reader, run_id: str, source: Source) -> dict[str, Any]:
         await self.current(reader)
+        if source == "native":
+            await self.runtime.database.prefetch_session_audiences(reader.user, [run_id])
         if source == "legacy":
             if self.history is None or reader.principal is None:
                 raise HTTPException(503, "Existing product history is not configured.")
