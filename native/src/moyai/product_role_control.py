@@ -140,11 +140,11 @@ class RoleControl:
         ):
             raise ValueError("The control directory or lock changed during ownership.")
 
-    def _socket_node(self) -> os.stat_result:
+    def _socket_node(self, *, require_private: bool = True) -> os.stat_result:
         node = os.stat(self.path.name, dir_fd=self.directory_fd, follow_symlinks=False)
         if (
             not stat.S_ISSOCK(node.st_mode) or node.st_uid != os.geteuid()
-            or stat.S_IMODE(node.st_mode) & 0o077 or node.st_nlink != 1
+            or (require_private and stat.S_IMODE(node.st_mode) & 0o077) or node.st_nlink != 1
         ):
             raise ValueError("The control path must be a private, owner-owned socket.")
         return node
@@ -208,7 +208,9 @@ class RoleControl:
             return
         self._check_claim()
         try:
-            node = self._socket_node()
+            # This attempt captured the inode immediately after bind. It may
+            # still have umask permissions if chmod failed during startup.
+            node = self._socket_node(require_private=False)
         except (FileNotFoundError, ValueError):
             return
         if (node.st_dev, node.st_ino) == self.inode:

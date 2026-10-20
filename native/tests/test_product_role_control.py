@@ -210,13 +210,20 @@ async def test_changed_lock_inode_during_probe_preserves_orphan(path, monkeypatc
     assert path.stat().st_ino == inode
 
 
-async def test_startup_failure_releases_lock_and_owned_socket(path, monkeypatch):
+@pytest.mark.parametrize("stage", ["server", "chmod"])
+async def test_startup_failure_releases_lock_and_owned_socket(path, monkeypatch, stage):
     async def fail(*args, **kwargs):
         raise RuntimeError("server failed")
 
+    def chmod_failed(*args, **kwargs):
+        raise PermissionError("chmod failed")
+
     with monkeypatch.context() as patch:
-        patch.setattr(asyncio, "start_unix_server", fail)
-        with pytest.raises(RuntimeError, match="server failed"):
+        if stage == "server":
+            patch.setattr(asyncio, "start_unix_server", fail)
+        else:
+            patch.setattr(os, "chmod", chmod_failed)
+        with pytest.raises((RuntimeError, PermissionError), match="failed"):
             async with RoleControl(path, None):
                 pytest.fail("Startup must fail.")
     assert not path.exists()
