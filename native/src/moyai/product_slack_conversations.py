@@ -141,7 +141,7 @@ class SlackConversations:
             FROM {history.table('slack_threads')} s JOIN {history.table('runs')} r ON r.id=s.run_id
             WHERE s.run_id=:id
         """), {"id": source_id})).mappings().first()
-        installed = await source_database(self.slack.installation)
+        installed = await self.slack.installation_in(db)
         if row is None or installed["team_id"] != row["team_id"]:
             raise HTTPException(403, "The original Slack destination is unavailable.")
         thread = SlackThread(session_id=session.id, team_id=row["team_id"],

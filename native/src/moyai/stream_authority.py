@@ -27,6 +27,7 @@ async def authorize_stream_viewer(
     # Finish before holding a native connection, including with a size-one pool.
     if identity is not None:
         await identity.require_request_current(request)
+    await database.prefetch_session_audiences(user, [session_id])
     # A new session per check keeps native controls and ACLs fresh. Reuse its
     # connection for the checks, never its identity map across releases.
     async with database.sessions() as db:

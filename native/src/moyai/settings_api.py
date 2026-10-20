@@ -636,6 +636,7 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         available = await automation_readiness(runtime)
         if not available["create"]:
             raise HTTPException(503, available["reason"])
+        await runtime.database.prefetch_session_audiences(user, [body.session_id])
         async with runtime.database.sessions.begin() as db:
             await lock_actor(db, user)
             session = await runtime.database.allowed_session(db, body.session_id, user)

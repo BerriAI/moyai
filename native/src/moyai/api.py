@@ -85,6 +85,7 @@ from .models import (
     now,
 )
 from .presentation import public_event, redact, saved_activity
+from .product_identity import ProductAuthorityBusy
 from .product_requester import answer_actor, can_answer
 from .pull_requests import routes as pull_request_routes
 from .runtime import Runtime
@@ -208,6 +209,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             {key: item[key] for key in ("type", "loc", "msg")} for item in error.errors()
         ]})
 
+    @app.exception_handler(ProductAuthorityBusy)
+    async def authority_busy(_request: Request, _error: ProductAuthorityBusy):
+        return JSONResponse(
+            status_code=503, content={"detail": "Account access is busy. Try again shortly."},
+            headers={"Retry-After": "1", "Cache-Control": "no-store"},
+        )
+
     async def actor(request: Request) -> User:
         if runtime.product_identity is not None:
             principal = await runtime.product_identity.authenticate(
@@ -224,6 +232,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             # Share membership reads only within this authenticated HTTP request.
             # Live streams explicitly discard this snapshot before each recheck.
             cast(Any, user).slack_read_cache = {}
+            await prefetch_request_audience(request, user)
             return user
         token = request.cookies.get(COOKIE, "")
         identity = runtime.security.read_session(token)
@@ -237,6 +246,24 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if not hmac.compare_digest(csrf, identity["csrf"]):
                 raise HTTPException(403, "Refresh the page before making changes.")
         return user
+
+    async def prefetch_request_audience(request: Request, user: User) -> None:
+        """HTTP mutations must not discover provider work after taking write locks."""
+        if runtime.product_slack is None:
+            return
+        session_id = request.path_params.get("session_id")
+        if session_id is None:
+            turn_id = request.path_params.get("turn_id")
+            artifact_id = request.path_params.get("artifact_id")
+            async with runtime.database.sessions() as db:
+                if turn_id:
+                    session_id = await db.scalar(select(Turn.session_id).where(Turn.id == turn_id))
+                elif artifact_id:
+                    session_id = await db.scalar(select(Artifact.session_id).where(Artifact.id == artifact_id))
+        if session_id is not None:
+            await runtime.database.prefetch_session_audiences(
+                user, [session_id], deleted=request.url.path.endswith("/restore"),
+            )
 
     app.include_router(image_routes(runtime, actor))
     app.include_router(computer_routes(runtime, actor, cookie_name=COOKIE))
@@ -279,6 +306,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         limit: int = Query(100, ge=1, le=100), user: User = Depends(actor), session_id: str | None = None,
     ) -> InvocableSkillPage:
         if session_id is not None:
+            await runtime.database.prefetch_session_audiences(user, [session_id])
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
                 context = await runtime.database.execution_context(db, session)
@@ -476,7 +504,15 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             reference = (await ProductReadService(runtime).detail(
                 Reader(user, request.state.product_principal), session_id, "native",
             ))["session"]
-        row = await runtime.database.session(user, session_id)
+        await runtime.database.prefetch_session_audiences(user, [session_id])
+        async with runtime.database.sessions() as db:
+            row = await runtime.database.allowed_session(db, session_id, user, metadata_only=True)
+            # Only a waiting conversation needs its private checkpoint to render
+            # pending questions. Ordinary reads must not transfer megabytes of it.
+            if row.status == "waiting":
+                # Keep the state and active turn aligned with this checkpoint if
+                # execution advanced while the source audience was checked.
+                await db.refresh(row, ["status", "active_turn", "conversation"])
         turn_columns = load_only(
             Turn.id, Turn.session_id, Turn.actor_id, Turn.model, Turn.status, Turn.mode,
             Turn.parent_turn, Turn.enqueue_id, Turn.connections, Turn.accepted_at, Turn.usage,
@@ -493,10 +529,15 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             guidance = dict((await db.execute(select(Event.turn_id, Event.created_at).where(
                 Event.turn_id.in_([turn.id for turn in turns]), Event.kind == "steering_admitted",
             ).order_by(Event.id))).all())
+            # Resolve each relationship once for this projection/transaction.
+            # A linked Slack author may own many turns; repeating its admission
+            # and identity reads per turn adds hundreds of database round trips.
+            owners = {owner: await runtime.database.same_person(db, user, owner)
+                      for owner in {row.owner_id, *(turn.actor_id for turn in turns)}}
             result: dict[str, Any] = {
-                "session": {**session_view(row), "can_manage": await runtime.database.same_person(db, user, row.owner_id)}, "turns": [
+                "session": {**session_view(row), "can_manage": owners[row.owner_id]}, "turns": [
                     {**turn_view(turn), "guidance_at": guidance.get(turn.id),
-                     "is_self": await runtime.database.same_person(db, user, turn.actor_id)} for turn in turns
+                     "is_self": owners[turn.actor_id]} for turn in turns
                 ],
             }
             if include_messages:
@@ -526,7 +567,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             delegation = await db.get(DelegatedSession, session_id)
             if delegation is not None:
                 try:
-                    await runtime.database.allowed_session(db, delegation.parent_session_id, user)
+                    await runtime.database.allowed_session(db, delegation.parent_session_id, user, metadata_only=True)
                 except HTTPException as error:
                     if error.status_code != 404:
                         raise
@@ -990,6 +1031,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     ) -> list[ConnectionView]:
         surface = "web"
         if session_id is not None:
+            await runtime.database.prefetch_session_audiences(user, [session_id])
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
                 context = await runtime.database.execution_context(db, session)
@@ -1081,6 +1123,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def resolve_effect(
         effect_id: str, body: EffectResolution, user: User = Depends(actor),
     ) -> EffectResolveResult:
+        async with runtime.database.sessions() as db:
+            session_id = await db.scalar(select(Effect.session_id).where(Effect.id == effect_id))
+        if session_id is not None:
+            await runtime.database.prefetch_session_audiences(user, [session_id])
         async with runtime.database.sessions.begin() as db:
             row = await db.get(Effect, effect_id)
             if row is None or not await runtime.database.same_person(db, user, row.actor_id):

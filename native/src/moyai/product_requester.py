@@ -15,6 +15,7 @@ async def answer_actor(runtime: Any, user: User, turn: Turn) -> User:
             raise HTTPException(403, "Only the original requester may answer this request.")
         return user
     identity = runtime.product.identity
+    await runtime.database.prefetch_session_audiences(user, [turn.session_id])
     async with runtime.database.sessions.begin() as db:
         caller = await identity.authorize_admission(db, getattr(user, "product_grant", None))
         saved = await db.get(Turn, turn.id)

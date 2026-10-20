@@ -10,6 +10,7 @@ from time import monotonic
 from typing import Any
 
 from app.connector_errors import ConnectorError
+from fastapi import HTTPException
 
 AUDIENCE_TTL = 60
 MAX_ENTRIES = 512
@@ -30,6 +31,23 @@ class SlackAudienceReads:
         self.snapshots: OrderedDict[Key, tuple[float, dict[str, Any]]] = OrderedDict()
         self.pending: dict[Key, asyncio.Task[dict[str, Any]]] = {}
         self.cooldowns: OrderedDict[Scope, float] = OrderedDict()
+
+    def cached(self, installed, method: str, channel: str, cursor: str = "") -> dict[str, Any]:
+        """A transaction may consume fresh provider facts, never start provider I/O."""
+        key = (installed["team_id"], installed["authority"], method, channel, cursor)
+        saved = self.snapshots.get(key)
+        if saved is not None and saved[0] > self.clock():
+            self.snapshots.move_to_end(key)
+            return saved[1]
+        raise HTTPException(503, "Slack access needs a fresh verification. Refresh to retry.")
+
+    def denied(self, installed, channel: str) -> None:
+        """Retain a provider denial as data, not an authorization decision."""
+        key = (installed["team_id"], installed["authority"], "conversations.info", channel, "")
+        self.snapshots[key] = (self.clock() + AUDIENCE_TTL, {"ok": False})
+        self.snapshots.move_to_end(key)
+        while len(self.snapshots) > MAX_ENTRIES:
+            self.snapshots.popitem(last=False)
 
     async def read(self, slack, installed, method: str, channel: str, cursor: str = "") -> dict[str, Any]:
         scope = (installed["team_id"], installed["authority"], method)

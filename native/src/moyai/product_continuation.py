@@ -460,6 +460,9 @@ class ProductContinuationService:
         self, principal: ProductPrincipal, actor: User, source_id: str, request: ContinuationRequest,
         *, received_at: str | None = None,
     ) -> dict[str, Any]:
+        # The preview may have expired or another API process may serve this
+        # write. Warm provider facts before taking the exclusive source fence.
+        await self.history.require(principal, source_id)
         async with self.runtime.database.sessions.begin() as db:
             return await self.continue_for_admission(
                 db, actor, principal, source_id, request.message(), surface="web", provenance={"surface": "web"},
@@ -551,7 +554,7 @@ class ProductContinuationService:
         target.last_actor_id, target.last_model, target.last_grants = actor.id, target.model, grant_fingerprint(grants)
         # Preserve this viewer's navigation without treating another person's
         # personal pin/folder/archive settings as global session properties.
-        metadata = await self.history.allowed(db, current, source_id)  # AsyncSession supplies the same execute API.
+        metadata = await self.history.allowed(db, current, source_id, source_actor=actor)
         if metadata["folder"]:
             exists = await db.scalar(select(SessionFolder.id).where(
                 SessionFolder.user_id == actor.id, SessionFolder.name == metadata["folder"],
