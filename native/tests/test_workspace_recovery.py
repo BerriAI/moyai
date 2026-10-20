@@ -489,7 +489,7 @@ async def test_exact_restore_inherits_legacy_file_provenance(runtime, actor, act
             session_id=session.id, workspace_id=REFERENCE["id"], workspace_scope=prepared.scope.workspace_key,
             manifest_fingerprint="verified-original-import", files=3, bytes=987,
         ))
-    monkeypatch.setattr(runtime, "product", SimpleNamespace())
+    monkeypatch.setattr(runtime, "product", SimpleNamespace(close=AsyncMock()))
     monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=False))
     monkeypatch.setattr("moyai.workspace_recovery.restored_sandbox", AsyncMock(return_value=SimpleNamespace(
         object_id=RESTORED["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
