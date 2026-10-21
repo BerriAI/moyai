@@ -66,7 +66,7 @@ from .failed_action_attempts import failed_action_attempt
 from .failure_diagnostics import failure_details
 from .file_preview import routes as file_preview_routes
 from .general_preferences import GeneralPreferences, general_preferences
-from .history_handoff import is_turn_run, latest_turn_snapshot
+from .history_handoff import is_turn_run
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
 from .live_stream import authorized_events
@@ -84,7 +84,7 @@ from .models import (
     new_id,
     now,
 )
-from .presentation import public_event, redact, saved_activity
+from .presentation import public_event, redact
 from .product_identity import ProductAuthorityBusy
 from .product_requester import answer_actor, can_answer
 from .pull_requests import routes as pull_request_routes
@@ -589,15 +589,22 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 ~failed_action_attempt(),
             ))).all())
             result["has_unsettled_effects"] = bool(unsettled)
-            own_turns = {turn.id for turn, view in zip(turns, result["turns"]) if view["is_self"]}
             result["effects"] = [{
                 "id": effect.id, "turn_id": effect.turn_id, "tool_name": effect.tool_name,
                 "arguments": json.loads(runtime.security.unseal(effect.arguments)),
             } for effect in unsettled if await runtime.database.same_person(db, user, effect.actor_id)]
-        if include_activity and turns and turns[0].id in own_turns and turns[0].status != "running":
-            snapshot = await latest_turn_snapshot(runtime, turns[0].id)
-            if snapshot is not None:
-                result["activity"] = saved_activity(snapshot.messages, turns[0].id)
+        if include_activity and turns and turns[0].status != "running":
+            from .progress import turn_activity
+            async with runtime.database.sessions() as db:
+                latest = await db.get(Turn, turns[0].id, options=[load_only(Turn.id, Turn.preparation)])
+            if latest is not None:
+                result["activity"] = await turn_activity(runtime, latest)
+            fresh = await runtime.database.user(user.id)
+            if fresh.auth_version != user.auth_version:
+                raise HTTPException(401, "Your session expired.")
+            if runtime.product_identity is not None:
+                await runtime.product_identity.require_request_current(request)
+            await runtime.database.session(user, session_id)
         if row.status == "waiting" and row.conversation and active_turn is not None:
             # Requester-link checks take their own transaction. Do not hold a
             # native connection while awaiting them (including one-slot pools).
@@ -640,8 +647,6 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             turn = await db.get(Turn, turn_id)
             if turn is None or turn.session_id != session_id:
                 raise HTTPException(404, "Turn not found.")
-            if not await runtime.database.same_person(db, user, turn.actor_id):
-                raise HTTPException(403, "Working activity is visible only to its requester.")
         result = (
             await work_progress.read(turn) if include_activity
             else {"messages": await turn_progress(runtime, turn)}
@@ -664,8 +669,6 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             turn = await db.get(Turn, turn_id)
             if turn is None or turn.session_id != session_id:
                 raise HTTPException(404, "Turn not found.")
-            if not await runtime.database.same_person(db, user, turn.actor_id):
-                raise HTTPException(403, "Working activity is visible only to its requester.")
         result, source_session = await work_progress.action(turn, action_id, agent_id)
         fresh = await runtime.database.user(user.id)
         if fresh.auth_version != user.auth_version:
@@ -674,7 +677,12 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             await runtime.product_identity.require_request_current(request)
         await runtime.database.session(user, session_id)
         if source_session != session_id:
-            await runtime.database.session(user, source_session)
+            # action() resolves only generated turns in this parent's assignment,
+            # not later private follow-ups in the delegated conversation.
+            async with runtime.database.sessions() as db:
+                source = await db.get(Session, source_session)
+                if source is None or source.deleted:
+                    raise HTTPException(404, "Action not found.")
         return WorkActionDetail.model_validate(result)
 
     @app.get("/api/sessions/{session_id}/turns/{turn_id}/failure", operation_id="getTurnFailureDetails")
@@ -699,18 +707,22 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return TurnFailureDetails.model_validate(details)
 
     @app.get("/api/sessions/{session_id}/activity", operation_id="getSessionActivity")
-    async def session_activity(session_id: str, user: User = Depends(actor)) -> list[SavedActivity]:
+    async def session_activity(session_id: str, request: Request, user: User = Depends(actor)) -> list[SavedActivity]:
+        from .progress import turn_activity
+
         await runtime.database.session(user, session_id)
         async with runtime.database.sessions() as db:
-            turn = (await db.execute(select(Turn.id, Turn.actor_id, Turn.status).where(
+            turn = await db.scalar(select(Turn).where(
                 Turn.session_id == session_id,
-            ).order_by(Turn.created_at.desc()).limit(1))).first()
-            own = turn is not None and await runtime.database.same_person(db, user, turn.actor_id)
-        if turn is not None and own and turn.status != "running":
-            snapshot = await latest_turn_snapshot(runtime, turn.id)
-            if snapshot is not None:
-                return SAVED_ACTIVITY.validate_python(saved_activity(snapshot.messages, turn.id))
-        return []
+            ).options(load_only(Turn.id, Turn.status, Turn.preparation)).order_by(Turn.created_at.desc()).limit(1))
+        result = await turn_activity(runtime, turn) if turn is not None and turn.status != "running" else []
+        fresh = await runtime.database.user(user.id)
+        if fresh.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        if runtime.product_identity is not None:
+            await runtime.product_identity.require_request_current(request)
+        await runtime.database.session(user, session_id)
+        return SAVED_ACTIVITY.validate_python(result)
 
     @app.get("/api/sessions/{session_id}/debug-trace")
     async def session_debug_trace(session_id: str, user: User = Depends(actor)):
@@ -970,8 +982,6 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             turn = await db.get(Turn, turn_id)
             if turn is None or turn.session_id != session_id:
                 raise HTTPException(404, "Turn not found.")
-            if not await runtime.database.same_person(db, user, turn.actor_id):
-                raise HTTPException(403, "Working activity is visible only to its requester.")
         client = await runtime.connect()
         try:
             cursor = max(offset, int(request.headers.get("last-event-id", "-1")) + 1, 0)
@@ -1004,6 +1014,12 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                                 yield f"id: {native.offset}\ndata: " + json.dumps(
                                     redact(item, secret_values), ensure_ascii=False, default=str
                                 ) + "\n\n"
+                    # Workflow Streams can end its iterator normally when its
+                    # poll is cancelled. Preserve our reader's cancellation:
+                    # reopening here would keep the old API alive during drain.
+                    reader = asyncio.current_task()
+                    if reader is not None and reader.cancelling():
+                        raise asyncio.CancelledError
                     if next_offset == previous_offset:
                         break
             except asyncio.CancelledError:
@@ -1017,7 +1033,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         async def authorize_viewer():
             from .stream_authority import authorize_stream_viewer
             await authorize_stream_viewer(
-                runtime.database, runtime.product_identity, request, user, session_id, turn.actor_id,
+                runtime.database, runtime.product_identity, request, user, session_id,
             )
 
         return StreamingResponse(

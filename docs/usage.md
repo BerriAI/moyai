@@ -2,6 +2,15 @@
 
 [Install Moyai](../README.md#run-locally) · [Documentation](README.md)
 
+## Resize the session sidebar
+
+On desktop, drag the right edge of the left session sidebar to change its width.
+Focus the divider and use Left/Right arrows for 10px steps, or Shift+Left/Right
+for 40px steps. Home/End select the limits; Enter or double-click restores the
+default. Escape cancels a drag. Closing and reopening the sidebar keeps its
+width in the current view; switching conversations or choosing **New session**
+resets it. Mobile navigation remains an overlay. Right-hand panels are unchanged.
+
 ## Goals
 
 `/goal` is a native Moyai command available out of the box in ordinary web chats.
@@ -84,8 +93,8 @@ an existing conversation beside the Computer, Activity, Plan and Files panel.
 Drop files anywhere in the chat column, choose **Attach**, or paste an image
 with Command/Ctrl+V. New-session, main-chat and side-chat composers show
 removable attachment cards and support file-only messages. A message can contain
-eight files, each up to 20 MB; PNG, JPEG, GIF and WebP images are limited to 8 MB
-and 20 megapixels each. Zip a folder before attaching it.
+eight files, each up to 20 MB, including PNG, JPEG, GIF and WebP images.
+Images must also be no larger than 20 megapixels. Zip a folder before attaching it.
 Uploads are stored in encrypted objects; admission binds each upload to its
 owner's chosen conversation. Images use native Pydantic `BinaryContent`,
 including when steering a run. Other originals are available through the shared
@@ -197,7 +206,8 @@ history and has its own computer. In the left sidebar, children nest beneath the
 parent in a collapsible group. Select a child to open its full conversation, or
 choose **Open in side chat** from its row, menu, or Workspace entry to chat with
 the same child in the right panel. The parent stays open and keeps its draft.
-Older SDK subagents retain their requester-only answer and recorded-steps panels.
+Older SDK subagents expose their answers and recorded steps to everyone who can
+read the parent conversation.
 See [Subagent chats](subagent-chats.md) for lifecycle and migration details. Saving a
 file with `save_artifact` adds an output, and `attach_link` adds a PR, external
 output or source. PR links in the public transcript also appear as mentioned PRs.

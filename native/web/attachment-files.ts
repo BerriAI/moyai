@@ -1,6 +1,5 @@
 export const MAX_ATTACHMENTS = 8
 export const MAX_FILE_BYTES = 20 * 1024 * 1024
-export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 export function isInlineImage(mediaType: string): boolean {
   return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType)
@@ -9,9 +8,8 @@ export function isInlineImage(mediaType: string): boolean {
 export function attachmentError(files: Pick<File, "name" | "size" | "type">[], count: number): string | undefined {
   if (count + files.length > MAX_ATTACHMENTS) return "Attach up to 8 files per message."
   for (const file of files) {
-    const image = isInlineImage(file.type) || /\.(png|jpe?g|gif|webp)$/i.test(file.name)
-    if (file.size > (image ? MAX_IMAGE_BYTES : MAX_FILE_BYTES)) {
-      return `${file.name || "This file"} is too large. ${image ? "Images must be 8 MB" : "Files must be 20 MB"} or smaller.`
+    if (file.size > MAX_FILE_BYTES) {
+      return `${file.name || "This file"} is too large. Files must be 20 MB or smaller.`
     }
   }
 }

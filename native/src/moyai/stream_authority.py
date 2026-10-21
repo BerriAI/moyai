@@ -19,7 +19,6 @@ async def authorize_stream_viewer(
     request: Request,
     user: User,
     session_id: str,
-    requester_id: str,
 ) -> None:
     # Request-local Slack audience results must not survive a stream release.
     cast(Any, user).slack_read_cache = {}
@@ -35,5 +34,3 @@ async def authorize_stream_viewer(
         if fresh is None or not fresh.enabled or fresh.auth_version != user.auth_version:
             raise HTTPException(401, "Your access changed.")
         await database.allowed_session(db, session_id, user)
-        if not await database.same_person(db, user, requester_id):
-            raise HTTPException(403, "Requester access changed.")

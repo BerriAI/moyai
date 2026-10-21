@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
 from .commentary import saved_commentary
 from .history_handoff import latest_turn_snapshot
 from .models import Event, Turn
-from .presentation import redact
+from .presentation import redact, saved_activity
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -43,3 +43,9 @@ def progress_secrets(runtime: Runtime, turn: Turn) -> list[str]:
             if grant.get("credential") and not grant.get("policy", {}).get("product"):
                 secrets.append(runtime.security.unseal(grant["credential"]).decode())
     return secrets
+
+
+async def turn_activity(runtime: Runtime, turn: Turn) -> list[dict[str, Any]]:
+    """Use the live feed's credential redaction for saved activity too."""
+    snapshot = await latest_turn_snapshot(runtime, turn.id)
+    return redact(saved_activity(snapshot.messages, turn.id), progress_secrets(runtime, turn)) if snapshot else []

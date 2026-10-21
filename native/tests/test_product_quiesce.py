@@ -114,7 +114,7 @@ async def test_socket_never_overwrites_a_live_socket_or_shared_directory():
 
 async def test_worker_and_wrong_process_cannot_claim_drained():
     worker = role("worker").quiescence
-    with pytest.raises(ValueError, match="Temporal"):
+    with pytest.raises(ValueError, match="durable fleet seal"):
         worker.begin(worker.identity(), "worker")
     first, replacement = role().quiescence, role().quiescence
     with pytest.raises(ValueError, match="identity"):

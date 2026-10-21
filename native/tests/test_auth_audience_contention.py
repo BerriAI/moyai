@@ -530,7 +530,7 @@ async def test_sse_refreshes_expired_audience_before_authorizing_each_frame(audi
     async def authorize():
         await authorize_stream_viewer(
             product.database, product.adapter, request, product.actor,
-            product.session_id, product.raw_principal.id,
+            product.session_id,
         )
 
     async def disconnected():

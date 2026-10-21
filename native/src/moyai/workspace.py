@@ -10,15 +10,18 @@ from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, ValidationError
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai_harness.step_persistence import RunRecord
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import load_only
 
+from .commentary import public_text_parts
 from .database import SESSION_METADATA
 from .delegation_models import DelegatedSession
 from .links import PR_MENTION, LinkInput, save_link
 from .models import Artifact, Message, Session, SessionLink, SubagentLabel, Turn, Upload, User
+from .presentation import redact
+from .progress import progress_secrets
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -199,12 +202,11 @@ async def native_subagents(runtime: Runtime, session_id: str, turns: list[Turn],
             "running" if turn.status in {"starting", "running"} else
             "waiting" if turn.status == "waiting" else "interrupted"
         )
-        own = turn.actor_id == user.id
         return {
             "id": record.run_id, "parent_id": record.parent_run_id, "turn_id": turn.id,
             "name": labels[record.run_id].name, "avatar": labels[record.run_id].avatar,
             "status": status, "started_at": record.started_at.isoformat(),
-            "can_inspect": own, "depth": depth,
+            "can_inspect": True, "depth": depth,
         }
 
     return list(await asyncio.gather(*(summary(*item) for item in found))), limited
@@ -302,6 +304,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         cursor = record
         visited: set[str] = set()
         authorized = False
+        root = None
         async with runtime.database.sessions() as db:
             while cursor and cursor.parent_run_id and len(visited) < 32:
                 parent_id = cursor.parent_run_id
@@ -310,27 +313,27 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 visited.add(parent_id)
                 root = await db.get(Turn, parent_id)
                 if root:
-                    authorized = root.session_id == session_id and root.actor_id == user.id
+                    authorized = root.session_id == session_id
                     break
                 cursor = await runtime.stores.steps.get_run(run_id=parent_id)
-        if not authorized or record is None:
+        if not authorized or record is None or root is None:
             raise HTTPException(404, "Subagent not found.")
         events = await runtime.stores.steps.list_events(run_id=run_id)
         snapshot = await runtime.stores.steps.latest_snapshot(run_id=run_id, include_interrupted=True)
         replies = [
-            part.content for message in (snapshot.messages if snapshot else [])
+            content for message in (snapshot.messages if snapshot else [])
             if isinstance(message, ModelResponse) and message.run_id == run_id
-            for part in message.parts if isinstance(part, TextPart)
+            for _, content, _ in public_text_parts(message)
         ]
         labels = await agent_labels(runtime, session_id, [record])
         await recheck(user, session_id)
-        return SubagentDetail.model_validate({
+        return SubagentDetail.model_validate(redact({
             "id": run_id, "name": labels[run_id].name,
             "output": "\n\n".join(replies[-3:])[-30_000:],
             "steps": [{
                 "kind": event.kind, "tool": event.tool_name, "timestamp": event.timestamp.isoformat(),
             } for event in events[-60:]],
-        })
+        }, progress_secrets(runtime, root)))
 
     @router.post("/api/sessions/{session_id}/links", status_code=201, operation_id="attachSessionLink")
     async def attach(session_id: str, body: LinkInput, user: User = Depends(actor)) -> WorkspaceLink:

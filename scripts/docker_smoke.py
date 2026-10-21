@@ -93,6 +93,7 @@ def main():
         docker('volume', 'create', volume)
         docker('run', '--rm', '--entrypoint', python, '-v', f'{volume}:/var/data', args.image, '-c', SEED)
         name = start('-app', volume, '-e', 'LITELLM_API_KEY=synthetic-not-used',
+                     '-e', 'LITELLM_API_BASE=http://127.0.0.1:9/v1',
                      command=('moyai', 'dev', '--host', '0.0.0.0', '--port', '8787'))
         healthy(name)
         record(docker('exec', '--user', '10001:10001', name, python, '-c', VERIFY).stdout.strip())

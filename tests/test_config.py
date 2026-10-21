@@ -41,6 +41,22 @@ def test_project_gateway_key_overrides_unrelated_shell_key(tmp_path, monkeypatch
     assert Settings(_env_file=None).litellm_api_key == "unrelated-shell-key"
 
 
+def test_google_login_requires_an_explicit_allowed_domain(tmp_path, monkeypatch):
+    from app.security import Security
+
+    monkeypatch.delenv('GOOGLE_ALLOWED_DOMAINS', raising=False)
+    settings = Settings(
+        _env_file=None, data_dir=tmp_path, public_url='http://127.0.0.1:8787',
+        google_client_id='synthetic-client', google_client_secret='synthetic-secret',
+        google_admin_emails='admin@example.test',
+    )
+    assert settings.google_domains() == set()
+    with pytest.raises(ValueError, match='Configure GOOGLE_ALLOWED_DOMAINS'):
+        Security(settings)
+    settings.google_allowed_domains = 'example.test'
+    Security(settings)
+
+
 def test_deployment_cannot_select_github_repositories(monkeypatch):
     monkeypatch.setenv('GITHUB_REPOSITORIES', 'OtherOrg/private')
     settings = Settings(_env_file=None)

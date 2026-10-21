@@ -1,4 +1,4 @@
-"""Requester-scoped work presentation, separate from root answer streaming.
+"""Conversation-scoped work presentation, separate from root answer streaming.
 
 Execution, retries and histories remain owned by the native SDK. This reader
 uses its existing lineage, lifecycle events and public response snapshots; it
@@ -139,7 +139,7 @@ class WorkProgress:
         return sorted([*events, *cached[1]], key=lambda event: event.timestamp)
 
     async def action(self, turn: Turn, action_id: str, agent_id: str | None) -> tuple[dict, str]:
-        """Load one action on demand, entering through requester-scoped progress.
+        """Load one action on demand, entering through conversation-scoped progress.
 
         Never accept an arbitrary run ID or return the rest of a model snapshot.
         Delegated action IDs refer only to turns generated for that assignment.

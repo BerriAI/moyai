@@ -24,7 +24,7 @@ from test_workspace_overview import native_run
 from moyai.commentary import Commentary
 from moyai.contracts import NewMessage
 from moyai.delegation import DelegationService
-from moyai.models import Session, User
+from moyai.models import Session, Turn, User
 from moyai.work_progress import TOOL_LIMIT, WorkProgress, tools
 
 
@@ -130,8 +130,90 @@ async def test_live_work_contains_only_authorized_public_child_updates(runtime, 
             "private-tool-return", "private-delegation-prompt",
         ]:
             assert private not in response.text
-        assert (await member.get(path)).status_code == 403
+        shared = await member.get(path)
+        assert shared.status_code == 200, shared.text
+        assert shared.json() == value
         assert (await owner.get(f"/api/sessions/{session.id}/progress/missing?include_activity=true")).status_code == 404
+
+
+@pytest.mark.parametrize("persisted", [False, True], ids=["legacy-snapshot", "commentary-events"])
+async def test_shared_viewers_read_root_commentary_without_private_activity(runtime, active, persisted):
+    session, turn, prepared = active
+    runtime.settings.gateway_key = SecretStr("synthetic-gateway-secret")
+    await runtime.stores.steps.register_run(RunRecord(run_id=turn.id, agent_name="moyai"))
+    response = ModelResponse(run_id=turn.id, parts=[
+        ThinkingPart("private reasoning"),
+        TextPart("private analysis", provider_details={"phase": "analysis"}),
+        TextPart("Checking synthetic-gateway-secret.", provider_details={"phase": "commentary"}),
+        ToolCallPart("shell", {"command": "private command"}, tool_call_id="private-call"),
+    ])
+    await runtime.stores.steps.save_snapshot(ContinuableSnapshot(
+        run_id=turn.id, step_index=1, messages=[response],
+    ))
+    if persisted:
+        from moyai.commentary import saved_commentary
+        await Commentary(runtime.database).save(prepared.scope, 1, saved_commentary([response], turn.id))
+    path = f"/api/sessions/{session.id}/progress/{turn.id}"
+    async with member_client(runtime) as (client, _):
+        assert (await client.get(path)).status_code == 404
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Session, session.id)).visibility = "shared"
+        for query in ("", "?include_activity=true"):
+            result = await client.get(path + query)
+            assert result.status_code == 200, result.text
+            assert [item["text"] for item in result.json()["messages"]] == ["Checking [redacted]."]
+            assert not result.json()["tools"]
+            assert not result.json()["subagents"]
+            assert all(value not in result.text for value in (
+                "synthetic-gateway-secret", "private reasoning", "private analysis", "private command",
+            ))
+        assert (await client.get(f"/api/sessions/{session.id}/progress/missing")).status_code == 404
+
+
+@pytest.mark.parametrize("revocation", ["session", "identity"])
+async def test_shared_progress_rechecks_access_after_read(runtime, active, monkeypatch, revocation):
+    import moyai.progress
+
+    session, turn = await public_parent(runtime, active)
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Session, session.id)).visibility = "shared"
+    original = moyai.progress.turn_progress
+
+    async with member_client(runtime) as (client, member):
+        async def revoke_during_read(runtime, turn):
+            result = await original(runtime, turn)
+            async with runtime.database.sessions.begin() as db:
+                if revocation == "session":
+                    (await db.get(Session, session.id)).visibility = "private"
+                else:
+                    (await db.get(User, member.id)).auth_version += 1
+            return result
+
+        monkeypatch.setattr(moyai.progress, "turn_progress", revoke_during_read)
+        result = await client.get(f"/api/sessions/{session.id}/progress/{turn.id}")
+        assert result.status_code == (404 if revocation == "session" else 401)
+        assert "Inspecting the parent task." not in result.text
+
+
+async def test_saved_activity_is_shared_and_uses_live_credential_redaction(runtime, active):
+    from test_action_details import saved_action
+
+    session, turn, _ = active
+    runtime.settings.gateway_key = SecretStr("synthetic-gateway-secret")
+    await saved_action(runtime, turn.id, output="Shared result synthetic-gateway-secret")
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Session, session.id)).visibility = "shared"
+        (await db.get(Turn, turn.id)).status = "completed"
+    async with sign_in(runtime) as owner, member_client(runtime) as (member, _):
+        path = f"/api/sessions/{session.id}"
+        result = await member.get(path + "/activity")
+        assert result.status_code == 200, result.text
+        assert result.json() == (await owner.get(path + "/activity")).json()
+        assert result.json()[0]["arguments"] == {"command": "ls [redacted]"}
+        assert "synthetic-gateway-secret" not in result.text
+        inline = await member.get(path + "?include_activity=true")
+        assert inline.status_code == 200, inline.text
+        assert inline.json()["activity"] == result.json()
 
 
 async def test_unchanged_child_progress_reuses_only_the_public_projection(runtime, active, monkeypatch):

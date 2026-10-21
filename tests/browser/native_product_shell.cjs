@@ -40,7 +40,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/auth/google/start')return json({url:'https://accounts.google.com/fixture'});
   if(url.pathname==='/api/logout'){state.signedIn=false;return json({signed_out:true});}
   if(!state.signedIn)return json({detail:'Sign in.'},401);
-  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:'test-model',product_mode:state.mode,preferences:state.preferences||{delivery_mode:'when_idle',connection_ids:null}});
+  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:state.viewerName||'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:state.defaultModel||'test-model',product_mode:state.mode,preferences:state.preferences||{delivery_mode:'when_idle',connection_ids:null}});
   if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;const id='c'.repeat(32);state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],model:data.model||'test-model'}};return json(session(id));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections') {
@@ -193,6 +193,23 @@ async function handle(req,res,next) {
     return json(result);
   }
   return json({detail:'Fixture endpoint not implemented: '+url.pathname},404);
+}
+// Synthetic presentation data only. No provider requests or real account details.
+function resetReadmeDemo() {
+  reset({status:'idle',viewerName:'Alex Morgan',models:['Claude Sonnet 4.5'],defaultModel:'Claude Sonnet 4.5'});
+  const examples=[
+    ['Polish command palette','idle'],
+    ['Fix streaming reconnects','running'],
+    ['Add keyboard navigation','idle'],
+    ['Review API migration','idle'],
+    ['Refresh onboarding copy','idle'],
+    ['Trace gateway latency','idle'],
+  ];
+  state.inventoryRows=examples.map(([title,status],index)=>({
+    ...session((index+1).toString(16).repeat(32)),title,status,source:'native',
+    ...(index>=4?{owner_id:'demo-teammate',participated:true}:{}),
+    updated_at:new Date(Date.now()-(index+1)*3600000).toISOString(),
+  }));
 }
 async function waitFor(predicate,label='condition',timeout=10000) {const end=Date.now()+timeout;while(!predicate()){if(Date.now()>end)throw new Error('Timed out: '+label);await new Promise(resolve=>setTimeout(resolve,25));}}
 function emit(value,id,event) {for(const client of clients)client.write(`${id===undefined?'':`id: ${id}\n`}${event?`event: ${event}\n`:''}data: ${JSON.stringify(value)}\n\n`);}
@@ -1088,7 +1105,46 @@ test('sidebar PR icons retain multi-PR selection without numeric badges',async t
   await page.getByRole('button',{name:'Review change 13 example/project#13',exact:true}).waitFor();
 });
 
-test('workspace overlay preserves chat geometry while the side panel resizes it',async t=>{
+async function assertWorkspaceSeparated(page) {
+  const area=await page.locator('.workspace > .chat').boundingBox();
+  const chat=await page.locator('.workspace > .chat .chat-content').boundingBox();
+  const menu=await page.getByRole('dialog',{name:'Workspace resources',exact:true}).boundingBox();
+  assert.equal(menu.width,280);
+  assert.ok(area.width < 640 ? chat.y - (menu.y + menu.height) >= 16 : menu.x - (chat.x + chat.width) >= 16,
+    JSON.stringify({area,chat,menu}));
+  const composer=await page.locator('.workspace > .chat .composer-wrap').boundingBox();
+  assert.ok(composer.y >= chat.y && composer.y + composer.height <= chat.y + chat.height + 1);
+  assert.ok(composer.x >= chat.x && composer.x + composer.width <= chat.x + chat.width + 1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+}
+
+for(const width of [1440,768,320])for(const theme of ['dark','light'])test(`workspace avoids messages and composer at ${width}px in ${theme}`,async t=>{
+  reset({status:'completed',messages:[
+    {id:1,turn_id:turnId,role:'user',content:'Keep the Workspace resources separate from this conversation.'},
+    {id:2,turn_id:turnId,role:'assistant',content:'The main chat remains readable while the resources are open. '.repeat(12)}],
+    workspaceData:{links:[],sources:[],subagents:[],subagents_limited:false,
+      files:Array.from({length:20},(_,i)=>({id:String(i),name:`responsive-layout-verification-report-${i}.md`,size:4096,url:`/files/${i}`,media_type:'text/plain'}))}});
+  const page=await pageFor(t,'#'+sessionId,width, page=>page.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme));
+  await page.setViewportSize({width,height:600});
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Preserve this draft while opening resources.');
+  const before=await page.locator('.chat-content').boundingBox();
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  const menu=page.getByRole('dialog',{name:'Workspace resources',exact:true});
+  await menu.getByText('responsive-layout-verification-report-19.md',{exact:true}).waitFor();
+  await assertWorkspaceSeparated(page);
+  assert.ok(await menu.evaluate(el=>el.scrollHeight>el.clientHeight),'resources scroll within their own track');
+  assert.ok(await page.locator('.transcript').evaluate(el=>el.clientHeight>80),'chat keeps a usable scroll area');
+  if(process.env.MOYAI_UI_CAPTURE_DIR) {
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`workspace-separated-${width}-${theme}.png`)});
+  }
+  await page.keyboard.press('Escape');await menu.waitFor({state:'detached'});
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(),before);
+  assert.equal(await input.innerText(),'Preserve this draft while opening resources.');
+});
+
+test('workspace reserves a narrower column with a gap and restores chat on dismissal',async t=>{
   reset({status:'completed',workspaceData:{links:[],files:[],sources:[],subagents_limited:false,
     subagents:[{id:'agent-one',parent_id:'',name:'Newton',avatar:0,status:'failed',can_inspect:true,started_at:'',depth:0}]}});
   const page=await pageFor(t);
@@ -1099,7 +1155,11 @@ test('workspace overlay preserves chat geometry while the side panel resizes it'
   await key.click();
   const dialog=page.getByRole('dialog',{name:'Workspace resources',exact:true});
   await dialog.waitFor();
-  assert.deepEqual(await Promise.all([page.locator('.chat-content').boundingBox(),page.locator('.composer-wrap').boundingBox()]),before);
+  const chat = await page.locator('.chat-content').boundingBox(), menu = await dialog.boundingBox();
+  assert.equal(menu.width,280);
+  assert.ok(menu.x - (chat.x + chat.width) >= 16, 'Workspace must not cover chat');
+  const composer = await page.locator('.composer-wrap').boundingBox();
+  assert.ok(composer.x + composer.width <= menu.x - 16);
   assert.equal(await dialog.getByText('Failed',{exact:true}).count(),1);
   await page.keyboard.press('Escape');
   await dialog.waitFor({state:'detached'});
@@ -1925,6 +1985,57 @@ for(const width of [1440,768,320])test(`live work and subagents survive steering
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
 });
 
+for(const width of [1440,768,320])test(`shared conversation activity includes tools and subagents at ${width}px`,async t=>{
+  const start=Date.now()-60000,at=seconds=>new Date(start+seconds*1000).toISOString();
+  reset({ownerId:'teammate',sessionOverrides:{[sessionId]:{visibility:'shared',surface:'slack'}},
+    turns:[{id:turnId,actor_id:'teammate',is_self:false,status:'running',created_at:at(0),connections:[],usage:{}}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'teammate',author_name:'Test teammate',is_self:false,
+      content:'Check the shared task.',created_at:at(0)}],
+    workProgress:{messages:[{id:'shared-1',phase:'commentary',text:'Checking the shared task.',created_at:at(5)}],
+      tools:[{id:'shared-read',name:'read_file',status:'completed',created_at:at(6),finished_at:at(7)}],
+      subagents:[{id:'child',session_id:'private-child-chat',name:'Kepler',avatar:0,depth:0,status:'completed',
+        created_at:at(8),updated_at:at(10),messages:[{id:'child-result',phase:'final_answer',text:'Delegated check passed.',created_at:at(10)}],tools:[]}],
+      tools_limited:false,subagents_limited:false},
+    actionDetails:{'shared-read':{id:'shared-read',name:'read_file',status:'completed',created_at:at(6),finished_at:at(7),
+      input:'README.md',output:'Shared file contents.',restricted:false,input_truncated:false,output_truncated:false}}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const progress=page.getByRole('region',{name:'Work progress'});
+  await progress.getByText('Checking the shared task.',{exact:true}).waitFor({timeout:10000});
+  await progress.getByRole('button',{name:/Working for/}).waitFor();
+  await waitFor(()=>state.streams.length>0,'shared activity stream');
+  emit({type:'response_start',run_id:turnId,step:2},0);
+  emit({type:'text_start',index:0,text:'Live shared update.',phase:'commentary'},1);
+  await progress.getByText('Live shared update.',{exact:true}).waitFor();
+  await progress.getByRole('button',{name:'1 action',exact:true}).click();
+  await progress.getByRole('button',{name:'Open Read file action',exact:true}).click();
+  await page.getByText('Shared file contents.',{exact:true}).waitFor();
+  await page.getByRole('complementary',{name:'Session panel',exact:true}).getByRole('button',{name:'Hide side panel',exact:true}).click();
+  await progress.getByRole('button',{name:/Kepler Completed/}).click();
+  await progress.getByText('Delegated check passed.',{exact:true}).waitFor();
+  assert.equal(await progress.getByRole('button',{name:'Open Kepler details',exact:true}).count(),0,'Private follow-up chats stay private.');
+  state.workProgress.messages.push({id:'shared-2',phase:'commentary',text:'The shared check passed.',created_at:at(20)});
+  await progress.getByText('The shared check passed.',{exact:true}).waitFor();
+  if(process.env.MOYAI_UI_CAPTURE_DIR) {
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`shared-progress-${width}.png`)});
+  }
+  state.status='idle';state.turns[0].status='completed';state.turns[0].finished_at=at(30);
+  state.messages.push({id:2,turn_id:turnId,role:'assistant',author_id:null,content:'Shared final answer.',created_at:at(30)});
+  await page.getByText('Shared final answer.',{exact:true}).waitFor();
+  await progress.locator('.turn-progress-toggle[aria-expanded="false"]').waitFor();
+  await page.reload();
+  const toggle=progress.getByRole('button',{name:'Worked for 30s',exact:true});
+  await toggle.waitFor();
+  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  await toggle.focus();await page.keyboard.press('Enter');
+  await progress.getByText('The shared check passed.',{exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  state.denied=true;
+  await page.getByText('Checking the shared task.',{exact:true}).waitFor({state:'hidden'});
+  assert.equal(await page.getByText('The shared check passed.',{exact:true}).count(),0);
+  assert.equal(state.requests.some(row=>row.path.endsWith('/actions/shared-read')),true);
+});
+
 for(const width of [1440,768,320])test(`empty steering activity stays hidden during refresh at ${width}px`,async t=>{
   const start=Date.now()-60000,at=seconds=>new Date(start+seconds*1000).toISOString();
   const progressPath=`/api/sessions/${sessionId}/progress/${turnId}`;
@@ -1999,7 +2110,7 @@ for(const width of [1440,768,320])test(`delegation opens workspace once without 
   await menu.getByRole('region',{name:'Subagents',exact:true}).getByText('Kepler',{exact:true}).waitFor();
   assert.equal(await input.evaluate(el=>el===document.activeElement),true,'automatic discovery must not steal typing focus');
   assert.equal(await input.innerText(),'Keep this draft while the subagent starts.');
-  assert.deepEqual(await page.locator('.chat-content').boundingBox(),chat,'the menu floats without moving chat');
+  await assertWorkspaceSeparated(page);
   const card=page.locator('[data-agent-id="child"]');
   assert.equal(await card.locator('.work-agent-history').isVisible(),false,'collapsed cards show no report preview');
   if(process.env.MOYAI_UI_CAPTURE_DIR) {
@@ -2009,6 +2120,7 @@ for(const width of [1440,768,320])test(`delegation opens workspace once without 
   await input.press('Escape');
   await menu.waitFor({state:'hidden'});
   assert.equal(await input.evaluate(el=>el===document.activeElement),true);
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(),chat,'dismissal restores the chat area');
   const reads=()=>state.requests.filter(req=>req.path.endsWith(`/progress/${turnId}`)).length;
   const before=reads();
   await waitFor(()=>reads()>before,'progress poll after dismissal');
@@ -2195,19 +2307,33 @@ for(const width of [1440,768])test(`sidebar collapses to an accessible rail with
   assert.equal(await sidebar.isVisible(),false);
 });
 
-for(const width of [1440,768,320])test(`home and Settings share the same wordmark position and typography at ${width}px`,async t=>{
-  reset();const page=await pageFor(t,'',width);
+for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`home and Settings share the same logo alignment and typography at ${width}px in ${theme}`,async t=>{
+  reset();const page=await pageFor(t,'',width,p=>p.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme));
   if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
   const brand=page.locator('.moyai-brand');await brand.waitFor();await page.evaluate(()=>document.fonts.ready);
   const metrics=()=>brand.evaluate(el=>{
     const bounds=el.querySelector('span').getBoundingClientRect(), style=getComputedStyle(el), subtitle=getComputedStyle(el.querySelector('small'));
     return {x:bounds.x,y:bounds.y,height:bounds.height,font:style.font,spacing:style.letterSpacing,transform:style.textTransform,subtitle:subtitle.font};
   });
-  const home=await metrics();
+  const logoMetrics=async()=>{
+    const logo=brand.locator('.moyai-brand-mark:visible');
+    assert.equal(await logo.count(),1);
+    assert.equal(await logo.getAttribute('alt'),'');
+    assert.ok((await logo.getAttribute('src')).includes(theme==='dark'?'moyai-mark-white':'moyai-mark-blue'));
+    await logo.evaluate(image=>image.decode());
+    const bounds=await logo.boundingBox(), text=await brand.locator('.moyai-brand-name').boundingBox();
+    assert.equal(bounds.width,20);assert.equal(bounds.height,20);
+    assert.ok(Math.abs(bounds.y+bounds.height/2-text.y-text.height/2)<1,'logo and wordmark are vertically centered');
+    assert.equal(text.x-bounds.x-bounds.width,8,'logo has a consistent 8px gap before the wordmark');
+    assert.equal(await brand.getAttribute('href'),'#');
+    return bounds;
+  };
+  const home=await metrics(), homeLogo=await logoMetrics();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
   await page.getByRole('heading',{name:'Settings',exact:true}).waitFor();
-  assert.equal(await brand.count(),1);assert.equal(await brand.locator('img').count(),0);
+  assert.equal(await brand.count(),1);
   assert.deepEqual(await metrics(),home);
+  assert.deepEqual(await logoMetrics(),homeLogo);
   await brand.click();await page.locator('.home-composer').waitFor();
 });
 
@@ -3031,4 +3157,93 @@ for(const width of [1440,768,320])test(`subagent failure before first output sho
   assert.equal(new URL(page.url()).hash,'#'+sessionId);
   await side.getByText('Inspect the repository.',{exact:true}).waitFor();
   assert.ok(state.requests.some(row=>row.path===`/api/sessions/${childId}`));
+});
+
+for(const theme of ['dark','light'])for(const width of [1440,768])test(`session sidebar resizes and resets at ${width}px in ${theme}`,async t=>{
+  reset({status:'idle'});
+  const page=await pageFor(t,'',width,p=>p.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme));
+  const handle=page.getByRole('separator',{name:'Resize session sidebar'});
+  await handle.waitFor();
+  const sidebar=page.locator('#session-sidebar');
+  const size=async()=>Math.round((await sidebar.boundingBox()).width);
+  const initial=width>1250?240:230;
+  assert.equal(await size(),initial);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Keep this draft while resizing.');
+  await handle.focus();await page.keyboard.press('ArrowRight');
+  assert.equal(await size(),initial+10);
+  await page.keyboard.press('Shift+ArrowRight');assert.equal(await size(),initial+50);
+  await page.keyboard.press('End');assert.equal(await size(),Math.min(440,width-360));
+  await page.keyboard.press('Home');assert.equal(await size(),200);
+  const wordmark=await page.locator('.moyai-brand-name').boundingBox();
+  const search=await page.getByRole('button',{name:'Search sessions & commands',exact:true}).boundingBox();
+  assert.ok(wordmark.x+wordmark.width<=search.x,'brand does not overlap controls at minimum sidebar width');
+  assert.equal(await page.locator('.moyai-brand small').isVisible(),false);
+  assert.equal((await page.locator('.moyai-brand-mark:visible').boundingBox()).width,20);
+  await page.keyboard.press('Enter');assert.equal(await size(),initial);
+  const drag=async delta=>{
+    const box=await handle.boundingBox();
+    await page.mouse.move(box.x+box.width/2,box.y+100);await page.mouse.down();
+    await page.mouse.move(box.x+box.width/2+delta,box.y+100,{steps:6});
+  };
+  await drag(80);await page.mouse.up();assert.equal(await size(),initial+80);
+  await drag(50);await page.keyboard.press('Escape');await page.mouse.up();assert.equal(await size(),initial+80);
+  assert.equal(await page.locator('.sidebar-resize-shield').count(),0);
+  await handle.dblclick();assert.equal(await size(),initial);
+  await drag(-1000);await page.mouse.up();assert.equal(await size(),200);
+  await drag(22);await page.mouse.up();assert.equal(await size(),222);
+  const narrowWordmark=await page.locator('.moyai-brand-name').boundingBox();
+  const narrowSearch=await page.getByRole('button',{name:'Search sessions & commands',exact:true}).boundingBox();
+  assert.ok(narrowWordmark.x+narrowWordmark.width<=narrowSearch.x,'brand stays clear of controls near the byline breakpoint');
+  await drag(1500);await page.mouse.up();assert.equal(await size(),Math.min(440,width-360));
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).innerText(),'Keep this draft while resizing.');
+  assert.equal(await page.locator('.app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+  await handle.waitFor({state:'hidden'});assert.equal(await size(),52);
+  await page.getByRole('button',{name:'Open sidebar',exact:true}).click();
+  assert.equal(await size(),Math.min(440,width-360));
+  await page.locator('.new-chat').click();assert.equal(await size(),initial);
+  await handle.focus();await page.keyboard.press('Shift+ArrowRight');
+  await page.locator(`[data-session-key="native:${sessionId}"] > a`).click();
+  await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();assert.equal(await size(),initial);
+  await handle.focus();await page.keyboard.press('Shift+ArrowRight');
+  await page.locator('.new-chat').click();
+  await page.getByRole('heading',{name:'What are we building?'}).waitFor();assert.equal(await size(),initial);
+  await handle.focus();await page.keyboard.press('End');
+  await page.setViewportSize({width:650,height:1000});
+  await page.waitForFunction(()=>document.querySelector('[aria-label="Resize session sidebar"]').getAttribute('aria-valuenow')==='290');
+  assert.equal(await size(),290);
+  await page.setViewportSize({width:320,height:700});
+  await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await handle.waitFor({state:'hidden'});
+  assert.equal(await page.locator('.app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+});
+
+for(const theme of ['dark','light'])test(`README composer demo in ${theme}`,async t=>{
+  resetReadmeDemo();
+  const page=await browser.newPage({viewport:{width:1280,height:800},deviceScaleFactor:2,reducedMotion:'reduce'});
+  t.after(()=>page.close());
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme);
+  await page.goto(base+'/');
+  await page.getByRole('heading',{name:'What are we building?',exact:true}).waitFor();
+  const editor=page.getByRole('textbox',{name:'Message Moyai'});
+  await editor.fill('Add keyboard shortcuts to the command palette.\nMatch the existing components, test the interactions, and open a PR with a preview.');
+  await page.getByText('Alex Morgan',{exact:true}).waitFor();
+  await page.locator('#session-sidebar').getByText('Fix streaming reconnects',{exact:true}).waitFor();
+  const resize=page.getByRole('separator',{name:'Resize session sidebar'});
+  await resize.focus();await page.keyboard.press('Shift+ArrowRight');await page.keyboard.press('Shift+ArrowRight');
+  assert.equal(await resize.getAttribute('aria-valuenow'),'320');
+  await page.evaluate(()=>document.fonts.ready);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isEnabled(),true);
+  assert.equal(await page.locator('.app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.equal(await page.locator('.session-row').count(),6);
+  assert.deepEqual(errors,[]);
+  if(process.env.MOYAI_README_CAPTURE_DIR){
+    // Fail capture rather than silently publishing a fallback-font screenshot.
+    assert.equal(await page.evaluate(()=>[...document.fonts].some(font=>font.family.includes('General Sans')&&font.status==='loaded')),true);
+    await fs.mkdir(process.env.MOYAI_README_CAPTURE_DIR,{recursive:true});
+    await page.getByRole('heading',{name:'What are we building?',exact:true}).click();
+    await page.mouse.move(1260,780);
+    await page.screenshot({path:path.join(process.env.MOYAI_README_CAPTURE_DIR,theme==='dark'?'home.png':'home-light.png'),animations:'disabled'});
+  }
 });

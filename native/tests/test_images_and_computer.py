@@ -14,6 +14,7 @@ from test_application_boundaries import sign_in
 from moyai.api import COOKIE, create_app
 from moyai.computer import lease
 from moyai.contracts import NewMessage, NewSession
+from moyai.images import MAX_UPLOAD_BYTES
 from moyai.models import ComputerLease, ComputerOperation, Connection, User, new_id
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
@@ -62,7 +63,7 @@ async def test_images_reject_invalid_content_and_cross_conversation_reuse(runtim
     async with sign_in(runtime) as client:
         bad = await client.post("/api/uploads?name=image.png", content=b"<script>not an image</script>")
         assert bad.status_code == 422
-        huge = await client.post("/api/uploads", content=b"x" * (8 * 1024 * 1024 + 1))
+        huge = await client.post("/api/uploads", content=b"x" * (MAX_UPLOAD_BYTES + 1))
         assert huge.status_code == 413
         image = (await client.post("/api/uploads?name=picture.png", content=image_bytes())).json()
         first = (await client.post("/api/sessions", json={})).json()
@@ -71,6 +72,20 @@ async def test_images_reject_invalid_content_and_cross_conversation_reuse(runtim
         assert (await client.post(f"/api/sessions/{first['id']}/messages", json=body)).status_code == 202
         assert (await client.post(f"/api/sessions/{second['id']}/messages", json=body)).status_code == 404
         assert (await client.get(f"/api/sessions/{second['id']}/messages")).json() == []
+
+
+@pytest.mark.parametrize("name", ["large.png", "unnamed"])
+async def test_valid_image_over_eight_mib_uses_general_file_limit(runtime, name):
+    stream = io.BytesIO()
+    Image.new("RGB", (1800, 1800), "#44aaee").save(stream, format="PNG", compress_level=0)
+    raw = stream.getvalue()
+    assert 8 * 1024 * 1024 < len(raw) < MAX_UPLOAD_BYTES
+    async with sign_in(runtime) as client:
+        response = await client.post(f"/api/uploads?name={name}", content=raw)
+        assert response.status_code == 201
+        image = response.json()
+        assert image["size"] == len(raw) and image["media_type"] == "image/png"
+        assert (await client.get(f"/api/uploads/{image['id']}")).content == raw
 
 
 async def test_corrupt_png_is_rejected_without_an_internal_server_error(runtime):
