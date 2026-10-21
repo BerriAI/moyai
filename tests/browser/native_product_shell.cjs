@@ -1105,7 +1105,46 @@ test('sidebar PR icons retain multi-PR selection without numeric badges',async t
   await page.getByRole('button',{name:'Review change 13 example/project#13',exact:true}).waitFor();
 });
 
-test('workspace overlay preserves chat geometry while the side panel resizes it',async t=>{
+async function assertWorkspaceSeparated(page) {
+  const area=await page.locator('.workspace > .chat').boundingBox();
+  const chat=await page.locator('.workspace > .chat .chat-content').boundingBox();
+  const menu=await page.getByRole('dialog',{name:'Workspace resources',exact:true}).boundingBox();
+  assert.equal(menu.width,280);
+  assert.ok(area.width < 640 ? chat.y - (menu.y + menu.height) >= 16 : menu.x - (chat.x + chat.width) >= 16,
+    JSON.stringify({area,chat,menu}));
+  const composer=await page.locator('.workspace > .chat .composer-wrap').boundingBox();
+  assert.ok(composer.y >= chat.y && composer.y + composer.height <= chat.y + chat.height + 1);
+  assert.ok(composer.x >= chat.x && composer.x + composer.width <= chat.x + chat.width + 1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+}
+
+for(const width of [1440,768,320])for(const theme of ['dark','light'])test(`workspace avoids messages and composer at ${width}px in ${theme}`,async t=>{
+  reset({status:'completed',messages:[
+    {id:1,turn_id:turnId,role:'user',content:'Keep the Workspace resources separate from this conversation.'},
+    {id:2,turn_id:turnId,role:'assistant',content:'The main chat remains readable while the resources are open. '.repeat(12)}],
+    workspaceData:{links:[],sources:[],subagents:[],subagents_limited:false,
+      files:Array.from({length:20},(_,i)=>({id:String(i),name:`responsive-layout-verification-report-${i}.md`,size:4096,url:`/files/${i}`,media_type:'text/plain'}))}});
+  const page=await pageFor(t,'#'+sessionId,width, page=>page.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme));
+  await page.setViewportSize({width,height:600});
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Preserve this draft while opening resources.');
+  const before=await page.locator('.chat-content').boundingBox();
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  const menu=page.getByRole('dialog',{name:'Workspace resources',exact:true});
+  await menu.getByText('responsive-layout-verification-report-19.md',{exact:true}).waitFor();
+  await assertWorkspaceSeparated(page);
+  assert.ok(await menu.evaluate(el=>el.scrollHeight>el.clientHeight),'resources scroll within their own track');
+  assert.ok(await page.locator('.transcript').evaluate(el=>el.clientHeight>80),'chat keeps a usable scroll area');
+  if(process.env.MOYAI_UI_CAPTURE_DIR) {
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`workspace-separated-${width}-${theme}.png`)});
+  }
+  await page.keyboard.press('Escape');await menu.waitFor({state:'detached'});
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(),before);
+  assert.equal(await input.innerText(),'Preserve this draft while opening resources.');
+});
+
+test('workspace reserves a narrower column with a gap and restores chat on dismissal',async t=>{
   reset({status:'completed',workspaceData:{links:[],files:[],sources:[],subagents_limited:false,
     subagents:[{id:'agent-one',parent_id:'',name:'Newton',avatar:0,status:'failed',can_inspect:true,started_at:'',depth:0}]}});
   const page=await pageFor(t);
@@ -1116,7 +1155,11 @@ test('workspace overlay preserves chat geometry while the side panel resizes it'
   await key.click();
   const dialog=page.getByRole('dialog',{name:'Workspace resources',exact:true});
   await dialog.waitFor();
-  assert.deepEqual(await Promise.all([page.locator('.chat-content').boundingBox(),page.locator('.composer-wrap').boundingBox()]),before);
+  const chat = await page.locator('.chat-content').boundingBox(), menu = await dialog.boundingBox();
+  assert.equal(menu.width,280);
+  assert.ok(menu.x - (chat.x + chat.width) >= 16, 'Workspace must not cover chat');
+  const composer = await page.locator('.composer-wrap').boundingBox();
+  assert.ok(composer.x + composer.width <= menu.x - 16);
   assert.equal(await dialog.getByText('Failed',{exact:true}).count(),1);
   await page.keyboard.press('Escape');
   await dialog.waitFor({state:'detached'});
@@ -2016,7 +2059,7 @@ for(const width of [1440,768,320])test(`delegation opens workspace once without 
   await menu.getByRole('region',{name:'Subagents',exact:true}).getByText('Kepler',{exact:true}).waitFor();
   assert.equal(await input.evaluate(el=>el===document.activeElement),true,'automatic discovery must not steal typing focus');
   assert.equal(await input.innerText(),'Keep this draft while the subagent starts.');
-  assert.deepEqual(await page.locator('.chat-content').boundingBox(),chat,'the menu floats without moving chat');
+  await assertWorkspaceSeparated(page);
   const card=page.locator('[data-agent-id="child"]');
   assert.equal(await card.locator('.work-agent-history').isVisible(),false,'collapsed cards show no report preview');
   if(process.env.MOYAI_UI_CAPTURE_DIR) {
@@ -2026,6 +2069,7 @@ for(const width of [1440,768,320])test(`delegation opens workspace once without 
   await input.press('Escape');
   await menu.waitFor({state:'hidden'});
   assert.equal(await input.evaluate(el=>el===document.activeElement),true);
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(),chat,'dismissal restores the chat area');
   const reads=()=>state.requests.filter(req=>req.path.endsWith(`/progress/${turnId}`)).length;
   const before=reads();
   await waitFor(()=>reads()>before,'progress poll after dismissal');
