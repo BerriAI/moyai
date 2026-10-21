@@ -117,7 +117,10 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
     assert requester["extra"] == {
         "turn_id": turn.id,
         "turn_status": "failed",
-        "author": "requester",
+        "author": "Administrator",
+        "author_id": actor.id,
+        "author_relationship": "requester",
+        "message_source": "web",
         "prompt_received": "Prompt delivered with repository context.",
     }
 
@@ -132,7 +135,11 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
     assert agent["reasoning_content"] == "Check the relevant source before answering."
     assert agent["model_name"] == "test-model"
     assert agent["metrics"] == {"prompt_tokens": 120, "completion_tokens": 30, "cached_tokens": 10}
-    assert next(step for step in steps if step.get("extra") == {"kind": "steering"})["message"] == "Check the working directory."
+    steering = next(step for step in steps if step.get("extra", {}).get("kind") == "steering")
+    assert steering["message"] == "Check the working directory."
+    assert steering["extra"] == {
+        "kind": "steering", "author": "Unknown sender", "author_id": None, "author_relationship": "unknown",
+    }
     calls = {call["tool_call_id"]: call for call in agent["tool_calls"]}
     assert calls["private-call"]["arguments"] == {
         "redacted": "Arguments of private tool credentials_run are hidden in debug traces."
@@ -222,7 +229,9 @@ async def test_debug_trace_hides_teammate_work_and_denies_nonmembers(runtime, ac
             response = await owner.get(f"/api/sessions/{shared.id}/debug-trace")
         assert response.status_code == 200
         steps = response.json()["steps"]
-        assert steps[0]["extra"]["author"] == "teammate"
+        assert steps[0]["extra"]["author"] == teammate.display_name
+        assert steps[0]["extra"]["author_id"] == teammate.id
+        assert steps[0]["extra"]["author_relationship"] == "teammate"
         assert steps[0]["message"] == "Private teammate request."
         assistant = next(step for step in steps if step["source"] == "agent")
         assert assistant["message"] == "Teammate answer."
@@ -303,7 +312,38 @@ async def test_interrupted_trace_orders_and_deduplicates_delivered_steering(runt
     assert len(corrections) == 1
     assert corrections[0]["timestamp"] == authored_at.isoformat()
     assert corrections[0]["extra"]["delivered_at"] == delivered_at.isoformat()
+    assert corrections[0]["extra"]["author"] == actor.display_name
+    assert corrections[0]["extra"]["author_id"] == actor.id
     call = next(step for step in steps if step.get("tool_calls"))
     assert call["extra"]["run_id"] == segment
     assert call["tool_calls"][0]["function_name"] == "credentials_request"
     assert "never export" not in json.dumps(trace)
+
+
+async def test_trace_steering_keeps_the_saved_input_author_instead_of_parent_requester(runtime, actor, monkeypatch):
+    from moyai.input_identity import identified_prompt
+
+    session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    parent = await runtime.database.submit(actor, session.id, NewMessage(prompt="Initial task", request_key="parent"))
+    async with member_client(runtime) as (_client, teammate):
+        followup = await runtime.database.submit(
+            teammate, session.id, NewMessage(prompt="A teammate's correction", request_key="correction"),
+        )
+
+    async def snapshot(_runtime, identity, *, include_interrupted=False):
+        assert identity == parent.id
+        return SimpleNamespace(messages=[
+            ModelRequest(parts=[UserPromptPart("Initial task")], run_id=parent.id),
+            ModelRequest(parts=[UserPromptPart(identified_prompt(
+                "A teammate's correction", followup.id, parent.id,
+            ))], run_id=parent.id),
+        ])
+
+    monkeypatch.setattr("moyai.debug_trace.latest_turn_snapshot", snapshot)
+    trace = await debug_trace(runtime, actor, session.id)
+    corrections = [step for step in trace["steps"] if step["message"] == "A teammate's correction"]
+    assert len(corrections) == 1
+    assert corrections[0]["extra"]["author"] == teammate.display_name
+    assert corrections[0]["extra"]["author_id"] == teammate.id
+    assert corrections[0]["extra"]["author_relationship"] == "teammate"
+    assert corrections[0]["extra"]["prompt_received"] == "A teammate's correction"
