@@ -77,9 +77,6 @@ def register(tools: FunctionToolset[RunScope], publisher: Publications) -> None:
         For local checkout changes, stage the intended files with git add and pass directory
         instead of files. The worker reads the staged tree; do not copy file contents into the call.
         """
-        if isinstance(request, WorkspacePublishBranch):
-            from .product_github_workspace import staged_request
-            request = await staged_request(publisher, ctx, request)
         return await workflows.publish_branch(ctx, request)
 
     @tools.tool(metadata=WRITE, sequential=True)

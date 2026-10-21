@@ -38,6 +38,7 @@ from .github_workflow_types import (
     Retarget,
     Review,
     SubmitReview,
+    WorkspacePublishBranch,
 )
 from .product_github_models import ProductGitOperation as Operation
 
@@ -291,13 +292,31 @@ class Workflows:
             await self.create_ref(row, token, request.branch, commit)
             return await p.finish(row, {"repository_id": p.target, "branch": request.branch, "commit": commit})
 
-    async def publish_branch(self, ctx: RunContext[RunScope], request: PublishBranch) -> dict[str, JsonValue]:
+    async def publish_branch(
+        self, ctx: RunContext[RunScope], request: PublishBranch | WorkspacePublishBranch,
+    ) -> dict[str, JsonValue]:
         from app.github import workflow_changes
         p = self.publisher
         async with p.attempt(ctx, "publish_branch", request) as row:
             recovered = await self.resume_publication(row)
             if recovered is not None:
                 return recovered
+            if isinstance(request, WorkspacePublishBranch):
+                from .product_github_workspace import staged_request
+
+                files = p.document(row).get("workspace_files")
+                if files is None:
+                    prepared = await staged_request(p, ctx, request)
+                    # Freeze the actual input before any provider write. A retry
+                    # must not re-export a subsequently edited index.
+                    await p.save(row, workspace_files=[
+                        change.model_dump(mode="json") for change in prepared.files
+                    ])
+                    request = prepared
+                else:
+                    request = parse(PublishBranch, {
+                        **request.model_dump(exclude={"directory"}), "files": files,
+                    })
             token = await p.token(workflows=workflow_changes(request))
             if request.expected_head_sha is not None:
                 return await self.advance_branch(row, token, request)
