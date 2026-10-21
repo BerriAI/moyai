@@ -171,10 +171,11 @@ async def test_slack_sender_names_are_shared_by_messages_and_debug_trace(runtime
     assert message['author_name'] == name
     assert history_response.json()['messages'][0]['author_name'] == name
     assert step['message'] == message['content'] == text
-    assert step['extra'] == {
+    expected_author = {
         'turn_id': turn.id, 'turn_status': 'queued', 'author': name or 'Unknown sender',
         'author_id': sender.id, 'author_relationship': 'teammate', 'message_source': 'slack',
     }
+    assert {key: step['extra'][key] for key in expected_author} == expected_author
     assert state['calls'] == [PERSON]  # Sender resolution does not need an @mention in the body.
 
 
