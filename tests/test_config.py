@@ -87,6 +87,7 @@ def test_stale_deployment_model_list_cannot_hide_code_models(tmp_path, monkeypat
     settings = Settings(_env_file=env_file, agent_model='openai/gpt-6-astra')
     assert {'id': 'fireworks_ai/glm-5p3', 'name': 'GLM-5.3'} in settings.model_choices()
     assert settings.resolve_model('glm') == 'fireworks_ai/glm-5p3'
+    assert {'id': 'fireworks_ai/deepseek-v4p1-flash', 'name': 'DeepSeek V4.1 Flash'} in settings.model_choices()
     assert {'id': 'openai/gpt-6.1-sol', 'name': 'GPT-6.1 Sol'} in settings.model_choices()
     assert settings.resolve_model('sol') == 'openai/gpt-6.1-sol'
     assert settings.resolve_model() == 'openai/gpt-6-astra'
@@ -104,12 +105,24 @@ def test_sol_aliases_resolve_without_changing_default(alias):
     assert settings.resolve_model() == 'openai/gpt-6-astra'
 
 
+@pytest.mark.parametrize('alias', [
+    'fireworks_ai/deepseek-v4p1-flash', 'deepseek-v4p1-flash', 'deepseek-v4.1-flash',
+    'DeepSeek V4.1 Flash', 'deepseek v4p1 flash', '  DEEPSEEK-V4P1-FLASH  ',
+])
+def test_deepseek_flash_aliases_resolve_without_changing_default(alias):
+    settings = Settings(_env_file=None, agent_model='openai/gpt-6-astra')
+    assert settings.resolve_model(alias) == 'fireworks_ai/deepseek-v4p1-flash'
+    assert settings.allowed_models().count('fireworks_ai/deepseek-v4p1-flash') == 1
+    assert settings.resolve_model() == 'openai/gpt-6-astra'
+
+
 def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
     monkeypatch.setenv('AGENT_MODEL', 'custom-gateway-model')
     settings = Settings(_env_file=None)
     assert settings.resolve_model() == 'custom-gateway-model'
     assert settings.model_choices()[0] == {'id': 'custom-gateway-model', 'name': 'custom-gateway-model'}
     assert settings.resolve_model('glm') == 'fireworks_ai/glm-5p3'
+    assert {'id': 'fireworks_ai/deepseek-v4p1-flash', 'name': 'DeepSeek V4.1 Flash'} in settings.model_choices()
     assert {'id': 'openai/gpt-6.1-sol', 'name': 'GPT-6.1 Sol'} in settings.model_choices()
     assert settings.resolve_model('sol') == 'openai/gpt-6.1-sol'
 
@@ -118,6 +131,8 @@ def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
     ('astra', 'deepagents-temporal'), ('6-astra', 'deepagents-temporal'), ('GPT-6 Astra', 'deepagents-temporal'),
     ('opus', 'deepagents-temporal'), ('Claude Opus 5.5', 'deepagents-temporal'),
     ('glm', 'deepagents-temporal'), ('sol', 'deepagents-temporal'), ('GPT-6.1 Sol', 'deepagents-temporal'),
+    ('DeepSeek V4.1 Flash', 'deepagents-temporal'),
+    ('deepseek-v4p1-flash', 'deepagents-temporal'),
     ('custom-gateway-model', 'deepagents-temporal'),
 ])
 def test_new_session_default_harness_resolves_models(model, harness, monkeypatch):
