@@ -175,7 +175,7 @@ class Settings(BaseSettings):
     password_login_enabled: bool = True
     google_client_id: str = ""
     google_client_secret: str = ""
-    google_allowed_domains: str = "berri.ai"
+    google_allowed_domains: str = ""
     google_admin_emails: str = ""
     organization_name: str = Field(default="Internal team", min_length=1, max_length=80)
     session_secret: str = ""
