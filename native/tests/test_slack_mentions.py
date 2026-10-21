@@ -98,6 +98,39 @@ async def test_cached_profiles_are_team_scoped_and_parallel_reads_share_lookup(p
     assert state['calls'] == [PERSON]
 
 
+async def test_late_reader_waits_for_the_reserved_profile_lookup(profiles):
+    resolver, state, _ = profiles
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_response():
+        started.set()
+        await release.wait()
+
+    state['on_read'] = hold_response
+    first = asyncio.create_task(resolver.names(TEAM, [PERSON]))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    # The retry reservation has already been saved, but no name is available yet.
+    late = asyncio.create_task(resolver.names(TEAM, [PERSON]))
+    try:
+        finished, _pending = await asyncio.wait({late}, timeout=0.1)
+        assert not finished
+    finally:
+        release.set()
+        results = await asyncio.gather(first, late)
+    assert results == [{PERSON: 'Jordan Lee'}] * 2
+    assert state['calls'] == [PERSON]
+
+
+async def test_waiting_for_profile_lookup_is_bounded_and_preserves_cached_names(profiles, monkeypatch):
+    resolver, state, store = profiles
+    store.execute('INSERT INTO slack_mention_names VALUES(?,?,?,?)', (TEAM, PERSON, 'Cached name', 0))
+    timeout = asyncio.timeout
+    monkeypatch.setattr('moyai.slack_mentions.asyncio.timeout', lambda _seconds: timeout(0.01))
+    async with resolver.lock:
+        assert await asyncio.wait_for(resolver.names(TEAM, [PERSON]), timeout=1) == {PERSON: 'Cached name'}
+    assert state['calls'] == []
+
+
 async def test_existing_sender_name_wins_without_a_provider_lookup(profiles):
     resolver, state, store = profiles
     with store.connect() as db:
