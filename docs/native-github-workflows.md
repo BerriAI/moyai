@@ -37,6 +37,13 @@ rejected. Ref expressions and filesystem traversal are rejected before checkout.
 GitHub credentials remain on the trusted worker; only a Git bundle reaches the
 computer, and an existing checkout is never replaced.
 
+For workspace publication, stage the intended files and pass `directory`.
+If `base_sha` is missing locally, the worker verifies it against the selected
+repository and transfers a credential-free Git bundle. Importing it preserves
+HEAD, refs, the index, unstaged edits, untracked files and previous fetch metadata.
+This supports a second publication from the same checkout after GitHub creates
+the first commit.
+
 `request_pull_request_write_access` grants content access to an exact current
 head. `request_pr_lifecycle_access` separately asks for metadata access to a
 specific unmerged PR during the current task, including commits arriving after
@@ -83,6 +90,12 @@ the same request key and unchanged inputs. A receipt with attempted writes remai
 `incomplete`; inspect its saved acknowledgments rather than starting a replacement
 publication. Refused executions are fenced from dispatch even after a retry starts.
 
+Workspace export is part of this preflight. An export failure therefore has a
+`not_dispatched` receipt and does not block a corrective shell command in the same
+turn. Once export succeeds, its files are frozen with the operation before any
+GitHub write. Retrying that key uses the frozen files, even if the local index
+later changes; publishing different content requires a new request key.
+
 No tool permits review approval, merging, auto-merge, merge queue actions,
 arbitrary credential-bearing API calls, or unconditional forced ref updates.
 Unstack is intentionally unavailable: the provider's whole-stack mutation
@@ -104,6 +117,8 @@ MOYAI_TEST_POSTGRES=postgresql://localhost/postgres uv run --frozen pytest -q \
   native/tests/test_product_github_publication.py \
   native/tests/test_product_github_workflows.py \
   native/tests/test_github_branch_preflight.py \
+  native/tests/test_github_workspace_publication.py \
+  native/tests/test_coding_workflow.py \
   native/tests/test_github_publication_setup.py \
   native/tests/test_product_github_bootstrap.py \
   native/tests/test_product_connections.py \

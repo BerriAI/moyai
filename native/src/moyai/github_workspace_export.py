@@ -12,6 +12,10 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_FILES = 1000
 
 
+class MissingBaseCommit(ValueError):
+    """The selected remote base has not been imported into this checkout."""
+
+
 def export(directory: str, base_sha: str) -> list[dict]:
     root = pathlib.Path(directory)
     if root.is_symlink() or root.resolve() != root or not root.is_dir():
@@ -25,7 +29,10 @@ def export(directory: str, base_sha: str) -> list[dict]:
 
     if pathlib.Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve() != root:
         raise ValueError("Use the repository root.")
-    git("cat-file", "-e", base_sha + "^{commit}")
+    try:
+        git("cat-file", "-e", base_sha + "^{commit}")
+    except subprocess.CalledProcessError:
+        raise MissingBaseCommit("The publication base commit is missing from the local checkout.") from None
     # An immutable tree makes the export coherent even if the index later changes.
     tree = git("write-tree").decode().strip()
     diff = git("diff-tree", "-r", "--no-ext-diff", "--no-renames", "--no-abbrev", "-z", base_sha, tree)
@@ -60,6 +67,9 @@ def export(directory: str, base_sha: str) -> list[dict]:
 if __name__ == "__main__":
     try:
         print(json.dumps({"files": export(sys.argv[1], sys.argv[2])}))
+    except MissingBaseCommit as error:
+        print(json.dumps({"code": "missing_base", "error": str(error)}))
+        sys.exit(1)
     except (ValueError, subprocess.CalledProcessError, UnicodeError) as error:
         # Do not echo subprocess output, which can contain repository secrets.
         print(json.dumps({"error": str(error) if isinstance(error, ValueError) else "The staged Git tree could not be read."}))

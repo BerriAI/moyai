@@ -1,9 +1,12 @@
 """Real SDK planning and local Git publication inputs, without provider writes."""
 
 import base64
+import hashlib
 import re
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from pydantic_ai import Agent
@@ -12,7 +15,8 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai_harness.planning import InMemoryPlanStore
 
 from moyai.agent import WorkflowPlanning
-from moyai.github_workspace_export import export
+from moyai.github_workspace_export import MissingBaseCommit, export
+from moyai.github_workspace_import import import_base
 
 
 @pytest.mark.parametrize("current_history", [False, True])
@@ -138,3 +142,47 @@ def test_staged_export_rejects_an_unmerged_index(repository):
         git("merge", "other")
     with pytest.raises(subprocess.CalledProcessError):
         export(str(root.resolve()), base)
+
+
+@pytest.mark.parametrize("bad_digest", [False, True])
+def test_import_published_base_preserves_all_local_work_and_refs(repository, tmp_path, bad_digest):
+    source, git, base = repository
+    checkout = tmp_path / "checkout"
+    git("clone", "--no-hardlinks", str(source), str(checkout))
+    (source / "original.txt").write_text("first publication\n")
+    git("commit", "-qam", "Published by the server")
+    published = git("rev-parse", "HEAD")
+    bundle = Path("/tmp/moyai-git-" + uuid4().hex + ".bundle")
+    git("bundle", "create", str(bundle), "HEAD")
+
+    def local(*args):
+        return subprocess.check_output(["git", *args], cwd=checkout).decode().strip()
+
+    (checkout / "original.txt").write_text("second staged publication\n")
+    local("add", "original.txt")
+    (checkout / "original.txt").write_text("unfinished unstaged edit\n")
+    (checkout / "untracked.txt").write_text("untracked work\n")
+    local("write-tree")  # Populate Git's tree cache before comparing index bytes.
+    index = (checkout / ".git/index").read_bytes()
+    refs = local("show-ref")
+    (checkout / ".git/FETCH_HEAD").write_text("retain previous fetch metadata\n")
+    with pytest.raises(MissingBaseCommit):
+        export(str(checkout.resolve()), published)
+    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    if bad_digest:
+        with pytest.raises(ValueError, match="integrity"):
+            import_base(str(checkout.resolve()), str(bundle), "0" * 64, published)
+        with pytest.raises(MissingBaseCommit):
+            export(str(checkout.resolve()), published)
+    else:
+        import_base(str(checkout.resolve()), str(bundle), digest, published)
+        files = export(str(checkout.resolve()), published)
+        assert len(files) == 1 and files[0]["path"] == "original.txt"
+        assert base64.b64decode(files[0]["content"]) == b"second staged publication\n"
+    assert local("rev-parse", "HEAD") == base
+    assert local("show-ref") == refs
+    assert (checkout / ".git/index").read_bytes() == index
+    assert (checkout / ".git/FETCH_HEAD").read_text() == "retain previous fetch metadata\n"
+    assert (checkout / "original.txt").read_text() == "unfinished unstaged edit\n"
+    assert (checkout / "untracked.txt").read_text() == "untracked work\n"
+    assert not bundle.exists()
