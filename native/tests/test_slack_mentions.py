@@ -10,7 +10,7 @@ from test_product_connections import bridge as canonical_connections
 
 from moyai.contracts import NewMessage, NewSession
 from moyai.inbound_events import InboundEvent
-from moyai.models import Message, Session, Turn
+from moyai.models import Message, Session, Turn, User
 from moyai.slack_mentions import SlackMentionNames
 
 TEAM, PERSON = 'TTEST0001', 'U0B1TDTHL4Q'
@@ -108,6 +108,53 @@ async def test_existing_sender_name_wins_without_a_provider_lookup(profiles):
     assert state['calls'] == []
 
 
+@pytest.mark.parametrize('profile_available', [True, False])
+async def test_slack_sender_names_are_shared_by_messages_and_debug_trace(runtime, actor, profiles, profile_available):
+    resolver, state, _ = profiles
+    if not profile_available:
+        state['failure'] = TimeoutError('profile unavailable')
+    sender = User(id=f'slack:{TEAM}:{PERSON}', username='product:slack-sender',
+                  display_name=f'Slack {PERSON}', password='unused')
+    async with runtime.database.sessions.begin() as db:
+        db.add(sender)
+    session = await runtime.database.create_session(actor, NewSession(visibility='shared'))
+    text = 'Please inspect the trace.'
+    turn = await runtime.database.submit(sender, session.id, NewMessage.from_event(InboundEvent(
+        source='slack', sender_id=sender.id, deduplication_key='sender-identity', text=text,
+        provenance={'team_id': TEAM, 'channel_id': 'CTEST0001', 'user_id': PERSON,
+                    'thread_ts': '1792255700.001', 'message_ts': '1792255700.001'},
+    )))
+    runtime.database.slack_mentions = resolver.decorate
+    async with sign_in(runtime) as client:
+        trace_response = await client.get(f'/api/sessions/{session.id}/debug-trace')
+        assert trace_response.status_code == 200
+        step = trace_response.json()['steps'][0]
+        message_response = await client.get(f'/api/sessions/{session.id}/messages')
+        assert message_response.status_code == 200
+        message = message_response.json()[0]
+        history_response = await client.get(f'/api/history/sessions/{session.id}/messages?source=native')
+        assert history_response.status_code == 200
+    name = 'Jordan Lee' if profile_available else None
+    assert message['author_name'] == name
+    assert history_response.json()['messages'][0]['author_name'] == name
+    assert step['message'] == message['content'] == text
+    assert step['extra'] == {
+        'turn_id': turn.id, 'turn_status': 'queued', 'author': name or 'Unknown sender',
+        'author_id': sender.id, 'author_relationship': 'teammate', 'message_source': 'slack',
+    }
+    assert state['calls'] == [PERSON]  # Sender resolution does not need an @mention in the body.
+
+
+async def test_saved_sender_email_is_a_fallback_when_slack_profile_is_unavailable(profiles):
+    resolver, state, store = profiles
+    with store.connect() as db:
+        identity = store.slack_identity_in(db, TEAM, PERSON)
+    store.execute('UPDATE users SET email=? WHERE id=?', ('jordan@example.test', identity))
+    state['installed']['scopes'] = []
+    assert await resolver.names(TEAM, [PERSON]) == {PERSON: 'jordan@example.test'}
+    assert state['calls'] == []
+
+
 @pytest.mark.parametrize('response', [
     {'ok': False, 'error': 'missing_scope'},
     {'ok': True, 'user': {'id': PERSON, 'team_id': 'TOTHER001', 'profile': {'real_name': 'Wrong team'}}},
@@ -152,8 +199,28 @@ async def test_only_proven_slack_user_messages_resolve_and_no_scope_uses_cache(p
     assert state['calls'] == []
 
 
-async def test_access_is_rechecked_after_profile_lookup(runtime, actor, profiles):
+@pytest.mark.parametrize('source', [
+    None,
+    {'kind': 'web'},
+    {'kind': 'slack', 'team_id': TEAM, 'user_id': PERSON, 'deleted': True},
+    {'kind': 'slack', 'team_id': TEAM, 'user_id': 'UOTHER001'},
+    {'kind': 'slack', 'team_id': 'TOTHER001', 'user_id': PERSON},
+])
+async def test_sender_lookup_requires_matching_undeleted_slack_provenance(profiles, source):
+    resolver, state, _ = profiles
+    rows = [{'id': 1, 'role': 'user', 'content': 'No mentions',
+             'author_id': f'slack:{TEAM}:{PERSON}', 'author_name': None}]
+    await resolver.decorate(rows, {1: source})
+    assert rows[0]['author_name'] is None
+    assert state['calls'] == []
+
+
+@pytest.mark.parametrize('export', [False, True])
+async def test_access_is_rechecked_after_profile_lookup(runtime, actor, profiles, export):
     from fastapi import HTTPException
+
+    from moyai.debug_trace import debug_trace
+
     resolver, state, _ = profiles
     session, _ = await admit(runtime, actor)
     runtime.database.slack_mentions = resolver.decorate
@@ -162,4 +229,27 @@ async def test_access_is_rechecked_after_profile_lookup(runtime, actor, profiles
             await db.execute(update(Session).where(Session.id == session.id).values(deleted=True))
     state['on_read'] = revoke
     with pytest.raises(HTTPException):
-        await runtime.database.messages(actor, session.id)
+        if export:
+            await debug_trace(runtime, actor, session.id)
+        else:
+            await runtime.database.messages(actor, session.id)
+
+
+@pytest.mark.parametrize('revocation', [{'enabled': False}, {'auth_version': 2}])
+async def test_debug_export_rechecks_account_after_profile_lookup(runtime, actor, profiles, revocation):
+    from fastapi import HTTPException
+
+    from moyai.debug_trace import debug_trace
+
+    resolver, state, _ = profiles
+    session, _ = await admit(runtime, actor)
+    runtime.database.slack_mentions = resolver.decorate
+
+    async def revoke():
+        async with runtime.database.sessions.begin() as db:
+            await db.execute(update(User).where(User.id == actor.id).values(**revocation))
+
+    state['on_read'] = revoke
+    with pytest.raises(HTTPException) as error:
+        await debug_trace(runtime, actor, session.id)
+    assert error.value.status_code == 401
