@@ -81,6 +81,10 @@ class Settings(BaseSettings):
         default="moyai-pydantic",
         validation_alias=AliasChoices("MOYAI_MODAL_APP", "MODAL_APP_NAME"),
     )
+    modal_runtime: Literal["gvisor", "vm"] = Field(
+        default="vm",
+        validation_alias=AliasChoices("MOYAI_MODAL_RUNTIME", "MODAL_FUNCTION_RUNTIME"),
+    )
     sandbox_provider: Literal["modal", "lambda"] = Field(default="modal", validation_alias="SANDBOX_PROVIDER")
     lambda_region: str = Field(default="us-east-1", validation_alias="LAMBDA_REGION")
     lambda_profile: str = Field(default="", validation_alias="LAMBDA_PROFILE")
