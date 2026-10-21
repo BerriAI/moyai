@@ -1,4 +1,4 @@
-"""Lazy action details expose only the requester's selected tool call and result."""
+"""Lazy action details expose only the conversation's selected tool call and result."""
 from __future__ import annotations
 
 import asyncio
@@ -53,8 +53,12 @@ async def test_actual_input_result_redaction_and_lifecycle(runtime, active, stat
     session, turn, _ = active
     runtime.settings.gateway_key = SecretStr("synthetic-gateway-secret")
     await saved_action(runtime, turn.id, status=status, output={"text": "synthetic-gateway-secret", "ok": True} if status == "completed" else "Command failed")
-    async with sign_in(runtime) as client:
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Session, session.id)).visibility = "shared"
+    async with sign_in(runtime) as client, member_client(runtime) as (member, _):
         response = await client.get(f"/api/sessions/{session.id}/progress/{turn.id}/actions/call")
+        shared = await member.get(f"/api/sessions/{session.id}/progress/{turn.id}/actions/call")
+        assert shared.status_code == 200 and shared.json() == response.json()
     assert response.status_code == 200, response.text
     result = response.json()
     assert result["status"] == status
@@ -111,15 +115,20 @@ async def test_details_require_requester_and_authorized_lineage(runtime, active)
         (await db.get(Session, session.id)).visibility = "shared"
     path = f"/api/sessions/{session.id}/progress/{turn.id}/actions/"
     async with sign_in(runtime) as owner, member_client(runtime) as (member, _):
-        assert (await member.get(path + "call")).status_code == 403
+        shared = await member.get(path + "call")
+        assert shared.status_code == 200
+        assert shared.json() == (await owner.get(path + "call")).json()
         response = await owner.get(path + "private-tool-call", params={"agent_id": child})
         assert response.status_code == 200 and response.json()["output"] == "/workspace"
+        assert (await member.get(path + "private-tool-call", params={"agent_id": child})).json() == response.json()
+        assert (await member.get(path + "private-tool-call", params={"agent_id": unrelated})).status_code == 404
         assert (await owner.get(path + "private-tool-call", params={"agent_id": unrelated})).status_code == 404
         assert (await owner.get(path + "missing")).status_code == 404
         assert (await owner.get(path.replace(turn.id, "missing") + "call")).status_code == 404
 
 
-async def test_delegated_details_exclude_later_chat_and_deleted_session(runtime, active, actor):
+@pytest.mark.parametrize("viewer", ["requester", "teammate"])
+async def test_delegated_details_exclude_later_chat_and_deleted_session(runtime, active, actor, viewer):
     from test_delegated_sessions import finish
 
     session, root, prepared = active
@@ -127,10 +136,14 @@ async def test_delegated_details_exclude_later_chat_and_deleted_session(runtime,
     initial = await runtime.database.claim_next()
     context = await runtime.database.prepare(initial.id)
     await saved_action(runtime, initial.id)
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Session, session.id)).visibility = "shared"
     path = f"/api/sessions/{session.id}/progress/{root.id}/actions/"
-    async with sign_in(runtime) as client:
+    async with sign_in(runtime) as owner, member_client(runtime) as (member, _):
+        client = member if viewer == "teammate" else owner
         response = await client.get(path + f"{initial.id}:call", params={"agent_id": initial.id})
         assert response.status_code == 200, response.text
+        assert (await member.get(f"/api/sessions/{child['session_id']}")).status_code == 404
         await finish(runtime, context, "Done.")
         follow = await runtime.database.submit(actor, child["session_id"], NewMessage(prompt="Private followup", request_key="later"))
         await runtime.database.claim_next()

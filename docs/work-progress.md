@@ -12,8 +12,9 @@ Saved activity includes history continuations and remains available after reload
 Work resumed after a login or approval has its own activity section, even without
 a new user message. The current action label follows the saved running action;
 catching up on old streamed events does not replay them as current work.
-The feed belongs to the original
-requester, including in shared conversations.
+Everyone who can read a conversation can see its activity, including live
+updates, saved tool details and the original delegated assignments in shared
+conversations. Losing conversation access also removes access to its activity.
 
 Expand an action count, such as **11 actions**, then select a row to open its
 input and output in the right panel. The selected action updates while it runs;
@@ -25,7 +26,8 @@ remain private. Long inputs and outputs show a labelled preview of the first
 The feed supports both historical SDK delegates and interactive child chats.
 For a child chat it reads only the original delegated assignment and generated
 answer continuations. Later unrelated private follow-ups are not copied into
-the parent's feed. Activity is bounded and indicates when older entries were
+the parent's feed. Opening a child's full chat still requires access to that
+conversation. Activity is bounded and indicates when older entries were
 omitted. Visible active conversations refresh persisted activity every four
 seconds alongside the existing root text stream.
 

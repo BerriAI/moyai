@@ -89,7 +89,7 @@ async def test_commentary_only_loop_is_bounded_by_native_retry_budget():
     assert len(calls) == 3
 
 
-async def test_saved_progress_api_keeps_requester_boundary_and_redacts_secrets(runtime, active):
+async def test_saved_progress_api_shares_conversation_activity_and_redacts_secrets(runtime, active):
     from pydantic import SecretStr
     from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
     from test_application_boundaries import sign_in
@@ -113,7 +113,9 @@ async def test_saved_progress_api_keeps_requester_boundary_and_redacts_secrets(r
         response = await owner.get(path)
         assert response.status_code == 200
         assert [item["text"] for item in response.json()["messages"]] == ["Checking [redacted]"]
-        assert (await member.get(path)).status_code == 403
+        shared = await member.get(path)
+        assert shared.status_code == 200
+        assert shared.json() == response.json()
         assert (await owner.get(f"/api/sessions/{session.id}/progress/missing")).status_code == 404
 
 

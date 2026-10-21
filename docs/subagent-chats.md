@@ -28,6 +28,9 @@ are private to the requester because their assignments may contain private
 working context. Existing-product callers need an individual sign-in capable of
 creating a private conversation.
 
+People who can read the parent conversation can inspect the original assignment's
+activity in its progress feed. Later private follow-ups stay in the child's chat.
+
 The parent waits for the original delegated turn, including steering accepted
 into that turn. At settlement it receives a saved report that later child
 conversations cannot rewrite. Queued follow-ups run independently and are not

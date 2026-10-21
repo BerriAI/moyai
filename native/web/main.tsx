@@ -781,7 +781,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const active = view?.turns.find(turn => turn.id === view.session.active_turn)
   const work = useWorkProgress(
     id, `${authorityKey}:${connectionVersion}:${id}:${me.user.id}`,
-    (active?.is_self ?? active?.actor_id === me.user.id) ? active : undefined, visible && !swarmSpace,
+    active, visible && !swarmSpace,
     () => clearSensitiveNow.current(),
   )
   const activeProgress = active ? work.entries[active.id] : undefined
@@ -815,7 +815,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     return () => cancelAnimationFrame(frame)
   }, [id, active?.id, browserLoginIds, canResolveInput, visible, requestAnswered, sideMode])
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
-  const activeId = visible && active && ["running", "saving"].includes(active.status) && (active.is_self ?? active.actor_id === me.user.id) ? active.id : null
+  const activeId = visible && active && ["running", "saving"].includes(active.status) ? active.id : null
   useEffect(() => {
     if (!activeId) return
     if (liveNow.current.turnId !== activeId) {
@@ -1035,13 +1035,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
     && !view.pending && !view.credential_requests?.length)
   function renderProgress(segment: WorkSegment) {
-    if (!(segment.turn.is_self ?? segment.turn.actor_id === me.user.id)) return null
     return <TurnProgress
               key={`${authorityKey}:${connectionVersion}:${segment.id}`} segment={segment} visible={visible && !space}
               entry={work.entries[segment.turn.id]} request={work.load}
               live={liveText.turnId === segment.turn.id ? liveText : undefined}
               onContentChange={followWork}
               selectedAction={selectedTab?.kind === "action" ? selectedTab.action : undefined}
+              canOpenChildChat={segment.turn.is_self ?? segment.turn.actor_id === me.user.id}
               onAction={(tool, agent) => openAction({ sessionId: id, turnId: segment.turn.id, toolId: tool.id, agentId: agent?.id, name: toolLabel(tool.name) })}
               onSubagent={agent => openTab(agent.session_id ? {
                 id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,

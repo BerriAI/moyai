@@ -206,7 +206,8 @@ history and has its own computer. In the left sidebar, children nest beneath the
 parent in a collapsible group. Select a child to open its full conversation, or
 choose **Open in side chat** from its row, menu, or Workspace entry to chat with
 the same child in the right panel. The parent stays open and keeps its draft.
-Older SDK subagents retain their requester-only answer and recorded-steps panels.
+Older SDK subagents expose their answers and recorded steps to everyone who can
+read the parent conversation.
 See [Subagent chats](subagent-chats.md) for lifecycle and migration details. Saving a
 file with `save_artifact` adds an output, and `attach_link` adds a PR, external
 output or source. PR links in the public transcript also appear as mentioned PRs.

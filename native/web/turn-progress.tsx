@@ -105,10 +105,11 @@ function AgentWork({ agent, now, onOpen, ...controls }: {
 }
 
 /** A real final answer collapses its segment; steering keeps earlier activity. */
-export function TurnProgress({ segment, entry, live, visible, request, onSubagent, onContentChange, onAction, selectedAction }: {
+export function TurnProgress({ segment, entry, live, visible, request, onSubagent, canOpenChildChat, onContentChange, onAction, selectedAction }: {
   segment: WorkSegment; entry?: WorkEntry; live?: LiveTranscript; visible: boolean
   request: (turn: Turn) => Promise<void>
   onSubagent?: (agent: AgentProgress) => void
+  canOpenChildChat: boolean
   onContentChange?: () => void
   onAction: ActionControls["onAction"]
   selectedAction?: ActionSelection
@@ -166,7 +167,7 @@ export function TurnProgress({ segment, entry, live, visible, request, onSubagen
             <SkillMarkdown>{item.message.text}</SkillMarkdown>
           </div>
           : item.kind === "tools" ? <ToolGroup key={item.id} tools={item.tools} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />
-            : <AgentWork key={item.id} agent={item.agent} now={running ? now : Date.now()} onOpen={onSubagent} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />)}
+            : <AgentWork key={item.id} agent={item.agent} now={running ? now : Date.now()} onOpen={item.agent.session_id && !canOpenChildChat ? undefined : onSubagent} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />)}
         {activeWork && <p className="muted" role="status">{activeWork}</p>}
         {!items.length && !activeWork && !entry?.error && <p className="muted">{running
           ? segment.after !== null ? "Continuing the current task with your update…" : "Waiting for the first update…"
