@@ -73,6 +73,34 @@ def test_lambda_configuration_preserves_native_provider_without_modal_credential
     assert configured.lambda_checkpoint_timeout == 900
 
 
+@pytest.mark.parametrize("runtime", ["gvisor", "vm"])
+def test_installer_preserves_modal_runtime_for_every_role(install_environment, runtime):
+    from moyai.deployment_checks import validate
+    from moyai.install_config import prepare
+
+    install_environment["MOYAI_MODAL_RUNTIME"] = runtime
+    values, _ = prepare(
+        install_environment, image="moyai:test", topology="split", temporal="external",
+        secrets_from_env=False,
+    )
+    assert values["MOYAI_MODAL_RUNTIME"] == runtime
+    for role in ("api", "coordinator", "broker", "worker"):
+        configured = configuration(
+            {**install_environment, **values}, None, role=role,
+        )
+        configured = configuration(configured, new_state(install_environment, configured), role=role)
+        assert validate(configured).modal_runtime == runtime
+
+
+@pytest.mark.parametrize("environment", [
+    {"MOYAI_MODAL_RUNTIME": "vmm"},
+    {"MOYAI_MODAL_RUNTIME": "vm", "MODAL_FUNCTION_RUNTIME": "gvisor"},
+])
+def test_invalid_or_conflicting_modal_runtime_is_rejected(install_environment, environment):
+    with pytest.raises(InstallationError, match="RUNTIME"):
+        configuration({**install_environment, **environment}, None)
+
+
 def test_shared_configuration_uses_verified_schemas_and_persists_keys(install_environment):
     state, values = prepared(install_environment)
     write_state(install_environment, state)

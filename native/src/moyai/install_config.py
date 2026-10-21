@@ -36,6 +36,7 @@ DEFAULTS = {
     "LITELLM_API_BASE": "",
     "AGENT_MODEL": "",
     "MODAL_APP_NAME": "",
+    "MOYAI_MODAL_RUNTIME": "gvisor",
     "SANDBOX_PROVIDER": "modal",
     "LAMBDA_REGION": "us-east-1",
     "LAMBDA_PROFILE": "",

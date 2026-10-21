@@ -13,6 +13,7 @@ from temporalio.client import Client
 from .agent import inference_models, make_agent
 from .contracts import RunScope
 from .database import Database
+from .modal_runtime import configure_modal_runtime
 from .security import Security
 from .settings import Settings
 from .storage import ObjectStore, encrypted_converter
@@ -51,6 +52,7 @@ class Runtime:
             settings = Settings.model_validate({**settings.model_dump(), **product_config.native_overrides()})
         self.product_config = product_config
         self.settings = settings
+        configure_modal_runtime(settings)
         self.security = Security(settings.master_key)
         self.objects = ObjectStore(settings, self.security)
         self.database = Database(settings, self.security)

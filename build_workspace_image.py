@@ -3,10 +3,12 @@ import asyncio
 
 import modal
 from moyai.agent import workspace_image
+from moyai.modal_runtime import configure_modal_runtime
 from moyai.settings import Settings
 
 
 async def build_workspace_image(settings: Settings) -> modal.Image:
+    configure_modal_runtime(settings)
     application = await modal.App.lookup.aio(settings.modal_app, create_if_missing=True)
     image = workspace_image()
     await image.build.aio(application)
