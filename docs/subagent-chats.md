@@ -31,9 +31,43 @@ creating a private conversation.
 People who can read the parent conversation can inspect the original assignment's
 activity in its progress feed. Later private follow-ups stay in the child's chat.
 
-The parent waits for the original delegated turn, including steering accepted
-into that turn. At settlement it receives a saved report that later child
-conversations cannot rewrite. Queued follow-ups run independently and are not
+For independent work, the parent can use `spawn_agent(task)`. It returns a
+`session_id` as soon as the child is admitted, so the parent can continue its
+own model and tool steps while the child runs. This is an acceptance receipt,
+not a completed result. The synchronous `delegate_task` tool still waits.
+
+The parent can guide a running child with
+`send_message(target=session_id, message="...")`. A generated child can push an
+intermediate finding or blocker with `send_message(target="parent", message="...")`
+and continue working. These are explicit messages: ordinary commentary is not
+automatically forwarded. The receipt means queued, not consumed or answered.
+Messages do not start a new turn on an idle agent or revive a stopped one.
+The maximum is eight unread explicit messages per recipient assignment.
+
+Completion reports are delivered automatically. Pydantic AI's public enqueue
+API adds incoming messages to the recipient's next model step; Temporal signals
+carry durable notification IDs. The parent can continue its own work throughout.
+`wait_agent(agent_ids=[], timeout_seconds=60)` waits for incoming messages,
+including parent guidance. Waiting for outstanding selected children also wakes
+on incoming messages, which appear in the next model step. These waits use
+Temporal conditions rather than model-driven report polling. A timeout leaves
+children running. Each report identifies completed, failed, stopped, deleted,
+or human-input work; a non-completed status is not a successful result.
+Automatic reports are bounded previews; `wait_agent` can reread the saved
+original report. Pending handles travel with the parent's durable execution
+and history checkpoints. If the parent asks a human question, its authenticated
+answer continuation retains access to those original reports. Ordinary later
+follow-ups do not acquire that access. Pending messages also follow authenticated
+answer continuations in either direction, preserving the original assignment.
+Messages are reference data, not new human authorization.
+Before finalizing an answer, a parent with outstanding
+spawned children waits for their reports or human steering, then gets another
+model step to incorporate the evidence. Stop still affects only the selected
+conversation; it does not automatically cancel independently admitted children.
+
+The parent receives the original delegated turn's report, including steering
+accepted into that turn. At settlement this report is saved and later child
+conversations cannot rewrite it. Queued follow-ups run independently and are not
 exported back into the parent, which may have a different visibility or account
 context. A child
 needing a human answer, stopped by the user, failed, or deleted produces that
@@ -68,6 +102,28 @@ silently converted into new conversations, and in-flight recorded workflows keep
 their original delegation path through the Temporal version marker.
 The workflow carries that decision into its activities; older activity payloads
 retain the SDK's shared parent computer setup.
+The background-delegation and messaging markers likewise keep recorded histories
+on their original tool catalog and request lifecycle. Swarm members cannot use
+these tools. Depth-limited children can send messages and wait for guidance but
+cannot create further children.
+
+The encrypted event outbox separates Temporal's signal acknowledgment from
+Pydantic consuming a message. Dispatch retries reuse the same message ID, and
+the receiving workflow deduplicates it. Checkpoints preserve queued messages and
+acknowledge messages already included in their saved conversation before history
+rollover. Answer snapshots also acknowledge included messages in their save
+transaction. Human-answer continuations reconcile older paused snapshots before
+requeuing unread mail and retain only children whose completion is still pending.
+Mail reads distinguish a ready payload, an obsolete message and an unavailable
+authorization check. Only a successful read can establish that a message is
+obsolete. An unavailable read retains its place at the head of the mailbox and
+retries through Temporal, so completion cannot overtake blocked progress. Stop,
+agent exit and history handoff release delivery handlers while preserving unread
+outbox state. A delivery version marker retains the original activity and result
+semantics when replaying recorded histories.
+The dispatcher reconciles settled children and retries notifications;
+its PostgreSQL commit hints and fallback scan are infrastructure coordination,
+not parent model polling. No separate agent loop or database schema is introduced.
 
 Instructions, available tools, execution and computer startup use one delegation
 policy. New ordinary root/child chats can delegate; swarm members and chats at the
@@ -100,6 +156,20 @@ Standalone local databases add the new link table at startup.
 
 ## Regression coverage
 
+`test_background_delegation.py` proves parent/child model overlap through the
+real SDK and Temporal, explicit waits and nonblocking status checks, automatic
+report delivery, final-answer continuation, checkpoint rollover and replay,
+idempotent starts, stopped children, and private follow-up isolation.
+`test_agent_messages.py` exercises intermediate child updates, parent guidance,
+automatic completion, duplicate signals, worker replacement, checkpoint rollover
+and replay through the real SDK and Temporal. It also covers lost signal replies,
+bounded outbox pagination, backpressure, stopped senders and receivers, answer
+continuations, depth limits and isolation from unrelated follow-ups.
+`test_agent_mail_delivery.py` covers unavailable authorization without payload
+release, ordered recovery, worker replacement, history rollover, human-input
+pauses, cancellation and replay. These checks keep delivery retries independent
+of model polling and prevent shutdown from waiting on a handler that is itself
+waiting for shutdown.
 `test_delegation_authority.py` covers shared web, Slack and private parents;
 personal skills, memory namespaces, legacy snapshots, grandchildren, direct
 follow-ups, computer reuse, account pickers and promoted-message ordering.

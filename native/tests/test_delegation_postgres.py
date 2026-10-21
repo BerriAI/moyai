@@ -2,23 +2,108 @@
 
 import asyncio
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import test_product_automations as fixtures
 from fastapi import HTTPException
+from pydantic_ai import Conversation, ConversationTypeAdapter
 from sqlalchemy import select, text, update
 from test_delegated_sessions import finish
 from test_product_authority import active_turn
 
+from moyai.agent_messages import (
+    DELIVERED,
+    PENDING,
+    SIGNALLED,
+    AgentMessages,
+    MailDispatch,
+    dispatch_mail,
+    model_message,
+)
 from moyai.contracts import GuidanceChanged, NewMessage
 from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
-from moyai.models import Session, User
+from moyai.models import Event, Session, Turn, User
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 admitted_product = fixtures.admitted_product
 automations = fixtures.automations
 canonical_connections = fixtures.canonical_connections
+
+
+async def test_message_retry_serializes_and_completion_follows_progress(admitted_product):
+    product = admitted_product
+    database = product.database
+    _, parent_turn, parent = await active_turn(product)
+    parent.scope.agent_messages = True
+    child = await DelegationService(database).start(parent.scope, "child", "Work")
+    child_turn = await database.claim_next()
+    child_context = await database.prepare(child_turn.id)
+    mail = AgentMessages(database)
+    receipts = await asyncio.gather(*(
+        mail.send(parent.scope, "same-call", child["session_id"], "Direction", parent_turn.id) for _ in range(2)
+    ))
+    assert receipts[0] == receipts[1]
+    progress = await mail.send(child_context.scope, "progress", "parent", "Finding", child_turn.id)
+    await finish(product, child_context, "Final evidence")
+    signal = AsyncMock()
+    dispatch_runtime = SimpleNamespace(database=database, connect=AsyncMock(return_value=SimpleNamespace(
+        get_workflow_handle=lambda _: SimpleNamespace(signal=signal),
+    )))
+    await dispatch_mail(dispatch_runtime, MailDispatch())
+    await dispatch_mail(dispatch_runtime, MailDispatch())
+    assert signal.call_count == 2
+    assert signal.call_args_list[0].args == ("agent_message", progress["message_id"])
+    completion = await mail.read(parent.scope, signal.call_args_list[1].args[1])
+    assert completion.kind == "completion" and completion.content == "Final evidence"
+
+
+async def test_resume_mail_reconciliation_rolls_back_and_serializes_with_admission(admitted_product):
+    product = admitted_product
+    database = product.database
+    session, turn, prepared = await active_turn(product)
+    mail = AgentMessages(database)
+    await DelegationService(database).start(prepared.scope, "child", "Work")
+    child_turn = await database.claim_next()
+    child = await database.prepare(child_turn.id)
+    consumed, unread = [
+        await mail.send(child.scope, label, "parent", label, child_turn.id)
+        for label in ("consumed", "unread")
+    ]
+    conversation = ConversationTypeAdapter.dump_json(Conversation(
+        conversation_id=prepared.scope.conversation_id,
+        messages=[model_message(await mail.read(prepared.scope, consumed["message_id"]))],
+    )).decode()
+    assert await database.save_result(
+        prepared.scope, conversation=conversation, output="", workspace=None, usage={}, deferred=True,
+    )
+    async with database.sessions.begin() as db:
+        for receipt in (consumed, unread):
+            (await db.get(Event, receipt["message_id"])).kind = SIGNALLED
+    with pytest.raises(RuntimeError, match="Lost admission"):
+        async with database.sessions.begin() as db:
+            await database._resume(
+                product.actor, session.id, turn.id, "rolled-back", {"calls": {}}, "rollback",
+                transaction=db,
+            )
+            raise RuntimeError("Lost admission transaction")
+    async with database.sessions() as db:
+        assert (await db.get(Turn, turn.id)).status == "waiting"
+        for receipt in (consumed, unread):
+            row = await db.get(Event, receipt["message_id"])
+            assert row.kind == SIGNALLED and row.turn_id == turn.id
+    answers = await asyncio.gather(*(
+        database.resume(product.actor, session.id, turn.id, "answer", {"calls": {}})
+        for _ in range(2)
+    ))
+    assert answers[0].id == answers[1].id
+    async with database.sessions() as db:
+        seen = await db.get(Event, consumed["message_id"])
+        pending = await db.get(Event, unread["message_id"])
+        assert seen.kind == DELIVERED and seen.turn_id == turn.id
+        assert pending.kind == PENDING and pending.turn_id == answers[0].id
 
 
 async def test_correction_committing_before_admission_fence_rejects_old_model_work(admitted_product, monkeypatch):

@@ -53,6 +53,12 @@ class RunScope:
     # Chosen by the workflow and carried into tool activities. Old payloads
     # must retain SDK delegation and its shared parent computer.
     interactive_delegation: bool = False
+    # Workflow-owned state, carried through replay and history checkpoints.
+    # Older activity payloads retain synchronous delegation.
+    background_delegation: bool = False
+    background_agents: list[str] = field(default_factory=list)
+    agent_messages: bool = False
+    message_watches: list[str] = field(default_factory=list)
     execution_context: ExecutionContext | None = None
     history_segment: int = 0
     # Recorded by the workflow, so old activity inputs keep the original stream.
