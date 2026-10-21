@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from pydantic import Field, TypeAdapter
-from pydantic_ai import CallDeferred, RunContext
+from pydantic_ai import CallDeferred, ConversationTypeAdapter, RunContext
 from pydantic_ai.capabilities import Toolset, durable_operation
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.toolsets import FunctionToolset
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .computer import DESKTOP_VERSION, ComputerCommand
 from .contracts import RunScope
 from .database import Database
-from .models import ComputerDesktop, ComputerLease, Session
+from .models import ComputerDesktop, ComputerLease, ComputerOperation, Session, Turn, User, new_id
 
 TOOL_NAME = "request_browser_login"
 LoginOutcome = Literal["signed_in", "cancelled"]
@@ -82,19 +82,58 @@ async def login_result(
             "status": "cancelled",
             "instruction": "The requester cancelled sign-in. Do not assume access or request it again without new guidance.",
         }
-    session = await db.get(Session, session_id)
-    desktop = await db.get(ComputerDesktop, session_id)
+    session = await db.get(Session, session_id, populate_existing=True)
+    desktop = await db.get(ComputerDesktop, session_id, populate_existing=True)
     reference = TypeAdapter(WorkspaceRef).validate_python(json.loads(session.workspace)) if session and session.workspace else None
     if (
         not reference or reference.provider != "modal" or reference.id != metadata.get("workspace_id")
         or not desktop or desktop.workspace_id != reference.id or desktop.version != DESKTOP_VERSION
     ):
         raise HTTPException(409, "The computer changed. Cancel this request and ask Moyai to reopen the sign-in page.")
-    control = await db.get(ComputerLease, session_id)
-    if control and control.expires_at > time.time():
-        raise HTTPException(409, "Release control in Computer, then confirm that you have signed in.")
     return {
         "status": "user_reported_signed_in",
         "site": metadata["site"],
         "instruction": "Use browser_read to verify that the requested site is accessible before continuing. The user's confirmation alone does not prove authentication succeeded.",
     }
+
+
+async def handoff_login_control(
+    database: Database, db: AsyncSession, actor: User, previous: Turn, results: dict,
+) -> None:
+    """Return the requester's control inside the locked resume transaction.
+
+    Derive handoffs from the saved request, not arbitrary submitted tool results.
+    Replays return their existing turn before reaching this mutation.
+    """
+    if not previous.conversation:
+        return
+    conversation = ConversationTypeAdapter.validate_json(database.security.unseal(previous.conversation))
+    pending = conversation.deferred_tool_requests
+    if pending is None:
+        return
+    calls = results.get("calls", {})
+    confirmed = [
+        call for call in pending.calls
+        if call.tool_name == TOOL_NAME and isinstance(calls.get(call.tool_call_id), dict)
+        and calls[call.tool_call_id].get("status") == "user_reported_signed_in"
+    ]
+    if not confirmed:
+        return
+    for call in confirmed:
+        # The computer can change between HTTP validation and admission.
+        await login_result(db, previous.session_id, (pending.metadata or {}).get(call.tool_call_id) or {}, "signed_in")
+    control = await db.get(ComputerLease, previous.session_id)
+    stamp = time.time()
+    if control and control.expires_at > stamp and not await database.same_person(db, actor, control.actor_id):
+        raise HTTPException(409, "Another person is controlling this computer. They must release control before you continue.")
+    operation = await db.get(ComputerOperation, previous.session_id)
+    if operation and operation.expires_at > stamp:
+        raise HTTPException(409, "A computer action is still settling. Wait a moment, then confirm sign-in again.")
+    if control is not None:
+        await db.delete(control)
+    desktop = await db.get(ComputerDesktop, previous.session_id)
+    assert desktop is not None  # Revalidated by login_result above.
+    # Revoke every old controller socket, including another tab owned by this
+    # requester. A late heartbeat cannot recreate a released lease.
+    desktop.control_epoch = new_id()
+    desktop.control_client = ""

@@ -5198,6 +5198,7 @@
               "start",
               "claim",
               "release",
+              "handoff",
               "heartbeat",
               "open",
               "terminal",
@@ -5354,6 +5355,11 @@
             "title": "Busy",
             "type": "boolean"
           },
+          "can_release": {
+            "default": false,
+            "title": "Can Release",
+            "type": "boolean"
+          },
           "controlled": {
             "title": "Controlled",
             "type": "boolean"
@@ -5378,6 +5384,7 @@
           "available",
           "has_workspace",
           "controlled",
+          "can_release",
           "busy",
           "controller"
         ],

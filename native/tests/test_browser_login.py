@@ -1,9 +1,11 @@
 """Supplementary native API/SDK regressions; live Modal evidence is separate."""
 import json
+import time
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from pydantic_ai import CallDeferred, Conversation, ConversationTypeAdapter, DeferredToolRequests
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
@@ -15,8 +17,9 @@ from test_shared_browser import running_browser, workspace
 from moyai.api import COOKIE, create_app
 from moyai.browser_login import BrowserLogin
 from moyai.computer import lease
+from moyai.computer_stream import bind, validate
 from moyai.contracts import NewMessage
-from moyai.models import ComputerDesktop, Session, Turn, User, new_id
+from moyai.models import ComputerDesktop, ComputerLease, ComputerOperation, Session, Turn, User, new_id
 from moyai.questions import expire_optional_questions
 
 
@@ -102,23 +105,78 @@ async def test_completion_resumes_once_and_never_claims_verified_authentication(
         assert (await db.get(Turn, turn_id)).status == "resumed"
 
 
-async def test_completion_requires_released_control_and_same_computer_but_cancel_stays_available(runtime, actor):
+async def test_completion_returns_control_from_another_tab_and_fences_old_input(runtime, actor):
+    session, turn_id = await waiting_login(runtime, actor)
+    client_id = new_id()
+    await lease(runtime, session.id, actor, "claim", client_id)
+    access = await bind(runtime, session.id, actor, client_id, controlling=True)
+    body = {"turn_id": turn_id, "request_key": "complete", "browser_logins": {"login": "signed_in"}}
+    async with sign_in(runtime) as client:
+        response = await client.post(f"/api/sessions/{session.id}/answers", json=body)
+        assert response.status_code == 202, response.text
+        async with runtime.database.sessions() as db:
+            assert await db.get(ComputerLease, session.id) is None
+            desktop = await db.get(ComputerDesktop, session.id)
+            assert desktop.control_client == "" and desktop.control_epoch != access.epoch
+        with pytest.raises(HTTPException, match="released or changed"):
+            await validate(runtime, access)
+        with pytest.raises(HTTPException, match="Take control"):
+            await lease(runtime, session.id, actor, "heartbeat", client_id)
+        # A lost HTTP response can be retried, but must not relinquish a newly
+        # claimed controller after the original handoff already succeeded.
+        await lease(runtime, session.id, actor, "claim", client_id)
+        retry = await client.post(f"/api/sessions/{session.id}/answers", json=body)
+        assert retry.status_code == 202 and retry.json()["id"] == response.json()["id"]
+        async with runtime.database.sessions() as db:
+            assert (await db.get(ComputerLease, session.id)).actor_id == actor.id
+            assert (await db.get(ComputerDesktop, session.id)).control_client == client_id
+
+
+async def test_completion_requires_same_computer_but_cancel_stays_available(runtime, actor):
     session, turn_id = await waiting_login(runtime, actor)
     client_id = new_id()
     await lease(runtime, session.id, actor, "claim", client_id)
     body = {"turn_id": turn_id, "request_key": "complete", "browser_logins": {"login": "signed_in"}}
     async with sign_in(runtime) as client:
-        response = await client.post(f"/api/sessions/{session.id}/answers", json=body)
-        assert response.status_code == 409 and "Release control" in response.text
-        await lease(runtime, session.id, actor, "release", client_id)
         async with runtime.database.sessions.begin() as db:
             (await db.get(ComputerDesktop, session.id)).workspace_id = "replacement"
         response = await client.post(f"/api/sessions/{session.id}/answers", json=body)
         assert response.status_code == 409 and "computer changed" in response.text
+        async with runtime.database.sessions() as db:
+            assert (await db.get(ComputerLease, session.id)).actor_id == actor.id
         cancelled = await client.post(f"/api/sessions/{session.id}/answers", json={
             **body, "browser_logins": {"login": "cancelled"},
         })
         assert cancelled.status_code == 202
+        async with runtime.database.sessions() as db:
+            assert (await db.get(ComputerLease, session.id)).actor_id == actor.id
+
+
+@pytest.mark.parametrize("blocker", ["another_person", "pending_action"])
+async def test_blocked_handoff_rolls_back_resume_and_preserves_control(runtime, actor, blocker):
+    session, turn_id = await waiting_login(runtime, actor)
+    client_id = new_id()
+    await lease(runtime, session.id, actor, "claim", client_id)
+    async with runtime.database.sessions.begin() as db:
+        if blocker == "another_person":
+            other = User(id=new_id(), username="controller", display_name="Other", password="unused")
+            db.add(other)
+            await db.flush()
+            (await db.get(ComputerLease, session.id)).actor_id = other.id
+        else:
+            db.add(ComputerOperation(session_id=session.id, identity=new_id(), expires_at=int(time.time()) + 60))
+        epoch = (await db.get(ComputerDesktop, session.id)).control_epoch
+    body = {"turn_id": turn_id, "request_key": "blocked", "browser_logins": {"login": "signed_in"}}
+    async with sign_in(runtime) as client:
+        response = await client.post(f"/api/sessions/{session.id}/answers", json=body)
+        assert response.status_code == 409, response.text
+        assert ("Another person" if blocker == "another_person" else "still settling") in response.text
+    async with runtime.database.sessions() as db:
+        assert await db.get(ComputerLease, session.id) is not None
+        assert (await db.get(ComputerDesktop, session.id)).control_epoch == epoch
+        assert (await db.get(Session, session.id)).active_turn == turn_id
+        assert (await db.get(Turn, turn_id)).status == "waiting"
+        assert await db.scalar(select(Turn).where(Turn.request_key == "blocked")) is None
 
 
 async def test_only_requester_can_complete_and_unknown_or_incomplete_answers_are_rejected(runtime, actor):
@@ -126,6 +184,8 @@ async def test_only_requester_can_complete_and_unknown_or_incomplete_answers_are
         "header": "Scope", "question": "Which report?", "options": [{"label": "Daily"}, {"label": "Weekly"}],
     }]}, tool_call_id="scope")
     session, turn_id = await waiting_login(runtime, actor, extra=question)
+    client_id = new_id()
+    await lease(runtime, session.id, actor, "claim", client_id)
     async with runtime.database.sessions.begin() as db:
         (await db.get(Session, session.id)).visibility = "shared"
         other = User(id=new_id(), username="other", display_name="Other", password="unused")
@@ -143,6 +203,8 @@ async def test_only_requester_can_complete_and_unknown_or_incomplete_answers_are
         for update in [{}, {"browser_logins": {"unknown": "signed_in"}}, {"browser_logins": {"login": "success"}}]:
             response = await client.post(f"/api/sessions/{session.id}/answers", json={**body, **update})
             assert response.status_code == 422
+            async with runtime.database.sessions() as db:
+                assert (await db.get(ComputerLease, session.id)).actor_id == actor.id
         body["answers"] = {"scope": {"answers": [{"header": "Scope", "selected": ["Daily"]}]}}
         response = await client.post(f"/api/sessions/{session.id}/answers", json=body)
         assert response.status_code == 202, response.text

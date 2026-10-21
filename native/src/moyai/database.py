@@ -1314,6 +1314,8 @@ class Database:
                 ))
                 if existing and existing.request_fingerprint == fingerprint:
                     return existing
+            if isinstance(error, HTTPException):
+                raise
             raise HTTPException(409, "This answer conflicts with an already admitted request.") from error
 
     async def _resume(
@@ -1377,6 +1379,8 @@ class Database:
             ).values(active_turn=turn_id, status="queued", updated_at=now()).returning(Session.id))
             if claimed is None:
                 raise HTTPException(409, "Another response already resumed this request.")
+            from .browser_login import handoff_login_control
+            await handoff_login_control(self, db, actor, previous, results)
             db.add(turn)
             await db.flush()
             from .performance import admission

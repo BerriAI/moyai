@@ -143,7 +143,10 @@ after opening its sign-in page. The requester sees **Browser sign-in needed**,
 the website and reason, and Computer opens once for that request. Closing the
 panel keeps it closed until **Open Computer** is selected; reloading a waiting
 conversation restores the request. Take control, sign in inside Chromium, then
-release control and select **I've signed in**. Moyai resumes and must inspect
+select **I've signed in**. This returns your computer control, including control
+held by another of your browser tabs, and resumes Moyai in one step. Another
+person's active control and an unsettled computer action still block the handoff.
+Moyai must inspect
 the page to verify access. Confirmation is not an authentication-success check.
 **Cancel sign-in** resumes with a cancellation so Moyai can explain or continue
 independent work. These requests do not time out and only the original requester
@@ -152,8 +155,10 @@ can answer. A changed computer requires cancelling and making a fresh request.
 Opening the computer starts a real X desktop in the same sandbox, with Chromium open and a taskbar.
 The panel shows the desktop itself. Click **Take control** on the screen to
 click, type, paste text and scroll, using Chromium's own tabs and address bar.
-Expand the panel for more space. The small **Release control** overlay appears
-on hover or keyboard focus; Ctrl+Shift+Escape also returns control. Leaving or
+Expand the panel for more space. A **Release control** button stays visible above
+the desktop while you control it, including when the stream disconnects or
+another of your tabs holds control;
+Ctrl+Shift+Escape also returns control. Leaving or
 reloading the page releases this browser's control.
 
 Desktop access follows session visibility and rechecks the workspace's current
