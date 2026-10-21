@@ -1,5 +1,9 @@
 import base64
 import importlib.util
+import os
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -8,6 +12,55 @@ import pytest
 spec = importlib.util.spec_from_file_location("ocu_guest_test", Path(__file__).parents[1] / "ocu_guest.py")
 guest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guest)
+
+
+def test_ocu_child_uses_system_python_without_changing_workspace_or_node(monkeypatch, tmp_path):
+    """Exercise the subprocess boundary with a shadowing workspace Python."""
+    executables = tmp_path / "bin"
+    executables.mkdir()
+    wrong_python = executables / "python3"
+    wrong_python.write_text("#!/bin/sh\necho 'No module named gi' >&2\nexit 1\n")
+    wrong_python.chmod(0o755)
+    node = executables / "node"
+    node.write_text("#!/bin/sh\necho workspace-node\n")
+    node.chmod(0o755)
+    ocu_cli = executables / "ocu"
+    ocu_cli.write_text(f"""#!{sys.executable}
+import json, subprocess, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "tools/list":
+        result = {{"tools": [{{"name": "get_app_state", "inputSchema": {{"properties": {{}}}}}}]}}
+    elif request["method"] == "tools/call":
+        result = {{
+            "python": subprocess.check_output(["python3", "-c", "import sys; print(sys.executable)"], text=True).strip(),
+            "node": subprocess.check_output(["node"], text=True).strip(),
+        }}
+    else:
+        result = {{}}
+    print(json.dumps({{"id": request["id"], "result": result}}), flush=True)
+""")
+    ocu_cli.chmod(0o755)
+    path = str(executables) + os.pathsep + os.environ.get("PATH", os.defpath)
+    monkeypatch.setenv("PATH", path)
+    monkeypatch.setattr(guest, "SYSTEM_PYTHON", sys.executable)
+
+    assert subprocess.run(["python3", "-c", "import gi"], check=False, capture_output=True).returncode == 1
+    ocu = guest.Ocu()
+    try:
+        result = ocu.call("list_apps", {})
+        assert Path(result["python"]).resolve() == Path(sys.executable).resolve()
+        assert result["node"] == "workspace-node"
+        assert os.environ["PATH"] == path
+        assert shutil.which("python3") == str(wrong_python)
+        # Later requests still need the private lookup directory.
+        assert ocu.call("list_apps", {}) == result
+    finally:
+        ocu.process.terminate()
+        ocu.process.wait(timeout=5)
+        ocu.python_bin.cleanup()
 
 
 class Ocu(guest.Ocu):

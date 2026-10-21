@@ -8,10 +8,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -19,13 +21,21 @@ from uuid import uuid4
 MAX_FRAME = 16 * 1024 * 1024
 SCREENSHOTS = Path("/workspace/.moyai/desktop-screenshots")
 ACTIONS = {"click", "drag", "set_value", "type_text", "press_key", "scroll", "perform_secondary_action"}
+SYSTEM_PYTHON = "/usr/bin/python3"
 
 
 class Ocu:
     def __init__(self):
+        # OCU 1.1.2 invokes bare python3 for its Linux AT-SPI helper. Debian's
+        # python3-gi belongs to system Python, not Modal's /usr/local Python.
+        # Override only Python in this child, preserving Node and workspace PATH.
+        # Create this at startup so saved computers receive the fix too.
+        self.python_bin = tempfile.TemporaryDirectory(prefix="moyai-ocu-python-")
+        Path(self.python_bin.name, "python3").symlink_to(SYSTEM_PYTHON)
+        env = {**os.environ, "PATH": self.python_bin.name + os.pathsep + os.environ.get("PATH", os.defpath)}
         self.process = subprocess.Popen(
             ["ocu", "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=env,
         )
         self.sequence = 0
         self.observation = None
