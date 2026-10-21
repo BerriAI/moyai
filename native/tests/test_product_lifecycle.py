@@ -123,8 +123,31 @@ async def test_receipt_services_all_drain_before_cancellation_propagates():
     assert completed == ["start-legacy", "start-native", "close-native", "close-legacy"]
 
 
+@pytest.mark.parametrize("gateway_url", [None, "", " \t "])
+@pytest.mark.parametrize(("product_mode", "brokered"), [("standalone", False), ("existing", True)])
+def test_workers_require_an_explicit_gateway_url(monkeypatch, gateway_url, product_mode, brokered):
+    monkeypatch.delenv("LITELLM_API_BASE", raising=False)
+    if gateway_url is not None:
+        monkeypatch.setenv("LITELLM_API_BASE", gateway_url)
+    settings = Settings(
+        _env_file=None, product_mode=product_mode, sandbox_provider="modal", gateway_key="synthetic-key",
+    )
+    with pytest.raises(ValueError, match="Set LITELLM_API_BASE"):
+        settings.validate_worker(brokered=brokered)
+
+
+@pytest.mark.parametrize("gateway_url", ["https://gateway.example.test/v1", "http://127.0.0.1:4000/v1"])
+def test_workers_use_the_configured_gateway_url(monkeypatch, gateway_url):
+    monkeypatch.setenv("LITELLM_API_BASE", gateway_url)
+    settings = Settings(_env_file=None, sandbox_provider="modal", gateway_key="synthetic-key")
+    settings.validate_worker()
+    assert settings.gateway_url == gateway_url
+
+
 def test_only_explicit_product_broker_workers_can_omit_the_gateway_key(tmp_path):
-    settings = Settings(_env_file=None, data_dir=tmp_path, gateway_key="")
+    settings = Settings(
+        _env_file=None, data_dir=tmp_path, gateway_key="", gateway_url="https://gateway.example.test/v1",
+    )
     with pytest.raises(ValueError, match="LITELLM_API_KEY"):
         settings.validate_worker(brokered=True)
     settings.product_mode = "existing"
