@@ -31,16 +31,31 @@ For independent work, the parent can use `spawn_agent(task)`. It returns a
 own model and tool steps while the child runs. This is an acceptance receipt,
 not a completed result. The synchronous `delegate_task` tool still waits.
 
-Completed reports are added to the parent's next model request. The parent can
-also call `wait_agent(agent_ids, timeout_seconds=60)` to wait for any selected
-child, or use `timeout_seconds=0` to check status immediately. A timeout leaves
+The parent can guide a running child with
+`send_message(target=session_id, message="...")`. A generated child can push an
+intermediate finding or blocker with `send_message(target="parent", message="...")`
+and continue working. These are explicit messages: ordinary commentary is not
+automatically forwarded. The receipt means queued, not consumed or answered.
+Messages do not start a new turn on an idle agent or revive a stopped one.
+The maximum is eight unread explicit messages per recipient assignment.
+
+Completion reports are delivered automatically. Pydantic AI's public enqueue
+API adds incoming messages to the recipient's next model step; Temporal signals
+carry durable notification IDs. The parent can continue its own work throughout.
+`wait_agent(agent_ids=[], timeout_seconds=60)` waits for incoming messages,
+including parent guidance. Waiting for outstanding selected children also wakes
+on incoming messages, which appear in the next model step. These waits use
+Temporal conditions rather than model-driven report polling. A timeout leaves
 children running. Each report identifies completed, failed, stopped, deleted,
 or human-input work; a non-completed status is not a successful result.
 Automatic reports are bounded previews; `wait_agent` can reread the saved
 original report. Pending handles travel with the parent's durable execution
 and history checkpoints. If the parent asks a human question, its authenticated
 answer continuation retains access to those original reports. Ordinary later
-follow-ups do not acquire that access. Before finalizing an answer, a parent with outstanding
+follow-ups do not acquire that access. Pending messages also follow authenticated
+answer continuations in either direction, preserving the original assignment.
+Messages are reference data, not new human authorization.
+Before finalizing an answer, a parent with outstanding
 spawned children waits for their reports or human steering, then gets another
 model step to incorporate the evidence. Stop still affects only the selected
 conversation; it does not automatically cancel independently admitted children.
@@ -82,9 +97,18 @@ silently converted into new conversations, and in-flight recorded workflows keep
 their original delegation path through the Temporal version marker.
 The workflow carries that decision into its activities; older activity payloads
 retain the SDK's shared parent computer setup.
-The background-delegation marker likewise keeps recorded synchronous histories
-on their original tool catalog and request lifecycle. Swarm members and
-depth-limited children cannot use either background tool.
+The background-delegation and messaging markers likewise keep recorded histories
+on their original tool catalog and request lifecycle. Swarm members cannot use
+these tools. Depth-limited children can send messages and wait for guidance but
+cannot create further children.
+
+The encrypted event outbox separates Temporal's signal acknowledgment from
+Pydantic consuming a message. Dispatch retries reuse the same message ID, and
+the receiving workflow deduplicates it. Checkpoints preserve queued messages and
+acknowledge messages already included in their saved conversation before history
+rollover. The dispatcher reconciles settled children and retries notifications;
+its PostgreSQL commit hints and fallback scan are infrastructure coordination,
+not parent model polling. No separate agent loop or database schema is introduced.
 
 Instructions, available tools, execution and computer startup use one delegation
 policy. New ordinary root/child chats can delegate; swarm members and chats at the
@@ -121,6 +145,11 @@ Standalone local databases add the new link table at startup.
 real SDK and Temporal, explicit waits and nonblocking status checks, automatic
 report delivery, final-answer continuation, checkpoint rollover and replay,
 idempotent starts, stopped children, and private follow-up isolation.
+`test_agent_messages.py` exercises intermediate child updates, parent guidance,
+automatic completion, duplicate signals, worker replacement, checkpoint rollover
+and replay through the real SDK and Temporal. It also covers lost signal replies,
+bounded outbox pagination, backpressure, stopped senders and receivers, answer
+continuations, depth limits and isolation from unrelated follow-ups.
 `test_delegation_authority.py` covers shared web, Slack and private parents;
 personal skills, memory namespaces, legacy snapshots, grandchildren, direct
 follow-ups, computer reuse, account pickers and promoted-message ordering.

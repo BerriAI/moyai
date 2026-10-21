@@ -57,6 +57,8 @@ class RunScope:
     # Older activity payloads retain synchronous delegation.
     background_delegation: bool = False
     background_agents: list[str] = field(default_factory=list)
+    agent_messages: bool = False
+    message_watches: list[str] = field(default_factory=list)
     execution_context: ExecutionContext | None = None
     history_segment: int = 0
     # Recorded by the workflow, so old activity inputs keep the original stream.

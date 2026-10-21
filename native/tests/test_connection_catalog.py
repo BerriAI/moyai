@@ -140,6 +140,8 @@ async def test_workflow_version_resolution_reuses_catalog_without_erasing_admiss
         context(), context(interactive_delegation=True),
         context(interactive_delegation=True, workflow_public_events=True),
         context(interactive_delegation=True, workflow_public_events=True, history_segment=1),
+        context(background_delegation=True, background_agents=["child"]),
+        context(agent_messages=True, message_watches=["child"]),
     ]:
         async with CatalogToolset(catalog, selected, factory) as tools:
             await tools.get_tools(selected)

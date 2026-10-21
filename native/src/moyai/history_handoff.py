@@ -66,6 +66,7 @@ class HistoryHandoff:
     stream_state: WorkflowStreamState | None = None
     steered: list[str] = field(default_factory=list)
     pending_steering: list[str] = field(default_factory=list)
+    pending_agent_mail: list[int] = field(default_factory=list)
     deployment_handoff: DeploymentHandoff | None = None
     pending_deployment_handoff: DeploymentHandoff | None = None
     maintenance_workspace: bool = False
@@ -207,10 +208,12 @@ async def save_history_checkpoint(checkpoint: AgentCheckpoint) -> CheckpointSave
     # Control hints are carried separately by HistoryHandoff. A history-only
     # save must not look like an approved deployment in the agent snapshot.
     snapshot = replace(checkpoint, deployment_handoff=None, allow_history_only=False)
-    return CheckpointSave(
-        await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(snapshot)),
-        deployment_allowed=deployment_allowed,
-    )
+    reference = await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(snapshot))
+    if scope.agent_messages:
+        from .agent_messages import AgentMessages, receipts
+        ids, _ = receipts(ConversationTypeAdapter.validate_json(snapshot.conversation).messages)
+        await AgentMessages(runtime.database).acknowledge(scope, ids)
+    return CheckpointSave(reference, deployment_allowed=deployment_allowed)
 
 
 @activity.defn(name="moyai_load_history_checkpoint_v1")

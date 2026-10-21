@@ -93,11 +93,14 @@ class CapacityOutbound(WorkflowOutboundInterceptor):
         if input.task_queue in (None, queue) and workflow.patched(ROUTING_VERSION):
             input = replace(input, task_queue=f"{queue}-{pool}")
         if (
-            input.activity == "agent__moyai__capability__moyai_interactive_delegation__start"
+            input.activity in {
+                "agent__moyai__capability__moyai_interactive_delegation__start",
+                "agent__moyai__capability__moyai_interactive_delegation__send_message",
+            }
             and workflow.patched(DELEGATION_RETRY_VERSION)
         ):
-            # Only this native database command has an immutable admission
-            # receipt. Never inherit this policy into model or external writes.
+            # Only these native database commands have immutable admission
+            # receipts. Never inherit this policy into model or external writes.
             input = replace(input, retry_policy=RetryPolicy(
                 maximum_attempts=3, initial_interval=timedelta(seconds=1),
             ))

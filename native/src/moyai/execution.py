@@ -52,7 +52,10 @@ class AuthorizedActivity(ActivityInboundInterceptor):
                 # Admission owns both original-identity receipt recovery and
                 # live authorization for NEW work. Prechecking a retry here
                 # would discard a child committed before steering or Stop.
-                if name != "agent__moyai__capability__moyai_interactive_delegation__start":
+                if name not in {
+                    "agent__moyai__capability__moyai_interactive_delegation__start",
+                    "agent__moyai__capability__moyai_interactive_delegation__send_message",
+                }:
                     await self.database.authorize_scope(scope, input_id=input_id)
             except (PermissionError, HTTPException) as error:
                 raise ApplicationError(

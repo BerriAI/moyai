@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import test_product_automations as fixtures
@@ -10,6 +12,7 @@ from sqlalchemy import select, text, update
 from test_delegated_sessions import finish
 from test_product_authority import active_turn
 
+from moyai.agent_messages import AgentMessages, MailDispatch, dispatch_mail
 from moyai.contracts import GuidanceChanged, NewMessage
 from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
@@ -19,6 +22,33 @@ pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Di
 admitted_product = fixtures.admitted_product
 automations = fixtures.automations
 canonical_connections = fixtures.canonical_connections
+
+
+async def test_message_retry_serializes_and_completion_follows_progress(admitted_product):
+    product = admitted_product
+    database = product.database
+    _, parent_turn, parent = await active_turn(product)
+    parent.scope.agent_messages = True
+    child = await DelegationService(database).start(parent.scope, "child", "Work")
+    child_turn = await database.claim_next()
+    child_context = await database.prepare(child_turn.id)
+    mail = AgentMessages(database)
+    receipts = await asyncio.gather(*(
+        mail.send(parent.scope, "same-call", child["session_id"], "Direction", parent_turn.id) for _ in range(2)
+    ))
+    assert receipts[0] == receipts[1]
+    progress = await mail.send(child_context.scope, "progress", "parent", "Finding", child_turn.id)
+    await finish(product, child_context, "Final evidence")
+    signal = AsyncMock()
+    dispatch_runtime = SimpleNamespace(database=database, connect=AsyncMock(return_value=SimpleNamespace(
+        get_workflow_handle=lambda _: SimpleNamespace(signal=signal),
+    )))
+    await dispatch_mail(dispatch_runtime, MailDispatch())
+    await dispatch_mail(dispatch_runtime, MailDispatch())
+    assert signal.call_count == 2
+    assert signal.call_args_list[0].args == ("agent_message", progress["message_id"])
+    completion = await mail.read(parent.scope, signal.call_args_list[1].args[1])
+    assert completion.kind == "completion" and completion.content == "Final evidence"
 
 
 async def test_correction_committing_before_admission_fence_rejects_old_model_work(admitted_product, monkeypatch):

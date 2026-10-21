@@ -152,7 +152,7 @@ async def test_parent_works_while_child_runs_and_collects_report(runtime, actor,
         assert snapshot is not None
         report = next(
             message for message in snapshot.messages
-            if any(isinstance(part, UserPromptPart) and "Saved subagent reports" in str(part.content)
+            if any(isinstance(part, UserPromptPart) and "Agent message within your existing task" in str(part.content)
                    for part in message.parts)
         )
         assert report.run_id == turn.id and report.conversation_id

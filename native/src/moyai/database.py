@@ -1407,6 +1407,8 @@ class Database:
             if original.scope.background_delegation:
                 from .delegation import bind_background_resume
                 await bind_background_resume(self, db, previous, turn, original.scope)
+            from .agent_messages import resume_mail
+            await resume_mail(db, previous, turn)
             if automated is not None:
                 db.add(ProductAutomationTurn(turn_id=turn.id, origin_turn_id=automated.origin_turn_id))
             previous.status = "resumed"

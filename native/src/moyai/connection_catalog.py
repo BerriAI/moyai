@@ -130,7 +130,10 @@ class ConnectionCatalog:
         # Continue-As-New increments the segment of the same admitted turn.
         # Neither changes connector authority or definitions.
         # Keep all admitted identity/grant/provenance fields in the cache key.
-        for field in ("interactive_delegation", "workflow_public_events", "history_segment"):
+        for field in (
+            "interactive_delegation", "workflow_public_events", "history_segment",
+            "background_delegation", "background_agents", "agent_messages", "message_watches",
+        ):
             value.pop(field)
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 

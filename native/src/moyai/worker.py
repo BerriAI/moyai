@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from pydantic_ai.durable_exec.temporal import AgentPlugin
@@ -19,6 +19,7 @@ from temporalio.worker import (
 )
 
 from .activities import ACTIVITIES
+from .agent_messages import MailDispatch, dispatch_mail
 from .dispatch_wakeups import DispatchWakeups
 from .execution import ExecutionAuthority
 from .models import Turn
@@ -108,6 +109,7 @@ class DispatchState:
     starting_after: tuple[str, str] | None = None
     starting_through: tuple[str, str] | None = None
     backlog: bool = False
+    mail: MailDispatch = field(default_factory=MailDispatch)
 
 
 async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) -> int:
@@ -196,6 +198,13 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
             if error.status == RPCStatusCode.NOT_FOUND:
                 # A Stop admitted before workflow creation never needs to start the run.
                 await runtime.database.stopped(turn.id)
+    try:
+        async with asyncio.timeout(3):
+            await dispatch_mail(runtime, state.mail)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Agent message delivery remains pending.", exc_info=True)
     try:
         async with asyncio.timeout(3):
             await dispatch_missions(runtime)
