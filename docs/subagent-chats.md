@@ -114,6 +114,13 @@ acknowledge messages already included in their saved conversation before history
 rollover. Answer snapshots also acknowledge included messages in their save
 transaction. Human-answer continuations reconcile older paused snapshots before
 requeuing unread mail and retain only children whose completion is still pending.
+Mail reads distinguish a ready payload, an obsolete message and an unavailable
+authorization check. Only a successful read can establish that a message is
+obsolete. An unavailable read retains its place at the head of the mailbox and
+retries through Temporal, so completion cannot overtake blocked progress. Stop,
+agent exit and history handoff release delivery handlers while preserving unread
+outbox state. A delivery version marker retains the original activity and result
+semantics when replaying recorded histories.
 The dispatcher reconciles settled children and retries notifications;
 its PostgreSQL commit hints and fallback scan are infrastructure coordination,
 not parent model polling. No separate agent loop or database schema is introduced.
@@ -158,6 +165,11 @@ automatic completion, duplicate signals, worker replacement, checkpoint rollover
 and replay through the real SDK and Temporal. It also covers lost signal replies,
 bounded outbox pagination, backpressure, stopped senders and receivers, answer
 continuations, depth limits and isolation from unrelated follow-ups.
+`test_agent_mail_delivery.py` covers unavailable authorization without payload
+release, ordered recovery, worker replacement, history rollover, human-input
+pauses, cancellation and replay. These checks keep delivery retries independent
+of model polling and prevent shutdown from waiting on a handler that is itself
+waiting for shutdown.
 `test_delegation_authority.py` covers shared web, Slack and private parents;
 personal skills, memory namespaces, legacy snapshots, grandchildren, direct
 follow-ups, computer reuse, account pickers and promoted-message ordering.

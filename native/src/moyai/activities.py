@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from .agent_messages import read_agent_mail
+from .agent_messages import read_agent_mail, read_agent_mail_v2
 from .answer_settlement import SNAPSHOT_WARNING
 from .computer_keepalive import keep_computer_alive
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
@@ -142,6 +142,6 @@ ACTIVITIES = [
     prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
     prepare_steering, steering_receipt, keep_computer_alive, preserve_failed_workspace,
     *HISTORY_ACTIVITIES, *MAINTENANCE_ACTIVITIES,
-    read_agent_mail,
+    read_agent_mail, read_agent_mail_v2,
 ]
 

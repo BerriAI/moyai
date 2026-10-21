@@ -11,10 +11,10 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import HTTPException
-from pydantic import TypeAdapter
+from pydantic import Field, TypeAdapter
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.messages import ModelMessage, ModelRequest, TextContent, UserPromptPart
 from sqlalchemy import func, literal, select, update
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 VERSION = "moyai-agent-messages-v1"
+DELIVERY_VERSION = "moyai-agent-mail-delivery-v2"
 WATCH = "agent_watch"
 WATCHED = "agent_watch_settled"
 PENDING = "agent_mail"
@@ -51,7 +52,35 @@ class AgentMail:
 
 @dataclass
 class MailRead:
+    """Recorded v1 activity result. Retained only for workflow replay."""
+
     mail: AgentMail | None = None
+
+
+@dataclass(frozen=True)
+class MailReady:
+    mail: AgentMail
+    outcome: Literal["ready"] = "ready"
+
+
+@dataclass(frozen=True)
+class MailObsolete:
+    """The message is consumed, absent, or no longer belongs to this turn."""
+
+    outcome: Literal["obsolete"] = "obsolete"
+
+
+@dataclass(frozen=True)
+class MailUnavailable:
+    """No payload was released. The workflow must retain its delivery intent."""
+
+    outcome: Literal["unavailable"] = "unavailable"
+
+
+MailReadResult = Annotated[
+    MailReady | MailObsolete | MailUnavailable,
+    Field(discriminator="outcome"),
+]
 
 
 @dataclass
@@ -219,8 +248,8 @@ class AgentMessages:
             return {"message_id": row.id, "target": receiver.session_id, "status": "queued"}
 
     async def read(self, scope: RunScope, message_id: int) -> AgentMail | None:
-        await self.database.authorize_scope(scope)
         async with self.database.sessions() as db:
+            await self.database.authorize_scope(scope, db=db)
             row = await db.get(Event, message_id)
             if (
                 row is None or row.kind not in {PENDING, SIGNALLED}
@@ -252,6 +281,20 @@ async def read_agent_mail(scope: RunScope, message_id: int) -> MailRead:
         return MailRead(await AgentMessages(current().database).read(scope, message_id))
     except (HTTPException, PermissionError):
         return MailRead()
+
+
+@activity.defn(name="moyai_read_agent_mail_v2")
+async def read_agent_mail_v2(scope: RunScope, message_id: int) -> MailReadResult:
+    from .runtime import current
+
+    try:
+        mail = await AgentMessages(current().database).read(scope, message_id)
+    except (HTTPException, PermissionError):
+        # Both a transient authority outage and a revoked grant prohibit payload
+        # release. Neither proves consumption: retain the signal's ownership
+        # until a live check succeeds or the recipient closes/hands off.
+        return MailUnavailable()
+    return MailReady(mail) if mail is not None else MailObsolete()
 
 
 async def dispatch_mail(runtime: Runtime, state: MailDispatch, *, limit: int = 100) -> None:
