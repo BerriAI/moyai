@@ -29,9 +29,10 @@ workspace and Settings share the collapsed state. Mobile navigation stays an ove
 
 The folder workspace key uses the shared Button and Radix Dialog behavior, including
 Escape, outside dismissal and the Command/Control-period shortcut. Its resource
-menu floats within the chat area and must not resize the transcript, move the
-composer or change their scroll positions. The independent Computer/resource
-side panel still resizes the chat through its existing split.
+menu reserves a 280px column with a 16px gap from the transcript and composer.
+Below 640px of available chat width, it uses a bounded scrolling row above chat
+instead of covering content. Closing the menu restores the full chat area.
+The independent Computer/resource side panel retains its existing split.
 
 Images/fonts belong to `native/web/assets`; public files and the sculpture model
 belong to `native/web/public`. Analytics rendering and automation normalization

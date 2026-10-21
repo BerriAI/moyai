@@ -1,5 +1,6 @@
-/* This menu floats inside chat without changing its geometry.
-   Only the independent Computer/PR side panel changes the outer split. */
+/* Reserve room for resources instead of painting over messages or the composer.
+   Use chat width, not viewport width, because the independent panel is resizable. */
+.chat { container: workspace-chat / inline-size; }
 .chat-layout {
   position: relative;
   display: grid;
@@ -9,6 +10,11 @@
   min-height: 0;
   height: 100%;
   flex: 1;
+}
+/* Keep the track through Radix's exit animation, then return all space to chat. */
+.chat-layout:has(> .workspace-overlay-host:not(:empty)) {
+  grid-template-columns: minmax(0, 1fr) 288px;
+  column-gap: 16px;
 }
 .chat-content {
   position: relative;
@@ -21,8 +27,11 @@
   min-height: 0;
 }
 .workspace-overlay-host {
-  position: absolute;
-  inset: 0;
+  position: relative;
+  grid-column: 2;
+  grid-row: 1;
+  margin-block: 8px;
+  margin-inline-end: 8px;
   z-index: 40;
   min-inline-size: 0;
   min-block-size: 0;
@@ -32,14 +41,14 @@
 .workspace-overlay-host:empty { display: none; }
 
 .workspace-overlay-content {
-  --workspace-overlay-edge: 8px;
+  --workspace-overlay-edge: 0px;
   --workspace-overlay-offscreen: calc(100% + var(--workspace-overlay-edge));
   position: absolute;
   inset-block-start: var(--workspace-overlay-edge);
   inset-inline-end: var(--workspace-overlay-edge);
   box-sizing: border-box;
-  inline-size: min(360px, calc(100% - 2 * var(--workspace-overlay-edge)));
-  max-block-size: min(560px, calc(100% - 2 * var(--workspace-overlay-edge)));
+  inline-size: 100%;
+  max-block-size: min(560px, 100%);
   min-inline-size: 0;
   overflow: auto;
   overscroll-behavior: contain;
@@ -89,6 +98,23 @@
 .workspace-overlay-content > .workspace-overview.workspace-picker {
   max-height: none;
   overflow: visible;
+}
+
+/* A narrow chat cannot fit two usable columns. Stack a bounded, independently
+   scrolling resource row above it instead, including when the split is dragged. */
+@container workspace-chat (width < 640px) {
+  .chat-layout:has(> .workspace-overlay-host:not(:empty)) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, min(40%, 248px)) minmax(0, 1fr);
+    gap: 16px;
+  }
+  .chat-layout:has(> .workspace-overlay-host:not(:empty)) > .chat-content { grid-row: 2; }
+  .workspace-overlay-host {
+    grid-column: 1;
+    inline-size: min(280px, calc(100% - 16px));
+    justify-self: end;
+    margin-block-end: 0;
+  }
 }
 
 /* Do not paint even an exit frame over a panel that has replaced main chat. */

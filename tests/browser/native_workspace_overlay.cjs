@@ -167,24 +167,33 @@ async function geometry(page) {
   });
 }
 
-test('workspace floats within chat across live ratio changes without resizing it', async t => {
+test('workspace stays separate from chat across live ratio changes', async t => {
   const page = await pageFor(t);
   const content = await opened(page);
-  for (const size of ['65%', '380px', '820px']) {
+  for (const size of ['65%', '380px', '639px', '640px', '820px']) {
     await page.evaluate(size => window.overlayFixture.setSize(size), size);
     await page.waitForFunction(size => document.querySelector('.workspace').style.getPropertyValue('--chat-size') === size, size);
     const box = await geometry(page);
-    assert(Math.abs(box.host.right - box.chat.right) < 1, JSON.stringify(box));
+    assert(Math.abs(box.host.right - (box.chat.right - 8)) < 1, JSON.stringify(box));
     assert(Math.abs(box.content.right - (box.chat.right - 8)) < 1);
-    assert(box.content.width <= 360.1 && box.content.left >= box.chat.left);
+    assert(box.content.width <= 280.1 && box.content.left >= box.chat.left);
     assert(box.content.bottom <= box.chat.bottom);
     assert(box.content.right < box.panel.left);
     assert(box.content.right < box.workspace.right - 100, 'Not anchored to workspace/viewport far right');
-    assert.deepEqual(box.body, box.chat, 'The floating menu must not reserve chat space');
+    if (box.chat.width < 640) {
+      assert(box.body.top - box.content.bottom >= 16, JSON.stringify(box));
+      assert(box.content.bottom <= box.chat.top + 248);
+    } else {
+      assert(box.content.left - box.body.right >= 16, JSON.stringify(box));
+      assert.equal(box.content.width, 280);
+    }
   }
   assert.deepEqual(await content.locator('section').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))),
     ['Pull requests', 'Subagents', 'Outputs']);
-  assert(await content.evaluate(element => element.scrollHeight > element.clientHeight), 'One contained scrolling overlay');
+  assert(await content.evaluate(element => element.scrollHeight > element.clientHeight), 'One contained scrolling resource list');
+  await page.keyboard.press('Escape');
+  await content.waitFor({ state: 'detached' });
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(), await page.locator('.chat').boundingBox());
 });
 
 test('Radix retains exit animation, returns Escape focus, and does not animate resource refreshes', async t => {
@@ -237,14 +246,17 @@ test('existing attach-link dialog consumes Escape before the workspace overlay',
 });
 
 for (const width of [768, 320]) {
-  test(`closed resource panel leaves overlay inside the ${width}px main chat`, async t => {
+  test(`closed resource panel leaves resources separate from the ${width}px main chat`, async t => {
     const page = await pageFor(t, { viewport: { width, height: 800 } }, '?panel=closed');
     const before = await page.locator('.chat-content').boundingBox();
     await opened(page);
     const box = await geometry(page);
     assert(box.content.left >= box.chat.left && box.content.right <= box.chat.right);
-    assert(box.content.bottom <= box.chat.bottom && box.content.width <= 360.1);
-    assert.deepEqual(await page.locator('.chat-content').boundingBox(), before, 'Compact menu must not resize chat');
+    assert(box.content.bottom <= box.chat.bottom && box.content.width <= 280.1);
+    assert(box.chat.width < 640 ? box.body.top - box.content.bottom >= 16 : box.content.left - box.body.right >= 16);
+    await page.keyboard.press('Escape');
+    await page.locator('[data-slot="workspace-overlay-content"]').waitFor({ state: 'detached' });
+    assert.deepEqual(await page.locator('.chat-content').boundingBox(), before, 'Closing restores the full chat area');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   });
 }
@@ -287,4 +299,27 @@ test('reduced motion removes both animations without losing keyboard dismissal',
   await content.waitFor({ state: 'detached' });
   await page.waitForFunction(() => document.activeElement?.textContent === 'Workspace');
   assert(await page.getByRole('button', { name: 'Workspace', exact: true }).evaluate(element => element === document.activeElement));
+});
+
+for (const direction of ['ltr', 'rtl']) test(`resource track stays separate through exit in ${direction}`, async t => {
+  const page = await pageFor(t, { viewport: { width: 1440, height: 500 } }, '?panel=closed');
+  await page.locator('html').evaluate((element, direction) => element.dir = direction, direction);
+  const before = await page.locator('.chat-content').boundingBox();
+  const content = await opened(page);
+  const during = await page.locator('.chat-content').boundingBox();
+  const box = await geometry(page);
+  assert(direction === 'rtl' ? box.body.left - box.content.right >= 16 : box.content.left - box.body.right >= 16);
+  await page.evaluate(() => {
+    window.exitGeometry = null;
+    document.addEventListener('animationstart', event => {
+      if (event.animationName === 'workspace-overlay-leave') {
+        const box = document.querySelector('.chat-content').getBoundingClientRect();
+        window.exitGeometry = { x: box.x, y: box.y, width: box.width, height: box.height };
+      }
+    });
+  });
+  await page.keyboard.press('Escape');
+  await content.waitFor({ state: 'detached' });
+  assert.deepEqual(await page.evaluate(() => window.exitGeometry), during);
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(), before);
 });

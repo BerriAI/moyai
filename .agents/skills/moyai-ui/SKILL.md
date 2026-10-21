@@ -19,8 +19,9 @@ an edge-to-edge workspace without an outer gutter or rounded frame. The sidebar 
 alongside pins and folders, newest first, with each session’s status or PR state on a second line under the title. Keep chat entry compact, with attachment/model tools below. Use monospace for code,
 paths and technical metadata, with General Sans for prose. Keep review diffs prominent
 and expose repository/commit metadata through the Review details disclosure.
-The workspace menu floats without reflowing chat; only the independent side
-panel changes chat proportions. Inspect current screens before changing them.
+The workspace menu reserves a narrow column with a gap from chat, or a bounded
+row above it when chat is narrow. The independent side panel controls the outer
+split. Inspect current screens before changing them.
 
 ## Sources and controls
 
