@@ -28,22 +28,20 @@ async def test_native_checks_share_one_checkout_without_caching(runtime, actor):
     event.listen(runtime.database.engine.sync_engine, "checkout", checkout)
     try:
         for _ in range(2):
-            await authorize_stream_viewer(runtime.database, None, request(), actor, session.id, actor.id)
+            await authorize_stream_viewer(runtime.database, None, request(), actor, session.id)
         assert len(checkouts) == 2
     finally:
         event.remove(runtime.database.engine.sync_engine, "checkout", checkout)
 
 
-@pytest.mark.parametrize("revocation", ["disable", "version", "delete", "owner", "requester"])
+@pytest.mark.parametrize("revocation", ["disable", "version", "delete", "owner"])
 async def test_revoked_native_authority_never_releases_ready_content(runtime, actor, revocation):
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    requester_id = actor.id
 
     async def authorize():
-        await authorize_stream_viewer(runtime.database, None, request(), actor, session.id, requester_id)
+        await authorize_stream_viewer(runtime.database, None, request(), actor, session.id)
 
     async def source():
-        nonlocal requester_id
         async with runtime.database.sessions.begin() as db:
             if revocation in {"disable", "version"}:
                 values = {"enabled": False} if revocation == "disable" else {"auth_version": actor.auth_version + 1}
@@ -54,10 +52,7 @@ async def test_revoked_native_authority_never_releases_ready_content(runtime, ac
                 other = User(username="other", display_name="Other", password="unused", role="member")
                 db.add(other)
                 await db.flush()
-                if revocation == "owner":
-                    await db.execute(update(Session).where(Session.id == session.id).values(owner_id=other.id))
-                else:
-                    requester_id = other.id
+                await db.execute(update(Session).where(Session.id == session.id).values(owner_id=other.id))
         yield "private"
 
     async def disconnected():
@@ -92,9 +87,9 @@ async def test_canonical_check_is_fresh_and_does_not_hold_native_connection(runt
     event.listen(runtime.database.engine.sync_engine, "checkout", checkout)
     event.listen(runtime.database.engine.sync_engine, "checkin", checkin)
     try:
-        await authorize_stream_viewer(runtime.database, identity, request(), actor, session.id, actor.id)
+        await authorize_stream_viewer(runtime.database, identity, request(), actor, session.id)
         with pytest.raises(HTTPException) as revoked:
-            await authorize_stream_viewer(runtime.database, identity, request(), actor, session.id, actor.id)
+            await authorize_stream_viewer(runtime.database, identity, request(), actor, session.id)
         assert revoked.value.status_code == 401
         assert checks == 2
     finally:
@@ -117,8 +112,8 @@ async def test_source_audience_is_rechecked_each_release(runtime, actor):
         return calls == 1
 
     runtime.database.slack_access = audience
-    await authorize_stream_viewer(runtime.database, None, request(), actor, session.id, actor.id)
+    await authorize_stream_viewer(runtime.database, None, request(), actor, session.id)
     with pytest.raises(HTTPException) as revoked:
-        await authorize_stream_viewer(runtime.database, None, request(), actor, session.id, actor.id)
+        await authorize_stream_viewer(runtime.database, None, request(), actor, session.id)
     assert revoked.value.status_code == 404
     assert calls == 2

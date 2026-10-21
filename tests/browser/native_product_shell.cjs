@@ -1942,6 +1942,57 @@ for(const width of [1440,768,320])test(`live work and subagents survive steering
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
 });
 
+for(const width of [1440,768,320])test(`shared conversation activity includes tools and subagents at ${width}px`,async t=>{
+  const start=Date.now()-60000,at=seconds=>new Date(start+seconds*1000).toISOString();
+  reset({ownerId:'teammate',sessionOverrides:{[sessionId]:{visibility:'shared',surface:'slack'}},
+    turns:[{id:turnId,actor_id:'teammate',is_self:false,status:'running',created_at:at(0),connections:[],usage:{}}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'teammate',author_name:'Test teammate',is_self:false,
+      content:'Check the shared task.',created_at:at(0)}],
+    workProgress:{messages:[{id:'shared-1',phase:'commentary',text:'Checking the shared task.',created_at:at(5)}],
+      tools:[{id:'shared-read',name:'read_file',status:'completed',created_at:at(6),finished_at:at(7)}],
+      subagents:[{id:'child',session_id:'private-child-chat',name:'Kepler',avatar:0,depth:0,status:'completed',
+        created_at:at(8),updated_at:at(10),messages:[{id:'child-result',phase:'final_answer',text:'Delegated check passed.',created_at:at(10)}],tools:[]}],
+      tools_limited:false,subagents_limited:false},
+    actionDetails:{'shared-read':{id:'shared-read',name:'read_file',status:'completed',created_at:at(6),finished_at:at(7),
+      input:'README.md',output:'Shared file contents.',restricted:false,input_truncated:false,output_truncated:false}}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const progress=page.getByRole('region',{name:'Work progress'});
+  await progress.getByText('Checking the shared task.',{exact:true}).waitFor({timeout:10000});
+  await progress.getByRole('button',{name:/Working for/}).waitFor();
+  await waitFor(()=>state.streams.length>0,'shared activity stream');
+  emit({type:'response_start',run_id:turnId,step:2},0);
+  emit({type:'text_start',index:0,text:'Live shared update.',phase:'commentary'},1);
+  await progress.getByText('Live shared update.',{exact:true}).waitFor();
+  await progress.getByRole('button',{name:'1 action',exact:true}).click();
+  await progress.getByRole('button',{name:'Open Read file action',exact:true}).click();
+  await page.getByText('Shared file contents.',{exact:true}).waitFor();
+  await page.getByRole('complementary',{name:'Session panel',exact:true}).getByRole('button',{name:'Hide side panel',exact:true}).click();
+  await progress.getByRole('button',{name:/Kepler Completed/}).click();
+  await progress.getByText('Delegated check passed.',{exact:true}).waitFor();
+  assert.equal(await progress.getByRole('button',{name:'Open Kepler details',exact:true}).count(),0,'Private follow-up chats stay private.');
+  state.workProgress.messages.push({id:'shared-2',phase:'commentary',text:'The shared check passed.',created_at:at(20)});
+  await progress.getByText('The shared check passed.',{exact:true}).waitFor();
+  if(process.env.MOYAI_UI_CAPTURE_DIR) {
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`shared-progress-${width}.png`)});
+  }
+  state.status='idle';state.turns[0].status='completed';state.turns[0].finished_at=at(30);
+  state.messages.push({id:2,turn_id:turnId,role:'assistant',author_id:null,content:'Shared final answer.',created_at:at(30)});
+  await page.getByText('Shared final answer.',{exact:true}).waitFor();
+  await progress.locator('.turn-progress-toggle[aria-expanded="false"]').waitFor();
+  await page.reload();
+  const toggle=progress.getByRole('button',{name:'Worked for 30s',exact:true});
+  await toggle.waitFor();
+  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  await toggle.focus();await page.keyboard.press('Enter');
+  await progress.getByText('The shared check passed.',{exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  state.denied=true;
+  await page.getByText('Checking the shared task.',{exact:true}).waitFor({state:'hidden'});
+  assert.equal(await page.getByText('The shared check passed.',{exact:true}).count(),0);
+  assert.equal(state.requests.some(row=>row.path.endsWith('/actions/shared-read')),true);
+});
+
 for(const width of [1440,768,320])test(`empty steering activity stays hidden during refresh at ${width}px`,async t=>{
   const start=Date.now()-60000,at=seconds=>new Date(start+seconds*1000).toISOString();
   const progressPath=`/api/sessions/${sessionId}/progress/${turnId}`;

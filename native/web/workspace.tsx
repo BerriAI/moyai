@@ -244,7 +244,7 @@ function SubagentContent({ sessionId, agent, active, onOpenFile }: { sessionId: 
       } catch (error) {
         if (controller.signal.aborted) return
         setDetail(null); denied = isAccessError(error)
-        setError(denied ? "These requester-only details are no longer available to this account." : message(error))
+        setError(denied ? "These details are no longer available to this account." : message(error))
       } finally { if (!controller.signal.aborted) setLoading(false) }
       if (!controller.signal.aborted && !terminal && !denied) timer = setTimeout(poll, 4000)
     }
@@ -254,7 +254,7 @@ function SubagentContent({ sessionId, agent, active, onOpenFile }: { sessionId: 
   const last = detail?.steps.filter(step => ["run_completed", "run_failed"].includes(step.kind)).at(-1)
   const status = last?.kind === "run_completed" ? "completed" : last?.kind === "run_failed" ? "failed" : agent.status
   return <section className="workspace-subagent-panel" aria-label={`${agent.name} details`}>
-    <header><AgentAvatar avatar={agent.avatar} /><div><h2>{detail?.name || agent.name}</h2><p aria-live="polite">{statusText[status] ?? status} · Requester-only details</p></div>
+    <header><AgentAvatar avatar={agent.avatar} /><div><h2>{detail?.name || agent.name}</h2><p aria-live="polite">{statusText[status] ?? status}</p></div>
       {canInspect && <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh subagent details" title="Refresh subagent details" disabled={!active || loading} onClick={() => setRevision(value => value + 1)}><RefreshCw size={16} /></Button>}</header>
     {!canInspect ? <p className="workspace-picker-empty">Only the person who requested this subagent can inspect its details.</p>
       : error ? <div className="workspace-picker-error" role="alert"><p>{error}</p><Button type="button" variant="outline" size="sm" disabled={!active || loading} onClick={() => setRevision(value => value + 1)}>Retry</Button></div>

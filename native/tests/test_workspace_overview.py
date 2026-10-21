@@ -90,7 +90,7 @@ async def native_run(runtime, parent_id, *, terminal="run_completed", run_id=Non
     return run_id
 
 
-async def test_nested_colon_ids_follow_requester_ancestry_and_keep_stable_public_names(runtime, actor):
+async def test_nested_colon_ids_follow_conversation_ancestry_and_keep_stable_public_names(runtime, actor):
     shared = await runtime.database.create_session(actor, NewSession(visibility="shared"))
     private = await runtime.database.create_session(actor, NewSession(visibility="private"))
     async with sign_in(runtime) as owner, member_client(runtime) as (member, requester):
@@ -116,15 +116,15 @@ async def test_nested_colon_ids_follow_requester_ancestry_and_keep_stable_public
         assert all(owner_rows[key]["name"] == row["name"] for key, row in member_rows.items())
         assert all(row["name"] and row["name"] != "private-sdk-agent" for row in member_rows.values())
         assert owner_rows[owner_run]["can_inspect"]
-        assert not owner_rows[member_run]["can_inspect"]
-        assert not member_rows[owner_run]["can_inspect"]
+        assert owner_rows[member_run]["can_inspect"]
+        assert member_rows[owner_run]["can_inspect"]
         assert member_rows[member_run]["can_inspect"] and member_rows[nested_run]["can_inspect"]
         assert member_rows[nested_run]["parent_id"] == member_run
         assert member_rows[nested_run]["depth"] == member_rows[member_run]["depth"] + 1
         assert all(row["status"] == "completed" for row in member_rows.values())
         assert "private-" not in str(second)
 
-        for run_id in (member_run, nested_run):
+        for run_id in (owner_run, member_run, nested_run):
             response = await member.get(f"{path}/subagents/{run_id}")
             assert response.status_code == 200, response.text
             detail = response.json()
@@ -139,9 +139,8 @@ async def test_nested_colon_ids_follow_requester_ancestry_and_keep_stable_public
                 "private-event-metadata", "private-run-metadata", "private-provider-error",
             ):
                 assert secret not in response.text
-            # Session ownership and even the admin role do not grant another requester's details.
-            assert (await owner.get(f"{path}/subagents/{run_id}")).status_code == 404
-        for run_id in (owner_run, private_run, owner_turn.id, "unrelated-orphan", "missing"):
+            assert (await owner.get(f"{path}/subagents/{run_id}")).json() == detail
+        for run_id in (private_run, owner_turn.id, "unrelated-orphan", "missing"):
             assert (await member.get(f"{path}/subagents/{run_id}")).status_code == 404
         assert (await member.get(f"/api/sessions/{private.id}/workspace")).status_code == 404
 

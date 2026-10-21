@@ -5,7 +5,6 @@ import os
 
 import pytest
 import test_product_identity_admission as identities
-from fastapi import HTTPException
 from sqlalchemy import event, text, update
 from test_product_identity import request
 
@@ -27,7 +26,7 @@ async def test_ready_frame_cannot_cross_real_product_revocation(admitted_product
 
     async def authorize():
         await authorize_stream_viewer(
-            product.database, product.adapter, viewer_request, product.actor, session.id, product.actor.id,
+            product.database, product.adapter, viewer_request, product.actor, session.id,
         )
 
     async def source():
@@ -73,7 +72,7 @@ async def test_real_product_release_reduces_native_checkouts_and_returns_all_con
         assert len(checkouts) == 3
         checkouts.clear()
         await asyncio.wait_for(authorize_stream_viewer(
-            product.database, product.adapter, viewer_request, product.actor, session.id, product.actor.id,
+            product.database, product.adapter, viewer_request, product.actor, session.id,
         ), 2)
         assert len(checkouts) == 2
         assert product.database.engine.pool.checkedout() == 0
@@ -81,7 +80,7 @@ async def test_real_product_release_reduces_native_checkouts_and_returns_all_con
         event.remove(product.database.engine.sync_engine, "checkout", checkout)
 
 
-async def test_linked_requester_is_rechecked_after_profile_conflict(slack_admission):
+async def test_shared_activity_does_not_require_the_original_requester_link(slack_admission):
     product = slack_admission
     session = await product.database.create_session(product.actor, NewSession(visibility="shared"))
     viewer_request = request(state={"product_identity_grant": product.principal.grant})
@@ -89,7 +88,7 @@ async def test_linked_requester_is_rechecked_after_profile_conflict(slack_admiss
     async def authorize():
         await authorize_stream_viewer(
             product.database, product.adapter, viewer_request, product.actor,
-            session.id, product.raw_principal.id,
+            session.id,
         )
 
     await authorize()
@@ -98,6 +97,4 @@ async def test_linked_requester_is_rechecked_after_profile_conflict(slack_admiss
             text("UPDATE moyai.users SET profile_conflict=1 WHERE id=:id"),
             {"id": product.raw_principal.id},
         )
-    with pytest.raises(HTTPException) as revoked:
-        await authorize()
-    assert revoked.value.status_code in {401, 403}
+    await authorize()
