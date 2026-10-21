@@ -2212,19 +2212,33 @@ for(const width of [1440,768])test(`sidebar collapses to an accessible rail with
   assert.equal(await sidebar.isVisible(),false);
 });
 
-for(const width of [1440,768,320])test(`home and Settings share the same wordmark position and typography at ${width}px`,async t=>{
-  reset();const page=await pageFor(t,'',width);
+for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`home and Settings share the same logo alignment and typography at ${width}px in ${theme}`,async t=>{
+  reset();const page=await pageFor(t,'',width,p=>p.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme));
   if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
   const brand=page.locator('.moyai-brand');await brand.waitFor();await page.evaluate(()=>document.fonts.ready);
   const metrics=()=>brand.evaluate(el=>{
     const bounds=el.querySelector('span').getBoundingClientRect(), style=getComputedStyle(el), subtitle=getComputedStyle(el.querySelector('small'));
     return {x:bounds.x,y:bounds.y,height:bounds.height,font:style.font,spacing:style.letterSpacing,transform:style.textTransform,subtitle:subtitle.font};
   });
-  const home=await metrics();
+  const logoMetrics=async()=>{
+    const logo=brand.locator('.moyai-brand-mark:visible');
+    assert.equal(await logo.count(),1);
+    assert.equal(await logo.getAttribute('alt'),'');
+    assert.ok((await logo.getAttribute('src')).includes(theme==='dark'?'moyai-mark-white':'moyai-mark-blue'));
+    await logo.evaluate(image=>image.decode());
+    const bounds=await logo.boundingBox(), text=await brand.locator('.moyai-brand-name').boundingBox();
+    assert.equal(bounds.width,20);assert.equal(bounds.height,20);
+    assert.ok(Math.abs(bounds.y+bounds.height/2-text.y-text.height/2)<1,'logo and wordmark are vertically centered');
+    assert.equal(text.x-bounds.x-bounds.width,8,'logo has a consistent 8px gap before the wordmark');
+    assert.equal(await brand.getAttribute('href'),'#');
+    return bounds;
+  };
+  const home=await metrics(), homeLogo=await logoMetrics();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
   await page.getByRole('heading',{name:'Settings',exact:true}).waitFor();
-  assert.equal(await brand.count(),1);assert.equal(await brand.locator('img').count(),0);
+  assert.equal(await brand.count(),1);
   assert.deepEqual(await metrics(),home);
+  assert.deepEqual(await logoMetrics(),homeLogo);
   await brand.click();await page.locator('.home-composer').waitFor();
 });
 
@@ -3065,6 +3079,11 @@ for(const theme of ['dark','light'])for(const width of [1440,768])test(`session 
   await page.keyboard.press('Shift+ArrowRight');assert.equal(await size(),initial+50);
   await page.keyboard.press('End');assert.equal(await size(),Math.min(440,width-360));
   await page.keyboard.press('Home');assert.equal(await size(),200);
+  const wordmark=await page.locator('.moyai-brand-name').boundingBox();
+  const search=await page.getByRole('button',{name:'Search sessions & commands',exact:true}).boundingBox();
+  assert.ok(wordmark.x+wordmark.width<=search.x,'brand does not overlap controls at minimum sidebar width');
+  assert.equal(await page.locator('.moyai-brand small').isVisible(),false);
+  assert.equal((await page.locator('.moyai-brand-mark:visible').boundingBox()).width,20);
   await page.keyboard.press('Enter');assert.equal(await size(),initial);
   const drag=async delta=>{
     const box=await handle.boundingBox();
@@ -3076,6 +3095,10 @@ for(const theme of ['dark','light'])for(const width of [1440,768])test(`session 
   assert.equal(await page.locator('.sidebar-resize-shield').count(),0);
   await handle.dblclick();assert.equal(await size(),initial);
   await drag(-1000);await page.mouse.up();assert.equal(await size(),200);
+  await drag(22);await page.mouse.up();assert.equal(await size(),222);
+  const narrowWordmark=await page.locator('.moyai-brand-name').boundingBox();
+  const narrowSearch=await page.getByRole('button',{name:'Search sessions & commands',exact:true}).boundingBox();
+  assert.ok(narrowWordmark.x+narrowWordmark.width<=narrowSearch.x,'brand stays clear of controls near the byline breakpoint');
   await drag(1500);await page.mouse.up();assert.equal(await size(),Math.min(440,width-360));
   assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).innerText(),'Keep this draft while resizing.');
   assert.equal(await page.locator('.app').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
