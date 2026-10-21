@@ -55,7 +55,7 @@ def settings(values: Mapping[str, str]) -> Settings:
         artifact_secret_access_key=SecretStr(values.get("OBJECT_STORAGE_SECRET_ACCESS_KEY", "")),
         artifact_session_token=SecretStr(values.get("OBJECT_STORAGE_SESSION_TOKEN", "")),
         sandbox_provider=values.get("SANDBOX_PROVIDER", "modal"),
-        modal_runtime=values.get("MOYAI_MODAL_RUNTIME", "gvisor"),
+        modal_runtime=values.get("MOYAI_MODAL_RUNTIME", "vm"),
         lambda_region=values.get("LAMBDA_REGION", "us-east-1"),
         lambda_profile=values.get("LAMBDA_PROFILE", ""),
         lambda_image=values.get("LAMBDA_IMAGE", ""),

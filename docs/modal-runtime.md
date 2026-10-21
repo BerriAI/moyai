@@ -1,17 +1,20 @@
 # Full Linux computers on Modal
 
-Set `MOYAI_MODAL_RUNTIME=vm` to run Moyai's Modal computers with a full Linux
-kernel. Leave it at `gvisor` for the existing default.
+Moyai's Modal computers use a full Linux kernel by default. No runtime setting
+is required. Set `MOYAI_MODAL_RUNTIME=gvisor` to explicitly use gVisor instead.
 
 ```dotenv
 SANDBOX_PROVIDER=modal
 MOYAI_MODAL_RUNTIME=vm
 ```
 
-For source development, add this to `.env` and restart `uv run --frozen moyai dev`.
-For Docker installations, set it in the installation's `.env` and recreate the
-application services. The configuration command also accepts an exported
-`MOYAI_MODAL_RUNTIME` when preparing a fresh installation.
+For source development, set an override in `.env` and restart
+`uv run --frozen moyai dev`. For Docker installations, set it in the
+installation's `.env` and recreate the application services. The configuration
+command also accepts an exported `MOYAI_MODAL_RUNTIME` when preparing a fresh
+installation. An existing explicit `gvisor` setting remains in effect until
+removed or changed to `vm`; installations without a setting adopt the VM default
+when upgraded.
 
 Use the same setting in every API, worker, broker, coordinator, and image-build
 process. This is a deployment setting, not a per-conversation switch. Drain active

@@ -73,23 +73,34 @@ def test_lambda_configuration_preserves_native_provider_without_modal_credential
     assert configured.lambda_checkpoint_timeout == 900
 
 
-@pytest.mark.parametrize("runtime", ["gvisor", "vm"])
+@pytest.mark.parametrize("runtime", [None, "gvisor", "vm"])
 def test_installer_preserves_modal_runtime_for_every_role(install_environment, runtime):
     from moyai.deployment_checks import validate
     from moyai.install_config import prepare
 
-    install_environment["MOYAI_MODAL_RUNTIME"] = runtime
+    if runtime is not None:
+        install_environment["MOYAI_MODAL_RUNTIME"] = runtime
+    expected = runtime or "vm"
     values, _ = prepare(
         install_environment, image="moyai:test", topology="split", temporal="external",
         secrets_from_env=False,
     )
-    assert values["MOYAI_MODAL_RUNTIME"] == runtime
+    assert values["MOYAI_MODAL_RUNTIME"] == expected
     for role in ("api", "coordinator", "broker", "worker"):
         configured = configuration(
             {**install_environment, **values}, None, role=role,
         )
         configured = configuration(configured, new_state(install_environment, configured), role=role)
-        assert validate(configured).modal_runtime == runtime
+        assert validate(configured).modal_runtime == expected
+
+
+def test_existing_deployment_without_runtime_uses_vm(install_environment):
+    from moyai.deployment_checks import validate
+
+    _, values = prepared(install_environment)
+    assert values.pop("MOYAI_MODAL_RUNTIME") == "vm"
+    # The preflight's own fallback also applies when a caller passes old config.
+    assert validate(values).modal_runtime == "vm"
 
 
 @pytest.mark.parametrize("environment", [

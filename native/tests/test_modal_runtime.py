@@ -25,31 +25,33 @@ def isolated_environment(monkeypatch):
 
 
 @pytest.mark.parametrize("name", ["MOYAI_MODAL_RUNTIME", "MODAL_FUNCTION_RUNTIME"])
-async def test_application_initializes_sdk_before_agent_or_recovery(tmp_path, monkeypatch, name):
-    monkeypatch.setenv(name, "vm")
+@pytest.mark.parametrize("selected", ["vm", "gvisor"])
+async def test_application_initializes_sdk_before_agent_or_recovery(tmp_path, monkeypatch, name, selected):
+    monkeypatch.setenv(name, selected)
     settings = Settings(_env_file=None, data_dir=tmp_path)
     runtime = Runtime(settings)
     try:
-        assert settings.modal_runtime == "vm"
-        assert config.get("function_runtime") == "vm"
+        assert settings.modal_runtime == selected
+        assert config.get("function_runtime") == selected
         # Identical configuration in another Runtime is harmless.
         configure_modal_runtime(settings)
     finally:
         await runtime.close()
 
 
-def test_dotenv_runtime_is_exported_to_sdk(tmp_path):
+@pytest.mark.parametrize("selected", ["vm", "gvisor"])
+def test_dotenv_runtime_is_exported_to_sdk(tmp_path, selected):
     dotenv = tmp_path / ".env"
-    dotenv.write_text("MOYAI_MODAL_RUNTIME=vm\n")
+    dotenv.write_text(f"MOYAI_MODAL_RUNTIME={selected}\n")
     settings = Settings(_env_file=dotenv)
     configure_modal_runtime(settings)
-    assert config.get("function_runtime") == "vm"
+    assert config.get("function_runtime") == selected
 
 
-def test_default_remains_gvisor():
+def test_default_uses_vm():
     settings = Settings(_env_file=None)
     configure_modal_runtime(settings)
-    assert config.get("function_runtime") == "gvisor"
+    assert config.get("function_runtime") == "vm"
 
 
 @pytest.mark.parametrize("value", ["", "VM", "runc", "invalid"])
@@ -74,17 +76,20 @@ def test_different_runtimes_cannot_race_in_one_process():
     assert config.get("function_runtime") == "vm"
 
 
-async def test_image_prewarming_uses_selected_runtime(monkeypatch):
+@pytest.mark.parametrize("selected", [None, "gvisor"])
+async def test_image_prewarming_uses_selected_runtime(monkeypatch, selected):
     import build_workspace_image
 
     async def lookup(*args, **kwargs):
-        assert config.get("function_runtime") == "vm"
+        assert config.get("function_runtime") == (selected or "vm")
         return object()
 
     image = SimpleNamespace(build=SimpleNamespace(aio=AsyncMock()))
+    if selected is not None:
+        monkeypatch.setenv("MOYAI_MODAL_RUNTIME", selected)
     monkeypatch.setattr(build_workspace_image.modal.App.lookup, "aio", lookup)
     monkeypatch.setattr(build_workspace_image, "workspace_image", lambda: image)
     assert await build_workspace_image.build_workspace_image(
-        Settings(_env_file=None, modal_runtime="vm"),
+        Settings(_env_file=None),
     ) is image
     image.build.aio.assert_awaited_once()

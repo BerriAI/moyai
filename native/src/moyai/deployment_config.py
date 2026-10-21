@@ -156,7 +156,7 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
             _required(values, field)
     else:
         raise InstallationError("SANDBOX_PROVIDER must be modal or lambda.")
-    modal_runtime = values.get("MOYAI_MODAL_RUNTIME", values.get("MODAL_FUNCTION_RUNTIME", "gvisor"))
+    modal_runtime = values.get("MOYAI_MODAL_RUNTIME", values.get("MODAL_FUNCTION_RUNTIME", "vm"))
     if modal_runtime not in {"gvisor", "vm"}:
         raise InstallationError("MOYAI_MODAL_RUNTIME must be gvisor or vm.")
     if values.get("MODAL_FUNCTION_RUNTIME", modal_runtime) != modal_runtime:

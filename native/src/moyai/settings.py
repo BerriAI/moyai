@@ -82,7 +82,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MOYAI_MODAL_APP", "MODAL_APP_NAME"),
     )
     modal_runtime: Literal["gvisor", "vm"] = Field(
-        default="gvisor",
+        default="vm",
         validation_alias=AliasChoices("MOYAI_MODAL_RUNTIME", "MODAL_FUNCTION_RUNTIME"),
     )
     sandbox_provider: Literal["modal", "lambda"] = Field(default="modal", validation_alias="SANDBOX_PROVIDER")
