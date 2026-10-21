@@ -195,6 +195,14 @@ class ProductConnections:
                 self._grants, actor_id, shared_session=shared_session, surface=surface,
                 selected_ids=selections,
             )
+        from .granola import connection_id as granola_id
+        from .granola import grants as granola_grants
+        if any(selection in {"granola", granola_id(actor_id)} for selection in selections):
+            if db is not None:
+                available += await granola_grants(db, actor_id, shared_session=shared_session, surface=surface)
+            else:
+                async with self.database.sessions() as transaction:
+                    available += await granola_grants(transaction, actor_id, shared_session=shared_session, surface=surface)
         selected: dict[str, Grant] = {}
         for selection in dict.fromkeys(selections):
             matches = [g for g in available if g.id == selection or g.kind == selection]

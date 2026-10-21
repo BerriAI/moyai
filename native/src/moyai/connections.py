@@ -52,7 +52,7 @@ def selected_connections(scope: RunScope) -> tuple[SelectedConnection, ...]:
         SelectedConnection(grant, ConnectionPolicy.model_validate(grant.policy))
         for grant in sorted(scope.grants, key=lambda item: item.id)
     )
-    if any(item.grant.kind not in SERVICES for item in selected):
+    if any(item.grant.kind not in {*SERVICES, "granola"} for item in selected):
         raise ValueError("Unsupported connected service.")
     if len({item.prefix for item in selected}) != len(selected):
         raise ValueError("Selected account tool prefixes collide.")
@@ -126,7 +126,11 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
 
     def scoped(ctx: RunContext[RunScope], connection: SelectedConnection) -> AbstractToolset[RunScope]:
         grant, policy = connection.grant, connection.policy
-        if policy.product is not None:
+        if grant.kind == "granola":
+            from .granola import GranolaToolset
+            from .runtime import current
+            native = GranolaToolset(current().database, ctx.deps, grant)
+        elif policy.product is not None:
             native = product_service().toolset(ctx.deps, grant)
         else:
             credential = security.unseal(grant.credential).decode()

@@ -77,6 +77,7 @@ const settingsDestinations = [
   { page: "general", label: "General" },
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
   { page: "connections", label: "Connections" }, { page: "secrets", label: "Secrets" },
+  { page: "granola", label: "Granola" },
   { page: "personal-slack", label: "Personal Slack", productOnly: true },
   { page: "users", label: "Users", adminOnly: true }, { page: "performance", label: "Performance", adminOnly: true },
   { page: "usage", label: "Spend & usage", adminOnly: true },

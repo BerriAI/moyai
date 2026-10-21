@@ -3,9 +3,11 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs/promises');
 const personalPath = '/api/connections/slack/personal';
+const granolaPath = '/api/connections/granola/personal';
 function defaults() {
   return {
     requests: [], individual: true,
+    granola: {available:true,connected:true,oauth_configured:true,limitation:'Granola is read-only and available only in your private web chats, in your active Granola workspace.'},
     personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.'},
     memory: {source:'canonical',scope:{kind:'personal',owner_id:'viewer'},preferences:{enabled:true,auto_save:true,revision:1},
       capabilities:{read:true,create:true,update:true,delete:true,preferences:true},
@@ -41,6 +43,12 @@ async function settingsFixture() {
       if(url.pathname==='/api/settings/general')return json({delivery_mode:'when_idle',connection_ids:null});
       if(url.pathname==='/api/pull-requests/statuses')return json({});
       if(url.pathname==='/api/skills')return json({skills:[],has_more:false});
+      if(url.pathname===granolaPath){
+        if(state.granolaError)return json({detail:'Granola status is temporarily unavailable.'},503);
+        if(req.method==='DELETE')state.granola.connected=false;
+        return json(state.granola);
+      }
+      if(url.pathname===granolaPath+'/oauth')return state.granolaOAuthError?json({detail:'Granola access failed. Reconnect in Settings > Granola.'},502):json({url:'/?fixture-oauth=1#settings/granola'});
       if(url.pathname===personalPath){
         if(state.personalError)return json({detail:'Slack status is temporarily unavailable.'},503);
         if(req.method==='DELETE')state.personal={...state.personal,connected:false,health:'absent',label:'',effective_source:'organization'};
@@ -64,5 +72,5 @@ async function settingsFixture() {
   await server.listen();fixture.base=`http://127.0.0.1:${server.httpServer.address().port}`;
   fixture.close=async()=>{await server.close();await fs.rm(cache,{recursive:true,force:true});};return fixture;
 }
-module.exports={settingsFixture,personalPath};
+module.exports={settingsFixture,personalPath,granolaPath};
 if(require.main===module)settingsFixture().then(fixture=>console.log(fixture.base));

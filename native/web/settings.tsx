@@ -16,6 +16,7 @@ import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, ty
 import {
   checkPersonalSlack, connectExistingGitHubApp, disconnectPersonalSlack, getMe, getPersonalSlack, listGitHubRepositories,
   selectGitHubRepositories, startGitHubConnection, startPersonalSlackOAuth,
+  getPersonalGranola, startPersonalGranolaOAuth, disconnectPersonalGranola,
 } from "./generated/api"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
@@ -79,6 +80,7 @@ const destinations = [
   { id: "automations", title: "Automations", description: "Schedule recurring work and review past runs.", group: "Workflows", Icon: CalendarClock },
   { id: "memory", title: "Memory", description: "Manage what Moyai remembers about your work.", group: "Workflows", Icon: BookOpen },
   { id: "connections", title: "Connections", description: "Choose the accounts Moyai can use in your sessions.", group: "Integrations", Icon: Link2 },
+  { id: "granola", title: "Granola", description: "Read your Granola meeting notes in private chats.", group: "Integrations", Icon: FileText },
   { id: "personal-slack", title: "Personal Slack", description: "Use your Slack account in private chats with Moyai.", group: "Integrations", Icon: LockKeyhole, productOnly: true },
   { id: "secrets", title: "Secrets", description: "Manage personal and shared service credentials.", group: "Integrations", Icon: KeyRound },
   { id: "users", title: "Users", description: "Manage workspace members, roles, and access.", group: "Administration", Icon: Users, admin: true },
@@ -687,7 +689,7 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
           onUpdated={() => { resource.refresh(); setSelected(null) }} />}
       </>
     }}</LoadState>
-    <p className="ns-help ns-footer-help">To use your own Slack account, connect <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
+    <p className="ns-help ns-footer-help">Read meeting notes with <a className="ns-link" href="#settings/granola">Granola</a>. To use your own Slack account, connect <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
   </>
 }
 function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onClose, onUpdated }: {
@@ -839,6 +841,39 @@ function ProductPersonalSlack({ individual, onStartPrivateChat }: { individual: 
   }}</LoadState>
 }
 
+function PersonalGranola({ onStartPrivateChat }: { onStartPrivateChat: () => void }) {
+  const resource = useResource("/connections/granola/personal", signal => getPersonalGranola({ signal }).then(({ data }) => data))
+  const mutation = useMutation(), [disconnect, setDisconnect] = useState(false)
+  const cancelled = new URLSearchParams(location.search).get("granola") === "cancelled"
+  return <LoadState resource={resource}>{data => <section className="ns-personal-slack" aria-label="Your Granola connection">
+    <div className="ns-connection-card">
+      <div className="ns-connection-heading">
+        <span className="ns-provider-icon"><FileText size={24} aria-hidden="true" /></span>
+        <div className="ns-connection-identity"><h2>{data.connected ? "Your Granola notes" : "Connect Granola"}</h2>
+          <span className={`ns-connection-status ${data.connected ? "is-connected" : ""}`}><span aria-hidden="true" />{data.connected ? "Connected" : "Not connected"}</span>
+        </div>
+      </div>
+      <p className="ns-help">{data.limitation} Not used in shared chats, Slack threads, or automations.</p>
+      <p className="ns-help">Search and read meeting notes, summaries, and available transcripts. Granola plan and workspace permissions apply. Moyai cannot edit notes or switch your Granola workspace.</p>
+      {data.connected && <p className="ns-help">Select Granola in your private chat's connections. If access expires or is revoked in Granola, reconnect here.</p>}
+      {cancelled && !data.connected && <p className="ns-notice" role="status">Granola sign-in was cancelled. No notes were accessed.</p>}
+      {!data.available && <p className="ns-notice" role="status">Sign in with your individual work account to connect Granola.</p>}
+      {!data.oauth_configured && <p className="ns-notice" role="status">Ask a workspace administrator to configure Moyai's public HTTPS URL.</p>}
+      <div className="ns-row-actions">
+        {data.connected && <Button disabled={mutation.busy} onClick={onStartPrivateChat}>Start private chat<ArrowRight aria-hidden="true" /></Button>}
+        <Button variant={data.connected ? "outline" : "default"} disabled={mutation.busy || !data.available || !data.oauth_configured} onClick={() => {
+          let url: string
+          void mutation.run(async () => { url = (await startPersonalGranolaOAuth()).data.url }, () => window.location.assign(productRedirect(url, location.origin)))
+        }}>{data.connected ? "Reconnect Granola" : "Connect Granola"}</Button>
+      </div>
+      {data.connected && <div className="ns-connection-footer"><Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button></div>}
+      {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+    </div>
+    {disconnect && <Confirm title="Disconnect Granola?" description="Moyai will stop using this connection, including in active chats. Notes already included in a chat remain in that chat. This does not sign you out of Granola." label="Disconnect Granola"
+      onConfirm={async () => { await disconnectPersonalGranola(); resource.refresh() }} onClose={() => setDisconnect(false)} />}
+  </section>}</LoadState>
+}
+
 function GeneralPage({ onPreferences }: { onPreferences: (preferences: GeneralPreferences) => void }) {
   const resource = useResource("/settings/general", signal => getSettingsGeneral({ signal }).then(({ data }) => data))
   return <LoadState resource={resource}>{data => <GeneralForm initial={data} onPreferences={onPreferences} />}</LoadState>
@@ -895,7 +930,7 @@ function ConnectionsPage({ user }: { user: SettingsUser }) {
         <div className="ns-record-copy"><div className="ns-record-title"><h2>{row.name}</h2><span className="ns-badge">{row.shared ? "Shared" : "Personal"}</span></div>
           <p>{services.find(service => service.value === row.kind)?.label ?? row.kind} · {row.enabled ? row.read_only ? "Read only" : row.policy?.require_approval === false ? "Can make changes" : "Changes require approval" : "Disabled"}</p>
           <small>{row.owner_id === user.id ? row.shared && user.role !== "admin" ? "Administrator access is required to edit this shared connection." : "Your connection" : "Managed by another workspace member"}</small></div>
-        {row.owner_id === user.id && (!row.shared || user.role === "admin") && <div className="ns-row-actions"><Button variant="outline" size="sm" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.name}</span></Button>{row.enabled && <Button variant="ghost" size="sm" onClick={() => setDisable(row)}>Disable<span className="visually-hidden"> {row.name}</span></Button>}</div>}
+        {row.kind === "granola" ? <a className="ns-link" href="#settings/granola">Manage Granola</a> : row.owner_id === user.id && (!row.shared || user.role === "admin") && <div className="ns-row-actions"><Button variant="outline" size="sm" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.name}</span></Button>{row.enabled && <Button variant="ghost" size="sm" onClick={() => setDisable(row)}>Disable<span className="visually-hidden"> {row.name}</span></Button>}</div>}
       </article>)}</div> : <Empty filtered={Boolean(search) || filter !== "all"} noun="connections" onClear={() => { setSearch(""); setFilter("all") }} />}
       {editor && <Editor title={editor === "new" ? "Add connection" : "Edit connection"} description="Use an access token for the selected service. Interactive OAuth is not supported by this connection form." initial={editor === "new" ? { name: "", kind: "github", credential: "", shared: false, read_only: true, enabled: true } : { name: editor.name, kind: editor.kind, credential: "", shared: editor.shared, read_only: editor.read_only, enabled: editor.enabled }} fields={values => [
         { name: "name", label: "Account name", required: true, maxLength: 150 }, { name: "kind", label: "Service", type: "select", options: services, disabled: editor !== "new" },
@@ -1070,6 +1105,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />
                     : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} /> : <ConnectionsPage user={user} />
+                      : current === "granola" ? <PersonalGranola onStartPrivateChat={onStartPrivateChat} />
                       : current === "personal-slack" ? <ProductPersonalSlack onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
                       : current === "secrets" ? productMode === "existing" ? <ProductSecretsPage user={user} /> : <SecretsPage user={user} />
                         : current === "users" ? <UsersPage user={user} />

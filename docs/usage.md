@@ -386,6 +386,31 @@ names or pinned SDK execution behavior.
 
 ## Accounts and integrations
 
+### Granola meeting notes
+
+Open **Settings → Granola → Connect Granola** and sign in with your Granola
+account. Moyai uses the same [official MCP server](https://docs.granola.ai/help-center/sharing/integrations/mcp)
+as [Codex's Granola plugin](https://github.com/openai/plugins/blob/main/plugins/granola/.mcp.json),
+with browser OAuth and PKCE. No Granola API key or manually registered OAuth app
+is needed. The administrator must set `MOYAI_PUBLIC_URL` to Moyai's public HTTPS
+URL (loopback HTTP is supported for local development).
+
+Start a **private web chat**, select **Granola** in its connections, and ask for
+meeting notes, summaries, or available transcripts. Only your active Granola
+workspace is accessible. Granola's plan limits and workspace permissions apply.
+Moyai only exposes the documented reading tools; it cannot edit notes, switch
+workspaces, or sign you out of Granola. Provider note content is untrusted data,
+and source links are preserved.
+
+The connection is personal, never available in shared chats, Slack threads, or
+scheduled automations. Tokens are encrypted on the server and do not enter the
+agent's computer or saved turn grants. Refresh retains the connection's authority;
+reconnecting or disconnecting invalidates existing grants. **Disconnect** stops
+future reads, including active chats, but does not erase notes already included
+in a chat or revoke the app in Granola. Revoke it in Granola too if needed.
+
+### Other connected accounts
+
 Add accounts in **Connections**, then set your preferences in **Settings → General**.
 **Use chat defaults** retains a continuation's latest selection when it belongs to
 you. New existing-product chats use available accounts; standalone chats start

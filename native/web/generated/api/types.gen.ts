@@ -4078,6 +4078,38 @@ export type GoalView = {
 };
 
 /**
+ * GranolaOAuthStart
+ */
+export type GranolaOAuthStart = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * GranolaStatus
+ */
+export type GranolaStatus = {
+    /**
+     * Available
+     */
+    available: boolean;
+    /**
+     * Connected
+     */
+    connected: boolean;
+    /**
+     * Limitation
+     */
+    limitation: string;
+    /**
+     * Oauth Configured
+     */
+    oauth_configured: boolean;
+};
+
+/**
  * HTTPValidationError
  */
 export type HttpValidationError = {
@@ -11533,6 +11565,54 @@ export type SelectGitHubRepositoriesResponses = {
 };
 
 export type SelectGitHubRepositoriesResponse = SelectGitHubRepositoriesResponses[keyof SelectGitHubRepositoriesResponses];
+
+export type DisconnectPersonalGranolaData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/granola/personal';
+};
+
+export type DisconnectPersonalGranolaResponses = {
+    /**
+     * Successful Response
+     */
+    200: GranolaStatus;
+};
+
+export type DisconnectPersonalGranolaResponse = DisconnectPersonalGranolaResponses[keyof DisconnectPersonalGranolaResponses];
+
+export type GetPersonalGranolaData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/granola/personal';
+};
+
+export type GetPersonalGranolaResponses = {
+    /**
+     * Successful Response
+     */
+    200: GranolaStatus;
+};
+
+export type GetPersonalGranolaResponse = GetPersonalGranolaResponses[keyof GetPersonalGranolaResponses];
+
+export type StartPersonalGranolaOAuthData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/granola/personal/oauth';
+};
+
+export type StartPersonalGranolaOAuthResponses = {
+    /**
+     * Successful Response
+     */
+    200: GranolaOAuthStart;
+};
+
+export type StartPersonalGranolaOAuthResponse = StartPersonalGranolaOAuthResponses[keyof StartPersonalGranolaOAuthResponses];
 
 export type DisconnectPersonalSlackData = {
     body?: never;

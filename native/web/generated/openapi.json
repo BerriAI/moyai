@@ -7391,6 +7391,48 @@
         "title": "GoalView",
         "type": "object"
       },
+      "GranolaOAuthStart": {
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "GranolaOAuthStart",
+        "type": "object"
+      },
+      "GranolaStatus": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "limitation": {
+            "default": "Granola is read-only and available only in your private web chats, in your active Granola workspace.",
+            "title": "Limitation",
+            "type": "string"
+          },
+          "oauth_configured": {
+            "title": "Oauth Configured",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "available",
+          "connected",
+          "oauth_configured",
+          "limitation"
+        ],
+        "title": "GranolaStatus",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -19785,6 +19827,58 @@
           }
         },
         "summary": "Select Repositories"
+      }
+    },
+    "/api/connections/granola/personal": {
+      "delete": {
+        "operationId": "disconnectPersonalGranola",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GranolaStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Disconnect"
+      },
+      "get": {
+        "operationId": "getPersonalGranola",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GranolaStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Status"
+      }
+    },
+    "/api/connections/granola/personal/oauth": {
+      "post": {
+        "operationId": "startPersonalGranolaOAuth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GranolaOAuthStart"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Start"
       }
     },
     "/api/connections/slack/personal": {

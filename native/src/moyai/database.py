@@ -747,6 +747,13 @@ class Database:
                 raise HTTPException(403, "A selected connection is no longer available.")
             if shared_session and not row.shared:
                 raise HTTPException(403, "Use a private conversation for a personal connection.")
+            if row.kind == "granola":
+                from .granola import grants as granola_grants
+                selected = await granola_grants(db, actor_id, shared_session=shared_session, surface=surface)
+                if not selected or selected[0].id != connection_id:
+                    raise HTTPException(403, "Granola requires your private web chat.")
+                grants.extend(selected)
+                continue
             grants.append(Grant(
                 id=row.id, kind=row.kind, revision=row.revision,
                 credential=row.credential, read_only=row.read_only, policy=json.loads(row.policy),

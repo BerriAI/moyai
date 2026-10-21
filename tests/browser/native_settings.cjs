@@ -3,7 +3,7 @@ const {before,after,test}=require('node:test');
 const {chromium}=require('playwright');
 const path=require('node:path');
 const fs=require('node:fs/promises');
-const {settingsFixture,personalPath}=require('../fixtures/settings.cjs');
+const {settingsFixture,personalPath,granolaPath}=require('../fixtures/settings.cjs');
 let fixture,browser;
 before(async()=>{fixture=await settingsFixture();browser=await chromium.launch({headless:true});});
 after(async()=>{await browser?.close();await fixture?.close();});
@@ -115,4 +115,44 @@ for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Sett
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,route);
     if(process.env.MOYAI_UI_CAPTURE_DIR){await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`${route}-${width}-${theme}.png`)});}
   }
+});
+
+for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Granola read-only connection fits ${width}px in ${theme}`,async t=>{
+  fixture.reset();const page=await open(t,'granola',width,theme);
+  await page.getByRole('heading',{name:'Your Granola notes'}).waitFor();
+  await page.getByText('Connected',{exact:true}).waitFor();
+  assert.match(await page.locator('.ns-connection-card').innerText(),/read-only.*private web chats/s);
+  assert.match(await page.locator('.ns-connection-card').innerText(),/cannot edit notes or switch/);
+  await noOverflow(page);
+  if(process.env.MOYAI_UI_CAPTURE_DIR){await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`granola-${width}-${theme}.png`)});}
+  await page.getByRole('button',{name:'Disconnect…',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Disconnect Granola?'});await dialog.waitFor();
+  await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
+  await page.waitForFunction(()=>document.activeElement?.textContent==='Disconnect…');
+});
+test('Granola disconnect requires confirmation and OAuth uses generated client',async t=>{
+  fixture.reset();const page=await open(t,'granola');
+  await page.getByRole('button',{name:'Disconnect…',exact:true}).click();
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();assert.ok(!fixture.state.requests.some(r=>r.method==='DELETE'));
+  await page.getByRole('button',{name:'Disconnect…',exact:true}).click();
+  await page.getByRole('button',{name:'Disconnect Granola',exact:true}).click();
+  await page.getByText('Not connected',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Connect Granola',exact:true}).click();
+  await page.waitForURL('**/?fixture-oauth=1#settings/granola');
+  assert.ok(fixture.state.requests.some(r=>r.path===granolaPath+'/oauth'&&r.method==='POST'));
+});
+test('Granola has retryable errors and blocks unavailable setup',async t=>{
+  fixture.reset();fixture.state.granolaError=true;const page=await open(t,'granola');
+  await page.getByRole('heading',{name:'Unable to load this page'}).waitFor();
+  fixture.state.granolaError=false;await page.getByRole('button',{name:'Try again'}).click();
+  await page.getByText('Connected',{exact:true}).waitFor();fixture.state.granolaOAuthError=true;
+  await page.getByRole('button',{name:'Reconnect Granola',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'Granola access failed'}).waitFor();
+  fixture.state.granola={...fixture.state.granola,connected:false,available:false};await page.reload();
+  await page.getByText('Sign in with your individual work account to connect Granola.').waitFor();
+  assert.equal(await page.getByRole('button',{name:'Connect Granola',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('button',{name:'Start private chat'}).count(),0);
+  fixture.state.granola={...fixture.state.granola,available:true,oauth_configured:false};await page.reload();
+  await page.getByText("Ask a workspace administrator to configure Moyai's public HTTPS URL.").waitFor();
+  assert.equal(await page.getByRole('button',{name:'Connect Granola',exact:true}).isEnabled(),false);
 });

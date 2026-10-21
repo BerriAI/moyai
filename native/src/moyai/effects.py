@@ -40,7 +40,7 @@ AUTOMATION_EFFECTS = {
 SCOPED_AUTOMATION_EFFECTS = {
     "automation_grant", "automation_self_update", "automation_claim_item", "automation_webhook_setup",
 }
-SERVICE_PREFIXES = ("github_", "linear_", "notion_", "slack_")
+SERVICE_PREFIXES = ("github_", "linear_", "notion_", "slack_", "granola_")
 SHELL_RECOVERY_VERSION = "moyai-shell-readiness-v1"
 SHELL_READINESS_SUPPORTED = "moyai_shell_readiness_supported"
 

@@ -265,6 +265,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 user, [session_id], deleted=request.url.path.endswith("/restore"),
             )
 
+    from .granola import routes as granola_routes
+    app.include_router(granola_routes(runtime, actor))
     app.include_router(image_routes(runtime, actor))
     app.include_router(computer_routes(runtime, actor, cookie_name=COOKIE))
     app.include_router(sidebar_routes(runtime, actor))
@@ -1046,14 +1048,17 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 context = await runtime.database.execution_context(db, session)
                 shared, surface = context.visibility == "shared", context.surface
         if runtime.product_connections is not None:
-            return [ConnectionView.model_validate(item) for item in await runtime.product_connections.catalog(
-                user.id, shared_session=shared, surface=surface,
-            )]
+            from .granola import catalog as granola_catalog
+            rows = await runtime.product_connections.catalog(user.id, shared_session=shared, surface=surface)
+            rows += await granola_catalog(runtime.database, user.id, shared_session=shared, surface=surface)
+            return [ConnectionView.model_validate(item) for item in rows]
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(Connection).where(
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
             ))
-            return [ConnectionView.model_validate(connection_view(row)) for row in rows if not shared or row.shared]
+            return [ConnectionView.model_validate(connection_view(row)) for row in rows
+                    if (not shared or row.shared) and
+                    (row.kind != "granola" or (row.enabled and not shared and surface == "web"))]
 
     @app.post("/api/connections", operation_id="createConnection")
     async def create_connection(body: ConnectionInput, user: User = Depends(actor)) -> ConnectionView:
