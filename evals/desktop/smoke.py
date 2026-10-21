@@ -50,7 +50,7 @@ def action(kind, role, name, **args):
 def main():
     guest({"action": "start"})
     Path("/var/lib/eval").mkdir(exist_ok=True)
-    app = subprocess.Popen([sys.executable, str(ROOT / "evals/desktop/apps.py"), "expense"], env=ENV)
+    app = subprocess.Popen(["/usr/bin/python3", str(ROOT / "evals/desktop/apps.py"), "expense"], env=ENV)
     try:
         for _ in range(50):
             if "Expense Report" in request({"action": "read"})["text"]:
