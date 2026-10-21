@@ -66,6 +66,48 @@ async def test_only_the_claiming_browser_gets_a_control_stream(runtime, actor):
     await validate(runtime, await bind(runtime, session.id, actor, second, controlling=True))
 
 
+async def test_explicit_handoff_can_return_own_other_tab_without_loosening_cleanup(runtime, actor):
+    session = await ready_computer(runtime, actor)
+    first, second = new_id(), new_id()
+    await lease(runtime, session.id, actor, "claim", first)
+    access = await bind(runtime, session.id, actor, first, controlling=True)
+    async with sign_in(runtime) as client:
+        state = (await client.get(f"/api/sessions/{session.id}/computer", params={"client_id": second})).json()
+        assert state["can_release"] is True and state["controlled"] is False
+        response = await client.post(f"/api/sessions/{session.id}/computer", json={
+            "action": "handoff", "client_id": second,
+        })
+        assert response.status_code == 200 and response.json()["controlled"] is False
+    with pytest.raises(HTTPException):
+        await validate(runtime, access)
+    with pytest.raises(HTTPException):
+        await lease(runtime, session.id, actor, "heartbeat", first)
+    await lease(runtime, session.id, actor, "claim", second)
+    with pytest.raises(HTTPException):
+        await lease(runtime, session.id, actor, "release", first)
+    async with runtime.database.sessions() as db:
+        assert (await db.get(ComputerDesktop, session.id)).control_client == second
+        assert (await db.get(ComputerLease, session.id)).actor_id == actor.id
+
+
+async def test_explicit_handoff_cannot_release_someone_else_or_unsettled_input(runtime, actor):
+    session = await ready_computer(runtime, actor, visibility="shared")
+    client_id = new_id()
+    await lease(runtime, session.id, actor, "claim", client_id)
+    async with runtime.database.sessions.begin() as db:
+        other = User(id=new_id(), username=new_id(), display_name="Other", password="unused")
+        db.add(other)
+    with pytest.raises(HTTPException, match="Another person"):
+        await lease(runtime, session.id, other, "handoff", new_id())
+    async with runtime.database.sessions.begin() as db:
+        db.add(ComputerOperation(session_id=session.id, identity=new_id(), expires_at=int(time.time()) + 60))
+    with pytest.raises(HTTPException, match="settle"):
+        await lease(runtime, session.id, actor, "handoff", new_id())
+    async with runtime.database.sessions() as db:
+        assert (await db.get(ComputerLease, session.id)).actor_id == actor.id
+        assert (await db.get(ComputerDesktop, session.id)).control_client == client_id
+
+
 async def test_late_disconnect_cannot_release_a_reconnected_controller(runtime, actor):
     session = await ready_computer(runtime, actor)
     client = new_id()

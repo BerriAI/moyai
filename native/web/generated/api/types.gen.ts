@@ -2757,7 +2757,7 @@ export type ComputerCommand = {
     /**
      * Action
      */
-    action: 'start' | 'claim' | 'release' | 'heartbeat' | 'open' | 'terminal' | 'click' | 'type' | 'key' | 'scroll';
+    action: 'start' | 'claim' | 'release' | 'handoff' | 'heartbeat' | 'open' | 'terminal' | 'click' | 'type' | 'key' | 'scroll';
     /**
      * Alt
      */
@@ -2842,6 +2842,10 @@ export type ComputerState = {
      * Busy
      */
     busy: boolean;
+    /**
+     * Can Release
+     */
+    can_release: boolean;
     /**
      * Controlled
      */

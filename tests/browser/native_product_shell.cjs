@@ -107,7 +107,13 @@ async function handle(req,res,next) {
       return json({id:'resumed-turn',status:'queued'},202);
     }
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
-    if(url.pathname.endsWith('/computer'))return json({available:false,has_workspace:true,controlled:false,busy:false});
+    if(url.pathname.endsWith('/computer')) {
+      if(req.method==='POST'&&data.action==='handoff') {
+        state.computer={...state.computer,controlled:false,can_release:false,controller:null};
+        return json({controlled:false,available:null,width:null,height:null});
+      }
+      return json({available:false,has_workspace:true,controlled:false,can_release:false,busy:false,controller:null,...state.computer});
+    }
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
     const failure=url.pathname.match(/^\/api\/sessions\/([^/]+)\/turns\/([^/]+)\/failure$/);
     if(failure) {
@@ -262,10 +268,37 @@ for(const width of [1440,768,320])test(`browser sign-in opens Computer and submi
   }
   await page.getByRole('heading',{name:'Browser sign-in needed',exact:true}).waitFor();
   assert.equal(await page.locator('.browser-login-request').getByText('Inspect the protected report.',{exact:true}).count(),1);
+  assert.match(await page.locator('.browser-login-request').innerText(),/Moyai will take back control and continue/);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
   await page.getByRole('button',{name:'I’ve signed in',exact:true}).click();
   await waitFor(()=>state.requests.some(row=>row.path.endsWith('/answers')));
   assert.deepEqual(state.requests.find(row=>row.path.endsWith('/answers')).body.browser_logins,{'login-call':'signed_in'});
+});
+for(const width of [1440,768,320])test(`release control stays visible without hover and works while disconnected at ${width}px`,async t=>{
+  reset({status:'waiting',canAnswer:true,pending:loginRequest(),computer:{controlled:true,controller:'Test viewer'}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const release=page.getByRole('button',{name:'Release control',exact:true});
+  await release.waitFor({state:'visible'});
+  await page.mouse.move(0,0);
+  assert.equal(await release.evaluate(element=>getComputedStyle(element).opacity),'1');
+  assert.equal(await release.isEnabled(),true);
+  assert.equal(await page.getByText('You have control',{exact:true}).isVisible(),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await release.focus();
+  await page.keyboard.press('Enter');
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/computer')&&row.body?.action==='handoff'));
+  await release.waitFor({state:'hidden'});
+  assert.equal(state.requests.some(row=>row.path.endsWith('/answers')),false);
+});
+test('another tab owned by the same person has a visible release action',async t=>{
+  reset({status:'waiting',canAnswer:true,pending:loginRequest(),computer:{controlled:false,can_release:true,controller:'Test viewer'}});
+  const page=await pageFor(t);
+  const release=page.getByRole('button',{name:'Release control',exact:true});
+  await release.waitFor({state:'visible'});
+  assert.equal(await page.getByText('You have control in another tab',{exact:true}).isVisible(),true);
+  await release.click();
+  await release.waitFor({state:'hidden'});
+  assert.equal(state.requests.filter(row=>row.body?.action==='handoff').length,1);
 });
 test('browser sign-in respects panel dismissal, can reopen, and restores after reload',async t=>{
   reset({status:'waiting',canAnswer:true,pending:loginRequest()});

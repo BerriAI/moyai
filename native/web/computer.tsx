@@ -15,7 +15,7 @@ export function ComputerPanel(props: PanelProps) {
 }
 
 function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
-  const [view, setView] = useState<DesktopState>({ available: false, has_workspace: hasWorkspace, controlled: false, busy: false, controller: null })
+  const [view, setView] = useState<DesktopState>({ available: false, has_workspace: hasWorkspace, controlled: false, can_release: false, busy: false, controller: null })
   const [error, setError] = useState("")
   const [working, setWorking] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -173,7 +173,7 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
     return () => clearInterval(timer)
   }, [id, view.controlled, pauseInput])
 
-  async function command(action: "claim" | "start" | "release") {
+  async function command(action: "claim" | "start" | "handoff") {
     if (commandPending.current || !lifetime.current.visible) return
     commandPending.current = true
     changingControl.current = true
@@ -182,13 +182,13 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
     lifetime.current.invalidate()
     try {
       await controlComputer({ path: { session_id: id }, body: { action, client_id: clientId.current } })
-      owned.current = action !== "release"
+      owned.current = action !== "handoff"
       if (!mounted.current) {
         // Setup may have completed after unmount's first release attempt.
-        owned.current = action !== "release"; releaseOwned()
+        owned.current = action !== "handoff"; releaseOwned()
         return
       }
-      setView(previous => ({ ...previous, controlled: owned.current }))
+      setView(previous => ({ ...previous, controlled: owned.current, can_release: owned.current }))
     } catch (error) {
       if (mounted.current) setError(String(error))
     } finally {
@@ -216,7 +216,7 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
       if (!down && !heldModifiers.current.size) remote.current?.sendKey(CONTROL, "ControlLeft", false)
     }
     if (down && event.ctrlKey && event.shiftKey && event.key === "Escape") {
-      event.preventDefault(); event.stopPropagation(); void command("release"); return
+      event.preventDefault(); event.stopPropagation(); void command("handoff"); return
     }
     // The remote desktop runs Linux. Map Mac Command to Control before noVNC
     // handles the remaining key, keeping browser shortcuts useful.
@@ -234,6 +234,12 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
   const canInput = foreground && view.controlled && connected && !working
   const occupied = Boolean(view.controller && !view.controlled)
   return <div className="computer-panel">
+    {(view.controlled || view.can_release) && <div className="desktop-control-bar" role="group" aria-label="Computer controls">
+      <span>{view.controlled ? "You have control" : "You have control in another tab"}</span>
+      <Button variant="secondary" size="sm" className="desktop-release-control"
+        disabled={!foreground || working} title="Release control (Ctrl+Shift+Escape)"
+        onClick={() => void command("handoff")}><MousePointer2 size={14} />Release control</Button>
+    </div>}
     <div className={`desktop-stage ${canInput ? "controlled" : ""}`} role="application" aria-label="Sandbox desktop"
       onMouseDownCapture={event => {
         if (!canInput) return
@@ -260,8 +266,6 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
         <span className="desktop-control-prompt"><MousePointer2 size={32} /><strong>{working ? "Taking control…" : occupied ? `${view.controller} has control` : "Take control"}</strong>
           {!occupied && <span>Click anywhere to use the computer</span>}</span>
       </Button>}
-      {canInput && <Button variant="secondary" size="sm" className="desktop-release-control"
-        title="Release control (Ctrl+Shift+Escape)" onClick={() => void command("release")}><MousePointer2 size={14} />Release control</Button>}
       {!connected && <div className="desktop-empty"><Monitor size={32} />
         <p role="status">{working ? "Opening computer…" : connecting ? "Connecting…" : hasWorkspace ? "Your sandbox desktop" : "Send Moyai a task to start its computer."}</p>
         {hasWorkspace && <Button disabled={!foreground || working || connecting || Boolean(view.controller && !view.available && !view.controlled)} onClick={() => view.available ? setAttempt(value => value + 1) : void command("start")}>{working ? "Preparing desktop…" : view.available ? <><RefreshCw size={15} />Reconnect</> : "Open computer"}</Button>}
