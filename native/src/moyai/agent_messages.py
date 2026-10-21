@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from pydantic import TypeAdapter
+from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.messages import ModelMessage, ModelRequest, TextContent, UserPromptPart
 from sqlalchemy import func, literal, select, update
 from sqlalchemy.orm import aliased
@@ -103,9 +104,28 @@ async def watch(db: AsyncSession, database: Database, scope: RunScope, child: st
     ))
 
 
-async def resume_mail(db: AsyncSession, previous: Turn, turn: Turn) -> None:
+async def acknowledge_mail(
+    db: AsyncSession, session_id: str, turn_id: str, message_ids: list[int],
+) -> None:
+    if message_ids:
+        await db.execute(update(Event).where(
+            Event.id.in_(message_ids), Event.turn_id == turn_id,
+            Event.session_id == session_id, Event.kind.in_([PENDING, SIGNALLED]),
+        ).values(kind=DELIVERED))
+
+
+async def resume_mail(db: AsyncSession, database: Database, previous: Turn, turn: Turn) -> set[str]:
     # Only the authenticated answer continuation calls this. Ordinary follow-ups
     # never acquire another assignment's queued mail.
+    completed = set()
+    if previous.conversation:
+        # Older pauses can have saved the conversation before its delivery event
+        # was acknowledged. Reconcile under the admission transaction before
+        # moving unread mail; a retry must not re-enqueue saved reference data.
+        ids, completed = receipts(
+            ConversationTypeAdapter.validate_json(database.security.unseal(previous.conversation)).messages,
+        )
+        await acknowledge_mail(db, previous.session_id, previous.id, ids)
     await db.execute(update(Event).where(
         Event.turn_id == previous.id, Event.session_id == turn.session_id,
         Event.kind.in_([WATCH, PENDING, SIGNALLED]),
@@ -113,6 +133,7 @@ async def resume_mail(db: AsyncSession, previous: Turn, turn: Turn) -> None:
     await db.execute(update(Event).where(
         Event.turn_id == turn.id, Event.kind == SIGNALLED,
     ).values(kind=PENDING))
+    return completed
 
 
 class AgentMessages:
@@ -211,10 +232,7 @@ class AgentMessages:
 
     async def acknowledge(self, scope: RunScope, message_ids: list[int]) -> None:
         async with self.database.sessions.begin() as db:
-            await db.execute(update(Event).where(
-                Event.id.in_(message_ids), Event.turn_id == scope.turn_id,
-                Event.session_id == scope.session_id, Event.kind.in_([PENDING, SIGNALLED]),
-            ).values(kind=DELIVERED))
+            await acknowledge_mail(db, scope.session_id, scope.turn_id, message_ids)
 
     async def ensure_watches(self, scope: RunScope) -> None:
         async with self.database._admission_session(None) as db:

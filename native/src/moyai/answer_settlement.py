@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from grpclib.const import Status
 from grpclib.exceptions import GRPCError
 from pydantic import TypeAdapter
+from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness import ModalSandbox
 from sqlalchemy import delete, literal, select, update
@@ -199,13 +200,22 @@ class AnswerSettlement:
                 return False
             turn.result_accepted = True
             turn.status = "waiting" if deferred and not checkpointing else "saving"
+            completed_agents: set[str] = set()
+            if scope.agent_messages:
+                from .agent_messages import acknowledge_mail, receipts
+                ids, completed_agents = receipts(ConversationTypeAdapter.validate_json(conversation).messages)
+                # Persist consumption with the snapshot, including final-drain
+                # messages whose SDK delivery event has not reached its hook.
+                await acknowledge_mail(db, scope.session_id, scope.turn_id, ids)
             if deferred:
                 from .questions import record_optional_deadline
                 record_optional_deadline(self.database, db, turn)
                 if scope.background_delegation and turn.preparation:
                     prepared = TypeAdapter(PreparedTurn).validate_json(self.database.security.unseal(turn.preparation))
                     prepared.scope.background_delegation = True
-                    prepared.scope.background_agents = list(scope.background_agents)
+                    prepared.scope.background_agents = [
+                        child for child in scope.background_agents if child not in completed_agents
+                    ]
                     turn.preparation = self.database.security.seal(TypeAdapter(PreparedTurn).dump_json(prepared))
             if checkpointing:
                 if turn.preparation is None or workspace is None:

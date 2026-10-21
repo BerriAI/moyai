@@ -22,7 +22,15 @@ from temporalio.worker import ExecuteActivityInput, Replayer
 from test_delegation_temporal import dispatching
 
 from moyai.agent import make_agent
-from moyai.agent_messages import DELIVERED, PENDING, SIGNALLED, AgentMessages, MailDispatch, dispatch_mail
+from moyai.agent_messages import (
+    DELIVERED,
+    PENDING,
+    SIGNALLED,
+    AgentMessages,
+    MailDispatch,
+    dispatch_mail,
+    model_message,
+)
 from moyai.contracts import NewMessage, NewSession
 from moyai.delegation import DelegationService, InteractiveDelegation
 from moyai.delegation_models import DelegatedSession
@@ -290,6 +298,150 @@ async def test_answer_continuations_receive_pending_mail_in_both_directions(runt
     assert await mail.read(later_context.scope, progress["message_id"]) is None
     with pytest.raises(PermissionError, match="different assignment"):
         await mail.send(child_context.scope, "late-progress", "parent", "Must stay private", child_answer.id)
+    runtime.client = None
+
+
+@pytest.mark.parametrize("direction", ["parent", "child"])
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_saved_conversation_acknowledges_only_its_consumed_mail(runtime, active, direction, deferred):
+    _, _, parent = active
+    mail = AgentMessages(runtime.database)
+    child = await DelegationService(runtime.database).start(parent.scope, "child", "Work")
+    child_turn = await runtime.database.claim_next()
+    child_context = await runtime.database.prepare(child_turn.id)
+    sender, receiver = (child_context, parent) if direction == "parent" else (parent, child_context)
+    target = "parent" if direction == "parent" else child["session_id"]
+    consumed, unread = [
+        await mail.send(sender.scope, label, target, label, sender.scope.turn_id)
+        for label in ("consumed", "unread")
+    ]
+    foreign = await mail.send(
+        receiver.scope, "other-recipient", child["session_id"] if direction == "parent" else "parent",
+        "Not consumed by its recipient", receiver.scope.turn_id,
+    )
+    # A signalled message can be in the saved conversation before the event
+    # consumer acknowledges it. A lost signal reply can leave it PENDING too.
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Event, consumed["message_id"])).kind = SIGNALLED
+        (await db.get(Event, unread["message_id"])).kind = SIGNALLED
+    messages = [
+        model_message(await mail.read(receiver.scope, consumed["message_id"])),
+        model_message(await mail.read(sender.scope, foreign["message_id"])),
+    ]
+    receiver.scope.agent_messages = True
+    saved = {
+        "conversation": ConversationTypeAdapter.dump_json(Conversation(
+            conversation_id=receiver.scope.conversation_id, messages=messages,
+        )).decode(), "output": "", "workspace": None, "usage": {}, "deferred": deferred,
+    }
+    assert await runtime.database.save_result(receiver.scope, **saved)
+    assert await runtime.database.save_result(receiver.scope, **saved)  # Lost activity reply.
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Event, consumed["message_id"])).kind == DELIVERED
+        assert (await db.get(Event, unread["message_id"])).kind == SIGNALLED
+        assert (await db.get(Event, foreign["message_id"])).kind == PENDING
+
+
+@pytest.mark.parametrize("direction", ["parent", "child"])
+@pytest.mark.parametrize("state", [PENDING, SIGNALLED])
+async def test_answer_resume_reconciles_legacy_snapshot_before_requeuing(runtime, actor, active, direction, state):
+    _, _, parent = active
+    mail = AgentMessages(runtime.database)
+    child = await DelegationService(runtime.database).start(parent.scope, "child", "Work")
+    parent.scope.background_delegation = True
+    parent.scope.background_agents = [child["session_id"]]
+    child_turn = await runtime.database.claim_next()
+    child_context = await runtime.database.prepare(child_turn.id)
+    sender, receiver = (child_context, parent) if direction == "parent" else (parent, child_context)
+    target = "parent" if direction == "parent" else child["session_id"]
+    consumed, unread = [
+        await mail.send(sender.scope, label, target, label, sender.scope.turn_id)
+        for label in ("consumed", "unread")
+    ]
+    conversation = ConversationTypeAdapter.dump_json(Conversation(
+        conversation_id=receiver.scope.conversation_id,
+        messages=[model_message(await mail.read(receiver.scope, consumed["message_id"]))],
+    )).decode()
+    assert await runtime.database.save_result(
+        receiver.scope, conversation=conversation, output="", workspace=None, usage={}, deferred=True,
+    )
+    # Reconstruct a pause persisted by the previous version, which did not
+    # reconcile the saved conversation with the outbox.
+    async with runtime.database.sessions.begin() as db:
+        for receipt in (consumed, unread):
+            (await db.get(Event, receipt["message_id"])).kind = state
+    for attempt in range(2):
+        resumed = await runtime.database.resume(
+            actor, receiver.scope.session_id, receiver.scope.turn_id, f"answer-{attempt}", {"calls": {}},
+        )
+        assert (await runtime.database.resume(
+            actor, receiver.scope.session_id, receiver.scope.turn_id, f"answer-{attempt}", {"calls": {}},
+        )).id == resumed.id
+        await runtime.database.claim_next()
+        context = await runtime.database.prepare(resumed.id)
+        async with runtime.database.sessions() as db:
+            seen = await db.get(Event, consumed["message_id"])
+            assert seen.kind == DELIVERED
+            assert seen.turn_id != resumed.id
+            pending = await db.get(Event, unread["message_id"])
+            assert pending.kind == PENDING and pending.turn_id == resumed.id
+        assert await mail.read(context.scope, consumed["message_id"]) is None
+        assert (await mail.read(context.scope, unread["message_id"])).content == "unread"
+        assert await runtime.database.save_result(
+            context.scope, conversation=conversation, output="", workspace=None, usage={}, deferred=True,
+        )
+        receiver = context
+
+
+@pytest.mark.parametrize("legacy_pause", [False, True])
+async def test_saved_completion_is_not_carried_as_outstanding_after_answer(runtime, actor, active, legacy_pause):
+    from test_delegated_sessions import finish
+
+    session, turn, prepared = active
+    prepared.scope.agent_messages = True
+    prepared.scope.background_delegation = True
+    service, mail = DelegationService(runtime.database), AgentMessages(runtime.database)
+    completed = await service.start(prepared.scope, "done-child", "Finish")
+    child_turn = await runtime.database.claim_next()
+    child_context = await runtime.database.prepare(child_turn.id)
+    await finish(runtime, child_context, "Completed evidence")
+    outstanding = await service.start(prepared.scope, "busy-child", "Keep working")
+    prepared.scope.background_agents = [completed["session_id"], outstanding["session_id"]]
+    runtime.client = SimpleNamespace(get_workflow_handle=lambda _: SimpleNamespace(signal=AsyncMock()))
+    await dispatch_mail(runtime, MailDispatch())
+    async with runtime.database.sessions() as db:
+        completion = await db.scalar(select(Event).where(Event.kind == SIGNALLED))
+    assert completion is not None
+    message = await mail.read(prepared.scope, completion.id)
+    assert message.kind == "completion"
+    conversation = ConversationTypeAdapter.dump_json(Conversation(
+        conversation_id=prepared.scope.conversation_id, messages=[model_message(message)],
+    )).decode()
+    assert await runtime.database.save_result(
+        prepared.scope, conversation=conversation, output="", workspace=None, usage={}, deferred=True,
+    )
+    from pydantic import TypeAdapter
+
+    from moyai.contracts import PreparedTurn
+
+    async with runtime.database.sessions() as db:
+        paused = await db.get(Turn, turn.id)
+        saved = TypeAdapter(PreparedTurn).validate_json(runtime.security.unseal(paused.preparation))
+        assert saved.scope.background_agents == [outstanding["session_id"]]
+    if legacy_pause:
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Event, completion.id)).kind = SIGNALLED
+            paused = await db.get(Turn, turn.id)
+            saved = TypeAdapter(PreparedTurn).validate_json(runtime.security.unseal(paused.preparation))
+            saved.scope.background_agents = list(prepared.scope.background_agents)
+            paused.preparation = runtime.security.seal(TypeAdapter(PreparedTurn).dump_json(saved))
+    resumed = await runtime.database.resume(actor, session.id, turn.id, "answer", {"calls": {}})
+    await runtime.database.claim_batch(10)
+    context = await runtime.database.prepare(resumed.id)
+    assert context.scope.background_agents == [outstanding["session_id"]]
+    async with runtime.database.sessions() as db:
+        row = await db.get(Event, completion.id)
+        assert row.kind == DELIVERED and row.turn_id == turn.id
     runtime.client = None
 
 

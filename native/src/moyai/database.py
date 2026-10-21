@@ -1404,11 +1404,14 @@ class Database:
             delegated = await db.get(DelegatedTurn, previous.id)
             if delegated is not None:
                 db.add(DelegatedTurn(turn_id=turn.id, session_id=delegated.session_id))
+            from .agent_messages import resume_mail
+            completed_agents = await resume_mail(db, self, previous, turn)
             if original.scope.background_delegation:
                 from .delegation import bind_background_resume
+                original.scope.background_agents = [
+                    child for child in original.scope.background_agents if child not in completed_agents
+                ]
                 await bind_background_resume(self, db, previous, turn, original.scope)
-            from .agent_messages import resume_mail
-            await resume_mail(db, previous, turn)
             if automated is not None:
                 db.add(ProductAutomationTurn(turn_id=turn.id, origin_turn_id=automated.origin_turn_id))
             previous.status = "resumed"

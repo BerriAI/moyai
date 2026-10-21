@@ -111,7 +111,10 @@ The encrypted event outbox separates Temporal's signal acknowledgment from
 Pydantic consuming a message. Dispatch retries reuse the same message ID, and
 the receiving workflow deduplicates it. Checkpoints preserve queued messages and
 acknowledge messages already included in their saved conversation before history
-rollover. The dispatcher reconciles settled children and retries notifications;
+rollover. Answer snapshots also acknowledge included messages in their save
+transaction. Human-answer continuations reconcile older paused snapshots before
+requeuing unread mail and retain only children whose completion is still pending.
+The dispatcher reconciles settled children and retries notifications;
 its PostgreSQL commit hints and fallback scan are infrastructure coordination,
 not parent model polling. No separate agent loop or database schema is introduced.
 
