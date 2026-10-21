@@ -34,7 +34,8 @@ def request(command):
 
 
 def target(state, role, name):
-    match = re.search(r"^\s*(\d+) " + re.escape(role) + " " + re.escape(name) + r"(?: |$)", state["text"], re.MULTILINE)
+    role_pattern = r"(?:push )?button" if role == "button" else re.escape(role)
+    match = re.search(r"^\s*(\d+) " + role_pattern + " " + re.escape(name) + r"(?: |$)", state["text"], re.MULTILINE)
     assert match, state
     return match.group(1)
 
@@ -45,6 +46,84 @@ def action(kind, role, name, **args):
                       "element_index": target(state, role, name), **args})
     assert result.get("action_executed"), result
     return state, result
+
+
+def check_native_input():
+    app_name = "input_app.py"
+    directory = Path("/var/lib/eval/input-proof")
+    app = subprocess.Popen(
+        ["/usr/bin/python3", str(ROOT / "evals/desktop/input_app.py"), str(directory)], env=ENV,
+    )
+
+    def read():
+        return request({"action": "read", "app": app_name})
+
+    def perform(kind, role=None, name=None, **args):
+        state = read()
+        result = request({
+            "action": kind, "app": app_name, "observation": state["observation"],
+            **({"element_index": target(state, role, name)} if role else {}), **args,
+        })
+        return state, result
+
+    def edit(kind, role=None, name=None, **args):
+        state, result = perform(kind, role, name, **args)
+        assert result.get("action_executed"), result
+        return state
+
+    def saved(**expected):
+        for _ in range(30):
+            try:
+                value = json.loads((directory / "input-state.json").read_text())
+                if all(value[key] == result for key, result in expected.items()):
+                    assert value["decoy"] == "DO NOT EDIT" and value["locked"] == "LOCKED", value
+                    return value
+            except FileNotFoundError:
+                pass
+            time.sleep(.1)
+        raise AssertionError((expected, value))
+
+    try:
+        for _ in range(50):
+            if app_name in request({"action": "read"})["text"]:
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError("The input fixture did not start.")
+        edit("click", "button", "Prepare caret")
+        edit("type_text", text="X")
+        saved(target="abXcd", caret=3, activations=0)
+        edit("click", "text", "Target text")
+        saved(activations=0)
+        edit("press_key", key="Home")
+        edit("press_key", key="Right")
+        edit("type_text", text="é🙂")
+        saved(target="aé🙂bXcd")
+        edit("press_key", key="ctrl+a")
+        edit("type_text", text="Renée🙂")
+        saved(target="Renée🙂", caret=6)
+        edit("click", "button", "Prepare selection")
+        old = edit("type_text", text="Ω🙂")
+        saved(target="aΩ🙂d", caret=3)
+        refused = request({"action": "click", "app": app_name, "observation": old["observation"],
+                           "element_index": target(old, "text", "Target text")})
+        assert refused["action_executed"] is False
+        edit("click", "text", "Read only text")
+        _, refused = perform("type_text", text="SHOULD_NOT_APPEAR")
+        assert refused["action_executed"] is False
+        saved(target="aΩ🙂d")
+        edit("click", "text", "Target text")
+        edit("scroll", "scroll pane", "Independent scroll area", direction="down", pages=1)
+        assert saved(target="aΩ🙂d", notes="first\nsecond")["scroll"] > 0
+        edit("click", "text", "Multiline text")
+        edit("press_key", key="ctrl+a")
+        edit("type_text", text="α\n第二行🙂")
+        saved(notes="α\n第二行🙂")
+        return ["focused_text", "caret", "selection", "unicode", "multiline",
+                "read_only_refusal", "click_without_activation", "targeted_scroll"]
+    finally:
+        app.terminate()
+        app.wait(timeout=5)
 
 
 def main():
@@ -92,8 +171,10 @@ def main():
         finally:
             ocu.process.terminate()
             ocu.process.wait(timeout=5)
+        input_checks = check_native_input()
         print(json.dumps({"passed": ["form_values", "checkbox", "submit", "stale_observation", "worker_restart",
-                                     "screenshot", "failed_browser_navigation", "full_text_preserved"], **sizes}))
+                                     "screenshot", "failed_browser_navigation", "full_text_preserved",
+                                     *input_checks], **sizes}))
     finally:
         app.terminate()
         app.wait(timeout=5)

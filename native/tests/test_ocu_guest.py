@@ -71,11 +71,12 @@ class Ocu(guest.Ocu):
         self.image = b"test-image"
         self.calls = []
         self.failure = False
+        self.result_text = "done"
 
     def call(self, tool, args):
         self.calls.append((tool, args))
         if tool != "get_app_state":
-            return {"isError": self.failure, "content": [{"type": "text", "text": "done"}]}
+            return {"isError": self.failure, "content": [{"type": "text", "text": self.result_text}]}
         return {"content": [{"type": "text", "text": self.text},
                             {"type": "image", "mimeType": "image/png",
                              "data": base64.b64encode(self.image).decode()}]}
@@ -142,3 +143,17 @@ def test_native_error_after_input_stays_uncertain_and_invalidates_observation():
                      "element_index": "1", "context": "turn"}, time.time() + 10)
     assert ocu.observation is None
     assert sum(tool == "click" for tool, _ in ocu.calls) == 1
+
+
+def test_known_pre_dispatch_refusal_refreshes_state_without_retrying():
+    ocu = Ocu()
+    state = ocu.observe("Test", "turn")
+    ocu.failure = True
+    ocu.result_text = guest.NOT_DISPATCHED + "The requested app is not active."
+    result = ocu.perform({"action": "press_key", "app": "Test", "observation": state["observation"],
+                          "key": "ctrl+a", "context": "turn"}, time.time() + 10)
+    assert result["action_executed"] is False
+    assert result["available"] is True
+    assert result["observation"] != state["observation"]
+    assert result["message"] == "The requested app is not active."
+    assert sum(tool == "press_key" for tool, _ in ocu.calls) == 1
