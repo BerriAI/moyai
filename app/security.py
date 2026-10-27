@@ -8,9 +8,9 @@ from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException, Request
-from starlette.responses import Response
-from starlette.requests import HTTPConnection
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from starlette.requests import HTTPConnection
+from starlette.responses import Response
 
 from .config import Settings
 
@@ -77,7 +77,10 @@ class Security:
         key = settings.encryption_key or local_secret(settings.data_dir / "encryption.key", lambda: Fernet.generate_key().decode())
         self.fernet = Fernet(key.encode())
         self.signer = URLSafeTimedSerializer(self.secret, salt="workspace-session-v1")
-        self.origin = settings.public_url.rstrip("/")
+        from .public_url import base_path, cookie_name, origin
+        self.origin = origin(settings.public_url)
+        self.session_cookie = cookie_name("workspace_session", settings.public_url)
+        self.cookie_path = base_path(settings.public_url) or "/"
         self.local = urlparse(self.origin).hostname in {"localhost", "127.0.0.1", "::1"}
         if bool(settings.google_client_id) != bool(settings.google_client_secret):
             raise ValueError("Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
@@ -105,7 +108,7 @@ class Security:
             info = getattr(request.state, 'access_session', None)
             return {**info, 'role': self.google_role(info['identity']['email'])} if info else None
         try:
-            info = self.signer.loads(request.cookies.get("workspace_session", ""), max_age=43200)
+            info = self.signer.loads(request.cookies.get(self.session_cookie, ""), max_age=43200)
             # Sessions from the original single-password deployment belong to
             # its administrator. New member sessions always carry a role/tag.
             role = info.get("role", "admin")
@@ -143,7 +146,7 @@ class Security:
         # never provide an account id or bypass the live mapping validation.
         request.state.access_actor = actor
         try:
-            info = self.signer.loads(request.cookies.get('workspace_session', ''), max_age=43200)
+            info = self.signer.loads(request.cookies.get(self.session_cookie, ''), max_age=43200)
         except (BadSignature, SignatureExpired):
             info = {}
         if (isinstance(info, dict) and info.get('method') == 'cloudflare'
@@ -222,8 +225,8 @@ class Security:
         return sid
 
     def set_session_cookie(self, response, info):
-        response.set_cookie('workspace_session', self.signer.dumps(info), max_age=43200,
-                            httponly=True, secure=not self.local, samesite='lax', path='/')
+        response.set_cookie(self.session_cookie, self.signer.dumps(info), max_age=43200,
+                            httponly=True, secure=not self.local, samesite='lax', path=self.cookie_path)
 
     def encrypt(self, value: str) -> str:
         return self.fernet.encrypt(value.encode()).decode()

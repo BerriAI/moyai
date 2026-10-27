@@ -1,3 +1,4 @@
+import { appPath, internalPath } from "./api"
 import type { MouseEvent } from "react"
 import type { OutputResource } from "./workspace-types"
 
@@ -10,17 +11,17 @@ export function fileReference(href: string, sessionId: string, origin: string): 
   let url: URL
   try { url = new URL(href, origin + "/") } catch { return null }
   if (!["http:", "https:"].includes(url.protocol) || url.origin !== origin || url.username || url.password) return null
-  const direct = url.pathname.match(/^\/api\/(files|uploads)\/([A-Za-z0-9_-]{1,200})\/?$/)
+  const direct = internalPath(url.pathname).match(/^\/api\/(files|uploads)\/([A-Za-z0-9_-]{1,200})\/?$/)
   if (direct && sessionId) return {
     kind: direct[1] === "files" ? "artifact" : "upload", id: direct[2], sessionId,
-    url: `/api/${direct[1]}/${direct[2]}`,
+    url: appPath(`/api/${direct[1]}/${direct[2]}`),
   }
-  const scoped = url.pathname.match(
+  const scoped = internalPath(url.pathname).match(
     /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/file-preview\/(artifact|upload)\/([A-Za-z0-9_-]{1,200})(?:\/(?:content|download))?\/?$/,
   )
   return scoped ? {
     kind: scoped[2] as "artifact" | "upload", id: scoped[3], sessionId: scoped[1],
-    url: url.pathname,
+    url: appPath(url.pathname),
   } : null
 }
 

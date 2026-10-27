@@ -1,0 +1,22 @@
+{{- $name := include "moyai.name" . -}}
+{{- $claims := dict "state" .Values.persistence -}}
+{{- if .Values.postgresql.enabled }}{{ $_ := set $claims "postgres" .Values.postgresql.persistence }}{{ end -}}
+{{- range $suffix, $claim := $claims }}
+{{- if not $claim.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-{{ $suffix }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with $claim.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests: {storage: {{ $claim.size }}}
+{{- end }}
+{{- end }}

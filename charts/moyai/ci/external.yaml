@@ -1,0 +1,9 @@
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+temporal:
+  address: temporal.example.com:7233
+persistence:
+  existingClaim: retained-moyai-state
+serviceAccount:
+  create: false
+  name: existing-moyai

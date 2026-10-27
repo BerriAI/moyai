@@ -148,6 +148,8 @@ class ProductIdentityAdapter:
         allow_shared_identities: bool = False,
     ):
         # Lazy imports keep the standalone native package independent of app/.
+        from app.public_url import cookie_name
+        self.session_cookie = cookie_name("workspace_session", legacy_settings.public_url)
         from app.cloudflare_access import CloudflareAccess
         from app.security import Security
         from app.user_roles import UserRoles

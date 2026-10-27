@@ -12,8 +12,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, ValidationError
 
 from .connector_errors import ConnectorError
-from .github import MANIFEST_PERMISSIONS, require_protection_permission, supports_permissions
+from .github import (
+    MANIFEST_PERMISSIONS,
+    require_protection_permission,
+    supports_permissions,
+)
 from .github_repositories import positive_id
+from .public_url import app_path
 from .security import digest
 
 
@@ -147,7 +152,7 @@ def routes(connectors, security, store, settings):
         state = state_for(sid, 'github_app')
         store.execute('INSERT INTO github_registration VALUES(?,?,?)',
                       (digest(state), organization['id'], organization['login']))
-        return GitHubSetupRedirect(url='/auth/github/register?' + urlencode({'state': state}))
+        return GitHubSetupRedirect(url=app_path(settings.public_url, '/auth/github/register?') + urlencode({'state': state}))
 
     def registration_owner(state):
         rows = store.rows('SELECT * FROM github_registration WHERE state_hash=?', (digest(state),))
@@ -216,7 +221,7 @@ def routes(connectors, security, store, settings):
                     'default_permissions': MANIFEST_PERMISSIONS}
         action = 'https://github.com/organizations/' + owner + '/settings/apps/new?' + urlencode({'state': state})
         return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connect GitHub · Moyai</title>'
-            '<link rel="stylesheet" href="/static/style.css"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
+            f'<link rel="stylesheet" href="{app_path(settings.public_url, "/static/style.css")}"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
             '<h1>Connect GitHub for your organization</h1><p>Organization: <strong>' + html.escape(owner) + '</strong>. Select repositories on GitHub; manage the selection in Moyai afterward.</p>'
             '<p>Moyai can read code, create normal pull requests, and update or comment on Moyai PRs created by any chat in this workspace under the current GitHub connection without an administrator approval step. It cannot approve or merge pull requests, '
             'enable auto-merge, or change credential and access-control files.</p>'
@@ -280,7 +285,7 @@ def routes(connectors, security, store, settings):
                 store.execute("UPDATE connections SET label=? WHERE provider='github'", (label,))
         connectors.record_check('github', 'healthy')
         connectors.audit('github', 'Connected ' + label + ': PR publishing and ruleset inspection; reviewer edits require Administration write; PR reviews and merges blocked')
-        return RedirectResponse('/?connection=success#connections', status_code=303)
+        return RedirectResponse(app_path(settings.public_url, '/?connection=success#connections'), status_code=303)
 
     return router
 

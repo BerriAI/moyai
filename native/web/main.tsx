@@ -1,3 +1,4 @@
+import { appPath } from "./api"
 import { SlackMessage } from "./slack-content"
 import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
@@ -407,7 +408,7 @@ function AppCommandPalette({ current, historicalId, productMode, ...props }: {
   return <CommandPalette {...props} scopeLabel="Your accessible sessions" currentSession={session} busy={actions.busy} search={searchSessions}
     destinations={settingsDestinations.filter(item => !item.productOnly || productMode === "existing")} onOpenSession={openSessionReference}
     onNewFolder={() => actions.openEditor({ action: "folder-create" })}
-    onCopySessionLink={async row => { await navigator.clipboard.writeText(`${location.origin}/#${sessionReferenceHash(row)}`) }}
+    onCopySessionLink={async row => { await navigator.clipboard.writeText(`${location.origin}${appPath("/")}#${sessionReferenceHash(row)}`) }}
     onRenameSession={() => { if (current) actions.openEditor({ action: "rename", session: current }) }}
     onMoveSession={() => { if (current) actions.openEditor({ action: "move", session: current }) }}
     onSetPinned={async (_row, pinned) => { if (current) await actions.edit(current, { pinned }, pinned ? "Session pinned." : "Session unpinned.") }} />
@@ -825,7 +826,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     const auth = csrfToken(), version = sensitiveVersion.current
     let closed = false
     let retry: ReturnType<typeof setTimeout> | undefined
-    const stream = new EventSource(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`)
+    const stream = new EventSource(appPath(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`))
     const current = () => !closed && auth === csrfToken() && version === sensitiveVersion.current && visibleNow.current
     const refreshSaved = () => { if (current()) void load(undefined, true).catch(reason => { if (current()) setLoadError(String(reason)) }) }
     stream.onmessage = event => {

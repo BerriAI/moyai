@@ -1,3 +1,4 @@
+import { appPath } from "./api"
 import React, { useEffect, useRef, useState } from "react"
 import { FileText, LoaderCircle, Paperclip, Upload, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -46,7 +47,7 @@ export function useAttachments(onError: (message: string) => void) {
 export function AttachmentPreviews({ files, remove, retry, draft = false }: { files: DraftFile[]; remove?: (id: string) => void; retry?: (id: string) => void; draft?: boolean }) {
   if (!files.length) return null
   return <div className="image-previews" aria-label="Attached files">{files.map(file => <div className={`image-preview${isInlineImage(file.media_type) ? "" : " file-preview"}${file.uploadState === "failed" ? " upload-failed" : ""}`} key={file.localId ?? file.id} aria-busy={file.uploadState === "uploading"}>
-    {draft ? <div>{preview(file)}</div> : <a href={`/api/uploads/${file.id}`}>{preview(file)}</a>}
+    {draft ? <div>{preview(file)}</div> : <a href={appPath(`/api/uploads/${file.id}`)}>{preview(file)}</a>}
     {file.uploadState === "uploading" && <span className="attachment-upload-status" role="status"><LoaderCircle size={13} className="upload-spinner" />Uploading…</span>}
     {file.uploadState === "failed" && <div className="attachment-upload-error"><span role="alert">{file.error || "Upload failed."}</span>{retry && <Button type="button" variant="ghost" size="sm" aria-label={`Retry ${file.name}`} onClick={() => retry(file.id)}>Retry</Button>}</div>}
     {remove && <Button type="button" size="icon-sm" variant="secondary" aria-label={`Remove ${file.name}`} onClick={() => remove(file.id)}><X size={13} /></Button>}
@@ -54,7 +55,7 @@ export function AttachmentPreviews({ files, remove, retry, draft = false }: { fi
 }
 
 function preview(file: DraftFile) {
-  return <>{isInlineImage(file.media_type) ? <img src={file.previewUrl || `/api/uploads/${file.id}`} alt={file.name} /> : <FileText size={28} aria-hidden="true" />}
+  return <>{isInlineImage(file.media_type) ? <img src={file.previewUrl || appPath(`/api/uploads/${file.id}`)} alt={file.name} /> : <FileText size={28} aria-hidden="true" />}
     <span title={file.name}>{file.name}</span>
     {!isInlineImage(file.media_type) && <small>{file.size < 1024 ? `${file.size} B` : `${(file.size / 1024).toFixed(1)} KB`}</small>}
   </>

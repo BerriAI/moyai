@@ -1,12 +1,12 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 import { ExternalLink, MessageSquare, Orbit, Pause, Play, Square, Users } from "lucide-react"
-import Markdown from "react-markdown"
+import Markdown, { defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ApiError, csrfToken } from "./api"
+import { appPath, ApiError, csrfToken } from "./api"
 import { controlSwarm, getSwarm, type SwarmBoard } from "./generated/api"
 import { SwarmSpace } from "./swarm-space"
 import "./swarm.css"
@@ -159,7 +159,7 @@ export function SwarmPanel({ sessionId, visible = true, onChanged, space = false
           {data.posts.filter(post => post.kind !== "goal").map(post => <article key={post.id} className="swarm-post">
             <div><strong>{post.author}</strong><span className="muted">{post.kind === "human" ? "Direction" : post.kind}</span>
               <time dateTime={post.created_at}>{new Date(post.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></div>
-            <div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{post.content}</Markdown></div>
+            <div className="message-content"><Markdown urlTransform={url => appPath(defaultUrlTransform(url))} remarkPlugins={[remarkGfm]}>{post.content}</Markdown></div>
             {post.kind === "result" && post.author_session_id && <a href={`#${post.author_session_id}`}>Open full conversation</a>}
           </article>)}
           {!data.posts.some(post => post.kind !== "goal") && <p className="muted">The team’s real findings and assignments will appear here.</p>}

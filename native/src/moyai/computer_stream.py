@@ -13,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from app.db import drain
+from app.public_url import origin
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import TypeAdapter
 from pydantic_ai.workspaces import WorkspaceRef, WorkspaceUnavailableError
@@ -261,7 +262,7 @@ def routes(runtime: Runtime, *, cookie_name: str) -> APIRouter:
         code, reason = 1000, "Desktop disconnected."
         try:
             scheme = "https" if socket.url.scheme == "wss" else "http"
-            expected = runtime.settings.public_url.rstrip("/") or f"{scheme}://{socket.url.netloc}"
+            expected = origin(runtime.settings.public_url) or f"{scheme}://{socket.url.netloc}"
             if socket.headers.get("origin") != expected:
                 raise HTTPException(403, "This desktop connection has an invalid origin.")
             actor, token, request, grant = await authenticate_socket(runtime, socket, cookie_name=cookie_name)

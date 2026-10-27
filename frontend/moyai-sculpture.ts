@@ -132,7 +132,7 @@ export function mountSculpture(host: HTMLElement | null) {
     parser.textureLoader = new THREE.TextureLoader()
     return { name: 'MoyaiEmbeddedImages' }
   })
-  loader.load('/static/models/moyai.glb', gltf => {
+  loader.load(new URL('static/models/moyai.glb', document.baseURI).href, gltf => {
     if (disposed || !host.isConnected) { release(gltf.scene); cleanup(); return }
     const meshes: THREE.Mesh[] = []
     gltf.scene.traverse(child => { if (child instanceof THREE.Mesh) meshes.push(child) })

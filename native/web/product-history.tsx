@@ -1,3 +1,4 @@
+import { appPath, internalPath } from "./api"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -94,9 +95,10 @@ export function productFileUrl(value: string | undefined, sessionId: string): st
   try {
     const url = new URL(value, window.location.origin)
     if (url.origin !== window.location.origin || url.username || url.password || value.startsWith("//")) return
-    const recovery = new RegExp(`^/api/product/sessions/${sessionId}/continuation/archive/[a-f0-9]{32}$`).test(url.pathname)
-    if (!recovery && ![ `/api/product/sessions/${sessionId}/files/content`, `/api/runs/${sessionId}/artifact` ].includes(url.pathname)) return
-    return url.pathname + url.search
+    const pathname = internalPath(url.pathname)
+    const recovery = new RegExp(`^/api/product/sessions/${sessionId}/continuation/archive/[a-f0-9]{32}$`).test(pathname)
+    if (!recovery && ![ `/api/product/sessions/${sessionId}/files/content`, `/api/runs/${sessionId}/artifact` ].includes(pathname)) return
+    return appPath(url.pathname) + url.search
   } catch { return }
 }
 function externalLink(value?: string) {
@@ -115,7 +117,7 @@ function Prose({ text }: { text: string }) {
         /^\/#run=[a-f0-9]{32}$/.test(href) ||
         /^\/api\/runs\/[a-f0-9]{32}\/artifact(?:\?revision=[a-f0-9]{24,64})?$/.test(href)
       )
-      if (local) return <a href={href}>{children}</a>
+      if (local) return <a href={appPath(href || "")}>{children}</a>
       const url = externalLink(href)
       return url ? <a href={url} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>
     },
@@ -210,7 +212,7 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
   }
   async function copyLink() {
     try {
-      await navigator.clipboard.writeText(new URL(`/#run=${encodeURIComponent(sessionId)}`, window.location.origin).href)
+      await navigator.clipboard.writeText(new URL(`${appPath("/")}#run=${encodeURIComponent(sessionId)}`, window.location.origin).href)
       if (mounted.current) setCopyState("Link copied")
     } catch { if (mounted.current) setCopyState("Copy failed. Use the session link below.") }
   }
@@ -265,9 +267,9 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
           {actionError && <Notice error>{actionError}</Notice>}
           <div className="ph-details ph-muted">
             <span>{session.owner?.name || session.owner?.id || "Earlier author"}</span><span>{session.model}</span>
-            <a href={`/#run=${sessionId}`}>{sessionId}</a>
+            <a href={appPath(`/#run=${sessionId}`)}>{sessionId}</a>
             {session.parent_session_id && <Button variant="link" size="sm" asChild>
-              <a href={`/#run=${session.parent_session_id}`} onClick={event => {
+              <a href={appPath(`/#run=${session.parent_session_id}`)} onClick={event => {
                 if (onOpenSession) { event.preventDefault(); openSession(session.parent_session_id!) }
               }}>Parent conversation</a>
             </Button>}
@@ -300,7 +302,7 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
             {children.error ? <Notice error>{children.error.message}</Notice>
               : children.loading ? <p className="ph-muted" role="status">Loading conversations…</p>
               : children.data?.sessions.length ? children.data.sessions.map(child => <Button className="ph-child" variant="ghost" key={child.id} asChild>
-                <a href={`/#run=${child.id}`} onClick={event => { if (onOpenSession) { event.preventDefault(); openSession(child.id) } }}>
+                <a href={appPath(`/#run=${child.id}`)} onClick={event => { if (onOpenSession) { event.preventDefault(); openSession(child.id) } }}>
                   <MessageSquare size={16} /><span><strong>{child.title}</strong><small>{child.status}</small></span><ArrowRight size={14} />
                 </a>
               </Button>) : <p className="ph-muted">No child conversations.</p>}

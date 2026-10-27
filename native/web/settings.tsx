@@ -1,3 +1,4 @@
+import { appPath } from "./api"
 import React, { useCallback, useEffect, useId, useRef, useState } from "react"
 import { ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Gauge, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, Slack, SlidersHorizontal, FileText, Trash2, Users, Wallet, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -590,7 +591,7 @@ export function productSkillFileUrl(id: string, path: string, revision: number):
   if (!/^[0-9a-f]{32}$/.test(id) || !path || /[\\\u0000-\u001f\u007f]/.test(path) || !Number.isSafeInteger(revision) || revision < 1) return
   const parts = path.split("/")
   if (parts.some(part => !part || part === "." || part === "..")) return
-  return `/api/product/skills/${encodeURIComponent(id)}/files/${parts.map(encodeURIComponent).join("/")}?revision=${revision}`
+  return appPath(`/api/product/skills/${encodeURIComponent(id)}/files/${parts.map(encodeURIComponent).join("/")}?revision=${revision}`)
 }
 export function ProductSkillRows({ skills, onView }: { skills: ProductSkillSummary[]; onView: (skill: ProductSkillSummary) => void }) {
   return <div className="ns-records">{skills.map(skill => <article className="ns-record" key={skill.id}><FileText className="ns-record-icon" aria-hidden="true" />

@@ -1,0 +1,76 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "moyai.name" . }}-postgres
+spec:
+  selector:
+    app: {{ include "moyai.name" . }}-postgres
+  ports:
+    - name: {{ include "moyai.name" . }}-postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "moyai.name" . }}-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "moyai.name" . }}-postgres
+  template:
+    metadata:
+      labels:
+        app: {{ include "moyai.name" . }}-postgres
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: {{ .Values.postgresql.image }}
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: postgres
+            - name: PGDATA
+              value: /var/lib/postgresql/18/docker
+          envFrom:
+            - secretRef:
+                name: {{ .Values.databaseSecret }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: scripts
+              mountPath: /docker-entrypoint-initdb.d/init.sh
+              subPath: postgres-init.sh
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: [sh, -c, "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+            periodSeconds: 5
+          startupProbe:
+            exec:
+              command: [sh, -c, "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+            periodSeconds: 5
+            failureThreshold: 60
+          resources: {{ .Values.postgresql.resources | toJson }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-postgres" (include "moyai.name" .)) .Values.postgresql.persistence.existingClaim }}
+        - name: scripts
+          configMap:
+            name: {{ include "moyai.name" . }}-scripts
+{{- end }}

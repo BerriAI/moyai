@@ -285,7 +285,7 @@ def load_product_config(environment: Mapping[str, str] | None = None) -> Product
         valid_origin = (
             origin.scheme in {"http", "https"} and bool(origin.hostname)
             and not origin.username and not origin.password and not origin.query and not origin.fragment
-            and origin.path in {"", "/"} and not any(c.isspace() for c in source.public_url)
+            and not any(c.isspace() for c in source.public_url)
             and (origin.scheme == "https" or _loopback_endpoint(source.public_url))
         )
         _ = origin.port

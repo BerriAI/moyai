@@ -51,3 +51,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$RELEASE_TAG" release/moyai-docker.tar.gz
+
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.19.0
+      - name: Package the matching Helm chart
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          REVISION: ${{ steps.revision.outputs.sha }}
+        run: python3 scripts/build_helm_bundle.py --digest "$IMAGE_DIGEST" --revision "$REVISION" --output release/helm
+      - name: Publish the chart and attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm push release/helm/moyai-*.tgz oci://ghcr.io/berriai/charts
+          gh release upload "$RELEASE_TAG" release/helm/moyai-*.tgz

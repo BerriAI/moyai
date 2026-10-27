@@ -23,6 +23,7 @@ from uuid import NAMESPACE_URL, uuid5
 from weakref import WeakValueDictionary
 
 from app.db import database as source_database
+from app.public_url import app_path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -844,7 +845,7 @@ def routes(service: ProductConnections) -> APIRouter:
         if not await source_database(consume):
             raise HTTPException(400, "Expired or invalid connection request. Start again from Connections.")
         if error or not code:
-            return RedirectResponse("/?connection=cancelled#connections", status_code=303)
+            return RedirectResponse(app_path(service.product.settings.public_url, "/?connection=cancelled#connections"), status_code=303)
         expected = await source_database(connectors.connection_revision, provider)
         value = await connectors.exchange(provider, code=code)
         label = await connectors.verify(provider, value)
@@ -852,6 +853,6 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(save_if_unchanged, store, security, provider, value, label, expected)
         await source_database(connectors.record_check, provider, "healthy")
         await source_database(connectors.audit, provider, "Authorized an organization connection")
-        return RedirectResponse("/?connection=success#connections", status_code=303)
+        return RedirectResponse(app_path(service.product.settings.public_url, "/?connection=success#connections"), status_code=303)
 
     return router

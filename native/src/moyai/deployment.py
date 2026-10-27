@@ -134,10 +134,12 @@ async def reconcile_control(values: dict[str, str], command: str, intent: dict) 
 
 async def health(values: dict[str, str]) -> None:
     identities = {}
+    ports = {"api": 8787, "coordinator": 8788, "broker": 8789, "worker": 8790}
     async with httpx.AsyncClient(timeout=10) as client:
         for role in ("coordinator", "broker", "worker", "api"):
             response = await client.get(
-                f"http://{role}:8787/health", headers={"Host": httpx.URL(values["MOYAI_PUBLIC_URL"]).netloc.decode()},
+                (f"http://127.0.0.1:{ports[role]}/health"
+                 if values.get("MOYAI_COLOCATED_ROLES") == "true" else f"http://{role}:8787/health"), headers={"Host": httpx.URL(values["MOYAI_PUBLIC_URL"]).netloc.decode()},
             )
             response.raise_for_status()
             if (

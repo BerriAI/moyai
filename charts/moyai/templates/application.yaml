@@ -1,0 +1,105 @@
+{{- $name := include "moyai.name" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+spec:
+  # Shared private installation state and exclusive role ownership: never scale.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: moyai}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: moyai}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "moyai.account" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 300
+      imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
+      nodeSelector: {{ .Values.nodeSelector | toJson }}
+      tolerations: {{ .Values.tolerations | toJson }}
+      affinity: {{ .Values.affinity | toJson }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: permissions
+          image: {{ include "moyai.image" . }}
+          command: [/bin/sh, -ec, "chown 10001:10001 /data /data/ingress; chmod 0700 /data; chmod 0755 /data/ingress"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}
+          {{- include "moyai.mounts" . | nindent 10 }}
+        {{- $steps := list "initialize" -}}
+        {{- if .Values.temporal.bundled }}{{ $steps = prepend $steps "namespace" }}{{ end }}
+        {{- range $steps }}
+        - name: {{ . }}
+          image: {{ include "moyai.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: [/app/.venv/bin/python, -m, moyai.deployment, {{ . }}]
+          {{- include "moyai.env" $ | nindent 10 }}
+          {{- include "moyai.mounts" $ | nindent 10 }}
+          {{- include "moyai.security" $ | nindent 10 }}
+          resources: {{ $.Values.resources | toJson }}
+        {{- end }}
+      containers:
+        {{- range $role, $port := dict "api" 8787 "coordinator" 8788 "broker" 8789 "worker" 8790 }}
+        - name: {{ $role }}
+          image: {{ include "moyai.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: [/app/.venv/bin/python, -m, moyai.kubernetes_runtime, {{ $role }}]
+          {{- include "moyai.env" $ | nindent 10 }}
+          {{- include "moyai.mounts" $ | nindent 10 }}
+          {{- include "moyai.security" $ | nindent 10 }}
+          ports: [{name: {{ $role }}, containerPort: {{ $port }}}]
+          startupProbe:
+            exec: {command: [/app/.venv/bin/python, -m, moyai.kubernetes_runtime, probe, {{ $role }}]}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 180
+          readinessProbe:
+            exec: {command: [/app/.venv/bin/python, -m, moyai.kubernetes_runtime, probe, {{ $role }}]}
+            timeoutSeconds: 5
+          lifecycle:
+            preStop:
+              exec: {command: [/app/.venv/bin/python, -m, moyai.kubernetes_runtime, close-ingress]}
+          resources: {{ $.Values.resources | toJson }}
+        {{- end }}
+        - name: activation
+          image: {{ include "moyai.image" . }}
+          command: [/app/.venv/bin/python, -m, moyai.kubernetes_runtime, activate]
+          {{- include "moyai.env" . | nindent 10 }}
+          {{- include "moyai.mounts" . | nindent 10 }}
+          {{- include "moyai.security" . | nindent 10 }}
+          readinessProbe:
+            exec: {command: [/bin/sh, -ec, "test -f /data/ingress/ready"]}
+            periodSeconds: 5
+          resources: {{ .Values.resources | toJson }}
+        - name: proxy
+          image: {{ .Values.proxy.image }}
+          command: [nginx, -c, /etc/moyai/nginx.conf, -g, "daemon off;"]
+          {{- include "moyai.security" . | nindent 10 }}
+          ports: [{name: http, containerPort: 8080}]
+          volumeMounts:
+            - {name: scripts, mountPath: /etc/moyai, readOnly: true}
+            - {name: ingress, mountPath: /ingress, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+          resources: {{ .Values.proxy.resources | toJson }}
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-state" $name) .Values.persistence.existingClaim }}
+        - name: ingress
+          emptyDir: {}
+        - name: scripts
+          configMap: {name: {{ $name }}-scripts}

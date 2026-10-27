@@ -1,0 +1,24 @@
+name: Helm chart
+on:
+  pull_request:
+    paths: ['charts/**', 'scripts/build_helm_bundle.py', 'charts/tests/**', '.github/workflows/helm.yml', '.github/workflows/docker-release.yml', 'native/src/moyai/kubernetes_runtime.py']
+  push:
+    branches: [main]
+    paths: ['charts/**', 'scripts/build_helm_bundle.py', 'charts/tests/**', '.github/workflows/helm.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.19.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install pytest pyyaml
+      - run: helm lint charts/moyai -f charts/moyai/ci/bundled.yaml
+      - run: helm lint charts/moyai -f charts/moyai/ci/external.yaml
+      - run: python -m pytest -o addopts= charts/tests/test_chart.py -q --confcutdir=charts

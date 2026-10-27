@@ -1,11 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const ts = require('typescript');
-const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../native/web/file-links.ts'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText;
+const compiled = require('esbuild').buildSync({
+  entryPoints: ['native/web/file-links.ts'], bundle: true, write: false, format: 'esm', platform: 'node',
+}).outputFiles[0].text;
 const loaded = import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 const origin = 'http://127.0.0.1:8807';
 const file = 'efbc22e2-15c7-49df-b562-999440ef1f14';
@@ -65,4 +62,17 @@ test('credential-bearing, unsafe and ambiguous paths cannot become a file previe
     `/api\\files\\${file}`, '//elsewhere.invalid/api/files/id',
   ]) assert.equal(fileReference(href, session, origin), null, href);
   assert.equal(fileReference(`/api/files/${file}`, '', origin), null);
+});
+
+
+test('prefixed file links retain the public path for preview and browser downloads', async () => {
+  const { fileReference } = await loaded;
+  global.document = { querySelector: () => ({ getAttribute: () => '/moyai/' }) };
+  try {
+    for (const prefix of ['', '/moyai']) {
+      assert.equal(fileReference(`${prefix}/api/files/${file}`, session, origin).url, `/moyai/api/files/${file}`);
+      const scoped = `${prefix}/api/sessions/${session}/file-preview/upload/${file}/download`;
+      assert.equal(fileReference(scoped, session, origin).url, `/moyai/api/sessions/${session}/file-preview/upload/${file}/download`);
+    }
+  } finally { delete global.document; }
 });

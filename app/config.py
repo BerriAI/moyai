@@ -1,14 +1,14 @@
-from pathlib import Path
-from typing import Literal
 import base64
 import re
+from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from .context_budget import ModelContextLimits
 from .model_selection import ASTRA, ASTRA_ULTRAFAST
-
 
 # Keep picker IDs and labels in code so a stale deployment environment cannot
 # hide models added by a release. AGENT_MODEL only chooses the default.
@@ -147,9 +147,9 @@ class Settings(BaseSettings):
                 raise ValueError('Employee and broker Access applications must have different audiences.')
             origin = urlsplit(self.public_url)
             if (origin.scheme != 'https' or not origin.hostname or origin.username or origin.password
-                    or origin.path not in {'', '/'} or origin.query or origin.fragment
+                    or origin.query or origin.fragment
                     or any(char in self.public_url for char in '\r\n')):
-                raise ValueError('Cloudflare Access requires an HTTPS PUBLIC_URL origin without a path or credentials.')
+                raise ValueError('Cloudflare Access requires an HTTPS PUBLIC_URL without credentials, query or fragment.')
         credentials = (self.cloudflare_access_client_id, self.cloudflare_access_client_secret)
         if any(credentials) and (not all(credentials) or not all(values)):
             raise ValueError('Configure both broker service credentials and Cloudflare Access.')
@@ -160,10 +160,18 @@ class Settings(BaseSettings):
             raise ValueError('Only exact automation webhook paths can be exempted from Access.')
         return self
 
+    @field_validator('public_url')
+    @classmethod
+    def validate_public_path(cls, value):
+        from .public_url import base_path
+        base_path(value)
+        return value
+
     def broker_environment(self, token: str) -> dict[str, str]:
+        from .public_url import origin
         # Explicit empty values remove stale credentials on reused sandboxes.
         return {'WORKSPACE_RUN_TOKEN': token,
-                'WORKSPACE_ACCESS_ORIGIN': self.public_url.rstrip('/') if self.cloudflare_access_client_id else '',
+                'WORKSPACE_ACCESS_ORIGIN': origin(self.public_url) if self.cloudflare_access_client_id else '',
                 'WORKSPACE_ACCESS_CLIENT_ID': self.cloudflare_access_client_id,
                 'WORKSPACE_ACCESS_CLIENT_SECRET': self.cloudflare_access_client_secret}
 

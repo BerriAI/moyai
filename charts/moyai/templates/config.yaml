@@ -1,0 +1,70 @@
+{{- $name := include "moyai.name" . -}}
+{{- $path := include "moyai.path" . -}}
+{{- if and $path (not (regexMatch "^(/[A-Za-z0-9_-]+)+$" $path)) -}}
+{{- fail "publicUrl must use a canonical path of letters, digits, underscores and hyphens" -}}
+{{- end -}}
+{{- if and .Values.temporal.bundled (not .Values.postgresql.enabled) -}}
+{{- fail "bundled Temporal requires postgresql.enabled; otherwise configure external Temporal" -}}
+{{- end -}}
+{{- if and (eq (urlParse .Values.publicUrl).scheme "http") (not (has (urlParse .Values.publicUrl).hostname (list "localhost" "127.0.0.1"))) -}}
+{{- fail "publicUrl must use HTTPS except for loopback tests" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-config
+data:
+  {{- $fixed := dict "DATA_DIR" "/data" "MOYAI_INSTALL_TOPOLOGY" "split" "MOYAI_CORE" "pydantic" "MOYAI_COLOCATED_ROLES" "true" "MOYAI_INSTALLATION_ID" .Values.installationId "MOYAI_PUBLIC_URL" (trimSuffix "/" .Values.publicUrl) "TEMPORAL_NAMESPACE" .Values.temporal.namespace "MOYAI_TEMPORAL_MODE" (ternary "bundled" "external" .Values.temporal.bundled) "TEMPORAL_TLS" (ternary "false" (toString .Values.temporal.tls) .Values.temporal.bundled) -}}
+  {{- $_ := set $fixed "TEMPORAL_ADDRESS" (ternary (printf "%s-temporal:7233" $name) .Values.temporal.address .Values.temporal.bundled) -}}
+  {{- if .Values.temporal.bundled }}{{ $_ := set $fixed "TEMPORAL_API_KEY" "" }}{{ end -}}
+  {{- if not (get $fixed "TEMPORAL_ADDRESS") }}{{ fail "temporal.address is required for external Temporal" }}{{ end -}}
+  {{- range $key, $value := mergeOverwrite (deepCopy .Values.config) $fixed }}
+  {{ $key }}: {{ $value | toString | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-scripts
+data:
+  postgres-init.sh: |
+{{ .Files.Get "files/postgres-init.sh" | indent 4 }}
+  temporal-schema.sh: |
+{{ .Files.Get "files/temporal-schema.sh" | indent 4 }}
+  nginx.conf: |
+    pid /tmp/nginx.pid;
+    events {}
+    http {
+      access_log /dev/stdout;
+      error_log /dev/stderr warn;
+      client_body_temp_path /tmp/client_body;
+      proxy_temp_path /tmp/proxy;
+      map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+      server {
+        listen 8080;
+        server_tokens off;
+        client_max_body_size 21m;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        location = /health { proxy_pass http://127.0.0.1:8787/health; }
+        location = {{ $path }}/broker/health { proxy_pass http://127.0.0.1:8789/health; }
+        location {{ $path }}/broker/ { proxy_pass http://127.0.0.1:8789; }
+        location {{ $path }}/hooks/ {
+          if (!-f /ingress/ready) { return 503; }
+          proxy_pass http://127.0.0.1:8788;
+        }
+        {{- if $path }}
+        location = {{ $path }} { return 307 {{ $path }}/$is_args$args; }
+        location / { return 404; }
+        {{- end }}
+        location {{ $path }}/ {
+          if (!-f /ingress/ready) { return 503; }
+          proxy_pass http://127.0.0.1:8787;
+        }
+      }
+    }

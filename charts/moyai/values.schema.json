@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "publicUrl": {
+      "type": "string",
+      "pattern": "^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9_-]+)*/?$"
+    },
+    "installationId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]{0,7}$"
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "repository",
+        "digest"
+      ]
+    },
+    "runtimeSecret": {
+      "type": "string",
+      "minLength": 1
+    },
+    "databaseSecret": {
+      "type": "string",
+      "minLength": 1
+    },
+    "postgresql": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "temporal": {
+      "type": "object",
+      "properties": {
+        "bundled": {
+          "type": "boolean"
+        },
+        "tls": {
+          "type": "boolean"
+        },
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "required": [
+    "image",
+    "publicUrl",
+    "installationId",
+    "runtimeSecret",
+    "databaseSecret"
+  ]
+}

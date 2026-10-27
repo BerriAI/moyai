@@ -1,11 +1,11 @@
 import React, { createContext, forwardRef, useCallback, useContext, useEffect, useRef, useState } from "react"
-import Markdown from "react-markdown"
+import Markdown, { defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ChevronRight, File, Flower2, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Globe, Image, Orbit, PanelRightOpen, Plus, RefreshCw, Shapes, Sparkles, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { ApiError } from "./api"
+import { appPath, ApiError } from "./api"
 import { attachSessionLink, getSubagent, getWorkspace, removeSessionLink, type PullRequestStatus, type SessionWorkspace, type SubagentDetail, type WorkspaceLink, type WorkspaceSubagent } from "./generated/api"
 import type { SidebarSession } from "./session-actions"
 import type { OutputResource } from "./workspace-types"
@@ -259,7 +259,7 @@ function SubagentContent({ sessionId, agent, active, onOpenFile }: { sessionId: 
     {!canInspect ? <p className="workspace-picker-empty">Only the person who requested this subagent can inspect its details.</p>
       : error ? <div className="workspace-picker-error" role="alert"><p>{error}</p><Button type="button" variant="outline" size="sm" disabled={!active || loading} onClick={() => setRevision(value => value + 1)}>Retry</Button></div>
         : !detail ? <p className="workspace-picker-empty" role="status">{active ? "Loading subagent…" : "Details load when this tab is selected."}</p> : <>
-          <div className="message-content subagent-result" onClickCapture={event => previewFileLink(event, sessionId, onOpenFile)}>{detail.output ? <Markdown remarkPlugins={[remarkGfm]}>{detail.output}</Markdown> : <p className="workspace-picker-empty">No response has been saved yet.</p>}</div>
+          <div className="message-content subagent-result" onClickCapture={event => previewFileLink(event, sessionId, onOpenFile)}>{detail.output ? <Markdown urlTransform={url => appPath(defaultUrlTransform(url))} remarkPlugins={[remarkGfm]}>{detail.output}</Markdown> : <p className="workspace-picker-empty">No response has been saved yet.</p>}</div>
           <details><summary>Recorded steps · {detail.steps.length}</summary><ol className="subagent-steps">{detail.steps.map((step, index) => <li key={`${step.timestamp}:${index}`}><span>{step.kind.replaceAll("_", " ")}{step.tool ? ` · ${step.tool}` : ""}</span>{Number.isFinite(Date.parse(step.timestamp)) && <time dateTime={step.timestamp}>{new Date(step.timestamp).toLocaleTimeString()}</time>}</li>)}</ol></details>
         </>}
   </section>

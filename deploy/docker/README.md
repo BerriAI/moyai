@@ -70,7 +70,7 @@ Each installation needs its own ID and Compose project.
 | `OBJECT_STORAGE_REGION` | Bucket region. |
 | `OBJECT_STORAGE_ENDPOINT` | Empty for AWS S3; set for another compatible service. |
 | `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY` | Credentials, or leave empty to use the AWS workload credential chain. |
-| `MOYAI_PUBLIC_URL` | The HTTPS origin your browser and workers can reach. |
+| `MOYAI_PUBLIC_URL` | The HTTPS URL your browser and workers can reach, optionally including `/moyai`. |
 | `LITELLM_API_BASE`, `LITELLM_API_KEY`, `AGENT_MODEL` | Gateway URL, key, and an enabled model that supports Responses. |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | A token pair for your Modal workspace. |
 | `MODAL_APP_NAME` | A dedicated Modal application name for this installation. |
@@ -143,6 +143,16 @@ different host. Keep the database, Temporal, and individual application services
 private. Configure the ingress for streaming and WebSockets.
 Compose restarts the proxy when it replaces an upstream application container,
 so Nginx resolves the new container addresses.
+
+### Serve under a path
+
+Set `MOYAI_PUBLIC_URL=https://gateway.example.com/moyai` before configuration.
+The helper derives `MOYAI_BASE_PATH=/moyai`; for manually prepared `.env` files,
+set both consistently. Forward the path unchanged to the proxy. The same image
+serves assets, APIs, streams and callbacks below that prefix. Register enabled
+OAuth callbacks with the prefix. Keep Cloudflare provider endpoints such as
+`/cdn-cgi/access/logout` at the hostname root. Changing an existing installation's
+public URL/path requires an explicit migration.
 
 ### Choose the topology
 
@@ -364,8 +374,7 @@ Node or `node_modules`.
 
 The release workflow publishes AMD64/ARM64 images and attaches a digest-pinned
 installation bundle when a GitHub release is published. That workflow does not
-deploy Moyai or migrate a customer's data. Helm/EKS and AWS provisioning remain
-follow-up work.
+deploy Moyai or migrate a customer's data. A [Helm chart](../../charts/moyai/README.md) is published alongside the image; AWS provisioning remains external.
 
 ## Publish the quickstart image
 
