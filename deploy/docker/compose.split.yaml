@@ -58,9 +58,6 @@ services:
       - moyai-ingress:/data/ingress
     depends_on:
       proxy:
-    environment:
-      MOYAI_BASE_PATH: ${MOYAI_BASE_PATH:-}
-      NGINX_ENVSUBST_FILTER: ^MOYAI_BASE_PATH$
         condition: service_healthy
   proxy:
     environment:

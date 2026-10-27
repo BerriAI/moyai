@@ -165,7 +165,7 @@ class Settings(BaseSettings):
     def validate_public_path(cls, value):
         from .public_url import base_path
         base_path(value)
-        return value.rstrip('/')
+        return value
 
     def broker_environment(self, token: str) -> dict[str, str]:
         from .public_url import origin

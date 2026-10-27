@@ -14,7 +14,15 @@ from moyai.deployment_config import InstallationError, _public_origin
 
 
 @pytest.mark.parametrize('prefix', ['', '/moyai', '/tools/moyai'])
-async def test_assets_login_mutations_download_and_logout_under_prefix(runtime, prefix):
+async def test_assets_login_mutations_download_and_logout_under_prefix(runtime, prefix, tmp_path, monkeypatch):
+    # Native-only CI does not build Vite. Exercise the HTML/static serving
+    # contract here; the actual built frontend is covered by browser/local E2E.
+    static = tmp_path / 'static'
+    (static / 'assets').mkdir(parents=True)
+    (static / 'index.html').write_text('<html><head><!--moyai-base-->'
+                                     '<script src="./assets/proof.js"></script></head></html>')
+    (static / 'assets/proof.js').write_text('/* static serving proof */')
+    monkeypatch.setattr('moyai.api.STATIC', static)
     runtime.settings.public_url = 'http://testserver' + prefix
     app = create_app(runtime, run_dispatcher=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://testserver') as client:

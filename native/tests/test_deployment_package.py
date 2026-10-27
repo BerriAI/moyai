@@ -24,6 +24,17 @@ from moyai.product_config import load_product_config
 from moyai.product_deployment import require_startable
 
 
+def test_split_compose_preserves_activation_and_limits_proxy_substitution():
+    import yaml
+
+    path = Path(__file__).resolve().parents[2] / 'deploy/docker/compose.split.yaml'
+    services = yaml.safe_load(path.read_text())['services']
+    assert services['activate']['depends_on']['proxy']['condition'] == 'service_healthy'
+    assert services['activate']['environment'] == {'MOYAI_INSTALL_TOPOLOGY': 'split'}
+    assert services['proxy']['environment']['NGINX_ENVSUBST_FILTER'] == '^MOYAI_BASE_PATH$'
+    assert './nginx.split.conf:/etc/nginx/templates/default.conf.template:ro' in services['proxy']['volumes']
+
+
 @pytest.fixture
 def install_environment(tmp_path, monkeypatch):
     @asynccontextmanager
