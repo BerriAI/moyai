@@ -1,0 +1,81 @@
+{{- if .Values.temporal.bundled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "moyai.name" . }}-temporal
+spec:
+  selector:
+    app: {{ include "moyai.name" . }}-temporal
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "moyai.name" . }}-temporal
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "moyai.name" . }}-temporal
+  template:
+    metadata:
+      labels:
+        app: {{ include "moyai.name" . }}-temporal
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: schema
+          image: {{ .Values.temporal.adminImage }}
+          command: [/bin/sh, /setup/temporal-schema.sh]
+          env:
+            - {name: POSTGRES_HOST, value: {{ include "moyai.name" . }}-postgres}
+            - name: SQL_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.databaseSecret }}, key: TEMPORAL_PASSWORD}
+          volumeMounts:
+            - name: scripts
+              mountPath: /setup
+              readOnly: true
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+      containers:
+        - name: temporal
+          image: {{ .Values.temporal.image }}
+          env:
+            - {name: DB, value: postgres12}
+            - {name: DB_PORT, value: "5432"}
+            - {name: POSTGRES_SEEDS, value: {{ include "moyai.name" . }}-postgres}
+            - {name: POSTGRES_USER, value: temporal}
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.databaseSecret }}, key: TEMPORAL_PASSWORD}
+            - {name: DBNAME, value: temporal}
+            - {name: VISIBILITY_DBNAME, value: temporal_visibility}
+            - {name: BIND_ON_IP, value: "0.0.0.0"}
+          ports:
+            - name: grpc
+              containerPort: 7233
+          startupProbe:
+            tcpSocket: {port: grpc}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket: {port: grpc}
+            periodSeconds: 5
+          resources: {{ .Values.temporal.resources | toJson }}
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "moyai.name" . }}-scripts
+{{- end }}

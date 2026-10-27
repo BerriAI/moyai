@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import quote, urlsplit
 
+from app.public_url import app_path, base_path, cookie_name, origin
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, TypeAdapter, field_validator
 from pydantic_ai import ConversationTypeAdapter, DeferredToolResults
@@ -87,6 +88,7 @@ from .models import (
 from .presentation import public_event, redact
 from .product_identity import ProductAuthorityBusy
 from .product_requester import answer_actor, can_answer
+from .public_path import PublicPathMiddleware
 from .pull_requests import routes as pull_request_routes
 from .runtime import Runtime
 from .security import check_password
@@ -170,6 +172,7 @@ def connection_view(connection: Connection) -> dict[str, Any]:
 def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -> FastAPI:
     owned = runtime is None
     runtime = runtime or Runtime(Settings())
+    session_cookie = cookie_name(COOKIE, runtime.settings.public_url)
     work_progress = runtime.work_progress
 
     @asynccontextmanager
@@ -234,7 +237,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             cast(Any, user).slack_read_cache = {}
             await prefetch_request_audience(request, user)
             return user
-        token = request.cookies.get(COOKIE, "")
+        token = request.cookies.get(session_cookie, "")
         identity = runtime.security.read_session(token)
         if not identity:
             raise HTTPException(401, "Sign in to continue.")
@@ -266,7 +269,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             )
 
     app.include_router(image_routes(runtime, actor))
-    app.include_router(computer_routes(runtime, actor, cookie_name=COOKIE))
+    app.include_router(computer_routes(runtime, actor, cookie_name=session_cookie))
     app.include_router(sidebar_routes(runtime, actor))
     app.include_router(workspace_routes(runtime, actor))
     app.include_router(file_preview_routes(runtime, actor))
@@ -322,9 +325,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if not hasattr(request.state, "moyai_received_at"):
             request.state.moyai_received_at = now()
         if request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/hooks/"):
-            origin = request.headers.get("origin")
-            expected = runtime.settings.public_url.rstrip("/") or str(request.base_url).rstrip("/")
-            if origin and origin.rstrip("/") != expected:
+            request_origin = request.headers.get("origin")
+            expected = origin(runtime.settings.public_url or str(request.base_url))
+            if request_origin and request_origin.rstrip("/") != expected:
                 return Response("Origin is not allowed.", status_code=403)
         if runtime.product is not None and (
             request.url.path not in {"/health", "/healthz"}
@@ -343,7 +346,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 # cookie. Writes need a fresh CSRF token from /api/me first.
                 response = (
                     RedirectResponse(
-                        request.url.path + ("?" + request.url.query if request.url.query else ""),
+                        app_path(runtime.settings.public_url, request.url.path) + ("?" + request.url.query if request.url.query else ""),
                         status_code=303,
                     ) if request.method in {"GET", "HEAD"} else
                     JSONResponse({"detail": "Refresh your organization sign-in."}, status_code=401)
@@ -407,14 +410,16 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             raise HTTPException(401, "Username or password is incorrect.")
         token, csrf = runtime.security.issue_session(user.id, user.auth_version)
         response.set_cookie(
-            COOKIE, token, httponly=True, samesite="strict",
+            session_cookie, token, httponly=True, samesite="strict",
             secure=runtime.settings.secure_cookies, max_age=7 * 86400,
+            path=base_path(runtime.settings.public_url) or "/",
         )
         return LoginResult(csrf=csrf)
 
     @app.post("/api/logout", operation_id="logout")
     async def logout(response: Response, user: User = Depends(actor)) -> LogoutResult:
-        response.delete_cookie("workspace_session" if runtime.product is not None else COOKIE)
+        response.delete_cookie(runtime.product.security.session_cookie if runtime.product is not None else session_cookie,
+                               path=base_path(runtime.settings.public_url) or "/")
         if runtime.product is not None and runtime.product.settings.cloudflare_access_login:
             return LogoutResult(signed_out=True, logout_url="/cdn-cgi/access/logout")
         return LogoutResult(signed_out=True)
@@ -440,7 +445,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if principal is not None:
             csrf = principal.csrf_token
         else:
-            identity = runtime.security.read_session(request.cookies[COOKIE])
+            identity = runtime.security.read_session(request.cookies[session_cookie])
             if identity is None:
                 raise HTTPException(401, "Your session expired.")
             csrf = identity["csrf"]
@@ -1200,7 +1205,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def frontend(path: str):
         index = STATIC / "index.html"
         if index.is_file():
-            return FileResponse(index)
+            html = index.read_text().replace("<!--moyai-base-->",
+                f'<base href="{app_path(runtime.settings.public_url)}">')
+            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
         raise HTTPException(503, "Build the web application with npm run build in native/web.")
 
+    app.add_middleware(PublicPathMiddleware, public_url=runtime.settings.public_url)
     return app

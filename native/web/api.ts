@@ -1,3 +1,16 @@
+/** The server injects a canonical base; assets and requests share it at runtime. */
+export function basePath(): string {
+  return typeof document === "undefined" ? "" : (document.querySelector("base")?.getAttribute("href") ?? "/").replace(/\/$/, "")
+}
+export function appPath(path: string): string {
+  const base = basePath()
+  return path.startsWith("/") && !path.startsWith("//") && !(base && (path === base || path.startsWith(base + "/"))) ? base + path : path
+}
+export function internalPath(path: string): string {
+  const base = basePath()
+  return base && path.startsWith(base + "/") ? path.slice(base.length) : path
+}
+
 let csrf = ""
 export const setCsrf = (value: string) => { csrf = value }
 export const csrfToken = () => csrf
@@ -76,7 +89,7 @@ export async function sendJson(input: string | Request, init: RequestInit = {}):
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json")
-  const response = await send(`/api${path}`, { ...options, headers })
+  const response = await send(appPath(`/api${path}`), { ...options, headers })
   if (response.status === 204 || response.status === 205 || options.method === "HEAD") return undefined as T
   return await readJson(response, options.signal) as T
 }

@@ -154,3 +154,19 @@ test('binary uploads use the same error policy without changing their body or me
   });
   await assert.rejects(apiRequest('/uploads?name=image.png',{method:'POST',body,headers:{'Content-Type':'image/png'}}),{status:500});
 });
+
+test('runtime base prefixes application requests once while preserving provider URLs', async t => {
+  const {appPath, internalPath, apiRequest} = await loaded;
+  const savedDocument = global.document;
+  global.document = {querySelector: () => ({getAttribute: () => '/tools/moyai/'})};
+  t.after(() => { if (savedDocument === undefined) delete global.document; else global.document = savedDocument; });
+  assert.equal(appPath('/api/me'), '/tools/moyai/api/me');
+  assert.equal(appPath('/tools/moyai/api/me'), '/tools/moyai/api/me');
+  assert.equal(appPath('https://provider.test/oauth'), 'https://provider.test/oauth');
+  assert.equal(internalPath('/tools/moyai/api/me'), '/api/me');
+  t.mock.method(global, 'fetch', async input => {
+    assert.equal(input, '/tools/moyai/api/me');
+    return new Response('{}', {headers: {'Content-Type':'application/json'}});
+  });
+  await apiRequest('/me');
+});

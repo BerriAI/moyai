@@ -102,14 +102,16 @@ def _public_origin(value: str) -> str:
                 pass
         if (
             not parsed.hostname or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or parsed.path not in {"", "/"}
+            or parsed.query or parsed.fragment
             or not (parsed.scheme == "https" or parsed.scheme == "http" and loopback)
         ):
             raise ValueError
+        from app.public_url import base_path
+        base_path(value)
         _ = parsed.port
         return value.rstrip("/")
     except ValueError:
-        raise InstallationError("MOYAI_PUBLIC_URL must be an HTTPS origin, or loopback HTTP for local tests.") from None
+        raise InstallationError("MOYAI_PUBLIC_URL must be an HTTPS URL with an optional canonical path, or loopback HTTP for local tests.") from None
 
 
 def build_revision(environment: Mapping[str, str]) -> str:
@@ -163,13 +165,16 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
         raise InstallationError("MOYAI_MODAL_RUNTIME and MODAL_FUNCTION_RUNTIME must agree.")
     values["MOYAI_MODAL_RUNTIME"] = modal_runtime
     public_url = _public_origin(_required(values, "MOYAI_PUBLIC_URL"))
+    from app.public_url import base_path
+    if "MOYAI_BASE_PATH" in values and values["MOYAI_BASE_PATH"] != base_path(public_url):
+        raise InstallationError("MOYAI_BASE_PATH must match the path in MOYAI_PUBLIC_URL.")
     temporal_mode = values.get("MOYAI_TEMPORAL_MODE", "external")
     if temporal_mode not in {"external", "bundled"}:
         raise InstallationError("MOYAI_TEMPORAL_MODE must be external or bundled.")
     namespace = values.get("TEMPORAL_NAMESPACE", "")
     if temporal_mode == "bundled":
         namespace = namespace or f"{name}-moyai"
-        values.update(TEMPORAL_ADDRESS="temporal:7233", TEMPORAL_TLS="false", TEMPORAL_API_KEY="")
+        values.update(TEMPORAL_ADDRESS=values.get("TEMPORAL_ADDRESS") or "temporal:7233", TEMPORAL_TLS="false", TEMPORAL_API_KEY="")
     else:
         _required(values, "TEMPORAL_ADDRESS")
         namespace = _required(values, "TEMPORAL_NAMESPACE")

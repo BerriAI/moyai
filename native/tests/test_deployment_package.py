@@ -184,7 +184,7 @@ def test_bundled_temporal_uses_internal_endpoint_and_separate_queue(install_envi
 
 
 @pytest.mark.parametrize("origin", [
-    "http://public.example.test", "https://name:password@example.test", "https://example.test/subpath",
+    "http://public.example.test", "https://name:password@example.test", "https://example.test/subpath/../unsafe",
 ])
 def test_public_origin_validation_never_returns_input(install_environment, origin):
     with pytest.raises(InstallationError) as failure:

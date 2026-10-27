@@ -1,0 +1,9 @@
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+publicUrl: https://gateway.example.com/moyai
+postgresql:
+  enabled: true
+temporal:
+  bundled: true
+ingress:
+  enabled: true

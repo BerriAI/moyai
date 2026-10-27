@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useMemo } from "react"
-import Markdown from "react-markdown"
+import Markdown, { defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { Root, RootContent, PhrasingContent, Text } from "mdast"
 import { decodeString } from "micromark-util-decode-string"
+import { appPath } from "./api"
 import { CodeBlock } from "./code-block"
 import { MessageImage, MessageImageLink } from "./message-image"
 import { SkillMention } from "./skill-content"
@@ -92,7 +93,7 @@ export function SkillMarkdown({ children }: { children: string }) {
   const skills = useContext(SkillReferences)
   const plugin = useMemo(() => remarkSkills(skills, children), [skills, children])
   const references = useMemo(() => new Map(skills.map(skill => [skill.reference, skill])), [skills])
-  return <Markdown remarkPlugins={[remarkGfm, plugin]} components={{
+  return <Markdown urlTransform={url => appPath(defaultUrlTransform(url))} remarkPlugins={[remarkGfm, plugin]} components={{
     pre: CodeBlock,
     img: ({ src, alt, title }) => <MessageImage key={typeof src === "string" ? src : undefined} src={typeof src === "string" ? src : undefined} alt={alt} title={title} />,
     a: ({ node, ...props }) => <MessageImageLink {...props} />,

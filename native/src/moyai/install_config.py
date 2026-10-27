@@ -54,7 +54,7 @@ DEFAULTS = {
 }
 PROMPTS = (
     ("MOYAI_INSTALLATION_ID", "Installation ID (1–8 lowercase letters/digits)", False),
-    ("MOYAI_PUBLIC_URL", "Public HTTPS origin", False),
+    ("MOYAI_PUBLIC_URL", "Public HTTPS URL (optional path)", False),
     ("MOYAI_DATABASE_URL", "PostgreSQL connection URL", True),
     ("OBJECT_STORAGE_BUCKET", "Private S3 bucket", False),
     ("OBJECT_STORAGE_REGION", "S3 region", False),
@@ -115,6 +115,8 @@ def prepare(
         if any(character in value for character in ("\n", "\r", "\x00")):
             raise InstallationError(f"{field} cannot contain line breaks or NUL characters.")
     configured = configuration({**values, "MOYAI_BUILD_SHA": build_revision(environment)}, None)
+    from app.public_url import base_path
+    values["MOYAI_BASE_PATH"] = base_path(configured["MOYAI_PUBLIC_URL"])
     # Initialization generates and retains missing keys; these are only for offline validation.
     deployment_checks.validate(configuration(configured, new_state(values, configured)))
     overlay = None

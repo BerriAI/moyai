@@ -71,7 +71,9 @@ def create_application(
     app = create_app(runtime, run_dispatcher=plan.run_dispatcher and lifecycle is None)
     app.state.product_lifecycle = lifecycle
     if lifecycle is not None:
-        app.add_middleware(ProductRoleMiddleware, lifecycle=lifecycle)
+        from starlette.middleware import Middleware
+        # Public-path normalization must precede role ownership and Access checks.
+        app.user_middleware.insert(1, Middleware(ProductRoleMiddleware, lifecycle=lifecycle))
     original_lifespan = app.router.lifespan_context
 
     @asynccontextmanager

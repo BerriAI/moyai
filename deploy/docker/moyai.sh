@@ -82,6 +82,7 @@ COMPOSE_PROJECT_NAME=$(value COMPOSE_PROJECT_NAME)
 MOYAI_IMAGE=$(value MOYAI_IMAGE)
 MOYAI_BIND_ADDRESS=$(value MOYAI_BIND_ADDRESS)
 MOYAI_PORT=$(value MOYAI_PORT)
+MOYAI_BASE_PATH=$(value MOYAI_BASE_PATH)
 stored_password=$(value MOYAI_TEMPORAL_DATABASE_PASSWORD)
 if [ -n "$stored_password" ]; then MOYAI_TEMPORAL_DATABASE_PASSWORD=$stored_password; fi
 valid_image "$MOYAI_IMAGE"
@@ -91,7 +92,7 @@ COMPOSE_PATH_SEPARATOR=:
 # remain raw env_file values, including literal dollars and quotes in credentials.
 COMPOSE_ENV_FILES=/dev/null
 export COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PATH_SEPARATOR COMPOSE_ENV_FILES MOYAI_IMAGE
-export MOYAI_BIND_ADDRESS MOYAI_PORT
+export MOYAI_BIND_ADDRESS MOYAI_PORT MOYAI_BASE_PATH
 if [ "${MOYAI_TEMPORAL_DATABASE_PASSWORD+x}" ]; then export MOYAI_TEMPORAL_DATABASE_PASSWORD; fi
 compose() { docker compose --project-directory "$directory" --env-file /dev/null --project-name "$COMPOSE_PROJECT_NAME" "$@"; }
 command_in_image() { compose run --rm --no-deps setup "$python" -m moyai.deployment "$@"; }

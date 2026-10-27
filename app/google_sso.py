@@ -15,6 +15,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .file_links import valid_file_return_path
+from .public_url import app_path, cookie_name
 from .security import Throttle, digest
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -36,6 +37,7 @@ class SignInRedirect(BaseModel):
 class GoogleSignIn:
     def __init__(self, settings, security, store):
         self.settings, self.security, self.store = settings, security, store
+        self.cookie_name = cookie_name(COOKIE, settings.public_url)
         self.keys = {}
         self.keys_expire = 0
         self.last_key_fetch = 0
@@ -44,7 +46,7 @@ class GoogleSignIn:
 
     @property
     def callback(self):
-        return self.security.origin + "/auth/google/callback"
+        return self.settings.public_url.rstrip("/") + "/auth/google/callback"
 
     async def signing_key(self, kid):
         async with self.key_lock:
@@ -106,7 +108,7 @@ class GoogleSignIn:
             self.security.check_origin(request)
             if self.settings.cloudflare_access_login:
                 self.security.require(request)
-                return SignInRedirect(url='/#tasks')
+                return SignInRedirect(url=app_path(self.settings.public_url, '/#tasks'))
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
             client = self.security.client_key(request)
@@ -128,29 +130,29 @@ class GoogleSignIn:
                       "response_type": "code", "scope": "openid email profile", "state": state,
                       "nonce": nonce, "code_challenge": challenge, "code_challenge_method": "S256",
                       "prompt": "select_account", "hd": domains[0] if len(domains) == 1 else "*"}
-            response.set_cookie(COOKIE, browser, max_age=600, httponly=True,
-                                secure=not self.security.local, samesite="lax", path="/auth/google")
+            response.set_cookie(self.cookie_name, browser, max_age=600, httponly=True,
+                                secure=not self.security.local, samesite="lax", path=app_path(self.settings.public_url, "/auth/google"))
             return SignInRedirect(url=AUTHORIZE_URL + "?" + urlencode(params))
 
         @router.get("/auth/google/callback")
         async def callback(request: Request, state: str = "", code: str = "", error: str = ""):
             if self.settings.cloudflare_access_login:
                 self.security.require(request)
-                response = RedirectResponse('/#tasks', status_code=303)
-                response.delete_cookie(COOKIE, path='/auth/google')
+                response = RedirectResponse(app_path(self.settings.public_url, '/#tasks'), status_code=303)
+                response.delete_cookie(self.cookie_name, path=app_path(self.settings.public_url, '/auth/google'))
                 return response
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
             if len(state) > 200 or len(code) > 4096:
                 raise HTTPException(400, "Invalid sign-in request.")
-            browser = request.cookies.get(COOKIE, "")
+            browser = request.cookies.get(self.cookie_name, "")
             with self.store.connect() as conn:
                 row = conn.execute("DELETE FROM login_states WHERE state_hash=? AND browser_hash=? AND expires>? RETURNING *",
                                    (digest(state), digest(browser), time.time())).fetchone()
             result = "cancelled" if error else "failed"
             return_hash = row["return_path"][1:] if row else "#tasks"
-            response = RedirectResponse(f"/?signin={result}{return_hash}", status_code=303)
-            response.delete_cookie(COOKIE, path="/auth/google")
+            response = RedirectResponse(app_path(self.settings.public_url, f"/?signin={result}{return_hash}"), status_code=303)
+            response.delete_cookie(self.cookie_name, path=app_path(self.settings.public_url, "/auth/google"))
             if not row or not browser or error or not code:
                 return response
             try:
@@ -158,8 +160,8 @@ class GoogleSignIn:
             except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError, TypeError):
                 # Never echo provider errors, codes, tokens, or claims into the UI/logs.
                 return response
-            response = RedirectResponse(row["return_path"], status_code=303)
-            response.delete_cookie(COOKIE, path="/auth/google")
+            response = RedirectResponse(app_path(self.settings.public_url, row["return_path"]), status_code=303)
+            response.delete_cookie(self.cookie_name, path=app_path(self.settings.public_url, "/auth/google"))
             role = self.security.google_role(identity['email'])
             self.store.identity({'method': 'google', 'identity': identity, 'role': role})
             self.security.new_session(response, role, identity=identity)

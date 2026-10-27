@@ -1,5 +1,5 @@
 import type { CreateClientConfig } from "./generated/api/client.gen"
-import { sendJson } from "./api"
+import { basePath, sendJson } from "./api"
 
 /**
  * Generated SDK calls share api.ts's transport: CSRF, one attempt, ApiError.
@@ -7,7 +7,7 @@ import { sendJson } from "./api"
  */
 export const createClientConfig: CreateClientConfig = config => ({
   ...config,
-  baseUrl: "",
+  baseUrl: basePath(),
   parseAs: "json",
   fetch: (input, init) => sendJson(input instanceof Request ? input : String(input), init),
 })

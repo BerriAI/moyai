@@ -1,3 +1,4 @@
+import { appPath } from "./api"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import Markdown from "react-markdown"
 import { CodeBlock } from "./code-block"
@@ -47,7 +48,7 @@ function Prose({ text, sessionId, onOpenFile }: { text: string; sessionId: strin
   return <div className="output-markdown" onClickCapture={event => previewFileLink(event, sessionId, onOpenFile)}><Markdown skipHtml remarkPlugins={[remarkGfm]} components={{
     pre: CodeBlock,
     a: ({ href, children }) => {
-      if (href && onOpenFile && fileReference(href, sessionId, location.origin)) return <a href={href}>{children}</a>
+      if (href && onOpenFile && fileReference(href, sessionId, location.origin)) return <a href={appPath(href)}>{children}</a>
       const url = href ? externalUrl(href) : undefined
       return url ? <a href={url} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>
     },
@@ -95,8 +96,8 @@ function FilePreview({ sessionId, resource, active, onOpenFile, onName }: Output
     ? `/sessions/${encodeURIComponent(sessionId)}/file-preview/${resource.kind}/${encodeURIComponent(resource.id)}`
     : null
   // Derive all file URLs from the scoped ID. Never load resource.url as media.
-  const contentUrl = path ? `/api${path}/content` : undefined
-  const downloadUrl = resource.id ? resource.kind === "artifact" ? `/api/files/${encodeURIComponent(resource.id)}` : `/api${path}/download` : undefined
+  const contentUrl = path ? appPath(`/api${path}/content`) : undefined
+  const downloadUrl = resource.id ? resource.kind === "artifact" ? appPath(`/api/files/${encodeURIComponent(resource.id)}`) : appPath(`/api${path}/download`) : undefined
   useEffect(() => { if (active) heading.current?.focus() }, [])
   useEffect(() => {
     if (!active) { setPreview(null); setError(""); setLoading(false); return }

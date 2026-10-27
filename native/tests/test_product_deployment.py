@@ -184,7 +184,7 @@ def test_product_model_aliases_and_default_catalog_are_preserved(environment, se
     ("OBJECT_STORAGE_ENDPOINT", "https://user:secret@example.test"),
     ("OBJECT_STORAGE_SECRET_ACCESS_KEY", ""),
     ("MOYAI_PUBLIC_URL", "https://user:secret@example.test"),
-    ("MOYAI_PUBLIC_URL", "https://example.test/path"),
+    ("MOYAI_PUBLIC_URL", "https://example.test/path?unsafe=true"),
     ("MOYAI_PRODUCT_LOCAL_REHEARSAL", "yes"),
 ])
 def test_invalid_config_fails_without_creating_data_or_echoing_values(environment, name, value):

@@ -1,3 +1,4 @@
+import { appPath } from "./api"
 import React, { useCallback, useEffect, useRef, useState } from "react"
 import RFB from "@novnc/novnc"
 import { Monitor, MousePointer2, RefreshCw, X } from "lucide-react"
@@ -118,7 +119,7 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
     let live = true
     setConnected(false); setConnecting(true); setError("")
     const query = new URLSearchParams({ client_id: clientId.current, control: String(view.controlled) })
-    const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/sessions/${id}/computer/stream?${query}`)
+    const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${appPath(`/api/sessions/${id}/computer/stream`)}?${query}`)
     const rfb = new RFB(element, socket, { shared: true })
     remote.current = rfb
     rfb.scaleViewport = true

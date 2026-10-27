@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "moyai.name" . }}
+spec:
+  # Activation must verify the public broker before the pod can become Ready.
+  # The proxy gates browser/webhook requests until activation has completed.
+  publishNotReadyAddresses: true
+  selector: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: moyai}
+  ports: [{name: http, port: 8080, targetPort: http}]
+{{- if .Values.serviceAccount.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "moyai.account" . }}
+  annotations: {{ .Values.serviceAccount.annotations | toJson }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "moyai.name" . }}
+  annotations: {{ .Values.ingress.annotations | toJson }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls: {{ . | toJson }}
+  {{- end }}
+  rules:
+    - host: {{ (urlParse .Values.publicUrl).hostname | quote }}
+      http:
+        paths:
+          - path: {{ default "/" (include "moyai.path" .) | quote }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "moyai.name" . }}
+                port: {name: http}
+{{- end }}

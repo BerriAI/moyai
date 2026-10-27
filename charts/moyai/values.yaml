@@ -1,0 +1,61 @@
+# Release packaging fills image.digest with the matching multi-architecture image.
+image:
+  repository: ghcr.io/berriai/moyai
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+publicUrl: https://moyai.example.com
+installationId: moyai
+# Existing Secret: provider credentials, storage bucket/region, gateway/model,
+# and optionally Cloudflare settings. Never put secrets in Helm values.
+runtimeSecret: moyai-runtime
+# Existing Secret containing MOYAI_DATABASE_URL. Bundled PostgreSQL additionally
+# needs POSTGRES_PASSWORD, MOYAI_DB_PASSWORD and TEMPORAL_PASSWORD.
+databaseSecret: moyai-database
+config: {}
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+persistence:
+  existingClaim: ""
+  storageClass: ""
+  size: 5Gi
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {memory: 2Gi}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+proxy:
+  image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  tls: []
+postgresql:
+  enabled: false
+  image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+  persistence:
+    existingClaim: ""
+    storageClass: ""
+    size: 20Gi
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {memory: 2Gi}
+temporal:
+  bundled: false
+  # Required for external Temporal. Namespace must already exist.
+  address: ""
+  namespace: moyai
+  tls: true
+  # Bundled Temporal uses the bundled PostgreSQL; external TLS/API key is disabled.
+  image: temporalio/server:1.32.1@sha256:acecbab5b0b8ae9cf4012b508866ca97feda3709577bf157b537239f40029049
+  adminImage: temporalio/admin-tools:1.32.1@sha256:9ef0dc5b063bf4ffd5c1512de72e0e73e225bd2c7006a18ce69bd592a8862a83
+  resources:
+    requests: {cpu: 500m, memory: 512Mi}
+    limits: {memory: 2Gi}

@@ -1,3 +1,4 @@
+import { appPath } from "./api"
 import React, { createContext, useContext, useEffect, useRef, useState } from "react"
 import { Archive, Check, ChevronRight, Copy, Download, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -171,7 +172,7 @@ export function SessionActionsProvider({ userId, folders, refresh, updates, opti
   const named = editor && ["rename", "folder-create", "folder-rename"].includes(editor.action)
   return <ActionsContext.Provider value={{
     userId, busy, updates, optimisticSession, openEditor, edit, openComputer: onOpenComputer, newSession: onNewSession,
-    copy: row => { void navigator.clipboard.writeText(`${location.origin}/#${sessionHash(row)}`).then(
+    copy: row => { void navigator.clipboard.writeText(`${location.origin}${appPath("/")}#${sessionHash(row)}`).then(
       () => setNotice("Session link copied."),
       () => setError("Could not copy the link. Open the session and copy its address."),
     ) },

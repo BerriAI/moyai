@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { ApiError } from "./api"
+import { appPath, ApiError } from "./api"
 import { getBillingReport, getSettingsPerformance, getSettingsUsage } from "./generated/api"
 import { AnalyticsChart, AnalyticsDatePicker, AnalyticsLegend, AnalyticsMetrics, ReportTable } from "./analytics-shared"
 import { StartupPerformance } from "./performance"
@@ -266,7 +266,7 @@ export function AnalyticsPage({ kind, productMode, headingRef }: { kind: ReportK
   const updateFilter = (key: keyof Filters, value: string) => { setFilters(previous => ({ ...previous, [key]: value })); setOffset(0) }
   const aggregateExports = resource.data?.capabilities?.reported_costs === true
   const exportKind = kind === "performance" || !aggregateExports ? "turns" : view === "users" ? "users" : "daily"
-  const exportUrl = (format: string) => `/api${endpoint}?${params}&format=csv&export=${encodeURIComponent(format)}`
+  const exportUrl = (format: string) => appPath(`/api${endpoint}?${params}&format=csv&export=${encodeURIComponent(format)}`)
   return <div className="native-analytics">
     <header className="ns-page-heading analytics-report-heading"><h1 ref={headingRef} tabIndex={-1}>{kind === "performance" ? "Performance" : "Spend & usage"}</h1>
       <div className="analytics-actions"><AnalyticsDatePicker value={range} onChange={value => { setRange(value); setOffset(0) }} /><Button variant="outline" disabled={resource.loading} onClick={refresh}><RefreshCw size={16} />Refresh</Button></div>
