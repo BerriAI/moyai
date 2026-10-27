@@ -61,9 +61,11 @@ def test_sdist_to_wheel_retains_runtime_resources_and_canonical_archive_helper(t
         assert "app/main.py" not in names and not any(name.startswith(("agent/", "sandbox/")) for name in names)
         assert hashlib.sha256(package.read("app/legacy_artifacts.py")).digest() == hashlib.sha256(canonical).digest()
         index = package.read("moyai/static/index.html").decode()
-        assets = re.findall(r'(?:src|href)=["\'](/assets/[^"\']+)["\']', index)
+        # Vite emits relative URLs so the installed UI works below a public
+        # path such as /moyai/. Resolve those URLs inside the packaged static tree.
+        assets = re.findall(r'(?:src|href)=["\'](\./assets/[^"\']+)["\']', index)
         assert assets
-        assert all("moyai/static" + asset in names for asset in assets)
+        assert all("moyai/static/" + asset.removeprefix("./") in names for asset in assets)
 
     commands = tmp_path / "commands"
     commands.mkdir()
