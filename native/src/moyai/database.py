@@ -403,6 +403,7 @@ class Database:
             return await self.allowed_session(db, session_id, actor, metadata_only=metadata_only)
 
     async def messages(self, actor: User, session_id: str, *, after: int = 0) -> list[dict[str, Any]]:
+        from .message_authors import author_name
         from .message_sources import public_messages, source_view
 
         await self.prefetch_session_audiences(actor, [session_id])
@@ -440,7 +441,7 @@ class Database:
                 author = authors.get(row.author_id or "")
                 result.append({
                     "id": row.id, "turn_id": row.turn_id, "role": row.role,
-                    "author_id": row.author_id, "author_name": author.display_name if author else None,
+                    "author_id": row.author_id, "author_name": author_name(author),
                     "is_self": identities.get(row.author_id or "", False), "content": content,
                     "sent_as_goal": row.role == "user" and bool(
                         (source or {}).get("sent_as_goal") or (goal and row.turn_id == goal.source_turn_id)

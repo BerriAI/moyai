@@ -17,6 +17,12 @@ from app.slack_mentions import MAX_MENTIONS, MENTION, profile_name
 logger = logging.getLogger(__name__)
 
 
+def _profile_names(rows: dict) -> dict[str, str]:
+    return {user: name for user, row in rows.items()
+            if (name := profile_name(row['sender_name'], user) or profile_name(row['name'], user)
+                or profile_name(row['sender_email'], user))}
+
+
 class SlackMentionNames:
     def __init__(self, slack):
         self.slack = slack
@@ -25,15 +31,24 @@ class SlackMentionNames:
     def cached(self, team: str, users: list[str]) -> dict:
         targets = ','.join('(?)' for _ in users)
         rows = self.slack.store.rows(f'''WITH targets(user_id) AS (VALUES {targets})
-            SELECT targets.user_id,n.name,n.next_check,u.name AS sender_name
+            SELECT targets.user_id,n.name,n.next_check,u.name AS sender_name,u.email AS sender_email
             FROM targets LEFT JOIN slack_mention_names n ON n.team_id=? AND n.user_id=targets.user_id
             LEFT JOIN users u ON u.id='slack:'||?||':'||targets.user_id''', (*users, team, team))
         return {row['user_id']: row for row in rows}
 
     async def names(self, team: str, users: list[str]) -> dict[str, str]:
+        # A retry reservation can belong to a lookup still in flight. Read the
+        # cache under the same lock so concurrent readers receive its result.
+        try:
+            async with asyncio.timeout(8), self.lock:
+                return await self._names(team, users)
+        except TimeoutError:
+            # Preserve the bounded wait and any previously verified names.
+            return _profile_names(await source_database(self.cached, team, users))
+
+    async def _names(self, team: str, users: list[str]) -> dict[str, str]:
         rows = await source_database(self.cached, team, users)
-        names = {user: name for user, row in rows.items()
-                 if (name := profile_name(row['sender_name'], user) or profile_name(row['name'], user))}
+        names = _profile_names(rows)
         due = [user for user, row in rows.items() if not profile_name(row['sender_name'], user)
                and (row['next_check'] or 0) <= time.time()]
         if not due:
@@ -41,7 +56,7 @@ class SlackMentionNames:
         try:
             # One bounded lookup window per page, including concurrent readers.
             # Cached names remain usable during provider failures/rate limits.
-            async with asyncio.timeout(8), self.lock:
+            async with asyncio.timeout(8):
                 installed = await source_database(self.slack.installation)
                 if installed['team_id'] != team or 'users:read' not in installed.get('scopes', []):
                     return names
@@ -90,8 +105,7 @@ class SlackMentionNames:
                 # Subsequent reads can resolve the next batch after this one.
                 pending = [user for user, row in rows.items() if not profile_name(row['sender_name'], user)
                            and (row['next_check'] or 0) <= time.time()][:MAX_MENTIONS]
-                names.update({user: name for user, row in rows.items()
-                              if (name := profile_name(row['sender_name'], user) or profile_name(row['name'], user))})
+                names.update(_profile_names(rows))
                 async with asyncio.TaskGroup() as tasks:
                     for user in pending:
                         tasks.create_task(resolve(user, rows[user]))
@@ -108,6 +122,11 @@ class SlackMentionNames:
                     or not re.fullmatch(r'T[A-Z0-9]{7,30}', team)):
                 continue
             users = list(dict.fromkeys(MENTION.findall(message['content'])))[:MAX_MENTIONS]
+            sender = source.get('user_id', '')
+            if (re.fullmatch(r'[UW][A-Z0-9]{7,30}', sender)
+                    and message.get('author_id') == f'slack:{team}:{sender}'
+                    and not message.get('author_name')):
+                users = list(dict.fromkeys([sender, *users]))
             if users:
                 groups.setdefault(team, []).append((message, users))
         for team, entries in groups.items():
@@ -118,5 +137,10 @@ class SlackMentionNames:
                 logger.debug('Slack mention cache unavailable (%s)', type(error).__name__)
                 continue
             for message, ids in entries:
-                message['slack_mentions'] = {user: names[user] for user in ids if user in names}
+                mentions = set(MENTION.findall(message['content']))
+                message['slack_mentions'] = {user: names[user] for user in ids if user in names and user in mentions}
+                sender = (sources.get(message['id']) or {}).get('user_id')
+                if (sender in names and message.get('author_id') == f'slack:{team}:{sender}'
+                        and not message.get('author_name')):
+                    message['author_name'] = names[sender]
         return bool(groups)
