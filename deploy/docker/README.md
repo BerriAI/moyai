@@ -372,8 +372,14 @@ The Docker Node stage runs `npm ci` and `npm run build:native`. The runtime imag
 contains generated assets and the shared, locked Python environment, without
 Node or `node_modules`.
 
-The release workflow publishes AMD64/ARM64 images and attaches a digest-pinned
-installation bundle when a GitHub release is published. That workflow does not
+The release workflow promotes the existing AMD64/ARM64 image for the release's
+exact commit and attaches a digest-pinned installation bundle. Before publishing
+a GitHub release, wait for that commit's `Docker startup` main-push run to finish
+successfully, including quickstart image publication. The release checks both
+architecture revision labels and anonymous access, then copies the complete
+image index (including attestations) without rebuilding it. A missing image,
+failed or unfinished Docker run, or conflicting release image tag stops publication.
+That workflow does not
 deploy Moyai or migrate a customer's data. A [Helm chart](../../charts/moyai/README.md) is published alongside the image; AWS provisioning remains external.
 
 ## Publish the quickstart image
