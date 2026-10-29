@@ -727,15 +727,17 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
         await worker.close()
 
 
+@pytest.mark.parametrize("broker_url", ["", "https://broker.invalid"])
 @pytest.mark.parametrize("protected", [False, True])
 @pytest.mark.parametrize("route", ["responses", "responses/compact", "chat/completions"])
-async def test_broker_request_uses_only_configured_access_credentials(inference, protected, route):
+async def test_broker_request_uses_only_configured_access_credentials(inference, protected, route, broker_url):
     from moyai import product_inference_routes as routes
     from moyai.inference_usage import UsageCapture
 
     service = inference.service
     service.settings = service.settings.model_copy(update={
         "public_url": "https://workspace.invalid/",
+        "broker_url": broker_url,
         "cloudflare_access_client_id": ACCESS_HEADERS["CF-Access-Client-Id"] if protected else "",
         "cloudflare_access_client_secret": ACCESS_HEADERS["CF-Access-Client-Secret"] if protected else "",
     })
@@ -750,7 +752,7 @@ async def test_broker_request_uses_only_configured_access_credentials(inference,
         },
     )
     signed = routes.broker_request(service, original, UsageCapture(activity, "f" * 64, original))
-    assert str(signed.url) == "https://workspace.invalid/broker/native/v1/" + route
+    assert str(signed.url) == (broker_url or "https://workspace.invalid") + "/broker/native/v1/" + route
     assert signed.content == original.content and signed.headers["accept"] == "text/event-stream"
     assert signed.headers["accept-encoding"] == "identity"
     assert signed.headers["authorization"] != original.headers["authorization"]

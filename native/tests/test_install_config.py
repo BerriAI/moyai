@@ -266,3 +266,9 @@ def test_read_only_commands_do_not_wait_for_the_maintenance_file_lock(tmp_path, 
     deployment.main()
     assert json.loads(capsys.readouterr().out) == {"read_only": True}
     assert not (tmp_path / ".installation.lock").exists()
+
+
+def test_installer_preserves_explicit_broker_url(install_environment):
+    install_environment['MOYAI_BROKER_URL'] = 'https://broker.example.test'
+    values, _ = install_config.prepare(install_environment, image=IMAGE, topology='split', temporal='external', secrets_from_env=False)
+    assert values['MOYAI_BROKER_URL'] == 'https://broker.example.test'

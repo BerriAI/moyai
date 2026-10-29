@@ -9,12 +9,18 @@
 {{- if and (eq (urlParse .Values.publicUrl).scheme "http") (not (has (urlParse .Values.publicUrl).hostname (list "localhost" "127.0.0.1"))) -}}
 {{- fail "publicUrl must use HTTPS except for loopback tests" -}}
 {{- end -}}
+{{- if .Values.brokerUrl -}}
+{{- $broker := urlParse .Values.brokerUrl -}}
+{{- if or (ne (trimSuffix "/" $broker.path) $path) (and (eq $broker.scheme "http") (not (has $broker.hostname (list "localhost" "127.0.0.1")))) -}}
+{{- fail "brokerUrl must use HTTPS (except loopback tests) and the same base path as publicUrl" -}}
+{{- end -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ $name }}-config
 data:
-  {{- $fixed := dict "DATA_DIR" "/data" "MOYAI_INSTALL_TOPOLOGY" "split" "MOYAI_CORE" "pydantic" "MOYAI_COLOCATED_ROLES" "true" "MOYAI_INSTALLATION_ID" .Values.installationId "MOYAI_PUBLIC_URL" (trimSuffix "/" .Values.publicUrl) "TEMPORAL_NAMESPACE" .Values.temporal.namespace "MOYAI_TEMPORAL_MODE" (ternary "bundled" "external" .Values.temporal.bundled) "TEMPORAL_TLS" (ternary "false" (toString .Values.temporal.tls) .Values.temporal.bundled) -}}
+  {{- $fixed := dict "DATA_DIR" "/data" "MOYAI_INSTALL_TOPOLOGY" "split" "MOYAI_CORE" "pydantic" "MOYAI_COLOCATED_ROLES" "true" "MOYAI_INSTALLATION_ID" .Values.installationId "MOYAI_PUBLIC_URL" (trimSuffix "/" .Values.publicUrl) "MOYAI_BROKER_URL" (trimSuffix "/" (default .Values.publicUrl .Values.brokerUrl)) "TEMPORAL_NAMESPACE" .Values.temporal.namespace "MOYAI_TEMPORAL_MODE" (ternary "bundled" "external" .Values.temporal.bundled) "TEMPORAL_TLS" (ternary "false" (toString .Values.temporal.tls) .Values.temporal.bundled) -}}
   {{- $_ := set $fixed "TEMPORAL_ADDRESS" (ternary (printf "%s-temporal:7233" $name) .Values.temporal.address .Values.temporal.bundled) -}}
   {{- if .Values.temporal.bundled }}{{ $_ := set $fixed "TEMPORAL_API_KEY" "" }}{{ end -}}
   {{- if not (get $fixed "TEMPORAL_ADDRESS") }}{{ fail "temporal.address is required for external Temporal" }}{{ end -}}
@@ -67,4 +73,21 @@ data:
           proxy_pass http://127.0.0.1:8787;
         }
       }
+      {{- if .Values.brokerUrl }}
+      # The tunnel has no route to the UI, hooks, or readiness marker.
+      server {
+        listen 8081;
+        server_tokens off;
+        client_max_body_size 21m;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Connection "";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        location = {{ $path }}/broker/health { proxy_pass http://127.0.0.1:8789/health; }
+        location {{ $path }}/broker/ { proxy_pass http://127.0.0.1:8789; }
+        location / { return 404; }
+      }
+      {{- end }}
     }

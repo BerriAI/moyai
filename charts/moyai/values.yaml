@@ -5,6 +5,9 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 publicUrl: https://moyai.example.com
+# Optional machine endpoint; same base path as publicUrl. Creates a broker-only
+# ClusterIP Service on port 8080 for an authenticated tunnel, never a public LB.
+brokerUrl: ""
 installationId: moyai
 # Existing Secret: provider credentials, storage bucket/region, gateway/model,
 # and optionally Cloudflare settings. Never put secrets in Helm values.

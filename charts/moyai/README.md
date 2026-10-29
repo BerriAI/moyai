@@ -138,3 +138,32 @@ visibility and repository Actions access. PRs validate without publishing.
     helm lint charts/moyai -f charts/moyai/ci/bundled.yaml
     helm lint charts/moyai -f charts/moyai/ci/external.yaml
     uv run pytest charts/tests/test_chart.py --confcutdir=charts -q
+
+## Private UI with a separate broker endpoint
+
+Set `publicUrl` to the private browser URL and `brokerUrl` to the HTTPS machine
+URL, using the same base path (both root URLs are supported). The app uses
+`MOYAI_BROKER_URL` for native worker inference and activation's broker identity
+check. Cookies, OAuth redirects and browser origin checks still use
+`MOYAI_PUBLIC_URL`. Omitting `brokerUrl` retains existing routing.
+
+When configured, `<release>-moyai-broker:8080` is a **ClusterIP** Service targeting
+a dedicated proxy listener. Only `<basePath>/broker/*` reaches the broker role;
+UI, login, hooks and all other paths return 404. It publishes unready endpoints
+so activation can verify the route before admitting browser traffic. Point an
+existing authenticated Cloudflare tunnel at this Service; no extra Ingress or
+AWS load balancer is created. The chart does not create DNS or Access policies.
+
+Protect the entire broker hostname with a separate Cloudflare Access application
+and a Service Auth policy allowing only a dedicated service token. Enable Access
+JWT validation in the tunnel. Supply the team domain, distinct UI/broker audiences,
+and service token pair through `runtimeSecret`, never Helm values. The application
+still verifies the broker JWT audience and signed, single-request inference
+permission. Access credentials do not grant access to UI paths or authorize model
+requests on their own. Do not add browser Allow or Bypass policies to the broker.
+
+Changing only the broker transport preserves the persisted installation identity
+and keys. It still requires the normal deployment restart/activation check. Use
+an image built from the same revision as this chart; older images ignore the new
+setting. Docker installs can also set `MOYAI_BROKER_URL` in `.env` and route only
+broker paths through their externally managed authenticated proxy.

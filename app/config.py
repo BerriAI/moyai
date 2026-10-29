@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     # inherit the environment updates performed inside the server process.
     public_url: str = Field(default='http://127.0.0.1:8787',
                             validation_alias=AliasChoices('MOYAI_PUBLIC_URL', 'PUBLIC_URL', 'public_url'))
+    broker_url: str = Field(default='', validation_alias=AliasChoices('MOYAI_BROKER_URL', 'broker_url'))
     cloudflare_access_team_domain: str = ''
     cloudflare_access_audience: str = ''
     cloudflare_access_broker_audience: str = ''
@@ -133,6 +134,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def validate_cloudflare_access(self):
+        from .public_url import broker_base_url
+        broker_base_url(self.public_url, self.broker_url)
         values = (self.cloudflare_access_team_domain, self.cloudflare_access_audience,
                   self.cloudflare_access_broker_audience)
         if any(values) and not all(values):
@@ -145,6 +148,8 @@ class Settings(BaseSettings):
                 raise ValueError('Use the Cloudflare team hostname without a scheme or path.')
             if values[1] == values[2]:
                 raise ValueError('Employee and broker Access applications must have different audiences.')
+            if urlsplit(self.broker_base_url).scheme != 'https':
+                raise ValueError('Cloudflare Access requires an HTTPS broker URL.')
             origin = urlsplit(self.public_url)
             if (origin.scheme != 'https' or not origin.hostname or origin.username or origin.password
                     or origin.query or origin.fragment
@@ -167,11 +172,16 @@ class Settings(BaseSettings):
         base_path(value)
         return value
 
+    @property
+    def broker_base_url(self) -> str:
+        from .public_url import broker_base_url
+        return broker_base_url(self.public_url, self.broker_url)
+
     def broker_environment(self, token: str) -> dict[str, str]:
         from .public_url import origin
         # Explicit empty values remove stale credentials on reused sandboxes.
         return {'WORKSPACE_RUN_TOKEN': token,
-                'WORKSPACE_ACCESS_ORIGIN': origin(self.public_url) if self.cloudflare_access_client_id else '',
+                'WORKSPACE_ACCESS_ORIGIN': origin(self.broker_base_url) if self.cloudflare_access_client_id else '',
                 'WORKSPACE_ACCESS_CLIENT_ID': self.cloudflare_access_client_id,
                 'WORKSPACE_ACCESS_CLIENT_SECRET': self.cloudflare_access_client_secret}
 

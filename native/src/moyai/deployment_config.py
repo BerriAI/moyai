@@ -165,7 +165,11 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
         raise InstallationError("MOYAI_MODAL_RUNTIME and MODAL_FUNCTION_RUNTIME must agree.")
     values["MOYAI_MODAL_RUNTIME"] = modal_runtime
     public_url = _public_origin(_required(values, "MOYAI_PUBLIC_URL"))
-    from app.public_url import base_path
+    from app.public_url import base_path, broker_base_url
+    try:
+        resolved_broker = broker_base_url(public_url, values.get("MOYAI_BROKER_URL", ""))
+    except ValueError as error:
+        raise InstallationError(str(error)) from None
     if "MOYAI_BASE_PATH" in values and values["MOYAI_BASE_PATH"] != base_path(public_url):
         raise InstallationError("MOYAI_BASE_PATH must match the path in MOYAI_PUBLIC_URL.")
     temporal_mode = values.get("MOYAI_TEMPORAL_MODE", "external")
@@ -215,6 +219,7 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
         MOYAI_DATABASE_INITIALIZE="false",
         MOYAI_NATIVE_DATABASE_SCHEMA=native_schema,
         MOYAI_PUBLIC_URL=public_url,
+        MOYAI_BROKER_URL=resolved_broker,
         MOYAI_SECURE_COOKIES=str(public_url.startswith("https://")).lower(),
         MOYAI_BUILD_SHA=build_revision(values),
         MOYAI_WORKER_SHUTDOWN_SECONDS="240",

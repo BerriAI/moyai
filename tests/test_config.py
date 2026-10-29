@@ -204,3 +204,29 @@ def test_lens_feedback_target_derives_gateway_and_standalone_origins_and_honors_
 def test_lens_feedback_endpoint_requires_https_feedback_path_without_url_extras(endpoint):
     with pytest.raises(ValueError):
         Settings(_env_file=None, lens_feedback_endpoint=endpoint)
+
+
+@pytest.mark.parametrize('broker', ['', 'https://broker.example.test/moyai/'])
+def test_broker_origin_is_separate_from_browser_identity(broker):
+    settings = Settings(_env_file=None, public_url='https://private.example.test/moyai', broker_url=broker,
+                        cloudflare_access_team_domain='example.cloudflareaccess.com',
+                        cloudflare_access_audience='ui-aud', cloudflare_access_broker_audience='broker-aud',
+                        cloudflare_access_client_id='synthetic-id', cloudflare_access_client_secret='synthetic-secret')
+    assert settings.public_url == 'https://private.example.test/moyai'
+    expected = broker.rstrip('/') if broker else settings.public_url
+    assert settings.broker_base_url == expected
+    assert settings.broker_environment('test-token')['WORKSPACE_ACCESS_ORIGIN'] == expected.removesuffix('/moyai')
+
+
+@pytest.mark.parametrize('broker', ['http://public.test', 'https://user:password@broker.test',
+    'https://broker.test?key=secret', 'https://broker.test/#fragment', 'https://broker.test/other',
+    'https://broker.test:99999', 'https://broker.test/../', 'https://broker.test/%2f',
+    'https://broker.test/\n', ' https://broker.test'])
+def test_broker_url_rejects_unsafe_or_mismatched_destinations(broker):
+    with pytest.raises(ValidationError, match='MOYAI_BROKER_URL'):
+        Settings(_env_file=None, public_url='https://private.test', broker_url=broker)
+
+
+def test_broker_url_environment_alias_and_loopback(monkeypatch):
+    monkeypatch.setenv('MOYAI_BROKER_URL', 'http://127.0.0.1:8081')
+    assert Settings(_env_file=None, public_url='http://127.0.0.1:8080').broker_base_url == 'http://127.0.0.1:8081'

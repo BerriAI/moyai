@@ -97,3 +97,33 @@ def test_release_package_pins_the_image_from_the_same_build(tmp_path):
         assert yaml.safe_load(bundle.extractfile('moyai/values.yaml'))['image']['digest'] == digest
         assert yaml.safe_load(bundle.extractfile('moyai/Chart.yaml'))['appVersion'] == revision
     assert yaml.safe_load((CHART / 'values.yaml').read_text())['image']['digest'] == ''
+
+
+def test_separate_broker_has_only_a_cluster_ip_and_dedicated_proxy_listener():
+    objects = render('bundled', 'test', '--set-string', 'brokerUrl=https://broker.example.test/moyai')
+    service = named(objects, 'Service', 'test-moyai-broker')['spec']
+    assert service['type'] == 'ClusterIP' and service['publishNotReadyAddresses'] is True
+    assert service['ports'] == [{'name': 'http', 'port': 8080, 'targetPort': 'broker-http'}]
+    proxy = next(c for c in named(objects, 'Deployment', 'test-moyai')['spec']['template']['spec']['containers']
+                 if c['name'] == 'proxy')
+    assert {'name': 'broker-http', 'containerPort': 8081} in proxy['ports']
+    config = named(objects, 'ConfigMap', 'test-moyai-config')['data']
+    assert config['MOYAI_PUBLIC_URL'] == 'https://gateway.example.com/moyai'
+    assert config['MOYAI_BROKER_URL'] == 'https://broker.example.test/moyai'
+    listener = named(objects, 'ConfigMap', 'test-moyai-scripts')['data']['nginx.conf'].split('listen 8081;')[1]
+    assert 'location /moyai/broker/' in listener and 'location / { return 404; }' in listener
+    assert ':8787' not in listener and ':8788' not in listener
+    assert [o for o in objects if o['kind'] == 'Ingress'] == [o for o in render() if o['kind'] == 'Ingress']
+
+
+def test_default_does_not_expose_a_separate_listener():
+    objects = render()
+    assert not any(o['metadata']['name'] == 'test-moyai-broker' for o in objects)
+    assert 'listen 8081;' not in named(objects, 'ConfigMap', 'test-moyai-scripts')['data']['nginx.conf']
+
+
+@pytest.mark.parametrize('url', ['http://broker.test/moyai', 'https://broker.test/other',
+                                 'https://user:secret@broker.test/moyai', 'https://broker.test/moyai?key=secret'])
+def test_unsafe_or_incompatible_broker_chart_urls_are_rejected(url):
+    with pytest.raises(subprocess.CalledProcessError):
+        render('bundled', 'test', '--set-string', 'brokerUrl=' + url)

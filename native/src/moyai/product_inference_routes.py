@@ -1,7 +1,7 @@
 """Authenticated native model broker; Pydantic retains execution and streaming.
 
 Existing deployment routing sends /broker/* to the broker role. Workers use
-settings.public_url, exactly as the source runner does. The signed envelope is
+the broker URL, which defaults to the browser URL for existing installations. The signed envelope is
 bound to one materialized SDK request, original scope, and Temporal activity.
 It is not a user login, run token, or permission to replay a paid request.
 """
@@ -70,7 +70,7 @@ def broker_request(
             "CF-Access-Client-Secret": service.settings.cloudflare_access_client_secret,
         })
     return httpx2.Request(
-        "POST", service.settings.public_url.rstrip("/") + "/broker/native/v1/" + route,
+        "POST", service.settings.broker_base_url + "/broker/native/v1/" + route,
         content=content,
         headers=headers,
         extensions=request.extensions,
