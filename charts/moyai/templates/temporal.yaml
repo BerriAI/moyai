@@ -1,5 +1,14 @@
 {{- if .Values.temporal.bundled }}
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "moyai.name" . }}-temporal-dynamic
+data:
+  # The server image requires this file even when all dynamic defaults are used.
+  docker.yaml: |
+    {}
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "moyai.name" . }}-temporal
@@ -63,6 +72,11 @@ spec:
             - {name: DBNAME, value: temporal}
             - {name: VISIBILITY_DBNAME, value: temporal_visibility}
             - {name: BIND_ON_IP, value: "0.0.0.0"}
+            - {name: DYNAMIC_CONFIG_FILE_PATH, value: /etc/temporal/config/dynamicconfig/docker.yaml}
+          volumeMounts:
+            - name: dynamic-config
+              mountPath: /etc/temporal/config/dynamicconfig
+              readOnly: true
           ports:
             - name: grpc
               containerPort: 7233
@@ -75,6 +89,9 @@ spec:
             periodSeconds: 5
           resources: {{ .Values.temporal.resources | toJson }}
       volumes:
+        - name: dynamic-config
+          configMap:
+            name: {{ include "moyai.name" . }}-temporal-dynamic
         - name: scripts
           configMap:
             name: {{ include "moyai.name" . }}-scripts
