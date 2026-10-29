@@ -49,6 +49,19 @@ def test_dependencies_and_state_can_be_supplied_externally():
     assert [step['name'] for step in pod['initContainers']] == ['permissions', 'initialize']
     assert pod['serviceAccountName'] == 'existing-moyai'
     assert pod['volumes'][0]['persistentVolumeClaim']['claimName'] == 'retained-moyai-state'
+    assert not any(obj['metadata']['name'].endswith('-temporal-dynamic') for obj in objects)
+
+
+def test_bundled_temporal_has_a_readable_dynamic_config_file():
+    objects = render()
+    pod = named(objects, 'Deployment', 'test-moyai-temporal')['spec']['template']['spec']
+    server = next(container for container in pod['containers'] if container['name'] == 'temporal')
+    config_path = Path(next(env['value'] for env in server['env'] if env['name'] == 'DYNAMIC_CONFIG_FILE_PATH'))
+    mount = next(mount for mount in server['volumeMounts'] if config_path.parent == Path(mount['mountPath']))
+    assert mount['readOnly'] is True
+    volume = next(volume for volume in pod['volumes'] if volume['name'] == mount['name'])
+    config = named(objects, 'ConfigMap', volume['configMap']['name'])['data']
+    assert yaml.safe_load(config[config_path.name]) == {}
 
 
 def test_releases_do_not_alias_services_claims_or_selectors():
