@@ -88,7 +88,11 @@ spec:
           image: {{ .Values.proxy.image }}
           command: [nginx, -c, /etc/moyai/nginx.conf, -g, "daemon off;"]
           {{- include "moyai.security" . | nindent 10 }}
-          ports: [{name: http, containerPort: 8080}]
+          ports:
+            - {name: http, containerPort: 8080}
+            {{- if .Values.brokerUrl }}
+            - {name: broker-http, containerPort: 8081}
+            {{- end }}
           volumeMounts:
             - {name: scripts, mountPath: /etc/moyai, readOnly: true}
             - {name: ingress, mountPath: /ingress, readOnly: true}

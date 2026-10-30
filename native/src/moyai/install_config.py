@@ -27,6 +27,7 @@ DEFAULTS = {
     "MOYAI_BIND_ADDRESS": "127.0.0.1",
     "MOYAI_PORT": "8787",
     "MOYAI_PUBLIC_URL": "",
+    "MOYAI_BROKER_URL": "",
     "MOYAI_DATABASE_URL": "",
     "OBJECT_STORAGE_BUCKET": "",
     "OBJECT_STORAGE_REGION": "us-east-1",

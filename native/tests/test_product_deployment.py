@@ -259,6 +259,7 @@ def test_local_rehearsal_is_explicit_loopback_and_owns_only_native_execution(env
     ("MOYAI_DATABASE_URL", "postgresql://127.0.0.1/database?host=private.example.test"),
     ("TEMPORAL_ADDRESS", "private.example.test:7233"),
     ("MOYAI_PUBLIC_URL", "https://private.example.test"),
+    ("MOYAI_BROKER_URL", "https://broker.example.test"),
     ("OBJECT_STORAGE_ENDPOINT", ""),
     ("OBJECT_STORAGE_ENDPOINT", "https://s3.example.test"),
     ("RENDER_SERVICE_ID", "synthetic-render-service"),

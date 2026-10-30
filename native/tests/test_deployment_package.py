@@ -389,12 +389,14 @@ async def test_standalone_offline_upgrade_retains_keys_and_records_revision(inst
     assert "upgrade" not in state
 
 
+@pytest.mark.parametrize("broker_url", ["", "https://broker.example.test"])
 @pytest.mark.parametrize("fault", [None, "unavailable", "redirect", "build", "owner", "role", "core"])
 async def test_health_requires_the_public_route_to_reach_the_verified_broker(
-    install_environment, monkeypatch, fault,
+    install_environment, monkeypatch, fault, broker_url,
 ):
     install_environment.update(
         MOYAI_INSTALL_TOPOLOGY="split",
+        MOYAI_BROKER_URL=broker_url,
         CLOUDFLARE_ACCESS_CLIENT_ID="synthetic-access-id",
         CLOUDFLARE_ACCESS_CLIENT_SECRET="synthetic-access-secret",
     )
@@ -402,7 +404,9 @@ async def test_health_requires_the_public_route_to_reach_the_verified_broker(
     public_calls = []
 
     def respond(request):
-        public = request.url.host == "workspace.example.test"
+        public = request.url.host == ("broker.example.test" if broker_url else "workspace.example.test")
+        if broker_url:
+            assert request.url.host != "workspace.example.test"
         role = "broker" if public else request.url.host
         headers = {
             "X-Moyai-Core": "pydantic-v1", "X-Moyai-Role": role,
@@ -517,3 +521,21 @@ async def test_split_provision_uses_installed_interpreter_for_canonical_schema(i
     assert calls[0][0] == [sys.executable, "-m", "app.schema_migrations", "--apply"]
     assert calls[0][1]["MOYAI_DATABASE_INITIALIZE"] == "false"
     assert result == {"product": {"schema_revision": 21, "status": "ready"}, "native": {"app_schema": "verified"}}
+
+
+def test_broker_transport_can_change_without_migrating_persisted_identity(install_environment):
+    state, original = prepared(install_environment)
+    updated = configuration({**install_environment, "MOYAI_BROKER_URL": "https://broker.example.test/"}, state)
+    assert updated["MOYAI_BROKER_URL"] == "https://broker.example.test"
+    assert updated["MOYAI_PUBLIC_URL"] == original["MOYAI_PUBLIC_URL"]
+    assert all(updated[name] == value for name, value in state["secrets"].items())
+    reverted = configuration(install_environment, state)
+    assert reverted["MOYAI_BROKER_URL"] == original["MOYAI_PUBLIC_URL"]
+
+
+@pytest.mark.parametrize("url", ["http://broker.example.test", "https://user:secret@broker.test",
+                                 "https://broker.test/other", "https://broker.test/?token=secret"])
+def test_invalid_broker_url_is_a_safe_installation_error(install_environment, url):
+    with pytest.raises(InstallationError, match="MOYAI_BROKER_URL") as error:
+        configuration({**install_environment, "MOYAI_BROKER_URL": url}, None)
+    assert url not in str(error.value)

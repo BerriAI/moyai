@@ -299,14 +299,14 @@ def load_product_config(environment: Mapping[str, str] | None = None) -> Product
         )):
             raise ProductConfigurationError("Local product rehearsal cannot run on Render.")
         endpoints = (
-            database_url, "//" + source.temporal_address, source.public_url,
+            database_url, "//" + source.temporal_address, source.public_url, source.broker_base_url,
             source.object_storage_endpoint,
         )
         # libpq query parameters can override the apparent URL host. Local
         # rehearsal uses an unambiguous loopback DSN, without alternate routing.
         if urlsplit(database_url).query or any(not _loopback_endpoint(value) for value in endpoints):
             raise ProductConfigurationError(
-                "Local product rehearsal requires loopback database, Temporal, public URL and object storage."
+                "Local product rehearsal requires loopback database, Temporal, public URL, broker URL and object storage."
             )
     # Overlapping prefixes can have different object formats. Require an
     # independently named destination subtree rather than guessing compatibility.

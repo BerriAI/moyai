@@ -157,7 +157,9 @@ async def health(values: dict[str, str]) -> None:
                 "CF-Access-Client-Secret": values.get("CLOUDFLARE_ACCESS_CLIENT_SECRET", ""),
             })
         try:
-            response = await client.get(values["MOYAI_PUBLIC_URL"] + "/broker/health", headers=headers)
+            from app.public_url import broker_base_url
+            endpoint = broker_base_url(values["MOYAI_PUBLIC_URL"], values.get("MOYAI_BROKER_URL", ""))
+            response = await client.get(endpoint + "/broker/health", headers=headers)
             response.raise_for_status()
         except httpx.HTTPError:
             raise InstallationError("The public broker route is unavailable; execution was not resumed.") from None

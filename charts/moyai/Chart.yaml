@@ -2,7 +2,7 @@ apiVersion: v2
 name: moyai
 description: Moyai split-role installation with persistent state and optional dev dependencies
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "unreleased"
 kubeVersion: ">=1.29.0-0"
 home: https://github.com/BerriAI/moyai
