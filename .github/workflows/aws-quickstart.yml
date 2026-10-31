@@ -1,0 +1,26 @@
+name: AWS quickstart
+on:
+  pull_request:
+    paths: ["deploy/aws/**", "deploy/docker/**", "scripts/lambda_image.py", "scripts/build_docker_bundle.py", "native/lambda_guest/**", ".github/workflows/aws-quickstart.yml"]
+  push:
+    branches: [main]
+    paths: ["deploy/aws/**", "deploy/docker/**", "scripts/lambda_image.py", "scripts/build_docker_bundle.py", "native/lambda_guest/**", ".github/workflows/aws-quickstart.yml"]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: terraform -chdir=deploy/aws init -backend=false -input=false
+      - run: terraform -chdir=deploy/aws fmt -check -recursive
+      - run: terraform -chdir=deploy/aws validate
+      - run: terraform -chdir=deploy/aws test
+      - run: uv run ruff check deploy/aws
+      - run: uv run pytest -q deploy/aws/tests/test_quickstart.py

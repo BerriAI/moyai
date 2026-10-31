@@ -1,5 +1,10 @@
 # Native Pydantic + Temporal on AWS Lambda MicroVMs
 
+For a new AWS installation, start with the [Terraform quickstart](../deploy/aws/README.md).
+It provisions the application infrastructure and uses an AWS-hosted LiteLLM
+gateway with Bedrock, then guides Slack setup and both recovery checks. The
+instructions below also support existing EC2/EKS installations.
+
 `SANDBOX_PROVIDER=lambda` selects an AWS Lambda MicroVM for new native computers.
 Pydantic AI Harness and Temporal still own model calls, tools and durable
 conversation execution on the trusted worker. The guest contains workspace tools

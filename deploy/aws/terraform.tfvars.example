@@ -1,0 +1,22 @@
+name            = "moyai-example"
+region          = "us-east-1"
+hostname        = "moyai.example.com"
+route53_zone_id  = "Z_YOUR_PUBLIC_HOSTED_ZONE"
+
+# Enable the model/profile in Bedrock first. Cross-region inference must be
+# allowed by your organization's policies in every destination region.
+bedrock_model_id = "us.anthropic.claude-sonnet-4-6"
+bedrock_invoke_resources = [
+  "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-6",
+  "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6",
+  "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6",
+  "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6",
+]
+
+computer_lifetime     = 28800
+computer_idle_timeout = 600
+deletion_protection   = true
+
+# Pin matching release image digests when upgrading; see README.md.
+# moyai_image   = "ghcr.io/berriai/moyai@sha256:..."
+# litellm_image = "ghcr.io/berriai/litellm@sha256:..."
