@@ -20,6 +20,7 @@ SECRETS = (
     "MOYAI_DATABASE_URL", "LITELLM_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET",
     "OBJECT_STORAGE_ACCESS_KEY_ID", "OBJECT_STORAGE_SECRET_ACCESS_KEY", "OBJECT_STORAGE_SESSION_TOKEN",
     "TEMPORAL_API_KEY", "MOYAI_TEMPORAL_DATABASE_PASSWORD",
+    "SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN",
     "CLOUDFLARE_ACCESS_CLIENT_ID", "CLOUDFLARE_ACCESS_CLIENT_SECRET", *SECRET_NAMES,
 )
 DEFAULTS = {
@@ -48,6 +49,13 @@ DEFAULTS = {
     "LAMBDA_EXECUTION_ROLE_ARN": "",
     "LAMBDA_EGRESS_CONNECTOR": "",
     "SNAPSHOT_TIMEOUT_SECONDS": "900",
+    "SLACK_CLIENT_ID": "",
+    "SLACK_BOT_ENABLED": "false",
+    "SLACK_SESSION_USERS": "",
+    "SLACK_THREAD_CHAT_ENABLED": "true",
+    "SLACK_DM_ENABLED": "true",
+    "SLACK_IDENTITY_LINKING_ENABLED": "true",
+    "SLACK_TEAM_ID": "",
     "TEMPORAL_ADDRESS": "",
     "TEMPORAL_NAMESPACE": "",
     "TEMPORAL_TLS": "true",
@@ -65,10 +73,21 @@ PROMPTS = (
     ("LITELLM_API_BASE", "Model gateway URL, including /v1", False),
     ("LITELLM_API_KEY", "Model gateway API key", True),
     ("AGENT_MODEL", "Responses-capable model name", False),
-    ("MODAL_TOKEN_ID", "Modal token ID", True),
-    ("MODAL_TOKEN_SECRET", "Modal token secret", True),
     ("WORKSPACE_PASSWORD", "Initial administrator password (blank to generate)", True),
 )
+SANDBOX_PROMPTS = {
+    "modal": (
+        ("MODAL_TOKEN_ID", "Modal token ID", True),
+        ("MODAL_TOKEN_SECRET", "Modal token secret", True),
+    ),
+    "lambda": (
+        ("LAMBDA_REGION", "Lambda MicroVM region", False),
+        ("LAMBDA_IMAGE", "Lambda MicroVM image ARN", False),
+        ("LAMBDA_IMAGE_VERSION", "Pinned Lambda MicroVM image version", False),
+        ("LAMBDA_CHECKPOINT_BUCKET", "Private S3 checkpoint bucket", False),
+        ("LAMBDA_CHECKPOINT_PREFIX", "Installation checkpoint prefix", False),
+    ),
+}
 
 
 def prompt(label: str, default: str, *, secret: bool = False) -> str:
@@ -211,7 +230,8 @@ def main() -> None:
             else choice("Temporal", ("bundled", "external"), "bundled")
         )
         if not args.from_env:
-            for field, label, hidden in PROMPTS:
+            values["SANDBOX_PROVIDER"] = choice("Sandbox provider", ("modal", "lambda"), values["SANDBOX_PROVIDER"])
+            for field, label, hidden in (*PROMPTS, *SANDBOX_PROMPTS[values["SANDBOX_PROVIDER"]]):
                 if not (args.secrets_from_env and field in SECRETS):
                     values[field] = prompt(label, values[field], secret=hidden)
             if temporal == "external":

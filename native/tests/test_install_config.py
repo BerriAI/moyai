@@ -19,6 +19,63 @@ install_environment = install_fixture
 IMAGE = "ghcr.io/berriai/moyai@sha256:" + "a" * 64
 
 
+@pytest.mark.parametrize("external_secrets", [False, True])
+def test_slack_configuration_survives_installation_without_leaking_external_secrets(
+    install_environment, external_secrets, tmp_path,
+):
+    slack = {
+        "SLACK_CLIENT_ID": "123.456", "SLACK_CLIENT_SECRET": "client-secret",
+        "SLACK_SIGNING_SECRET": "signing-secret", "SLACK_BOT_ENABLED": "true",
+        "SLACK_SESSION_USERS": "U123", "SLACK_DM_ENABLED": "false",
+        "SLACK_THREAD_CHAT_ENABLED": "false", "SLACK_IDENTITY_LINKING_ENABLED": "false",
+        "SLACK_BOT_TOKEN": "test-bot-token", "SLACK_TEAM_ID": "T123",
+    }
+    values, overlay = install_config.prepare(
+        {**install_environment, **slack}, image=IMAGE, topology="split", temporal="external",
+        secrets_from_env=external_secrets,
+    )
+    install_config.write_configuration(tmp_path, values, overlay)
+    content = "".join(path.read_text() for path in tmp_path.iterdir())
+    for name, value in slack.items():
+        if external_secrets and name in install_config.SECRETS:
+            assert value not in content
+            assert all(name in service["environment"] for service in overlay["services"].values())
+        else:
+            assert values[name] == value
+
+
+@pytest.mark.parametrize("provider", ["modal", "lambda"])
+def test_interactive_installer_requests_only_selected_sandbox_credentials(
+    install_environment, tmp_path, monkeypatch, provider,
+):
+    environment = {**install_environment, "SANDBOX_PROVIDER": provider}
+    if provider == "lambda":
+        environment.pop("MODAL_TOKEN_ID", None)
+        environment.pop("MODAL_TOKEN_SECRET", None)
+    answers = {
+        "Sandbox provider (modal/lambda)": provider,
+        "Lambda MicroVM image ARN": "arn:aws:lambda:us-east-1:123456789012:microvm-image:test",
+        "Pinned Lambda MicroVM image version": "1.0",
+        "Private S3 checkpoint bucket": "test-checkpoints",
+    }
+    labels = []
+
+    def answer(label, default, **kwargs):
+        labels.append(label)
+        return answers.get(label, default)
+
+    monkeypatch.setattr(install_config, "prompt", answer)
+    monkeypatch.setattr(install_config.os, "environ", environment)
+    monkeypatch.setattr(sys, "argv", [
+        "moyai.install_config", "--image", IMAGE, "--directory", str(tmp_path),
+        "--topology", "split", "--temporal", "external",
+    ])
+    install_config.main()
+    assert ("Modal token ID" in labels) is (provider == "modal")
+    assert ("Lambda MicroVM image ARN" in labels) is (provider == "lambda")
+    assert f"SANDBOX_PROVIDER={provider}\n" in (tmp_path / ".env").read_text()
+
+
 @pytest.mark.parametrize("topology", ["standalone", "split"])
 @pytest.mark.parametrize("temporal", ["external", "bundled"])
 @pytest.mark.parametrize("external_secrets", [False, True])

@@ -71,7 +71,11 @@ starting saved processes.
 
 Restoration applies the exact archived xattr set after ownership and mode changes,
 including Linux ACLs and file capabilities. Attributes removed during the session
-are removed on restore as well.
+are removed on restore as well. Matching attributes are preserved without first
+deleting them: AWS's mandatory SELinux labels cannot be removed by guest root.
+Build a new guest image with this restoration behavior for new computers. An
+application-image upgrade alone does not replace guest code, and existing
+checkpoints continue to select their original pinned guest image/version.
 
 Content hashes can be reused only when device/inode, nanosecond ctime/mtime, size,
 mode, ownership and link count still match. Recent timestamps and backwards clock
@@ -102,3 +106,139 @@ image cannot be used as a Lambda image. Plain repository preparation and native
 file continuations use the selected provider. Interactive desktop streaming is
 currently Modal-only; Lambda supports native shell/file/browser tools and
 authenticated desktop snapshot/actions.
+
+## Deploy the application on AWS
+
+Lambda MicroVMs host the untrusted computers. The trusted Moyai application still
+needs a continuously running API, coordinator, broker and Temporal worker. The
+simplest single-host installation uses the Docker split bundle on EC2. An existing
+EKS installation can use the same Lambda settings through the Helm chart's
+`config` and runtime Secret. Neither path needs a Firecracker host or a Lambda
+function wrapper.
+
+| Component | AWS deployment |
+| --- | --- |
+| Application | One EC2 host running the split Docker bundle, or the published Helm chart on EKS |
+| HTTPS | ALB + ACM certificate + DNS; preserve Host and allow streaming/WebSockets |
+| Durable application data | PostgreSQL (normally RDS) and private S3 object prefixes |
+| Durable execution | Existing Temporal service, or bundled Temporal with persistent storage for an evaluation |
+| Untrusted computers | Pinned Lambda MicroVM image and a separate S3 checkpoint prefix |
+| Installation keys | Persistent protected `moyai-state` volume/PVC, backed up together with the database |
+| Model access | Reachable Responses-compatible gateway, matching API key and enabled model |
+| Slack | Dedicated installed app, signing secret, OAuth credentials and sender allowlist |
+
+For an evaluation, bundled PostgreSQL/Temporal on encrypted EBS can reduce setup,
+but that is a single host with no automatic database failover. The shipped bundle
+includes Temporal's database; bring a separate application PostgreSQL database.
+Use RDS and your existing Temporal service for production. Do not expose either
+database or Temporal ports through the ALB.
+
+### Provision and connect
+
+1. Choose an account/region with Lambda MicroVM access. Check the actual API,
+   not ordinary Lambda function availability. Build the guest using the command
+   above and wait for its exact version to become `SUCCESSFUL`.
+2. Create the application's database and separate object/checkpoint prefixes.
+   Block public S3 access and retain pinned images as long as checkpoints refer
+   to them. Checkpoints currently require SSE-S3, not an SSE-KMS-only policy.
+3. Attach a workload role to the application host. On EC2 require IMDSv2; Docker
+   bridge containers need a metadata response hop limit that permits the bridge
+   (typically 2). Limit access to the trusted application containers. Never attach
+   this role to the untrusted MicroVM guest or copy model credentials into it.
+4. Terminate HTTPS at your ingress. Allow the host's proxy port only from the ALB
+   security group. Prefer SSM to exposing SSH. Register the public URL before
+   initialization; changing it later changes installation identity.
+5. Ensure the worker can reach PostgreSQL, S3, Temporal, the model gateway and
+   AWS MicroVM control/authenticated data endpoints. A working laptop browser
+   session does not establish server-to-server connectivity. Private gateways
+   need working VPC routes/DNS and matching credentials before initialization.
+   Slack events need a reachable signed webhook endpoint; interactive employee
+   SSO in front of that endpoint prevents Slack delivery.
+
+The runtime role needs these actions on the selected image ARN:
+`lambda:RunMicrovm`, `lambda:GetMicrovm`, `lambda:TerminateMicrovm`,
+`lambda:CreateMicrovmAuthToken`, `lambda:GetMicrovmImageVersion`.
+Also allow `lambda:PassNetworkConnector` only on the selected connectors. Allow
+`s3:ListBucket` on the selected buckets (needed by `HeadBucket`) and object
+read/write permissions on the installation prefixes. Application object storage
+may also require deletion for its own lifecycle. No image-build permissions or
+`iam:PassRole` are needed by the runtime when `LAMBDA_EXECUTION_ROLE_ARN` is empty.
+If supplying an execution role, scope `iam:PassRole` to that role and review its
+guest permissions separately. AWS documents the [MicroVM IAM model and resource
+scoping](https://docs.aws.amazon.com/lambda/latest/dg/microvms-security.html).
+
+From a matching release bundle on the host, supply database/model/Slack secrets
+through your secret manager or private environment, then configure:
+
+```sh
+export MOYAI_INSTALLATION_ID=moyai
+export MOYAI_INSTALL_TOPOLOGY=split
+export MOYAI_PUBLIC_URL=https://moyai.example.com
+# A remote ALB needs the proxy bound to a reachable interface, protected by its SG.
+export MOYAI_BIND_ADDRESS=0.0.0.0
+export OBJECT_STORAGE_BUCKET=YOUR_PRIVATE_BUCKET
+export OBJECT_STORAGE_REGION=us-east-1
+export SANDBOX_PROVIDER=lambda
+export LAMBDA_REGION=us-east-1
+export LAMBDA_IMAGE=arn:aws:lambda:us-east-1:123456789012:microvm-image:moyai-native-workspace
+export LAMBDA_IMAGE_VERSION=1.0
+export LAMBDA_CHECKPOINT_BUCKET=YOUR_PRIVATE_BUCKET
+export LAMBDA_CHECKPOINT_PREFIX=moyai/lambda
+export MOYAI_TEMPORAL_MODE=bundled
+export SLACK_BOT_ENABLED=true
+export SLACK_SESSION_USERS=YOUR_SLACK_USER_ID
+# Also supply MOYAI_DATABASE_URL, LITELLM_API_BASE, LITELLM_API_KEY, AGENT_MODEL,
+# SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_SIGNING_SECRET privately.
+sh moyai.sh configure --from-env --secrets-from-env --topology split --temporal bundled
+sh moyai.sh up
+sh moyai.sh check
+sh moyai.sh status
+```
+
+For external Temporal, select `--temporal external` and supply its address,
+namespace, TLS and credentials. In environment-secret mode, the service manager
+must supply secrets on subsequent starts/upgrades too. To store supplied secrets
+in private mode-0600 `.env` instead, omit `--secrets-from-env`. Never source that
+raw Compose file as a shell script. Existing installations are not overwritten:
+add the Slack/Lambda values explicitly, then use the documented maintenance
+upgrade procedure to change images. See [Docker installation and
+upgrades](../deploy/docker/README.md).
+
+### Slack and checkpoint/restore acceptance
+
+Use a dedicated test Slack app and isolated data for evaluation. In split mode,
+configure OAuth and install through **Connections → Slack**; a raw bot token does
+not substitute for the canonical workspace installation. Use the application's
+requested scopes. Register `/oauth/slack/callback` as the redirect URL,
+`/hooks/slack/events` for events and `/hooks/slack/interactions` for interactions,
+including any configured base path. Subscribe to app mentions and messages in
+the conversations the bot is intended to handle. Start with an explicit
+`SLACK_SESSION_USERS` allowlist and enable only the required DM/thread surfaces.
+
+`moyai.sh check` proves service connections and the pinned image's readiness. It
+does not launch a computer, validate Slack delivery or prove restoration. Before
+calling the deployment ready:
+
+1. Sign in to the actual app. Verify anonymous application APIs are denied and
+   an invalid Slack signature is rejected.
+2. In an approved Slack test conversation, ask the installed bot to create a
+   uniquely named file with known contents. Verify real model/tool execution,
+   progress/final delivery in the same Slack thread and a completed checkpoint.
+   Reply in-thread and verify it continues the same Moyai session.
+3. Record the session's computer ID and checkpoint reference. Terminate only
+   that test MicroVM using the AWS API. Send a follow-up asking the agent to
+   **read** the existing file. Verify a different MicroVM ID, the saved contents
+   and a new checkpoint, without asking it to recreate the file.
+4. Verify installed packages, deletions, symlinks and permissions if the workload
+   relies on them. Checkpoint restoration imports filesystem state into a fresh
+   VM; it does not resume running processes.
+5. Restart the trusted application while retaining its database, object storage
+   and installation volume. Verify sign-in, the same session/history and another
+   real follow-up. Check failed and duplicate Slack delivery handling separately.
+
+Record source revisions, image ARN/version, actual VM IDs, checkpoint hashes,
+results and timings. Keep credentials and presigned URLs out of evidence. A
+provider-level checkpoint test is useful, but does not replace the full Slack
+workflow. Clean up temporary test VMs, hosts, load balancers and DNS after the
+evaluation; retain application state and checkpoint objects if the installation
+will be continued.
