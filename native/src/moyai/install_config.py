@@ -58,6 +58,7 @@ DEFAULTS = {
     "SLACK_DM_ENABLED": "true",
     "SLACK_IDENTITY_LINKING_ENABLED": "true",
     "SLACK_TEAM_ID": "",
+    "GOOGLE_ALLOWED_DOMAINS": "",
     "TEMPORAL_ADDRESS": "",
     "TEMPORAL_NAMESPACE": "",
     "TEMPORAL_TLS": "true",

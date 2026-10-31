@@ -122,7 +122,8 @@ the Lambda settings above. Use an EC2 instance role or pod workload identity;
 the host's AWS CLI login is not automatically available inside a container.
 
 For split-topology Slack, export `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`,
-`SLACK_SIGNING_SECRET`, `SLACK_BOT_ENABLED=true`, and `SLACK_SESSION_USERS`
+`SLACK_SIGNING_SECRET`, `SLACK_BOT_ENABLED=true`, `SLACK_SESSION_USERS`, and
+`GOOGLE_ALLOWED_DOMAINS` (approved Slack members' email domains for identity linking)
 before first configuration. The installer retains these settings and treats
 Slack secrets like other provider credentials in `--secrets-from-env` mode.
 Then install the app through Moyai's Connections page. Environment variables

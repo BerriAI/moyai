@@ -38,6 +38,7 @@ def test_slack_configuration_survives_installation_without_leaking_external_secr
         "SLACK_SESSION_USERS": "U123", "SLACK_DM_ENABLED": "false",
         "SLACK_THREAD_CHAT_ENABLED": "false", "SLACK_IDENTITY_LINKING_ENABLED": "false",
         "SLACK_BOT_TOKEN": "test-bot-token", "SLACK_TEAM_ID": "T123",
+        "GOOGLE_ALLOWED_DOMAINS": "example.com",
     }
     values, overlay = install_config.prepare(
         {**install_environment, **slack}, image=IMAGE, topology="split", temporal="external",

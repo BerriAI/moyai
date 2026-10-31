@@ -213,9 +213,12 @@ export LAMBDA_IMAGE=arn:aws:lambda:us-east-1:123456789012:microvm-image:moyai-na
 export LAMBDA_IMAGE_VERSION=1.0
 export LAMBDA_CHECKPOINT_BUCKET=YOUR_PRIVATE_BUCKET
 export LAMBDA_CHECKPOINT_PREFIX=moyai/lambda
+export MOYAI_COMPUTER_TIMEOUT=28800
+export MOYAI_COMPUTER_IDLE_TIMEOUT=600
 export MOYAI_TEMPORAL_MODE=bundled
 export SLACK_BOT_ENABLED=true
 export SLACK_SESSION_USERS=YOUR_SLACK_USER_ID
+export GOOGLE_ALLOWED_DOMAINS=example.com
 # Also supply MOYAI_DATABASE_URL, LITELLM_API_BASE, LITELLM_API_KEY, AGENT_MODEL,
 # SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_SIGNING_SECRET privately.
 sh moyai.sh configure --from-env --secrets-from-env --topology split --temporal bundled
@@ -243,6 +246,10 @@ requested scopes. Register `/oauth/slack/callback` as the redirect URL,
 including any configured base path. Subscribe to app mentions and messages in
 the conversations the bot is intended to handle. Start with an explicit
 `SLACK_SESSION_USERS` allowlist and enable only the required DM/thread surfaces.
+With identity linking enabled (the default), also set `GOOGLE_ALLOWED_DOMAINS`
+to the approved Slack members' email domains. Despite its name, this setting
+also governs Slack profile eligibility; an empty value rejects Slack senders
+even when their IDs are allowlisted. This does not require enabling Google OAuth.
 
 `moyai.sh check` proves service connections and the pinned image's readiness. It
 does not launch a computer, validate Slack delivery or prove restoration. Before
