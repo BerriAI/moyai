@@ -53,11 +53,11 @@ variable "deletion_protection" {
 }
 
 variable "moyai_image" {
-  description = "Immutable, anonymously pullable application image matching this checkout's Docker bundle."
+  description = "Immutable application image matching this checkout; set after building into application_repository."
   type        = string
-  default     = "ghcr.io/berriai/moyai@sha256:6ea304813079463b31a065fa8886612929bb9bfce1c5b0e68c7b7d129648a34a"
+  default     = null
   validation {
-    condition     = can(regex("^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$", var.moyai_image))
+    condition     = var.moyai_image == null || can(regex("^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$", var.moyai_image))
     error_message = "Pin the application image by sha256 digest."
   }
 }

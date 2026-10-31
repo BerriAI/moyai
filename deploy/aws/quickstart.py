@@ -140,6 +140,8 @@ def application_bundle() -> bytes:
 
 
 def start_install(session, config: dict, receipt: dict) -> str:
+    if not config.get("moyai_image"):
+        raise ValueError("Build this checkout, set moyai_image to its immutable digest and apply before installing")
     s3 = session.client("s3")
     bundle = application_bundle()
     digest = hashlib.sha256(bundle).hexdigest()

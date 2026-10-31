@@ -23,4 +23,4 @@ jobs:
       - run: terraform -chdir=deploy/aws validate
       - run: terraform -chdir=deploy/aws test
       - run: uv run ruff check deploy/aws
-      - run: uv run pytest -q deploy/aws/tests/test_quickstart.py
+      - run: uv run pytest -q deploy/aws/tests/test_quickstart.py native/tests/test_bedrock_model_profile.py

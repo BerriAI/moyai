@@ -100,7 +100,7 @@ def configure_gateway(config: dict, secret: dict) -> None:
     configure_gateway_tls(gateway, config["moyai_image"])
     # JSON is a YAML subset. Values are encoded, not interpolated into YAML/shell.
     settings = {
-        "model_list": [{"model_name": "moyai-bedrock", "litellm_params": {
+        "model_list": [{"model_name": "bedrock/" + config["bedrock_model_id"], "litellm_params": {
             "model": "bedrock/" + config["bedrock_model_id"], "aws_region_name": config["region"],
         }}],
         "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
@@ -209,7 +209,7 @@ def install(config: dict, archive: Path) -> None:
         "LAMBDA_IMAGE_VERSION": config["image_version"], "LAMBDA_CHECKPOINT_BUCKET": config["bucket"],
         "LAMBDA_CHECKPOINT_PREFIX": "moyai/lambda", "MOYAI_COMPUTER_TIMEOUT": str(config["computer_lifetime"]),
         "MOYAI_COMPUTER_IDLE_TIMEOUT": str(config["computer_idle_timeout"]),
-        "LITELLM_API_BASE": "https://gateway:4000/v1", "LITELLM_API_KEY": secret["gateway_key"], "AGENT_MODEL": "moyai-bedrock",
+        "LITELLM_API_BASE": "https://gateway:4000/v1", "LITELLM_API_KEY": secret["gateway_key"], "AGENT_MODEL": "bedrock/" + config["bedrock_model_id"],
         "WORKSPACE_PASSWORD": secret["WORKSPACE_PASSWORD"], "SLACK_BOT_ENABLED": str(bool(secret.get("SLACK_CLIENT_ID"))).lower(),
     }
     run(["sh", "moyai.sh", "configure", "--from-env", "--topology", "split", "--temporal", "bundled"], env=environment, cwd=APP)

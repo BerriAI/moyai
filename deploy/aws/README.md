@@ -42,17 +42,15 @@ It needs outbound access for images, image builds, Slack and AWS APIs.
 - A dedicated Slack app for testing. Its OAuth credentials, signing secret,
   allowed user IDs/team and approved email domains are supplied separately.
 
-The default application digest contains PR #675 (source `9de19f6`). The gateway
-digest is pinned rather than following a moving tag. Select a matching application
-image and Docker bundle when changing releases. Neither secret values nor an
+Build the application from this checkout: it includes the Bedrock tool-schema
+compatibility needed by the quickstart. The gateway digest is pinned rather than
+following a moving tag. Select a matching application image and Docker bundle
+when changing releases. Neither secret values nor an
 AWS access key belong in `.tfvars` or Terraform backend configuration.
 
-For a custom build, push it to the `application_repository` Terraform output and
-set `moyai_image` to that repository's immutable digest before installing. Build
-with `--build-arg MOYAI_BUILD_SHA=$(git rev-parse HEAD)` and `--platform linux/amd64`
-for the default host. The host can pull only that ECR repository; it has no push
-permissions. Public pinned images remain supported. Apply the changed input
-before running the installer. An existing installation still needs maintenance.
+The host can pull the stack's ECR repository; it has no push permissions.
+Public pinned images containing this change remain supported. An existing
+installation still needs maintenance when changing its application image.
 
 ## 1. Provision the infrastructure
 
@@ -67,6 +65,28 @@ terraform -chdir=deploy/aws init
 terraform -chdir=deploy/aws plan -out=installation.tfplan
 terraform -chdir=deploy/aws apply installation.tfplan
 ```
+
+Build and publish the application to the new repository. Docker with an AMD64
+builder is required. This does not put AWS credentials into the image:
+
+```sh
+MOYAI_REPOSITORY=$(terraform -chdir=deploy/aws output -raw application_repository)
+MOYAI_REVISION=$(git rev-parse HEAD)
+MOYAI_REGION=$(terraform -chdir=deploy/aws output -json quickstart | python3 -c 'import json,sys; print(json.load(sys.stdin)["region"])')
+aws ecr get-login-password --region "$MOYAI_REGION" | docker login --username AWS --password-stdin "${MOYAI_REPOSITORY%%/*}"
+docker buildx build --platform linux/amd64 --build-arg MOYAI_BUILD_SHA="$MOYAI_REVISION" --tag "$MOYAI_REPOSITORY:$MOYAI_REVISION" --push .
+docker logout "${MOYAI_REPOSITORY%%/*}"
+aws ecr describe-images --region "$MOYAI_REGION" --repository-name "${MOYAI_REPOSITORY#*/}" --image-ids "imageTag=$MOYAI_REVISION" --query 'imageDetails[0].imageDigest' --output text
+# Set moyai_image = "<application_repository>@<returned sha256 digest>" in terraform.tfvars.
+terraform -chdir=deploy/aws plan -out=application.tfplan
+terraform -chdir=deploy/aws apply application.tfplan
+```
+
+The initial infrastructure apply allows an unset `moyai_image`; application
+installation refuses to proceed until an immutable image is supplied. The
+gateway exposes a `bedrock/<model ID>` alias so Moyai selects compatible tool
+calling. Numeric bounds remain validated by Moyai; Bedrock strict-schema mode,
+which rejects those bounds, is disabled for provider-qualified Bedrock routes.
 
 Use your organization's encrypted, access-controlled remote Terraform backend
 with locking for a retained installation. The module deliberately does not create
