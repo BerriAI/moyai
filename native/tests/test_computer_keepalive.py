@@ -79,7 +79,7 @@ async def test_lazy_acquisition_is_observed_without_starting_a_computer(runtime,
 
 
 @pytest.mark.parametrize("change", [
-    "stopped", "failed", "completed", "waiting", "deleted", "revoked", "superseded", "scope", "actor", "lambda",
+    "stopped", "failed", "completed", "waiting", "deleted", "revoked", "superseded", "scope", "actor", "unsupported",
 ])
 async def test_inactive_or_unauthorized_workspace_is_not_touched(runtime, computer, change):
     session, scope, sandbox, attach = computer
@@ -95,13 +95,35 @@ async def test_inactive_or_unauthorized_workspace_is_not_touched(runtime, comput
             current.active_turn = None
         elif change == "scope":
             current.workspace_scope = "different-scope"
-        elif change == "lambda":
-            current.workspace = '{"provider":"lambda","id":"other-provider"}'
+        elif change == "unsupported":
+            current.workspace = '{"provider":"local","id":"other-provider"}'
     if change == "actor":
         scope = replace(scope, actor_id="different-actor")
     assert not (await keep_computer_alive(scope)).active
     attach.assert_not_awaited()
     sandbox.exec.aio.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", ["running", "saving", "idle"])
+async def test_lambda_keepalive_uses_endpoint_only_for_admitted_active_turn(runtime, computer, monkeypatch, status):
+    session, scope, _, modal_attach = computer
+    async with runtime.database.sessions.begin() as db:
+        current = await db.get(Session, session.id)
+        current.workspace = '{"provider":"lambda","id":"lambda:us-east-1:microvm-test"}'
+        current.status = status
+        (await db.get(Turn, scope.turn_id)).status = status
+    vm = SimpleNamespace(alive=AsyncMock(return_value=True), request=AsyncMock(return_value={}))
+    control = SimpleNamespace(get=AsyncMock(return_value=vm), create=AsyncMock())
+    monkeypatch.setattr("moyai.lambda_control.LambdaControl", lambda settings: control)
+    result = await keep_computer_alive(scope)
+    assert result.active is (status != "idle")
+    if status == "idle":
+        control.get.assert_not_awaited()
+    else:
+        control.get.assert_awaited_once_with("lambda:us-east-1:microvm-test")
+        vm.request.assert_awaited_once_with("/health", {})
+    control.create.assert_not_awaited()
+    modal_attach.assert_not_awaited()
 
 
 @pytest.mark.parametrize("failure", [None, modal.exception.NotFoundError("gone")])

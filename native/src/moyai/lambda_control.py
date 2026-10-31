@@ -125,7 +125,9 @@ class LambdaControl:
             "imageVersion": manifest["image_version"] if manifest else self.settings.lambda_image_version,
             "maximumDurationInSeconds": min(self.settings.computer_lifetime, 28800),
             "idlePolicy": {
-                "autoResumeEnabled": False, "maxIdleDurationSeconds": 28800, "suspendedDurationSeconds": 28800,
+                "autoResumeEnabled": True,
+                "maxIdleDurationSeconds": min(self.settings.computer_idle_timeout, 28800),
+                "suspendedDurationSeconds": 28800,
             },
             "ingressNetworkConnectors": [
                 f"arn:aws:lambda:{region}:aws:network-connector:aws-network-connector:ALL_INGRESS",
@@ -198,14 +200,29 @@ class LambdaVM:
         return self.vm["state"] not in {"TERMINATED", "TERMINATING"}
 
     async def running(self) -> None:
+        # SUSPENDED is a live computer, not permission to restore an older S3
+        # checkpoint. Resolve a lost resume reply by observing this same VM.
+        resumed = False
         async with asyncio.timeout(180):
             while True:
                 if not await self.alive():
                     raise WorkspaceUnavailableError("Lambda workspace terminated")
                 if self.vm["state"] == "RUNNING":
                     return
-                if self.vm["state"] != "PENDING":
-                    raise WorkspaceUnavailableError("Lambda workspace is not running")
+                if self.vm["state"] == "SUSPENDED" and not resumed:
+                    try:
+                        await self.control.aws(
+                            "lambda-microvms", "resume_microvm", microvmIdentifier=self.vm["microvmId"],
+                        )
+                    except RuntimeError as error:
+                        # Another authorized worker or endpoint auto-resume can
+                        # win the race. Other failures (including IAM) propagate.
+                        if not str(error).endswith("ConflictException"):
+                            raise
+                    resumed = True
+                    self.auth, self.auth_until = "", 0.0
+                elif self.vm["state"] not in {"PENDING", "SUSPENDING", "SUSPENDED"}:
+                    raise RuntimeError("Unexpected Lambda workspace state")
                 await asyncio.sleep(1)
 
     async def terminate(self) -> None:

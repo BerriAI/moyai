@@ -33,6 +33,8 @@ LAMBDA_IMAGE_VERSION=1.0
 LAMBDA_CHECKPOINT_BUCKET=YOUR_PRIVATE_BUCKET
 LAMBDA_CHECKPOINT_PREFIX=moyai-native-lambda
 SNAPSHOT_TIMEOUT_SECONDS=900
+MOYAI_COMPUTER_TIMEOUT=28800
+MOYAI_COMPUTER_IDLE_TIMEOUT=600
 # Optional:
 LAMBDA_PROFILE=
 LAMBDA_EXECUTION_ROLE_ARN=
@@ -45,7 +47,7 @@ through their environment file or `moyai.sh configure --from-env`.
 The deployment check verifies the pinned image and bucket; it does not claim
 that a complete checkpoint/restore conformance run has passed.
 
-The worker needs MicroVM run/get/terminate/auth-token/image-version APIs and
+The worker needs MicroVM run/get/resume/terminate/auth-token/image-version APIs and
 `lambda:PassNetworkConnector` for its selected ingress/egress connectors. Scope
 S3 get/put/list permissions to the installation bucket/prefix. Building additionally
 needs image creation, build-artifact upload and `iam:PassRole` for a build-only
@@ -96,10 +98,36 @@ guest disk space. A failed/oversized save preserves the answer and reports that
 automatic restoration is unavailable. No blank replacement or uncertain command
 replay is used to recover a missing computer.
 
-Lambda does not use suspension. VM lifetime follows `MOYAI_COMPUTER_TIMEOUT`,
-capped at eight hours; `MOYAI_COMPUTER_IDLE_TIMEOUT` applies only to Modal.
-Completed turns save checkpoints, while the VM remains available until explicit
-termination or lifetime expiry.
+### Native suspend/resume and durable recovery
+
+New Lambda computers use AWS native idle suspension. `MOYAI_COMPUTER_IDLE_TIMEOUT`
+(default 600 seconds, capped at eight hours) controls the endpoint inactivity
+window. During an admitted turn and its checkpoint save, Moyai sends read-only
+health probes to keep the computer active, including while the model is thinking.
+Once the turn settles, probes stop and AWS can suspend the VM. Background processes
+alone do not count as endpoint activity; they pause when the VM suspends.
+
+The next command resumes the **same VM**, retaining memory, running processes,
+command receipts and disk. The guest suspend hook flushes files; the resume hook
+checks initialization and discards cached filesystem hash hints without restarting
+the interpreter. Moyai refreshes its endpoint token after explicit resume and opens
+fresh transport connections. Applications running inside the sandbox must reconnect
+their own external sockets after resume. Never replay an uncertain command to wake
+the computer.
+
+VM lifetime follows `MOYAI_COMPUTER_TIMEOUT` (default one hour), capped at eight
+hours **including suspended time**. Suspension does not extend the deadline.
+Completed turns still publish independent, verified S3 filesystem checkpoints.
+After termination or expiry, the next admitted turn restores the latest accepted
+checkpoint into a new VM from its pinned image. Files and installed packages survive;
+RAM and running processes do not. An interrupted, uncheckpointed turn is not recovered
+by replaying its commands. Keep S3 objects and pinned image versions for as long as
+their sessions must remain recoverable.
+
+Build and select a new guest image to enable the suspend/resume hooks. Existing VM
+idle policies and checkpoint image versions are immutable for this integration;
+upgrading only the application does not retrofit them. AWS documents the
+[native lifecycle and eight-hour limit](https://docs.aws.amazon.com/lambda/latest/dg/microvms-launching.html).
 
 Prepared environment snapshots remain provider-specific: a Modal environment
 image cannot be used as a Lambda image. Plain repository preparation and native
@@ -157,7 +185,8 @@ database or Temporal ports through the ALB.
 
 The runtime role needs these actions on the selected image ARN:
 `lambda:RunMicrovm`, `lambda:GetMicrovm`, `lambda:TerminateMicrovm`,
-`lambda:CreateMicrovmAuthToken`, `lambda:GetMicrovmImageVersion`.
+`lambda:ResumeMicrovm`, `lambda:CreateMicrovmAuthToken`, `lambda:GetMicrovmImageVersion`.
+Operators testing explicit suspension additionally need `lambda:SuspendMicrovm`.
 Also allow `lambda:PassNetworkConnector` only on the selected connectors. Allow
 `s3:ListBucket` on the selected buckets (needed by `HeadBucket`) and object
 read/write permissions on the installation prefixes. Application object storage
@@ -225,14 +254,23 @@ calling the deployment ready:
    uniquely named file with known contents. Verify real model/tool execution,
    progress/final delivery in the same Slack thread and a completed checkpoint.
    Reply in-thread and verify it continues the same Moyai session.
-3. Record the session's computer ID and checkpoint reference. Terminate only
+3. Let the completed session idle until AWS reports `SUSPENDED` (use a 60-second
+   idle timeout for the test). Reply in the same Slack thread. Verify the same VM
+   ID resumes and both the file and an in-memory marker in a background test
+   process survive. Verify no replacement VM or S3 restore occurred. Leave a model
+   turn active longer than the idle window and verify keepalive prevents suspension.
+4. Record the session's computer ID and checkpoint reference. Terminate only
    that test MicroVM using the AWS API. Send a follow-up asking the agent to
    **read** the existing file. Verify a different MicroVM ID, the saved contents
    and a new checkpoint, without asking it to recreate the file.
-4. Verify installed packages, deletions, symlinks and permissions if the workload
+5. Verify installed packages, deletions, symlinks and permissions if the workload
    relies on them. Checkpoint restoration imports filesystem state into a fresh
    VM; it does not resume running processes.
-5. Restart the trusted application while retaining its database, object storage
+6. Repeat with a short configured lifetime to exercise AWS expiry, not just manual
+   termination. This reaches the same termination boundary as the eight-hour cap
+   without claiming an eight-hour soak test. Verify that the new VM restores files
+   but the old in-memory process is gone.
+7. Restart the trusted application while retaining its database, object storage
    and installation volume. Verify sign-in, the same session/history and another
    real follow-up. Check failed and duplicate Slack delivery handling separately.
 

@@ -1,4 +1,4 @@
-"""Keep an admitted turn's existing Modal computer alive until its save settles.
+"""Keep an admitted turn's existing computer alive until its save settles.
 
 Temporal owns the timer. Each tick is a short, independently authorized activity;
 it never allocates a computer, restores a snapshot, or repeats an agent action.
@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import modal
 from fastapi import HTTPException
+from pydantic_ai.workspaces import WorkspaceUnavailableError
 from temporalio import activity
 
 from .contracts import RunScope
@@ -45,13 +46,23 @@ async def keep_computer_alive(scope: RunScope) -> Keepalive:
             if reference is None:
                 # On-demand acquisition may happen later in this same turn.
                 return Keepalive(True, delay)
-            if session.workspace_scope != scope.workspace_key or reference.get("provider") != "modal":
+            if session.workspace_scope != scope.workspace_key or reference.get("provider") not in {"modal", "lambda"}:
                 return Keepalive(False)
     except (PermissionError, HTTPException):
         return Keepalive(False)
 
     try:
         async with asyncio.timeout(15):
+            if reference["provider"] == "lambda":
+                from .lambda_control import LambdaControl
+
+                vm = await LambdaControl(runtime.settings).get(reference["id"])
+                if not await vm.alive():
+                    return Keepalive(False)
+                # Only endpoint traffic resets AWS's idle timer. This read-only
+                # probe also allows native auto-resume; it never runs user code.
+                await vm.request("/health", {})
+                return Keepalive(True, delay)
             sandbox = await modal.Sandbox.from_id.aio(reference["id"])
             if await sandbox.poll.aio() is not None:
                 return Keepalive(False)
@@ -60,7 +71,7 @@ async def keep_computer_alive(scope: RunScope) -> Keepalive:
             process = await sandbox.exec.aio("/bin/true", timeout=10)
             await process.wait.aio()
     except (modal.exception.NotFoundError, modal.exception.SandboxTerminatedError,
-            modal.exception.SandboxTimeoutError):
+            modal.exception.SandboxTimeoutError, WorkspaceUnavailableError):
         return Keepalive(False)
     except Exception:
         # A transient maintenance failure is not evidence of computer loss.

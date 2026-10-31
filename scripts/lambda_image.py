@@ -40,7 +40,14 @@ def image_request(region: str, name: str, bucket: str, key: str, role: str) -> d
         "egressNetworkConnectors": [
             f"arn:aws:lambda:{region}:aws:network-connector:aws-network-connector:INTERNET_EGRESS",
         ],
-        "hooks": {"port": 80, "microvmImageHooks": {"ready": "ENABLED", "readyTimeoutInSeconds": 1800}},
+        "hooks": {
+            "port": 80,
+            "microvmImageHooks": {"ready": "ENABLED", "readyTimeoutInSeconds": 1800},
+            "microvmHooks": {
+                "suspend": "ENABLED", "suspendTimeoutInSeconds": 30,
+                "resume": "ENABLED", "resumeTimeoutInSeconds": 30,
+            },
+        },
     }
 
 

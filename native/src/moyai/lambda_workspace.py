@@ -173,6 +173,9 @@ class LambdaBackend:
         identity = uuid4().hex
         output: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
         async with vm.lock:
+            # A cached backend may have been idle since its previous command.
+            # Wake it before submitting a mutation, which must never be replayed.
+            await vm.running()
             try:
                 try:
                     await vm.request("/command", {

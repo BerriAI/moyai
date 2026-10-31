@@ -19,6 +19,15 @@ install_environment = install_fixture
 IMAGE = "ghcr.io/berriai/moyai@sha256:" + "a" * 64
 
 
+def test_installer_retains_explicit_computer_lifetime_and_idle_window(install_environment):
+    values, _ = install_config.prepare(
+        {**install_environment, "MOYAI_COMPUTER_TIMEOUT": "28800", "MOYAI_COMPUTER_IDLE_TIMEOUT": "60"},
+        image=IMAGE, topology="split", temporal="external", secrets_from_env=False,
+    )
+    assert values["MOYAI_COMPUTER_TIMEOUT"] == "28800"
+    assert values["MOYAI_COMPUTER_IDLE_TIMEOUT"] == "60"
+
+
 @pytest.mark.parametrize("external_secrets", [False, True])
 def test_slack_configuration_survives_installation_without_leaking_external_secrets(
     install_environment, external_secrets, tmp_path,

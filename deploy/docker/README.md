@@ -78,6 +78,7 @@ Each installation needs its own ID and Compose project.
 | `SANDBOX_PROVIDER` | `modal` (default) or `lambda`. See the [AWS deployment guide](../../docs/aws-lambda-microvms.md#deploy-the-application-on-aws). |
 | `LAMBDA_REGION`, `LAMBDA_IMAGE`, `LAMBDA_IMAGE_VERSION`, `LAMBDA_CHECKPOINT_BUCKET` | Required for Lambda; use an image version whose state is `SUCCESSFUL`. |
 | `LAMBDA_CHECKPOINT_PREFIX` | A separate checkpoint/launch-receipt prefix for this installation. |
+| `MOYAI_COMPUTER_TIMEOUT`, `MOYAI_COMPUTER_IDLE_TIMEOUT` | Lifetime and idle window in seconds (defaults 3600 and 600). Lambda idle suspension retains RAM/disk; total lifetime including suspension is capped at 28800 seconds. |
 | `MODAL_APP_NAME` | A dedicated Modal application name for this installation. |
 | `MOYAI_MODAL_RUNTIME` | `vm` (default) for a full Linux kernel, or explicit `gvisor`. Use the same value in every service; see [runtime selection](../../docs/modal-runtime.md). |
 | `WORKSPACE_PASSWORD` | An initial administrator password of at least 16 characters, or leave empty to generate one. |
@@ -238,7 +239,8 @@ behind a maintenance command's file lock.
 
 The setup service checks PostgreSQL, reads and writes a small encrypted storage
 probe, checks the Temporal namespace, lists the selected gateway model, and
-authenticates the Modal client. It then prepares application schemas. These
+authenticates Modal or verifies the pinned Lambda image and checkpoint bucket.
+It then prepares application schemas. These
 checks do not execute a model or start a computer.
 
 Retrieve the generated initial password only in your private terminal:

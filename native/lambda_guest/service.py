@@ -310,6 +310,23 @@ def dispatch(path, body):
         raise ValueError("Unknown operation")
 
 
+def lifecycle(action):
+    """Native suspension preserves the interpreter and all command receipts."""
+    global CACHE
+    with LOCK:
+        if action == "suspend":
+            os.sync()
+        elif action == "resume":
+            if not BOOTSTRAPPED or not checkpoint.BASELINE.exists() or not (ROOT / "initialized.json").exists():
+                raise RuntimeError("Cannot resume an uninitialized workspace")
+            # Revalidate hashes after a wall-clock jump; do not re-exec or clear
+            # command/process state. Model credentials stay on the trusted host,
+            # and each transport request opens a fresh connection.
+            CACHE = checkpoint.ContentCache()
+        else:
+            raise ValueError("Unknown lifecycle hook")
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -328,6 +345,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/aws/lambda-microvms/runtime/v1/ready":
+            return self.reply(200, {"ready": True})
+        if self.path in {"/aws/lambda-microvms/runtime/v1/suspend", "/aws/lambda-microvms/runtime/v1/resume"}:
+            try:
+                lifecycle(self.path.rsplit("/", 1)[1])
+            except Exception:
+                return self.reply(503, {"error": "Workspace lifecycle hook failed"})
             return self.reply(200, {"ready": True})
         if self.path == "/bootstrap":
             self.reply(200, {"ok": True})
