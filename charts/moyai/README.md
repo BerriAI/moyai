@@ -52,7 +52,7 @@ only for rendering, never deployment.
 Example product-dev.yaml:
 
     installationId: moyaidev
-    publicUrl: https://gateway.product-dev.internal.litellm.ai/moyai
+    publicUrl: https://gateway.example.com/moyai
     runtimeSecret: moyai-runtime
     databaseSecret: moyai-database
     persistence:
