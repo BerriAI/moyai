@@ -2,7 +2,8 @@
 
 This package runs the Pydantic AI/Harness core introduced in PR #465. Bring a
 PostgreSQL database, private S3-compatible storage, a LiteLLM gateway with a
-Responses-capable model, and Modal credentials. Choose an external Temporal
+Responses-capable model, and either Modal credentials or an AWS Lambda MicroVM
+image and workload role. Choose an external Temporal
 service or the included persistent Temporal server.
 
 Use an empty, dedicated application schema for a new installation. Migrating an
@@ -51,7 +52,8 @@ the migration/upgrade instructions below.
 
 If you prefer prompts, run `sh moyai.sh configure` first. The optional wizard
 writes endpoints and supplied credentials to `.env` with mode 0600 and refuses
-to overwrite existing configuration.
+to overwrite existing configuration. Select `lambda` at the sandbox-provider
+prompt to enter a pinned MicroVM image and checkpoint bucket instead of Modal tokens.
 
 For manual configuration, copy `.env.example` to `.env`, protect it with
 `chmod 600 .env`, and fill in the settings below. Use the helper to start either
@@ -73,6 +75,10 @@ Each installation needs its own ID and Compose project.
 | `MOYAI_PUBLIC_URL` | The HTTPS URL your browser and workers can reach, optionally including `/moyai`. |
 | `LITELLM_API_BASE`, `LITELLM_API_KEY`, `AGENT_MODEL` | Gateway URL, key, and an enabled model that supports Responses. |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | A token pair for your Modal workspace. |
+| `SANDBOX_PROVIDER` | `modal` (default) or `lambda`. See the [AWS deployment guide](../../docs/aws-lambda-microvms.md#deploy-the-application-on-aws). |
+| `LAMBDA_REGION`, `LAMBDA_IMAGE`, `LAMBDA_IMAGE_VERSION`, `LAMBDA_CHECKPOINT_BUCKET` | Required for Lambda; use an image version whose state is `SUCCESSFUL`. |
+| `LAMBDA_CHECKPOINT_PREFIX` | A separate checkpoint/launch-receipt prefix for this installation. |
+| `MOYAI_COMPUTER_TIMEOUT`, `MOYAI_COMPUTER_IDLE_TIMEOUT` | Lifetime and idle window in seconds (defaults 3600 and 600). Lambda idle suspension retains RAM/disk; total lifetime including suspension is capped at 28800 seconds. |
 | `MODAL_APP_NAME` | A dedicated Modal application name for this installation. |
 | `MOYAI_MODAL_RUNTIME` | `vm` (default) for a full Linux kernel, or explicit `gvisor`. Use the same value in every service; see [runtime selection](../../docs/modal-runtime.md). |
 | `WORKSPACE_PASSWORD` | An initial administrator password of at least 16 characters, or leave empty to generate one. |
@@ -110,6 +116,19 @@ sh moyai.sh up
 For bundled Temporal, omit the external Temporal connection settings and export
 `MOYAI_TEMPORAL_MODE=bundled` before the same `up` command. For S3-compatible
 storage, export `OBJECT_STORAGE_ENDPOINT` too.
+
+For Lambda, replace the Modal token exports with `SANDBOX_PROVIDER=lambda` and
+the Lambda settings above. Use an EC2 instance role or pod workload identity;
+the host's AWS CLI login is not automatically available inside a container.
+
+For split-topology Slack, export `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`,
+`SLACK_SIGNING_SECRET`, `SLACK_BOT_ENABLED=true`, `SLACK_SESSION_USERS`, and
+`GOOGLE_ALLOWED_DOMAINS` (approved Slack members' email domains for identity linking)
+before first configuration. The installer retains these settings and treats
+Slack secrets like other provider credentials in `--secrets-from-env` mode.
+Then install the app through Moyai's Connections page. Environment variables
+alone do not install the workspace bot. See the [Slack and recovery acceptance
+steps](../../docs/aws-lambda-microvms.md#slack-and-checkpointrestore-acceptance).
 
 ### Optional separate configuration
 
@@ -221,7 +240,8 @@ behind a maintenance command's file lock.
 
 The setup service checks PostgreSQL, reads and writes a small encrypted storage
 probe, checks the Temporal namespace, lists the selected gateway model, and
-authenticates the Modal client. It then prepares application schemas. These
+authenticates Modal or verifies the pinned Lambda image and checkpoint bucket.
+It then prepares application schemas. These
 checks do not execute a model or start a computer.
 
 Retrieve the generated initial password only in your private terminal:

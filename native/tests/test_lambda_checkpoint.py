@@ -1,5 +1,6 @@
 """Filesystem invariants, supplementary to actual-app AWS validation."""
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import sys
 import tarfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -128,6 +130,35 @@ def test_changed_hardlink_topology_even_with_matching_link_counts(tmp_path):
     _, meta, names = pack(tmp_path, root, baseline, checkpoint.ContentCache())
     assert all("root/" + name in names for name in "abcd")
     assert meta["diagnostics"]["signature_changes"]["hardlinks"] == 4
+
+
+def test_restore_keeps_matching_mandatory_security_label(tmp_path, monkeypatch):
+    """Lambda refuses to remove security.selinux, including for guest root."""
+    root = tmp_path / "guest"
+    (root / "workspace").mkdir(parents=True)
+    archive = tmp_path / "checkpoint.tar.gz"
+    label = b"system_u:object_r:container_file_t:s0"
+    with tarfile.open(archive, "w:gz") as target:
+        manifest = json.dumps({"version": 1, "deleted": []}).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(manifest)
+        target.addfile(info, io.BytesIO(manifest))
+        directory = tarfile.TarInfo("root/workspace")
+        directory.type = tarfile.DIRTYPE
+        directory.pax_headers["SCHILY.xattr.security.selinux"] = label.decode()
+        target.addfile(directory)
+    monkeypatch.setattr(checkpoint.os, "listxattr", lambda *a, **k: ["security.selinux"], raising=False)
+    monkeypatch.setattr(checkpoint.os, "getxattr", lambda *a, **k: label, raising=False)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("Mandatory security label cannot be removed or rewritten")
+
+    monkeypatch.setattr(checkpoint.os, "removexattr", denied, raising=False)
+    monkeypatch.setattr(checkpoint.os, "setxattr", denied, raising=False)
+    # No portable way to create a real SELinux label on macOS; actual guest
+    # restoration is additionally exercised by the AWS deployment acceptance run.
+    monkeypatch.setattr(checkpoint.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0))
+    checkpoint.restore(archive, root=root, expected_sha256=checkpoint.digest(archive).hexdigest())
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="GNU tar / Linux xattr restore is verified on ARM64")

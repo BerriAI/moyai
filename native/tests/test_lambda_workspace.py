@@ -98,7 +98,7 @@ async def test_command_exit_and_partial_output(timed_out):
     result = {"state": "done", "exit_code": 7, "timed_out": timed_out,
               "stdout": base64.b64encode(b"result\xff").decode(), "stderr": ""}
     request = AsyncMock(side_effect=[{}, result, {}] if timed_out else [{}, result])
-    value.vm = SimpleNamespace(request=request, lock=asyncio.Lock())
+    value.vm = SimpleNamespace(request=request, running=AsyncMock(), lock=asyncio.Lock())
     if timed_out:
         with pytest.raises(WorkspaceTimeoutError) as error:
             await value.run(["false"], timeout=.1)

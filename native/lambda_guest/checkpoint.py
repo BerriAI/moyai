@@ -362,7 +362,8 @@ def restore(archive, *, root=Path('/'), expected_sha256):
         elif target.is_dir():
             target.rmdir()  # A nonempty, unexpected directory fails closed.
     # GNU tar sets archived xattrs but does not remove attributes missing from
-    # a changed directory. Clear the old set so removals survive restoration.
+    # a changed directory. Remove only attributes absent from the archive:
+    # Lambda's SELinux label cannot be removed, even by the guest's root user.
     for member in members:
         if not member.name.startswith('root/'):
             continue
@@ -371,7 +372,8 @@ def restore(archive, *, root=Path('/'), expected_sha256):
             raise ValueError('Archive parent escapes the filesystem')
         if target.exists() or target.is_symlink():
             for name in os.listxattr(target, follow_symlinks=False):
-                os.removexattr(target, name, follow_symlinks=False)
+                if 'SCHILY.xattr.' + name not in member.pax_headers:
+                    os.removexattr(target, name, follow_symlinks=False)
     result = subprocess.run(['tar', '--extract', '--gzip', '--file', str(archive), '--directory', str(root),
         '--xattrs', '--xattrs-include=*', '--acls', '--numeric-owner',
         '--exclude=manifest.json', '--strip-components=1'], capture_output=True)
@@ -393,10 +395,12 @@ def restore(archive, *, root=Path('/'), expected_sha256):
             key.removeprefix('SCHILY.xattr.'): value.encode('utf-8', 'surrogateescape')
             for key, value in member.pax_headers.items() if key.startswith('SCHILY.xattr.')
         }
-        for key in os.listxattr(target, follow_symlinks=False):
+        current = os.listxattr(target, follow_symlinks=False)
+        for key in current:
             if key not in expected:
                 os.removexattr(target, key, follow_symlinks=False)
         for key in sorted(expected, key=lambda name: (name.startswith('security.'), name)):
-            os.setxattr(target, key, expected[key], follow_symlinks=False)
+            if key not in current or os.getxattr(target, key, follow_symlinks=False) != expected[key]:
+                os.setxattr(target, key, expected[key], follow_symlinks=False)
     # No execution specs or credentials are imported and no saved process is
     # started. Durable harness journals retain their uncertain markers.
