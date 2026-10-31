@@ -91,7 +91,7 @@ async def inference(admitted_product):
     await service.close()
 
 
-async def perform(ctx, *, logical="logical-one", attempt=1, cost="0.120000001", handler=None, headers=None):
+async def perform(ctx, *, logical="logical-one", attempt=1, cost="0.120000001", handler=None, headers=None, stream=False):
     async def upstream(request):
         ctx.calls.append(dict(request.headers))
         if handler is not None:
@@ -112,7 +112,7 @@ async def perform(ctx, *, logical="logical-one", attempt=1, cost="0.120000001", 
             return await client.post(
                 "https://gateway.invalid/v1/responses",
                 headers=headers or {"authorization": "Bearer synthetic-inference-key"},
-                json={"model": "test", "input": "private prompt must not persist"},
+                json={"model": "test", "input": "private prompt must not persist", "stream": stream},
             )
     finally:
         INFERENCE_ACTIVITY.reset(token)
@@ -250,17 +250,30 @@ async def test_changed_capacity_requires_restart_before_wire(inference):
     assert not inference.calls and not await requests(inference)
 
 
-async def test_http_rejection_is_recorded_but_never_blindly_replayed(inference):
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("status", [400, 429, 502])
+async def test_http_rejection_is_recorded_but_never_blindly_replayed(inference, stream, status):
     async def rejected(_):
         return httpx2.Response(
-            429, stream=WireStream(b'{"error":{"message":"synthetic limit"}}'),
+            status, stream=WireStream(b'{"error":{"message":"synthetic rejection"}}'),
             headers={"content-type": "application/json"},
         )
-    response = await perform(inference, handler=rejected)
-    assert response.status_code == 429
+    response = await perform(inference, handler=rejected, stream=stream)
+    assert response.status_code == status
     assert (await requests(inference))[0].status == "failed"
     with pytest.raises(InferenceAdmissionError, match="already dispatched"):
-        await perform(inference, attempt=2)
+        await perform(inference, attempt=2, stream=stream)
+
+
+async def test_interrupted_http_error_body_still_blocks_maintenance(inference):
+    async def rejected(_):
+        return httpx2.Response(
+            400, stream=WireStream(b'{"error":', fail=True),
+            headers={"content-type": "application/json"},
+        )
+    with pytest.raises(httpx2.ReadError):
+        await perform(inference, handler=rejected, stream=True)
+    assert (await requests(inference))[0].status == "unknown"
 
 
 async def test_product_transport_cannot_bypass_scope_or_route(inference):
