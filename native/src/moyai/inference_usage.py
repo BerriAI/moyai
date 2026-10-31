@@ -198,7 +198,9 @@ class UsageCapture:
 
     def headers(self, response: httpx.Response) -> None:
         self.streaming = (
-            self.request_streaming is True
+            # A rejected streaming request commonly returns a finite JSON error.
+            # Its exhausted body proves failure; it has no SSE terminal event.
+            (response.is_success and self.request_streaming is True)
             or "text/event-stream" in response.headers.get("content-type", "").lower()
         )
         self.values["status"] = "pending" if response.is_success else "failed"

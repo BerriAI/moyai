@@ -22,6 +22,7 @@ from pydantic_ai.exceptions import CallDeferred, ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
+from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.litellm import LiteLLMProvider
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
@@ -314,7 +315,13 @@ def inference_models(settings: Settings) -> dict[str, Model]:
         ),
     )
     provider = LiteLLMProvider(openai_client=client)
-    return {name: OpenAIResponsesModel(name, provider=provider) for name in settings.models}
+    # Bedrock rejects numeric bounds in strict tool schemas. Keep those bounds in
+    # the tool definition and local validation, but use ordinary tool calling.
+    # Provider-qualified aliases make this explicit without changing other routes.
+    return {name: OpenAIResponsesModel(name, provider=provider, profile=(
+        OpenAIModelProfile(openai_supports_strict_tool_definition=False)
+        if name.startswith("bedrock/") else None
+    )) for name in settings.models}
 
 
 
