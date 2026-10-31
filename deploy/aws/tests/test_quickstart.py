@@ -1,6 +1,7 @@
 """Installer boundaries; real AWS/Slack acceptance is documented separately."""
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -45,6 +46,33 @@ def test_database_password_is_encoded_and_tls_verifies_hostname():
     url = bootstrap.database_url("db.example", "moyai", "p@ss:/?#%", "moyai", "/run/rds-ca.pem")
     assert "p%40ss%3A%2F%3F%23%25@db.example" in url
     assert "sslmode=verify-full" in url
+
+
+def test_fresh_install_passes_actual_application_configuration_validation(tmp_path, monkeypatch):
+    from moyai.install_config import prepare, write_configuration
+
+    monkeypatch.setattr(bootstrap, "APP", tmp_path)
+    monkeypatch.setattr(bootstrap, "CONTROL", tmp_path)
+    (tmp_path / "host-ready").touch()
+    content = quickstart.application_bundle()
+    bundle = tmp_path / "bundle.tar.gz"
+    bundle.write_bytes(content)
+    values = {**config(content), "image_arn": "arn:aws:lambda:us-east-1:123456789012:microvm-image:workspace"}
+    monkeypatch.setattr(bootstrap, "aws", Mock(return_value={"SecretString": json.dumps(secret())}))
+    monkeypatch.setattr(bootstrap, "urlopen", lambda *args, **kwargs: io.BytesIO(b"public CA"))
+    for name in ("pull_application", "configure_database", "configure_gateway"):
+        monkeypatch.setattr(bootstrap, name, Mock())
+
+    def run(command, **kwargs):
+        if command[:3] == ["sh", "moyai.sh", "configure"]:
+            environment = {**kwargs["env"], "MOYAI_BUILD_SHA": "a" * 40}
+            configured, overlay = prepare(environment, image=values["moyai_image"], topology="split", temporal="bundled", secrets_from_env=False)
+            write_configuration(tmp_path, configured, overlay)
+        return ""
+
+    monkeypatch.setattr(bootstrap, "run", run)
+    bootstrap.install(values, bundle)
+    assert (tmp_path / "aws-installation.json").is_file()
 
 
 def test_bundle_checksum_precedes_extraction_or_secret_access(tmp_path, monkeypatch):

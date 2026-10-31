@@ -97,6 +97,7 @@ def pull_application(config: dict) -> None:
 def configure_gateway(config: dict, secret: dict) -> None:
     gateway = APP.parent / "gateway"
     gateway.mkdir(mode=0o700, exist_ok=True)
+    configure_gateway_tls(gateway, config["moyai_image"])
     # JSON is a YAML subset. Values are encoded, not interpolated into YAML/shell.
     settings = {
         "model_list": [{"model_name": "moyai-bedrock", "litellm_params": {
@@ -110,17 +111,56 @@ def configure_gateway(config: dict, secret: dict) -> None:
     write_private(gateway / "gateway.env", f"LITELLM_MASTER_KEY={secret['gateway_key']}\nAWS_REGION_NAME={config['region']}\n")
     compose = {
         "services": {"gateway": {
-            "image": config["litellm_image"], "command": ["--config", "/config.json", "--port", "4000"],
+            "image": config["litellm_image"], "command": ["--config", "/config.json", "--port", "4000",
+                "--ssl_keyfile_path", "/tls/key.pem", "--ssl_certfile_path", "/tls/cert.pem"],
             "env_file": [{"path": "gateway.env", "format": "raw"}],
-            "volumes": ["./config.json:/config.json:ro"], "restart": "unless-stopped",
+            "volumes": ["./config.json:/config.json:ro", "./tls:/tls:ro"], "restart": "unless-stopped",
             "networks": ["model"],
-            "healthcheck": {"test": ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=5)"],
+            "healthcheck": {"test": ["CMD", "python", "-c", "import ssl, urllib.request; urllib.request.urlopen('https://localhost:4000/health/liveliness', context=ssl.create_default_context(cafile='/tls/cert.pem'), timeout=5)"],
                             "interval": "5s", "timeout": "10s", "retries": 36, "start_period": "20s"},
         }},
         "networks": {"model": {"name": "moyai-model"}},
     }
     write_private(gateway / "compose.json", json.dumps(compose))
     run(["docker", "compose", "-p", "moyai-gateway", "-f", "compose.json", "up", "-d", "--wait", "--wait-timeout", "240"], cwd=gateway)
+
+
+def configure_gateway_tls(gateway: Path, image: str) -> None:
+    """Keep the private gateway authenticated with a locally trusted TLS identity."""
+    tls = gateway / "tls"
+    tls.mkdir(mode=0o700, exist_ok=True)
+    # Generate inside the pinned app image, which includes cryptography and certifi.
+    # The key stays on the trusted host; only its public certificate goes to Moyai.
+    program = """
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import certifi
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+tls = Path('/tls')
+if not (tls / 'cert.pem').exists() and not (tls / 'key.pem').exists():
+    key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'Moyai private gateway')])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=825))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName('gateway'), x509.DNSName('localhost')]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True).sign(key, hashes.SHA256()))
+    (tls / 'key.pem').write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    (tls / 'key.pem').chmod(0o600)
+    (tls / 'cert.pem').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+assert (tls / 'key.pem').is_file() and (tls / 'cert.pem').is_file(), 'Incomplete gateway TLS identity'
+Path('/app-ca.pem').write_bytes(Path(certifi.where()).read_bytes() + b'\\n' + (tls / 'cert.pem').read_bytes())
+"""
+    bundle = APP / "gateway-ca-bundle.pem"
+    bundle.touch(mode=0o600, exist_ok=True)
+    run(["docker", "run", "--rm", "--network", "none", "--user", "0:0",
+         "--volume", f"{tls}:/tls", "--volume", f"{bundle}:/app-ca.pem",
+         "--entrypoint", "/app/.venv/bin/python", image, "-c", program])
+    bundle.chmod(0o644)
 
 
 def install(config: dict, archive: Path) -> None:
@@ -169,7 +209,7 @@ def install(config: dict, archive: Path) -> None:
         "LAMBDA_IMAGE_VERSION": config["image_version"], "LAMBDA_CHECKPOINT_BUCKET": config["bucket"],
         "LAMBDA_CHECKPOINT_PREFIX": "moyai/lambda", "MOYAI_COMPUTER_TIMEOUT": str(config["computer_lifetime"]),
         "MOYAI_COMPUTER_IDLE_TIMEOUT": str(config["computer_idle_timeout"]),
-        "LITELLM_API_BASE": "http://gateway:4000/v1", "LITELLM_API_KEY": secret["gateway_key"], "AGENT_MODEL": "moyai-bedrock",
+        "LITELLM_API_BASE": "https://gateway:4000/v1", "LITELLM_API_KEY": secret["gateway_key"], "AGENT_MODEL": "moyai-bedrock",
         "WORKSPACE_PASSWORD": secret["WORKSPACE_PASSWORD"], "SLACK_BOT_ENABLED": str(bool(secret.get("SLACK_CLIENT_ID"))).lower(),
     }
     run(["sh", "moyai.sh", "configure", "--from-env", "--topology", "split", "--temporal", "bundled"], env=environment, cwd=APP)
@@ -179,7 +219,9 @@ def install(config: dict, archive: Path) -> None:
 def complete_install(identity: dict, receipt_path: Path) -> None:
     """Resume after configuration publication without generating new keys/passwords."""
     services = ["setup", "api", "coordinator", "broker", "worker", "activate", "temporal-namespace"]
-    overlay = {"services": {name: {"networks": ["default", "model"], "volumes": ["./rds-ca.pem:/run/rds-ca.pem:ro"]} for name in services},
+    overlay = {"services": {name: {"networks": ["default", "model"],
+               "environment": {"SSL_CERT_FILE": "/run/gateway-ca-bundle.pem"},
+               "volumes": ["./rds-ca.pem:/run/rds-ca.pem:ro", "./gateway-ca-bundle.pem:/run/gateway-ca-bundle.pem:ro"]} for name in services},
                "networks": {"model": {"external": True, "name": "moyai-model"}}}
     write_private(APP / "compose.aws.json", json.dumps(overlay))
     contents = (APP / ".env").read_text()

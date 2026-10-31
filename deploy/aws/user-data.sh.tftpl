@@ -27,8 +27,8 @@ cat >/etc/systemd/system/docker.service.d/moyai.conf <<'UNIT'
 RequiresMountsFor=/srv/moyai
 UNIT
 cd /opt/moyai-aws
-curl --fail --silent --show-error --location https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-linux-x86_64 -o docker-compose-linux-x86_64
-curl --fail --silent --show-error --location https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-linux-x86_64.sha256 -o compose.sha256
+curl --fail --silent --show-error --location https://github.com/docker/compose/releases/download/v5.1.4/docker-compose-linux-x86_64 -o docker-compose-linux-x86_64
+curl --fail --silent --show-error --location https://github.com/docker/compose/releases/download/v5.1.4/docker-compose-linux-x86_64.sha256 -o compose.sha256
 sha256sum -c compose.sha256
 install -m 755 docker-compose-linux-x86_64 /usr/local/lib/docker/cli-plugins/docker-compose
 systemctl daemon-reload

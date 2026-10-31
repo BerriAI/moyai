@@ -14,7 +14,7 @@ It also creates a private ECR repository for an organization-built application i
 The existing Docker split bundle runs the API, coordinator, broker and worker.
 Temporal and its PostgreSQL database use the retained EBS volume. The application
 uses RDS through a separate database login with verified TLS. The LiteLLM gateway
-is reachable only on the application's Docker network and invokes the explicitly
+uses verified HTTPS, is reachable only on the application's Docker network, and invokes the explicitly
 allowed Bedrock model/profile through the host role. Guests have no execution
 role and do not receive model, database or Slack credentials.
 
@@ -198,6 +198,14 @@ See the [detailed recovery acceptance guide](../../docs/aws-lambda-microvms.md#s
   upgrades; perform a restore drill before depending on this for production.
 - Protect `/srv/moyai`, including Docker volumes and the private installation
   keys. A restored database without its original encryption keys is insufficient.
+- The private gateway uses a locally trusted certificate valid for 825 days,
+  stored under `/srv/moyai/gateway/tls`; only its public certificate is added to
+  the application's CA bundle. This does not change system-wide trust or disable
+  hostname verification. Include certificate expiry in your monitoring and renew
+  it during coordinated maintenance before expiry. Keep the `gateway` DNS SAN,
+  rebuild `/srv/moyai/app/gateway-ca-bundle.pem` with the standard public roots
+  and replacement certificate, and recreate the gateway/restart application roles
+  before resuming admission. ACM manages renewal of the separate public ALB certificate.
 - Use the [Docker maintenance/upgrade procedure](../docker/README.md), keeping
   `compose.aws.json`, the RDS CA mount and the private model network. Terraform
   changes do not upgrade a running application or rewrite its private `.env`.
