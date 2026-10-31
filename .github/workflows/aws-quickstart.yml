@@ -1,10 +1,10 @@
 name: AWS quickstart
 on:
   pull_request:
-    paths: ["deploy/aws/**", "deploy/docker/**", "scripts/lambda_image.py", "scripts/build_docker_bundle.py", "native/lambda_guest/**", ".github/workflows/aws-quickstart.yml"]
+    paths: ["deploy/aws/**", "deploy/docker/**", "scripts/lambda_image.py", "scripts/build_docker_bundle.py", "native/lambda_guest/**", "native/src/moyai/agent.py", "native/tests/test_bedrock_model_profile.py", ".github/workflows/aws-quickstart.yml"]
   push:
     branches: [main]
-    paths: ["deploy/aws/**", "deploy/docker/**", "scripts/lambda_image.py", "scripts/build_docker_bundle.py", "native/lambda_guest/**", ".github/workflows/aws-quickstart.yml"]
+    paths: ["deploy/aws/**", "deploy/docker/**", "scripts/lambda_image.py", "scripts/build_docker_bundle.py", "native/lambda_guest/**", "native/src/moyai/agent.py", "native/tests/test_bedrock_model_profile.py", ".github/workflows/aws-quickstart.yml"]
 permissions:
   contents: read
 jobs:

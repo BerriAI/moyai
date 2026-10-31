@@ -153,3 +153,10 @@ def test_ssm_command_carries_identifiers_not_credentials():
     assert "flock -n 9" in command
     assert "sha256sum -c" in command
     assert ssm.send_command.call_args.kwargs["InstanceIds"] == ["i-test"]
+
+
+def test_missing_application_image_stops_before_any_cloud_mutation():
+    session = Mock()
+    with pytest.raises(ValueError, match="immutable digest"):
+        quickstart.start_install(session, {**config(b"bundle"), "moyai_image": None}, {})
+    session.client.assert_not_called()

@@ -17,6 +17,7 @@ computer_lifetime     = 28800
 computer_idle_timeout = 600
 deletion_protection   = true
 
-# Pin matching release image digests when upgrading; see README.md.
-# moyai_image   = "ghcr.io/berriai/moyai@sha256:..."
+# After the initial apply, build this checkout into the created ECR repository.
+# Pin its immutable digest and apply again before install; see README.md.
+# moyai_image   = "123456789012.dkr.ecr.us-east-1.amazonaws.com/moyai-example/moyai@sha256:..."
 # litellm_image = "ghcr.io/berriai/litellm@sha256:..."
