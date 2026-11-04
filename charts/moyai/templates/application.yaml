@@ -26,13 +26,38 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
-        fsGroup: 10001
-        fsGroupChangePolicy: OnRootMismatch
+        # The init container owns volume permissions; fsGroup broadens private files on remount.
         seccompProfile: {type: RuntimeDefault}
       initContainers:
         - name: permissions
           image: {{ include "moyai.image" . }}
-          command: [/bin/sh, -ec, "chown 10001:10001 /data /data/ingress; chmod 0700 /data; chmod 0755 /data/ingress"]
+          command: [/app/.venv/bin/python, -c]
+          args:
+            - |
+              import os
+              import stat
+
+              for path, mode in (("/data", 0o700), ("/data/ingress", 0o755)):
+                  fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                  try:
+                      os.fchown(fd, 10001, 10001)
+                      os.fchmod(fd, mode)
+                  finally:
+                      os.close(fd)
+              # Repair files broadened by older charts without following links or rewriting keys.
+              try:
+                  fd = os.open("/data/installation.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+              except FileNotFoundError:
+                  pass
+              else:
+                  try:
+                      info = os.fstat(fd)
+                      if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                          raise SystemExit("installation.json must be a regular file with no links")
+                      os.fchown(fd, 10001, 10001)
+                      os.fchmod(fd, 0o600)
+                  finally:
+                      os.close(fd)
           securityContext:
             runAsNonRoot: false
             runAsUser: 0
