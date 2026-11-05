@@ -258,6 +258,13 @@ class Store:
                     user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
                     PRIMARY KEY(issuer,subject), UNIQUE(issuer,user_id), UNIQUE(issuer,email)
                 );
+                CREATE TABLE IF NOT EXISTS oidc_identities (
+                    provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL,
+                    email TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(provider,issuer,subject)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS oidc_identities_account ON oidc_identities(provider,issuer,user_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS oidc_identities_email ON oidc_identities(provider,issuer,email);
                 CREATE TABLE IF NOT EXISTS user_model_preferences (
                     user_id TEXT PRIMARY KEY REFERENCES users(id), model TEXT NOT NULL
                 );
@@ -278,6 +285,9 @@ class Store:
             """)
             if 'client' not in conn.column_names('login_states'):
                 conn.execute("ALTER TABLE login_states ADD COLUMN client TEXT NOT NULL DEFAULT ''")
+            for column in ('link_user_id', 'link_session_hash'):
+                if column not in conn.column_names('login_states'):
+                    conn.execute(f"ALTER TABLE login_states ADD COLUMN {column} TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS login_states_client ON login_states(client, expires)")
             if 'metadata' not in conn.column_names('slack_outbox'):
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
@@ -945,29 +955,32 @@ class Store:
         """Only call with the server-verified session, never request JSON."""
         if info.get('method') == 'cloudflare':
             return self.access_identity(info['identity'])
-        if info.get('method') == 'google':
-            identity = info['identity']
-            user_id = 'google:' + identity['sub']
-            kind, email, name = 'google', identity['email'].strip().lower(), identity.get('name') or identity['email']
-        elif info.get('method') == 'okta':
-            from .okta_sso import okta_user_id
-            identity = info['identity']
-            user_id = okta_user_id(identity['issuer'], identity['sub'])
-            kind, email, name = 'okta', identity['email'].strip().lower(), identity.get('name') or identity['email']
-        else:
-            kind, email = 'shared', ''
-            user_id = 'shared:' + info.get('method', 'password') + ':' + info.get('role', 'admin')
-            name = 'Local preview' if info.get('method') == 'local' else 'Shared password sign-in'
+        if info.get('method') in {'google', 'okta'}:
+            if info.get('oidc_bound'):
+                return self.oidc_actor(info)
+            return self.oidc_identity(info['method'], info['identity'])
+        kind, email = 'shared', ''
+        user_id = 'shared:' + info.get('method', 'password') + ':' + info.get('role', 'admin')
+        name = 'Local preview' if info.get('method') == 'local' else 'Shared password sign-in'
         stamp = now()
         with self.connect() as conn:
             conn.begin_write()
-            old = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
             conn.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name,updated_at=excluded.updated_at',
                          (user_id, kind, email, name, stamp, stamp))
-            if kind in {'google', 'okta'}:
-                for value in {email, old['email'] if old else email}:
-                    self.reconcile_email_in(conn, value)
         return user_id
+
+    def oidc_actor(self, info):
+        from .oidc_identity import resolve_in
+        with self.connect() as conn:
+            return resolve_in(conn, info['method'], info['identity'], require_binding=info.get('oidc_bound', False))
+
+    def oidc_identity(self, provider, identity, *, link_info=None):
+        from .oidc_identity import enroll_in
+        with self.connect() as conn:
+            conn.begin_write()
+            user_id = enroll_in(conn, provider, identity, now(), link_info=link_info)
+            self.reconcile_email_in(conn, identity['email'])
+            return user_id
 
     def access_actor(self, identity):
         """Read a pinned account from this request's verified Access claims."""
@@ -1040,7 +1053,7 @@ class Store:
     def reconcile_email_in(self, conn, email):
         """Accounting links only. Never authenticate a user or grant a role here.
 
-        The email must have come from a checked Slack profile or Google OIDC.
+        The email must have come from a checked Slack profile or verified OIDC.
         Once bound, provider IDs stay authoritative; changes need admin review.
         """
         if not email or not self.auto_link_identities:

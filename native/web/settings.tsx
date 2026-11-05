@@ -15,6 +15,7 @@ import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
 import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "./generated/api"
 import {
+  listLinkedSignIns, startGoogleSignIn, startOktaSignIn,
   checkPersonalSlack, connectExistingGitHubApp, disconnectPersonalSlack, getMe, getPersonalSlack, listGitHubRepositories,
   selectGitHubRepositories, startGitHubConnection, startPersonalSlackOAuth,
 } from "./generated/api"
@@ -75,6 +76,7 @@ type FormValues = Record<string, string | number | boolean>
 type Field = { name: string; label: string; type?: "text" | "password" | "textarea" | "select" | "checkbox" | "number" | "url"; required?: boolean; hint?: string; options?: Option[]; disabled?: boolean; min?: number; max?: number; minLength?: number; maxLength?: number; pattern?: string }
 
 const destinations = [
+  { id: "sign-in", title: "Sign-in", description: "Manage how you sign into this Moyai account.", group: "Preferences", Icon: KeyRound, productOnly: true },
   { id: "general", title: "General", description: "Set your chat preferences.", group: "Preferences", Icon: SlidersHorizontal },
   { id: "skills", title: "Skills", description: "Choose reusable instructions for your chats.", group: "Workflows", Icon: FileText },
   { id: "automations", title: "Automations", description: "Schedule recurring work and review past runs.", group: "Workflows", Icon: CalendarClock },
@@ -1013,6 +1015,35 @@ function AutomationsPage({ user }: { user: SettingsUser }) {
   }}</LoadState>
 }
 
+function SignInPage() {
+  const resource = useResource("/auth/identities", signal => listLinkedSignIns({ signal }).then(({ data }) => data))
+  const mutation = useMutation()
+  const result = new URLSearchParams(location.search).get("signin")
+  return <>
+    <p className="ns-muted">Linked sign-in methods open the same conversations, credentials, roles and usage history.</p>
+    {result === "linked" && <p role="status">Sign-in method linked to your existing account.</p>}
+    {(result === "failed" || result === "link_required" || result === "cancelled") && <p className="ns-notice" role="alert">Linking was not completed. Use the same work email and keep this account signed in. Existing account conflicts need administrator review.</p>}
+    {mutation.error && <p className="ns-notice" role="alert">{mutation.error}</p>}
+    <LoadState resource={resource}>{data => <>
+      {data.can_link ? <p>Signed in as <strong>{data.email}</strong>. Sign in again if your current session is more than five minutes old, then choose the method to link.</p>
+        : <p>Sign in with your existing Google or Okta account to link another method. A workspace password cannot link personal accounts.</p>}
+      <RecordTable label="Linked sign-in methods" headings={["Provider", "Status", "Action"]}>
+        {data.providers.map(item => <TableRow key={item.provider}>
+          <TableCell>{item.provider === "google" ? "Google" : "Okta"}</TableCell>
+          <TableCell>{item.linked ? "Linked" : item.enabled ? "Not linked" : "Not configured"}</TableCell>
+          <TableCell>{item.enabled && !item.linked && <Button variant="outline" disabled={!data.can_link || mutation.busy} onClick={() => void mutation.run(async () => {
+            const start = item.provider === "google" ? startGoogleSignIn : startOktaSignIn
+            const { data: next } = await start({ body: { link: true, return_to: "/#settings/sign-in" } })
+            const url = new URL(next.url, location.origin)
+            if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid sign-in destination.")
+            location.assign(url.href)
+          }, () => {})}>Link {item.provider === "google" ? "Google" : "Okta"}</Button>}</TableCell>
+        </TableRow>)}
+      </RecordTable>
+    </>}</LoadState>
+  </>
+}
+
 function OverviewPage({ user, navigate, productMode }: { user: SettingsUser; navigate: (page: string) => void; productMode: "standalone" | "existing" }) {
   // Native-store totals do not describe canonical product data. Navigation
   // remains available without publishing false zero counts during cutover.
@@ -1066,6 +1097,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
           {destination?.productOnly && productMode !== "existing" ? <div className="ns-empty"><h2>Existing product accounts required</h2><p>This page is available when Moyai uses the existing product account service.</p></div>
             : destination?.admin && user.role !== "admin" ? <div className="ns-empty" role="alert"><Shield size={24} /><h2>Administrator access required</h2><p>This page is available to workspace administrators.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview</Button></div>
             : current === "overview" ? <OverviewPage user={user} navigate={navigate} productMode={productMode} />
+              : current === "sign-in" ? <SignInPage />
               : current === "general" ? <GeneralPage onPreferences={onPreferences} />
               : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />

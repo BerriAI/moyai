@@ -106,6 +106,9 @@ SCHEMA = (
     ("CREATE TABLE access_identities (issuer TEXT NOT NULL, subject TEXT NOT NULL, email TEXT NOT NULL, "
     "user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, PRIMARY KEY(issuer,subject), "
     "UNIQUE(issuer,user_id), UNIQUE(issuer,email))"),
+    ("CREATE TABLE oidc_identities (provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, "
+    "email TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(provider,issuer,subject), "
+    "UNIQUE(provider,issuer,user_id), UNIQUE(provider,issuer,email))"),
 )
 
 
@@ -176,7 +179,7 @@ async def test_existing_signed_google_identity_exact_id_and_live_roles(product):
     cookie, csrf = google_cookie(product.adapter)
     principal = await product.adapter.authenticate(request(cookie), admin=True)
     assert principal.id == "google:admin-sub" and principal.role == "admin" and principal.individual
-    assert principal.method == "google" and principal.csrf_token == csrf
+    assert principal.method == "oidc" and principal.csrf_token == csrf
     assert set(asdict(principal.grant)) == {"user_id", "authority_version"}
     assert cookie not in repr(principal) and csrf not in repr(principal)
     UserRoles(product.store, product.settings).change(
@@ -548,7 +551,7 @@ async def test_postgres_admission_serializes_with_canonical_role_writes_and_reje
         engine = create_async_engine("postgresql+asyncpg://" + url.split("://", 1)[1])
         async with engine.begin() as db:
             await db.execute(text("CREATE SCHEMA moyai"))
-            for statement in SCHEMA[:2]:
+            for statement in (SCHEMA[:2] + (SCHEMA[-1],)):
                 await db.execute(text(statement.replace("CREATE TABLE ", "CREATE TABLE moyai.", 1)))
             await db.execute(text(
                 "INSERT INTO moyai.users VALUES ('google:admin-sub','google','admin@example.test','Admin',NULL,'c','u')"
@@ -634,7 +637,7 @@ def okta_provider(tmp_path, monkeypatch):
         state.requests.append(req)
         if req.url.path.endswith("openid-configuration"):
             payload = state.metadata
-        elif req.url.path.endswith("/keys"):
+        elif req.url.path.endswith(("/keys", "/certs")):
             payload = {"keys": [state.jwk]}
         elif req.url.path.endswith("/token"):
             payload = {"id_token": jwt.encode(state.claims, state.key, algorithm="RS256", headers={"kid": "current"}),
@@ -774,3 +777,214 @@ async def test_okta_canonical_identity_preserves_email_but_not_google_ownership(
         await product.adapter.authenticate(request(cookie))
     with pytest.raises(HTTPException):
         await product.adapter.current(user_id)
+
+
+async def test_explicit_oidc_link_preserves_account_and_requires_same_session(okta_provider, tmp_path):
+    """Real shared route handlers with a simulated IdP; not provider E2E proof."""
+    from urllib.parse import parse_qs, urlencode
+
+    import httpx
+    from app.db import Store
+    from app.oidc_identity import IdentityLinkRequired
+    from fastapi import FastAPI
+
+    state = okta_provider
+    store = Store(tmp_path / "link-store")
+    state.flow.store = store
+    state.flow.security.user_roles = UserRoles(store, state.settings)
+    google = {"sub": "original-subject", "email": "admin@example.test", "domain": "example.test", "name": "Original name"}
+    owner = store.oidc_identity("google", google)
+    snapshot = store.rows("SELECT * FROM users WHERE id=?", (owner,))[0]
+    # Same email alone cannot enroll or merge the other provider.
+    okta = {"issuer": state.settings.okta_issuer, "sub": "employee-1", "email": "admin@example.test"}
+    with pytest.raises(IdentityLinkRequired):
+        store.oidc_identity("okta", okta)
+    response = Response()
+    sid = state.flow.security.new_session(response, identity=google)
+    cookie = SimpleCookie(response.headers['set-cookie'])['workspace_session'].value
+    app = FastAPI()
+    app.include_router(state.flow.routes())
+    source = create_async_engine(f"sqlite+aiosqlite:///file:{store.path}?mode=ro&uri=true")
+    adapter = ProductIdentityAdapter(state.settings, source)
+    try:
+        async with state.http_client(transport=httpx.ASGITransport(app=app), base_url=state.settings.public_url) as browser:
+            browser.cookies.set('workspace_session', cookie)
+            browser.headers['Origin'] = state.settings.public_url
+            assert (await browser.post('/api/auth/okta/start', json={'link': True})).status_code == 403
+            browser.headers['x-csrf-token'] = state.flow.security.csrf(sid)
+            started = await browser.post('/api/auth/okta/start', json={'link': True})
+            assert started.status_code == 200
+            params = parse_qs(urlsplit(started.json()['url']).query)
+            state.claims['nonce'] = params['nonce'][0]
+            assert params['prompt'] == ['login']
+            callback = '/auth/okta/callback?' + urlencode({'state': params['state'][0], 'code': 'code'})
+            # The login cookie alone cannot finish a link in another Moyai session.
+            saved_cookie = browser.cookies['workspace_session']
+            browser.cookies.delete('workspace_session')
+            denied = await browser.get(callback)
+            assert 'signin=failed' in denied.headers['location']
+            assert not store.rows("SELECT 1 FROM oidc_identities WHERE provider='okta'")
+            browser.cookies.set('workspace_session', saved_cookie)
+            started = await browser.post('/api/auth/okta/start', json={'link': True})
+            params = parse_qs(urlsplit(started.json()['url']).query)
+            state.claims['nonce'] = params['nonce'][0]
+            callback = '/auth/okta/callback?' + urlencode({'state': params['state'][0], 'code': 'code'})
+            accepted = await browser.get(callback)
+            assert accepted.status_code == 303 and 'signin=linked#settings/sign-in' in accepted.headers['location']
+            # The response's signed session authenticates to the original account.
+            linked_cookie = next(value.value for name, value in SimpleCookie(accepted.headers.get_list('set-cookie')[-1]).items() if name == 'workspace_session')
+            left = await adapter.authenticate(request(cookie))
+            right = await adapter.authenticate(request(linked_cookie))
+            assert left.id == right.id == owner
+            assert left.role == right.role == 'admin'
+            assert left.individual and right.individual
+            assert left.authority_version == right.authority_version
+            assert store.oidc_identity('okta', okta) == owner
+            saved = store.rows('SELECT * FROM users WHERE id=?', (owner,))[0]
+            assert {k:v for k,v in saved.items() if k != 'updated_at'} == {k:v for k,v in snapshot.items() if k != 'updated_at'}
+            assert len(store.rows('SELECT * FROM users')) == 1
+            assert len(store.rows('SELECT * FROM identity_audit')) == 1
+            assert 'signin=failed' in (await browser.get(callback)).headers['location']
+            store.execute("DELETE FROM oidc_identities WHERE provider='okta'")
+            with pytest.raises(HTTPException) as missing_binding:
+                await adapter.authenticate(request(linked_cookie))
+            assert missing_binding.value.status_code == 401
+            browser.headers['x-csrf-token'] = state.flow.security.csrf(
+                state.flow.security.session_info(request(linked_cookie))['sid'])
+            assert (await browser.post('/api/auth/okta/start', json={'link': True})).status_code == 401
+    finally:
+        await source.dispose()
+        store.close()
+
+
+@pytest.mark.parametrize('first', ['google', 'okta'])
+def test_linking_is_symmetric_and_rejects_conflicting_or_changed_identities(tmp_path, first):
+    from app.db import Store
+    from app.oidc_identity import IdentityLinkRequired
+
+    profiles = {
+        'google': {'sub': 'google-person', 'email': 'owner@example.test', 'domain': 'example.test'},
+        'okta': {'sub': 'okta-person', 'email': 'owner@example.test', 'issuer': 'https://company.okta.com'},
+    }
+    second = 'okta' if first == 'google' else 'google'
+    store = Store(tmp_path / first)
+    try:
+        user_id = store.oidc_identity(first, profiles[first])
+        original = {'method': first, 'identity': profiles[first]}
+        with pytest.raises(IdentityLinkRequired):
+            store.oidc_identity(second, profiles[second])
+        with pytest.raises(IdentityLinkRequired):
+            store.oidc_identity(second, {**profiles[second], 'email': 'someone@example.test'}, link_info=original)
+        assert store.oidc_identity(second, profiles[second], link_info=original) == user_id
+        assert store.oidc_actor({'method': second, 'identity': profiles[second]}) == user_id
+        with pytest.raises(IdentityLinkRequired):
+            store.oidc_identity(second, {**profiles[second], 'sub': 'replacement-person'}, link_info=original)
+        with pytest.raises(ValueError):
+            store.oidc_identity(second, {**profiles[second], 'email': 'changed@example.test'})
+        store.execute('DELETE FROM users WHERE id=?', (user_id,))
+        with pytest.raises(ValueError):
+            store.oidc_identity(second, profiles[second])
+    finally:
+        store.close()
+
+
+def test_legacy_duplicate_accounts_are_never_merged_or_reparented(tmp_path):
+    from app.db import Store
+    from app.oidc_identity import IdentityLinkRequired, legacy_user_id
+
+    store = Store(tmp_path / 'duplicates')
+    google = {'sub': 'google-person', 'email': 'owner@example.test', 'domain': 'example.test'}
+    okta = {'sub': 'okta-person', 'email': 'owner@example.test', 'issuer': 'https://company.okta.com'}
+    try:
+        original = store.oidc_identity('google', google)
+        duplicate = legacy_user_id('okta', okta)
+        store.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                      (duplicate, 'okta', okta['email'], 'Existing owner', 'created', 'updated'))
+        before = store.rows('SELECT * FROM users ORDER BY id')
+        with pytest.raises(IdentityLinkRequired):
+            store.oidc_identity('okta', okta, link_info={'method': 'google', 'identity': google})
+        assert store.rows('SELECT * FROM users ORDER BY id') == before
+        assert store.oidc_identity('okta', okta) == duplicate
+        assert store.oidc_identity('google', google) == original
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('kind', ['shared', 'stale'])
+async def test_link_requires_recent_individual_sign_in(okta_provider, tmp_path, monkeypatch, kind):
+    import httpx
+    from app.db import Store
+    from fastapi import FastAPI
+    from itsdangerous import TimestampSigner
+
+    state = okta_provider
+    store = Store(tmp_path / kind)
+    state.flow.store = store
+    identity = {'sub': 'original', 'email': 'admin@example.test', 'domain': 'example.test'}
+    store.oidc_identity('google', identity)
+    response = Response()
+    with monkeypatch.context() as clock:
+        if kind == 'stale':
+            clock.setattr(TimestampSigner, 'get_timestamp', lambda self: int(time.time()) - 601)
+        sid = state.flow.security.new_session(response, identity=identity if kind == 'stale' else None)
+    app = FastAPI()
+    app.include_router(state.flow.routes())
+    try:
+        async with state.http_client(transport=httpx.ASGITransport(app=app), base_url=state.settings.public_url) as browser:
+            browser.cookies.set('workspace_session', SimpleCookie(response.headers['set-cookie'])['workspace_session'].value)
+            response = await browser.post('/api/auth/okta/start', json={'link': True}, headers={
+                'Origin': state.settings.public_url, 'x-csrf-token': state.flow.security.csrf(sid),
+            })
+            assert response.status_code == 403
+            assert not state.requests
+            assert not store.rows('SELECT * FROM login_states')
+    finally:
+        store.close()
+
+
+def test_simultaneous_links_cannot_replace_the_first_verified_subject(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.db import Store
+    from app.oidc_identity import IdentityLinkRequired
+
+    store = Store(tmp_path / 'concurrent')
+    google = {'sub': 'original', 'email': 'owner@example.test', 'domain': 'example.test'}
+    owner = store.oidc_identity('google', google)
+    def link(subject):
+        try:
+            return store.oidc_identity('okta', {'issuer': 'https://company.okta.com', 'sub': subject, 'email': google['email']},
+                                       link_info={'method': 'google', 'identity': google})
+        except IdentityLinkRequired:
+            return 'denied'
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(link, ['first', 'second']))
+        assert sorted(outcomes) == sorted([owner, 'denied'])
+        assert len(store.rows("SELECT * FROM oidc_identities WHERE provider='okta'")) == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('change', [{}, {'hd': 'wrong.test'}, {'email_verified': False}, {'email': 'admin@outside.test'}])
+async def test_shared_flow_retains_google_workspace_validation(okta_provider, change):
+    from urllib.parse import parse_qs
+
+    from app.google_sso import GoogleSignIn
+
+    state = okta_provider
+    google = GoogleSignIn(state.settings, state.flow.security, None)
+    state.claims.update(iss='https://accounts.google.com', aud=state.settings.google_client_id,
+                        email='admin@example.test', email_verified=True, hd='example.test')
+    state.claims.update(change)
+    assert google.state_hash('same-state') != state.flow.state_hash('same-state')
+    if change:
+        with pytest.raises(ValueError):
+            await google.exchange('code', 'verifier', 'nonce')
+    else:
+        identity = await google.exchange('code', 'verifier', 'nonce')
+        assert identity['sub'] == 'employee-1' and identity['email'] == 'admin@example.test'
+        assert identity['domain'] == 'example.test'
+        token = next(req for req in state.requests if req.url.path.endswith('/token'))
+        assert parse_qs(token.content.decode())['client_id'] == [state.settings.google_client_id]
+        assert not any(req.url.path.endswith('/userinfo') for req in state.requests)

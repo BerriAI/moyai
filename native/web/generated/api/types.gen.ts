@@ -4781,6 +4781,42 @@ export type LinkInput = {
 };
 
 /**
+ * LinkedSignInProvider
+ */
+export type LinkedSignInProvider = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Linked
+     */
+    linked: boolean;
+    /**
+     * Provider
+     */
+    provider: 'google' | 'okta';
+};
+
+/**
+ * LinkedSignIns
+ */
+export type LinkedSignIns = {
+    /**
+     * Can Link
+     */
+    can_link: boolean;
+    /**
+     * Email
+     */
+    email: string;
+    /**
+     * Providers
+     */
+    providers: Array<LinkedSignInProvider>;
+};
+
+/**
  * LiveEvent
  *
  * One `data:` frame of GET /api/sessions/{id}/events (see presentation.public_event).
@@ -9602,8 +9638,6 @@ export type SettingsSkillList = {
 
 /**
  * SignInRedirect
- *
- * Where the browser goes next: an identity provider, or a local path.
  */
 export type SignInRedirect = {
     /**
@@ -9616,6 +9650,10 @@ export type SignInRedirect = {
  * SignInStart
  */
 export type SignInStart = {
+    /**
+     * Link
+     */
+    link?: boolean;
     /**
      * Return To
      */
@@ -11370,6 +11408,22 @@ export type StartGoogleSignInResponses = {
 };
 
 export type StartGoogleSignInResponse = StartGoogleSignInResponses[keyof StartGoogleSignInResponses];
+
+export type ListLinkedSignInsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/auth/identities';
+};
+
+export type ListLinkedSignInsResponses = {
+    /**
+     * Successful Response
+     */
+    200: LinkedSignIns;
+};
+
+export type ListLinkedSignInsResponse = ListLinkedSignInsResponses[keyof ListLinkedSignInsResponses];
 
 export type StartOktaSignInData = {
     body: SignInStart;
@@ -15921,42 +15975,6 @@ export type RegistrationAuthGithubRegisterGetErrors = {
 export type RegistrationAuthGithubRegisterGetError = RegistrationAuthGithubRegisterGetErrors[keyof RegistrationAuthGithubRegisterGetErrors];
 
 export type RegistrationAuthGithubRegisterGetResponses = {
-    /**
-     * Successful Response
-     */
-    200: unknown;
-};
-
-export type CallbackAuthGoogleCallbackGetData = {
-    body?: never;
-    path?: never;
-    query?: {
-        /**
-         * State
-         */
-        state?: string;
-        /**
-         * Code
-         */
-        code?: string;
-        /**
-         * Error
-         */
-        error?: string;
-    };
-    url: '/auth/google/callback';
-};
-
-export type CallbackAuthGoogleCallbackGetErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type CallbackAuthGoogleCallbackGetError = CallbackAuthGoogleCallbackGetErrors[keyof CallbackAuthGoogleCallbackGetErrors];
-
-export type CallbackAuthGoogleCallbackGetResponses = {
     /**
      * Successful Response
      */

@@ -421,12 +421,12 @@ function navigateAuth(value: string, sameOrigin = false) {
 }
 function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   const [config, setConfig] = useState<AuthConfig | null>(null)
-  const [error, setError] = useState("")
+  const [error, setError] = useState(new URLSearchParams(location.search).get("signin") === "link_required"
+    ? "This email already has a Moyai account. Sign in with your existing method, then open Settings → Sign-in to link another provider." : "")
   const [busy, setBusy] = useState(false)
   const [retry, setRetry] = useState(0)
   useEffect(() => {
     const controller = new AbortController()
-    setError("")
     void getAuthConfig({ signal: controller.signal }).then(({ data: value }) => { if (!controller.signal.aborted) setConfig(value) }, reason => { if (!controller.signal.aborted) setError(String(reason)) })
     return () => controller.abort()
   }, [retry])

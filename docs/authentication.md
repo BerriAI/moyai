@@ -56,14 +56,41 @@ expiry/nonce checked, and userinfo must match the verified subject and contain a
 verified email in the allowed domains. State is single-use, browser-bound and
 bound to the Okta issuer/client; token exchange also uses PKCE.
 
-The login page shows **Continue with Okta** alongside any configured Google and
-password options. Okta identities participate in email attribution, saved roles,
-private sessions and personal credentials. `OKTA_ADMIN_EMAILS` supplies initial
-role defaults; saved email role assignments win. Accounts are bound to issuer
-and subject, not email: a matching Google email does **not** transfer private
-data to a new Okta account. Ambiguous Slack/email accounting links require
-review, as they do for other individual identities. Logout ends the Moyai
-session; it does not sign the user out of their organization-wide Okta session.
+The Google and Okta adapters use one OIDC flow for state, PKCE, token validation,
+account resolution and session creation. Provider-specific settings select the
+issuer, client credentials, endpoints and verified email claims.
+
+Both buttons can open **the same Moyai account**. After signing in with an existing
+Google or Okta account, open **Settings → Sign-in** and choose **Link Google** or
+**Link Okta**. The existing sign-in must be at most five minutes old; sign out and
+sign in again if prompted. Complete the other provider's sign-in using the same
+verified work email in the same browser. Linking requires the original Moyai
+session throughout the callback, a single-use browser-bound state, and the second
+provider's verified identity. Shared passwords cannot link personal accounts.
+
+A provider's issuer and subject are pinned to the existing account ID. Roles,
+private conversations, personal credentials, memory, and usage remain on that ID;
+no ownership rows or saved roles are rewritten. Subsequent sign-ins through either
+provider resolve through the same account service. Saved email roles still win
+over configured admin defaults. Linking changes the account's authority version,
+so already-admitted work may require fresh authorization.
+
+A matching email alone never links accounts. A first login that matches another
+account asks the user to sign in through their existing method and link it. Changed
+emails/subjects, different verified emails, ambiguous accounts, or providers that
+already belong to another account require administrator review. Existing duplicate
+accounts are not merged or deleted by this flow. No unlink or administrative merge
+API is introduced. Legacy provider-specific IDs remain valid; they are not renamed.
+
+The canonical source schema advances to revision 23 for pinned OIDC identities
+and link intent on login states. Use the reviewed offline migration/upgrade flow
+before starting this release; there is no new online migration path. Native
+application tables and existing ownership references are unchanged. Cloudflare
+Access mappings and its external app/policy configuration are untouched.
+
+Logout ends the Moyai session, not the organization-wide provider session. Provider
+unassignment does not immediately revoke an existing Moyai cookie; the existing
+12-hour maximum session lifetime and local account/role checks still apply.
 
 Keep password login enabled until a real Okta administrator login and access to
 the required workspace data have been verified. This configuration does not

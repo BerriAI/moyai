@@ -224,11 +224,19 @@ class Security:
         if request.headers.get("origin") != self.origin:
             raise HTTPException(403, "This request must come from the workspace.")
 
+    def require_recent_sign_in(self, request, *, max_age=300):
+        try:
+            self.signer.loads(request.cookies.get(self.session_cookie, ''), max_age=max_age)
+        except (BadSignature, SignatureExpired):
+            raise HTTPException(403, 'Sign out and sign in again before linking another sign-in method.') from None
+
     def new_session(self, response, role: str = "admin", *, identity: dict | None = None, local: bool = False,
-                    method: str = "google") -> str:
+                    method: str = "google", oidc_bound: bool = False) -> str:
         sid = secrets.token_urlsafe(32)
         info = {"sid": sid, "role": role, "method": method if identity else "local" if local else "password"}
         if identity:
+            if oidc_bound:
+                info["oidc_bound"] = True
             info.update(identity=identity, client_id=self.settings.okta_client_id if method == "okta" else self.settings.google_client_id)
         elif role == "member":
             info["password_tag"] = digest(self.settings.workspace_member_password)

@@ -443,3 +443,36 @@ async def test_product_grant_and_canonical_memory_run_in_real_temporal_and_repla
             assert (await db.get(ProductTurnAuthority, turn.id)).authority_version == product.principal.authority_version
     finally:
         await runtime.close()
+
+
+async def test_linked_provider_keeps_private_session_and_native_account(admitted_product):
+    from http.cookies import SimpleCookie
+
+    from fastapi import Response
+
+    product = admitted_product
+    saved = await product.database.create_session(product.actor, NewSession(title='Existing private work', visibility='private'))
+    settings = product.adapter.settings
+    settings.okta_issuer = 'https://company.okta.com'
+    settings.okta_client_id = 'client'
+    settings.okta_client_secret = 'synthetic-only'
+    settings.okta_allowed_domains = 'example.test'
+    settings.okta_admin_emails = 'admin@example.test'
+    async with product.source.begin() as db:
+        await db.execute(text("INSERT INTO moyai.oidc_identities VALUES ('okta',:issuer,'employee','admin@example.test',:owner,'linked')"),
+                         {'issuer': settings.okta_issuer, 'owner': product.user_id})
+    response = Response()
+    product.adapter.legacy_security.new_session(response, identity={
+        'issuer': settings.okta_issuer, 'sub': 'employee', 'email': 'admin@example.test',
+    }, method='okta', oidc_bound=True)
+    cookie = SimpleCookie(response.headers['set-cookie'])['workspace_session'].value
+    linked = await product.adapter.authenticate(request(cookie))
+    google, _ = google_cookie(product.adapter, sub=product.subject)
+    original = await product.adapter.authenticate(request(google))
+    assert linked.id == original.id == saved.owner_id == product.user_id
+    assert linked.role == original.role and linked.authority_version == original.authority_version
+    async with product.database.sessions.begin() as db:
+        actor = await product.adapter.project_native_user(db, linked)
+        old = await product.database.allowed_session(db, saved.id, actor)
+        assert old.title == 'Existing private work' and old.visibility == 'private'
+        assert await db.scalar(select(func.count()).select_from(User)) == 1

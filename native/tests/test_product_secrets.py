@@ -34,7 +34,10 @@ async def secrets_api(runtime, bridge, request):
         bridge.settings.okta_allowed_domains = "example.test"
         bridge.settings.okta_admin_emails = "admin@example.test"
         profile["issuer"] = bridge.settings.okta_issuer
-    user_id = bridge.store.identity({"method": method, "identity": profile, "role": "member"})
+    user_id = bridge.store.oidc_identity(method, profile, link_info=(
+        {"method": "google", "identity": {"sub": "owner", "email": "owner@example.test"}}
+        if method == "okta" else None
+    ))
     bridge.security.user_roles = UserRoles(bridge.store, bridge.settings)
     source = create_async_engine(f"sqlite+aiosqlite:///file:{bridge.store.path}?mode=ro&uri=true")
     identity = ProductIdentityAdapter(

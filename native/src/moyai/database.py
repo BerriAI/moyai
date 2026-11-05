@@ -355,7 +355,7 @@ class Database:
             if grant is not None:
                 principal = await self._identity().authorize_admission(transaction, grant)
                 if body.visibility == "private" and not principal.individual:
-                    raise HTTPException(403, "Private sessions require individual Google or Cloudflare sign-in.")
+                    raise HTTPException(403, "Private sessions require an individual organization sign-in.")
             session = Session(
                 id=new_id(), owner_id=actor.id, title=body.title,
                 visibility=body.visibility, model=model,
