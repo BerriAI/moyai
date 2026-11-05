@@ -80,6 +80,11 @@ class CloudflareAccess:
     async def check(self, path: str, method: str, token: str):
         if not self.enabled:
             return
+        broker = path.startswith('/broker/')
+        # WARP/private routing can enforce network access without injecting an
+        # HTTP assertion. Moyai session/CSRF authorization still protects the UI.
+        if not broker and self.settings.cloudflare_access_ui_mode == 'private-network':
+            return
         # Keep the health response minimal. Webhook handlers still authenticate
         # their provider before accepting work; no general /hooks/* exemption.
         if (path == '/health' and method in {'GET', 'HEAD'}) or (path in self.webhooks and method == 'POST'):
@@ -89,7 +94,7 @@ class CloudflareAccess:
         header = jwt.get_unverified_header(token)
         if header.get('alg') != 'RS256' or not isinstance(header.get('kid'), str):
             raise jwt.InvalidTokenError()
-        audience = self.broker_audience if path.startswith('/broker/') else self.audience
+        audience = self.broker_audience if broker else self.audience
         claims = jwt.decode(token, await self.signing_key(header['kid']), algorithms=['RS256'],
                             audience=audience, issuer=self.issuer,
                             options={'require': ['iss', 'aud', 'exp', 'iat']})

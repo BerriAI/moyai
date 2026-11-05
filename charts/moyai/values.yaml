@@ -15,6 +15,9 @@ runtimeSecret: moyai-runtime
 # Existing Secret containing MOYAI_DATABASE_URL. Bundled PostgreSQL additionally
 # needs POSTGRES_PASSWORD, MOYAI_DB_PASSWORD and TEMPORAL_PASSWORD.
 databaseSecret: moyai-database
+# For a UI already restricted by private networking, set
+# config.CLOUDFLARE_ACCESS_UI_MODE: private-network (requires the matching app release).
+# Keep both Access audiences and broker credentials; the broker remains JWT-protected.
 config: {}
 serviceAccount:
   create: true
