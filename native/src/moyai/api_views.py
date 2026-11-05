@@ -47,6 +47,7 @@ class AuthConfig(ApiView):
     mode: Literal["existing", "standalone"]
     password_enabled: bool
     google_enabled: bool
+    okta_enabled: bool
     access_enabled: bool
 
 

@@ -91,7 +91,7 @@ async def report_identities(runtime: Any) -> ReportIdentities:
         # Match existing product accounting semantics: retain established links
         # for historical attribution even when a profile later needs review.
         # Neither a name/email match nor a link to another Slack account suffices.
-        if person["kind"] == "slack" and target is not None and target["kind"] in {"google", "cloudflare"}:
+        if person["kind"] == "slack" and target is not None and target["kind"] in {"google", "cloudflare", "okta"}:
             person = target
         canonical = person["id"]
         product_ids.add(canonical)

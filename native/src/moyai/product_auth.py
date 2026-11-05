@@ -117,6 +117,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
     assert product is not None
     router = APIRouter()
     router.include_router(product.google.routes())
+    router.include_router(product.okta.routes())
 
     @router.put("/api/settings/users/role", operation_id="updateProductUserRole")
     async def role(body: RoleEdit, request: Request, user: User = Depends(actor)) -> ProductUserRoleResult:

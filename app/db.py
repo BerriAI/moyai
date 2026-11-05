@@ -480,7 +480,7 @@ class Store:
     def session_view_owner_in(conn, user_id: str) -> str:
         """Resolve shared-workspace view links, never authentication or authorship."""
         linked = conn.execute("""SELECT target.id FROM users source JOIN users target
-            ON target.id=source.linked_user_id AND target.kind IN ('google','cloudflare')
+            ON target.id=source.linked_user_id AND target.kind IN ('google','cloudflare','okta')
             WHERE source.id=? AND source.kind='slack'""", (user_id,)).fetchone()
         return linked['id'] if linked else user_id
 
@@ -607,7 +607,7 @@ class Store:
     def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None, received_at=None, private_owner_id=''):
         if private_owner_id:
             owners = self.rows('SELECT kind FROM users WHERE id=?', (private_owner_id,))
-            if private_owner_id != user_id or not owners or owners[0]['kind'] not in {'google', 'cloudflare'}:
+            if private_owner_id != user_id or not owners or owners[0]['kind'] not in {'google', 'cloudflare', 'okta'}:
                 raise ValueError('Private sessions require a verified individual owner.')
             if not chat_enabled or side_chat_of or swarm_budget_seconds is not None:
                 raise ValueError('Private sessions require a direct chat without derivation or swarms.')
@@ -949,6 +949,11 @@ class Store:
             identity = info['identity']
             user_id = 'google:' + identity['sub']
             kind, email, name = 'google', identity['email'].strip().lower(), identity.get('name') or identity['email']
+        elif info.get('method') == 'okta':
+            from .okta_sso import okta_user_id
+            identity = info['identity']
+            user_id = okta_user_id(identity['issuer'], identity['sub'])
+            kind, email, name = 'okta', identity['email'].strip().lower(), identity.get('name') or identity['email']
         else:
             kind, email = 'shared', ''
             user_id = 'shared:' + info.get('method', 'password') + ':' + info.get('role', 'admin')
@@ -959,7 +964,7 @@ class Store:
             old = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
             conn.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name,updated_at=excluded.updated_at',
                          (user_id, kind, email, name, stamp, stamp))
-            if kind == 'google':
+            if kind in {'google', 'okta'}:
                 for value in {email, old['email'] if old else email}:
                     self.reconcile_email_in(conn, value)
         return user_id
@@ -1040,7 +1045,7 @@ class Store:
         """
         if not email or not self.auto_link_identities:
             return
-        google = conn.execute("SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,)).fetchall()
+        google = conn.execute("SELECT id FROM users WHERE kind IN ('google','cloudflare','okta') AND email=?", (email,)).fetchall()
         slack = conn.execute("SELECT * FROM users WHERE kind='slack' AND email=? AND profile_eligible=1", (email,)).fetchall()
         fresh_after = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         # Retain collision detection for older/deactivated Slack identities too:

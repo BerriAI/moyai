@@ -2608,6 +2608,10 @@
             "title": "Mode",
             "type": "string"
           },
+          "okta_enabled": {
+            "title": "Okta Enabled",
+            "type": "boolean"
+          },
           "password_enabled": {
             "title": "Password Enabled",
             "type": "boolean"
@@ -2617,6 +2621,7 @@
           "mode",
           "password_enabled",
           "google_enabled",
+          "okta_enabled",
           "access_enabled"
         ],
         "title": "AuthConfig",
@@ -16996,7 +17001,7 @@
         "type": "object"
       },
       "SignInRedirect": {
-        "description": "Where the browser goes next: Google's authorization page, or a local path.",
+        "description": "Where the browser goes next: an identity provider, or a local path.",
         "properties": {
           "url": {
             "title": "Url",
@@ -19488,6 +19493,44 @@
     "/api/auth/google/start": {
       "post": {
         "operationId": "startGoogleSignIn",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInRedirect"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start"
+      }
+    },
+    "/api/auth/okta/start": {
+      "post": {
+        "operationId": "startOktaSignIn",
         "requestBody": {
           "content": {
             "application/json": {

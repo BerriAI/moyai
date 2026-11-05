@@ -152,9 +152,9 @@ class Memory:
             return actor
         if not actor or not self.security.settings.person_login_enabled():
             raise HTTPException(403, 'Sign in with your Google account to use personal memory.')
-        matches = [user for user in self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare')", connection=conn)
+        matches = [user for user in self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare','okta')", connection=conn)
                    if self.same_requester(user['id'], actor, connection=conn)]
-        if len(matches) != 1 or matches[0]['email'].rpartition('@')[2] not in self.security.settings.google_domains():
+        if len(matches) != 1 or matches[0]['email'].rpartition('@')[2] not in self.security.settings.identity_domains():
             raise HTTPException(403, 'Personal memory needs a verified Google account or a fresh matching Slack profile.')
         return matches[0]['id']
 

@@ -29,7 +29,7 @@ class SignInStart(BaseModel):
 
 
 class SignInRedirect(BaseModel):
-    """Where the browser goes next: Google's authorization page, or a local path."""
+    """Where the browser goes next: an identity provider, or a local path."""
     model_config = ConfigDict(json_schema_serialization_defaults_required=True)
     url: str
 

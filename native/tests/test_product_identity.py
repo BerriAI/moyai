@@ -602,3 +602,175 @@ async def test_postgres_admission_serializes_with_canonical_role_writes_and_reje
         if created:
             await admin.execute(f"DROP DATABASE {name} WITH (FORCE)")
         await admin.close()
+
+
+# OIDC-provider doubles are protocol regressions, not live Okta E2E proof.
+@pytest.fixture
+def okta_provider(tmp_path, monkeypatch):
+    import json
+
+    import httpx
+    from app.okta_sso import OktaSignIn
+    from app.security import Security as ProductSecurity
+
+    settings = settings_for(tmp_path, okta_issuer="https://company.okta.com",
+        okta_client_id="okta-client", okta_client_secret="okta-secret",
+        okta_allowed_domains="example.test", okta_admin_emails="admin@example.test")
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key())) | {"kid": "current", "alg": "RS256", "use": "sig"}
+    metadata = {"issuer": settings.okta_issuer,
+        "authorization_endpoint": settings.okta_issuer + "/oauth2/v1/authorize",
+        "token_endpoint": settings.okta_issuer + "/oauth2/v1/token",
+        "userinfo_endpoint": settings.okta_issuer + "/oauth2/v1/userinfo",
+        "jwks_uri": settings.okta_issuer + "/oauth2/v1/keys",
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic"]}
+    claims = {"iss": settings.okta_issuer, "aud": "okta-client", "sub": "employee-1",
+              "iat": int(time.time()), "exp": int(time.time()) + 300, "nonce": "nonce"}
+    state = SimpleNamespace(settings=settings, key=key, jwk=jwk, metadata=metadata, claims=claims,
+        profile={"sub": "employee-1", "email": "Admin@Example.Test", "email_verified": True, "name": "Employee"},
+        requests=[])
+    def respond(req):
+        state.requests.append(req)
+        if req.url.path.endswith("openid-configuration"):
+            payload = state.metadata
+        elif req.url.path.endswith("/keys"):
+            payload = {"keys": [state.jwk]}
+        elif req.url.path.endswith("/token"):
+            payload = {"id_token": jwt.encode(state.claims, state.key, algorithm="RS256", headers={"kid": "current"}),
+                       "access_token": "temporary-provider-access-token"}
+        elif req.url.path.endswith("/userinfo"):
+            payload = state.profile
+        else:
+            raise AssertionError("Unexpected provider endpoint")
+        return httpx.Response(200, json=payload)
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs))
+    state.flow = OktaSignIn(settings, ProductSecurity(settings), None)
+    state.http_client = client
+    return state
+
+
+async def test_okta_uses_verified_id_token_and_matching_verified_profile(okta_provider):
+    from urllib.parse import parse_qs
+    state = okta_provider
+    identity = await state.flow.exchange("code", "verifier", "nonce")
+    assert identity == {"issuer": state.settings.okta_issuer, "sub": "employee-1",
+                        "email": "admin@example.test", "name": "Employee"}
+    token_request = next(req for req in state.requests if req.url.path.endswith("/token"))
+    assert token_request.headers["authorization"].startswith("Basic ")
+    body = parse_qs(token_request.content.decode())
+    assert body["code_verifier"] == ["verifier"]
+    assert body["redirect_uri"] == [state.flow.callback]
+    assert "temporary-provider-access-token" not in repr(identity)
+
+
+@pytest.mark.parametrize("change", [
+    {"iss": "https://another.okta.com"}, {"aud": "another-client"}, {"nonce": "wrong"},
+    {"exp": 1}, {"iat": 9999999999}, {"azp": "another-client"},
+    {"aud": ["okta-client", "another-client"]}, {"sub": ""},
+])
+async def test_okta_rejects_invalid_id_token_claims(okta_provider, change):
+    state = okta_provider
+    state.claims.update(change)
+    with pytest.raises((jwt.PyJWTError, ValueError)):
+        await state.flow.exchange("code", "verifier", "nonce")
+    assert not any(req.url.path.endswith("/userinfo") for req in state.requests)
+
+
+@pytest.mark.parametrize("change", [
+    {"sub": "another-person"}, {"email_verified": False}, {"email_verified": "true"},
+    {"email": "admin@outside.test"}, {"email": "admin@example.test "},
+])
+async def test_okta_rejects_unverified_mismatched_or_outside_profile(okta_provider, change):
+    okta_provider.profile.update(change)
+    with pytest.raises(ValueError):
+        await okta_provider.flow.exchange("code", "verifier", "nonce")
+
+
+@pytest.mark.parametrize("change", [
+    {"issuer": "https://another.okta.com"}, {"token_endpoint": "https://steal.example/token"},
+    {"jwks_uri": "http://company.okta.com/keys"},
+    {"userinfo_endpoint": "https://user:password@company.okta.com/userinfo"},
+])
+async def test_okta_discovery_cannot_redirect_credentials(okta_provider, change):
+    okta_provider.metadata.update(change)
+    with pytest.raises(ValueError):
+        await okta_provider.flow.discovery()
+    assert len(okta_provider.requests) == 1
+
+
+async def test_okta_browser_binding_single_use_and_local_return_path(okta_provider, tmp_path):
+    from urllib.parse import parse_qs, urlencode
+
+    import httpx
+    from app.db import Store
+    from app.security import digest
+    from fastapi import FastAPI
+
+    state = okta_provider
+    store = Store(tmp_path / "store")
+    state.flow.store = store
+    app = FastAPI()
+    app.include_router(state.flow.routes())
+    try:
+        async with state.http_client(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787") as browser:
+            assert (await browser.post("/api/auth/okta/start", json={})).status_code == 403
+            started = await browser.post("/api/auth/okta/start", json={"return_to": "https://steal.example"},
+                                         headers={"Origin": "http://127.0.0.1:8787"})
+            assert started.status_code == 200
+            params = parse_qs(urlsplit(started.json()["url"]).query)
+            assert params["scope"] == ["openid email profile"] and params["code_challenge_method"] == ["S256"]
+            state.claims["nonce"] = params["nonce"][0]
+            callback = "/auth/okta/callback?" + urlencode(
+                {"state": params["state"][0], "code": "code"})
+            async with state.http_client(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787") as other:
+                rejected = await other.get(callback)
+                assert "signin=failed" in rejected.headers["location"]
+                assert "workspace_session" not in other.cookies
+            accepted = await browser.get(callback)
+            assert accepted.status_code == 303 and accepted.headers["location"] == "/#tasks"
+            info = state.flow.security.signer.loads(browser.cookies["workspace_session"])
+            assert info["method"] == "okta" and info["identity"]["email"] == "admin@example.test"
+            assert store.rows("SELECT kind FROM users") == [{"kind": "okta"}]
+            replay = await browser.get(callback)
+            assert "signin=failed" in replay.headers["location"]
+            assert sum(req.url.path.endswith("/token") for req in state.requests) == 1
+            assert state.flow.state_hash(params["state"][0]) != digest(params["state"][0])
+    finally:
+        store.close()
+
+
+async def test_okta_canonical_identity_preserves_email_but_not_google_ownership(product):
+    from app.okta_sso import okta_user_id
+    product.settings.okta_issuer = "https://company.okta.com"
+    product.settings.okta_client_id = "okta-client"
+    product.settings.okta_client_secret = "okta-secret"
+    product.settings.okta_allowed_domains = "example.test"
+    product.settings.okta_admin_emails = "admin@example.test"
+    identity = {"issuer": product.settings.okta_issuer, "sub": "employee-1", "email": "admin@example.test"}
+    user_id = okta_user_id(identity["issuer"], identity["sub"])
+    assert user_id != "google:admin-sub"
+    assert user_id != okta_user_id("https://another.okta.com", identity["sub"])
+    async with product.writer.begin() as conn:
+        await conn.execute(text("INSERT INTO users VALUES (:id,'okta','admin@example.test','Employee',NULL,'created','updated')"), {"id": user_id})
+    response = Response()
+    sid = product.adapter.legacy_security.new_session(response, identity=identity, method="okta")
+    cookie = SimpleCookie(response.headers["set-cookie"])["workspace_session"].value
+    principal = await product.adapter.authenticate(request(cookie), admin=True)
+    assert principal.id == user_id and principal.email == "admin@example.test" and principal.individual
+    assert principal.csrf_token == product.adapter.legacy_security.csrf(sid)
+    UserRoles(product.store, product.settings).change(RoleChange(email=principal.email, role="member", revision=0),
+        {"method": "google", "identity": {"email": "other@example.test"}})
+    assert (await product.adapter.authenticate(request(cookie))).role == "member"
+    with pytest.raises(HTTPException):
+        await product.adapter.require_current(principal.grant)
+    product.settings.okta_client_id = "changed-client"
+    with pytest.raises(HTTPException):
+        await product.adapter.authenticate(request(cookie))
+    product.settings.okta_client_id = "okta-client"
+    product.settings.okta_issuer = "https://another.okta.com"
+    with pytest.raises(HTTPException):
+        await product.adapter.authenticate(request(cookie))
+    with pytest.raises(HTTPException):
+        await product.adapter.current(user_id)

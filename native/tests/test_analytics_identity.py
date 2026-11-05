@@ -200,3 +200,27 @@ async def test_unavailable_product_directory_does_not_silently_split_people(runt
     with pytest.raises(HTTPException) as denied:
         await read(runtime, linked.people[WEB])
     assert denied.value.status_code == 403
+
+
+async def test_okta_email_attribution_links_slack_without_merging_google_account(runtime, actor, linked):
+    from app.okta_sso import okta_user_id
+
+    identity = okta_user_id("https://company.okta.com", "employee-1")
+    okta = User(id=identity, username="product:" + hashlib.sha256(identity.encode()).hexdigest(),
+                display_name="Okta Employee", password="!product!", role="member")
+    async with linked.writer.begin() as db:
+        await db.execute(text("INSERT INTO users VALUES (:id,'okta','Okta Employee','person@example.test',NULL)"),
+                         {"id": identity})
+        await db.execute(text("UPDATE users SET linked_user_id=:owner WHERE id=:id"), {"owner": identity, "id": SLACK})
+    async with runtime.database.sessions.begin() as db:
+        db.add(okta)
+    await observation(runtime, okta, cost="0.2")
+    await observation(runtime, linked.people[SLACK], cost="0.3")
+    await observation(runtime, linked.people[WEB], cost="0.4")
+    result = await read(runtime, actor)
+    groups = {row["user_id"]: row for row in result["by_user"]}
+    assert groups[identity]["cost_usd_exact"] == "0.5"
+    assert groups[WEB]["cost_usd_exact"] == "0.4"
+    assert next(row for row in result["users"] if row["id"] == identity)["email"] == "person@example.test"
+    exported = await read(runtime, actor, format="csv")
+    assert "person@example.test" in exported.body.decode()

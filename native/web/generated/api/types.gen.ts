@@ -1457,6 +1457,10 @@ export type AuthConfig = {
      */
     mode: 'existing' | 'standalone';
     /**
+     * Okta Enabled
+     */
+    okta_enabled: boolean;
+    /**
      * Password Enabled
      */
     password_enabled: boolean;
@@ -9599,7 +9603,7 @@ export type SettingsSkillList = {
 /**
  * SignInRedirect
  *
- * Where the browser goes next: Google's authorization page, or a local path.
+ * Where the browser goes next: an identity provider, or a local path.
  */
 export type SignInRedirect = {
     /**
@@ -11366,6 +11370,31 @@ export type StartGoogleSignInResponses = {
 };
 
 export type StartGoogleSignInResponse = StartGoogleSignInResponses[keyof StartGoogleSignInResponses];
+
+export type StartOktaSignInData = {
+    body: SignInStart;
+    path?: never;
+    query?: never;
+    url: '/api/auth/okta/start';
+};
+
+export type StartOktaSignInErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type StartOktaSignInError = StartOktaSignInErrors[keyof StartOktaSignInErrors];
+
+export type StartOktaSignInResponses = {
+    /**
+     * Successful Response
+     */
+    200: SignInRedirect;
+};
+
+export type StartOktaSignInResponse = StartOktaSignInResponses[keyof StartOktaSignInResponses];
 
 export type ListConnectionsData = {
     body?: never;
