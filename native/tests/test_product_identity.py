@@ -448,6 +448,60 @@ async def test_cloudflare_requires_real_signed_assertion_and_existing_pinned_acc
         await adapter.authenticate(request(cookie, headers={"cf-access-jwt-assertion": token}))
 
 
+async def test_private_network_ui_keeps_session_csrf_authority_and_broker_checks(product):
+    settings = settings_for(
+        product.settings.data_dir.parent,
+        public_url="https://private.example.test", broker_url="https://broker.example.test",
+        cloudflare_access_team_domain="synthetic.cloudflareaccess.com",
+        cloudflare_access_audience="employee-audience", cloudflare_access_broker_audience="broker-audience",
+        cloudflare_access_ui_mode="private-network",
+    )
+    adapter = ProductIdentityAdapter(settings, product.source, allow_shared_identities=True)
+    async with product.writer.begin() as db:
+        await db.execute(text(
+            "INSERT INTO users VALUES ('shared:password:admin','shared','','Shared',NULL,'c','u')"
+        ))
+    cookie = adapter.legacy_security.signer.dumps({"sid": "private-network-session"})
+    with pytest.raises(HTTPException) as error:
+        await adapter.authenticate(request())
+    assert error.value.status_code == 401
+    principal = await adapter.authenticate(request(cookie))
+    assert principal.id == "shared:password:admin" and not principal.individual
+    with pytest.raises(HTTPException) as error:
+        await adapter.authenticate(request(cookie, method="POST", headers={"origin": settings.public_url}), mutation=True)
+    assert error.value.status_code == 403
+    headers = {"origin": settings.public_url, "x-csrf-token": adapter.legacy_security.csrf("private-network-session")}
+    assert (await adapter.authenticate(request(cookie, method="POST", headers=headers), mutation=True)).id == principal.id
+    worker = ProductIdentityAdapter(settings, product.source, allow_shared_identities=True)
+    assert (await worker.require_current(principal.grant)).authority_version == principal.authority_version
+    strict = ProductIdentityAdapter(
+        settings.model_copy(update={"cloudflare_access_ui_mode": "jwt"}), product.source,
+        allow_shared_identities=True,
+    )
+    with pytest.raises(HTTPException) as error:
+        await strict.authenticate(request(cookie))
+    assert error.value.status_code == 401
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    adapter.access.keys = {"local-key": key.public_key()}
+    adapter.access.expires = time.monotonic() + 3600
+    claims = {
+        "iss": adapter.access.issuer, "type": "app", "aud": "broker-audience",
+        "iat": int(time.time()), "exp": int(time.time()) + 120,
+    }
+    valid = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "local-key"})
+    await adapter.access.check("/broker/inference", "POST", valid)
+    for token in (
+        "",
+        jwt.encode({**claims, "aud": "employee-audience"}, key, algorithm="RS256", headers={"kid": "local-key"}),
+        jwt.encode({**claims, "aud": ["employee-audience", "broker-audience"]}, key,
+                   algorithm="RS256", headers={"kid": "local-key"}),
+        jwt.encode({**claims, "exp": int(time.time()) - 1}, key, algorithm="RS256", headers={"kid": "local-key"}),
+    ):
+        with pytest.raises(jwt.PyJWTError):
+            await adapter.access.check("/broker/inference", "POST", token)
+
+
 async def test_each_activity_attempt_checks_source_even_when_mirror_is_unchanged(product):
     principal = await product.adapter.current("google:admin-sub")
     mirror = {"id": principal.id, "role": "admin", "enabled": True}

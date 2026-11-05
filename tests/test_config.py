@@ -230,3 +230,29 @@ def test_broker_url_rejects_unsafe_or_mismatched_destinations(broker):
 def test_broker_url_environment_alias_and_loopback(monkeypatch):
     monkeypatch.setenv('MOYAI_BROKER_URL', 'http://127.0.0.1:8081')
     assert Settings(_env_file=None, public_url='http://127.0.0.1:8080').broker_base_url == 'http://127.0.0.1:8081'
+
+
+def test_private_network_ui_access_is_explicit_and_preserves_broker_credentials(monkeypatch):
+    values = {
+        'public_url': 'https://private.example.test', 'broker_url': 'https://broker.example.test',
+        'cloudflare_access_team_domain': 'example.cloudflareaccess.com',
+        'cloudflare_access_audience': 'ui-aud', 'cloudflare_access_broker_audience': 'broker-aud',
+        'cloudflare_access_client_id': 'synthetic-id', 'cloudflare_access_client_secret': 'synthetic-secret',
+    }
+    monkeypatch.delenv('CLOUDFLARE_ACCESS_UI_MODE', raising=False)
+    strict = Settings(_env_file=None, **values)
+    assert strict.cloudflare_access_ui_mode == 'jwt'
+    monkeypatch.setenv('CLOUDFLARE_ACCESS_UI_MODE', 'private-network')
+    private = Settings(_env_file=None, **values)
+    assert private.cloudflare_access_ui_mode == 'private-network'
+    assert private.broker_environment('test-token') == strict.broker_environment('test-token')
+    for changes in (
+        {'broker_url': ''},
+        {'broker_url': values['public_url']},
+        {'cloudflare_access_login': True},
+        {'cloudflare_access_team_domain': '', 'cloudflare_access_audience': '',
+         'cloudflare_access_broker_audience': ''},
+        {'cloudflare_access_ui_mode': 'disabled'},
+    ):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **(values | changes))

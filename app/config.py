@@ -127,6 +127,7 @@ class Settings(BaseSettings):
     cloudflare_access_team_domain: str = ''
     cloudflare_access_audience: str = ''
     cloudflare_access_broker_audience: str = ''
+    cloudflare_access_ui_mode: Literal['jwt', 'private-network'] = 'jwt'
     cloudflare_access_client_id: str = Field(default='', repr=False)
     cloudflare_access_client_secret: str = Field(default='', repr=False)
     cloudflare_access_webhook_paths: list[str] = Field(default_factory=list)
@@ -134,12 +135,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def validate_cloudflare_access(self):
-        from .public_url import broker_base_url
+        from .public_url import broker_base_url, origin
         broker_base_url(self.public_url, self.broker_url)
         values = (self.cloudflare_access_team_domain, self.cloudflare_access_audience,
                   self.cloudflare_access_broker_audience)
         if any(values) and not all(values):
             raise ValueError('Configure the Cloudflare team domain and both application audiences together.')
+        if self.cloudflare_access_ui_mode == 'private-network':
+            if not all(values) or origin(self.public_url) == origin(self.broker_base_url):
+                raise ValueError('Private-network UI access requires Cloudflare Access and a separate broker origin.')
+            if self.cloudflare_access_login:
+                raise ValueError('Private-network UI access cannot use Cloudflare assertion-based sign-in.')
         if self.cloudflare_access_login and (not all(values) or not self.google_domains() or not self.google_admins()
                 or any(email.rpartition('@')[2] not in self.google_domains() for email in self.google_admins())):
             raise ValueError('Access sign-in requires Cloudflare Access, allowed work domains and administrator emails.')
