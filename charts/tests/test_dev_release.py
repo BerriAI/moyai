@@ -2,6 +2,7 @@
 
 import base64
 import io
+import json
 import subprocess
 import sys
 import tarfile
@@ -108,8 +109,6 @@ def prepare_gate(monkeypatch, *, head=REVISION, release=None, tag=None, active=(
             return {"sha": head, "commit": {"committer": {"date": DATE}}}
         if path.startswith("git/ref/tags/"):
             return tag
-        if path.startswith("releases/tags/"):
-            return release
         raise AssertionError(path)
 
     runs = Mock(
@@ -118,8 +117,32 @@ def prepare_gate(monkeypatch, *, head=REVISION, release=None, tag=None, active=(
         )
     )
     monkeypatch.setattr(dev, "api", api)
+    monkeypatch.setattr(dev, "release_for_tag", Mock(return_value=release))
     monkeypatch.setattr(dev, "runs", runs)
     return runs
+
+
+def test_release_lookup_recovers_unpublished_draft_by_pending_tag(monkeypatch):
+    draft = {"draft": True, "target_commitish": REVISION, "id": 123}
+    monkeypatch.setattr(
+        dev,
+        "run",
+        Mock(
+            return_value=json.dumps(
+                {"data": {"repository": {"release": {"databaseId": 123}}}}
+            )
+        ),
+    )
+    request = Mock(return_value=draft)
+    monkeypatch.setattr(dev, "api", request)
+    assert dev.release_for_tag("v" + VERSION) == draft
+    request.assert_called_once_with("releases/123")
+    monkeypatch.setattr(
+        dev,
+        "run",
+        Mock(return_value=json.dumps({"data": {"repository": {"release": None}}})),
+    )
+    assert dev.release_for_tag("v" + VERSION) is None
 
 
 def test_gate_selects_ready_head_and_skips_unchanged_or_advanced_main(monkeypatch):

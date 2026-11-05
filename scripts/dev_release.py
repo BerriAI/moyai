@@ -129,6 +129,21 @@ def dev_version(revision, committed_at):
     return f"0.0.0-dev.{stamp}.g{revision[:12]}"
 
 
+def release_for_tag(tag):
+    # REST's by-tag endpoint excludes drafts. GraphQL also finds pending tags,
+    # so an interrupted publication resumes its draft instead of duplicating it.
+    query = """query($tag: String!) {
+      repository(owner: "BerriAI", name: "moyai") {
+        release(tagName: $tag) { databaseId }
+      }
+    }"""
+    response = json.loads(
+        run("gh", "api", "graphql", "-f", f"query={query}", "-f", f"tag={tag}")
+    )
+    release = response["data"]["repository"]["release"]
+    return api(f"releases/{release['databaseId']}") if release else None
+
+
 def gate(revision):
     head = api("commits/main")
     if head["sha"] != revision:
@@ -147,7 +162,7 @@ def gate(revision):
         raise ValueError(
             "Existing dev tag does not point to the selected source revision."
         )
-    release = api(f"releases/tags/{tag}", missing=True)
+    release = release_for_tag(tag)
     if release:
         if release["target_commitish"] != revision or not release["prerelease"]:
             raise ValueError(
