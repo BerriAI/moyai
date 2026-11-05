@@ -33,7 +33,7 @@ Integration contract (the caller owns activation and reviewed schema migrations)
   onboarding as a second canonical user directory. Native disable/auth_version
   overrides are enforced as an additional fence and are never reset by projection.
   If shared-password identities are explicitly allowed, they remain nonindividual:
-  private sessions still require an individual Google/Access principal. Historical
+  private sessions still require an individual Google/Access/Okta principal. Historical
   sessions retain their original SessionPrivacy rules, including no admin bypass.
 
 ``legacy_security.decrypt`` reads explicitly legacy-tagged ciphertext only.

@@ -94,7 +94,7 @@ def current_in(vault, conn, run):
     current = vault.current_in(conn, run)
     if current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}:
         raise HTTPException(409, 'The requesting turn changed. Start login from the current request.')
-    if not current['active_user_id'].startswith(('google:', 'cloudflare:')) and not vault.security.local_preview():
+    if not current['active_user_id'].startswith(('google:', 'cloudflare:', 'okta:')) and not vault.security.local_preview():
         raise HTTPException(403, 'Sign in with a personal identity before saving an AWS login.')
     return current
 
