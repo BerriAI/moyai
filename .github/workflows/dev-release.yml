@@ -1,0 +1,105 @@
+name: Hourly dev prerelease
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Verify and package without publishing
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - .github/workflows/dev-release.yml
+      - .github/workflows/docker.yml
+      - .github/workflows/docker-release.yml
+      - scripts/dev_release.py
+      - scripts/build_helm_bundle.py
+      - scripts/build_docker_bundle.py
+      - scripts/verify_release_image.py
+      - charts/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/dev-release.yml
+      - .github/workflows/docker.yml
+      - .github/workflows/docker-release.yml
+      - scripts/dev_release.py
+      - scripts/build_helm_bundle.py
+      - scripts/build_docker_bundle.py
+      - scripts/verify_release_image.py
+      - charts/**
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.19.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pytest pyyaml
+      - run: python -m pytest -o addopts= charts/tests -q --confcutdir=charts
+
+  gate:
+    needs: verify
+    if: >-
+      github.repository == 'BerriAI/moyai' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/dev_release.py --check
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: moyai-release-publication
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.19.0
+      - name: Verify and publish the dev prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" != "true" ]; then
+            args+=(--publish)
+          fi
+          python3 scripts/dev_release.py --output "$RUNNER_TEMP/moyai-dev" "${args[@]}"

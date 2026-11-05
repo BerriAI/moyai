@@ -9,11 +9,12 @@ permissions:
 
 jobs:
   publish:
-    if: github.repository == 'BerriAI/moyai'
+    if: github.repository == 'BerriAI/moyai' && !startsWith(github.event.release.tag_name, 'v0.0.0-dev.')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
       group: moyai-release-publication
+      queue: max
       cancel-in-progress: false
     permissions:
       actions: read
