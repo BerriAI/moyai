@@ -1,6 +1,6 @@
 """Resolve Slack senders outside webhook acknowledgement and sandbox execution.
 
-Profiles can create an email-labelled local identity; only Google OIDC can
+Profiles can create an email-labelled local identity; only organization sign-in can
 authenticate a web session. This is JIT matching, not SCIM lifecycle management.
 """
 import asyncio
@@ -50,8 +50,8 @@ class SlackIdentities:
         if not actor and run and not run.get('chat_enabled'):
             actor = run.get('owner_id')
         rows = await database(self.store.rows, 'SELECT * FROM users WHERE id=?', (actor,)) if isinstance(actor, str) and actor else []
-        if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'slack'} or not run:
-            raise ConnectorError('Slack identity requires an identified requester. Sign in with Google or message the bot in Slack.')
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'okta', 'slack'} or not run:
+            raise ConnectorError('Slack identity requires an identified requester. Use organization sign-in or message the bot in Slack.')
         user = rows[0]
         installation = await database(self.connectors.slack_installation)
         await database(self.check_requester, run, installation)
@@ -64,7 +64,7 @@ class SlackIdentities:
                 raise ConnectorError('Your Slack identity belongs to a different workspace.')
             return {'user_id': recipient, 'team_id': team, 'email': user['email'], 'name': user['name']}
         email = user['email']
-        if not email or email.rpartition('@')[2] not in self.settings.google_domains():
+        if not email or email.rpartition('@')[2] not in self.settings.identity_domains():
             raise ConnectorError('Your verified work email is no longer allowed in this workspace.')
         if not (await database(self.status))['ready']:
             raise ConnectorError('Enable Slack identity linking and reconnect the bot with users:read and users:read.email.')
@@ -102,7 +102,7 @@ class SlackIdentities:
             await self.checkpoints.flush()
         await database(self.check_requester, run, installation)
         # Re-read after provider awaits; historical/manual spend links alone never select a recipient.
-        google = await database(self.store.rows, "SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,))
+        google = await database(self.store.rows, "SELECT id FROM users WHERE kind IN ('google','cloudflare','okta') AND email=?", (email,))
         matches = await database(candidates)
         if len(google) != 1 or google[0]['id'] != actor or len(matches) != 1:
             raise ConnectorError('Your Slack identity is ambiguous. Review the linked accounts before sending a DM.')
@@ -119,7 +119,7 @@ class SlackIdentities:
         missing = sorted(PROFILE_SCOPES - set(bot.get('scopes', [])))
         enabled = self.settings.slack_identity_linking_enabled
         return {'enabled': enabled, 'ready': enabled and bool(bot.get('installed')) and not missing and self.connectors.policy('slack')['enabled'],
-                'missing_scopes': missing, 'domains': sorted(self.settings.google_domains()),
+                'missing_scopes': missing, 'domains': sorted(self.settings.identity_domains()),
                 'team_id': bot.get('team_id')}
 
     def start(self):
@@ -200,7 +200,7 @@ class SlackIdentities:
             data = profile.get('profile') or {}
             email = data.get('email', '')
             email = email.strip().lower() if isinstance(email, str) else ''
-            eligible &= bool(re.fullmatch(r'[^\s@]+@[^\s@]+', email)) and email.rpartition('@')[2] in self.settings.google_domains()
+            eligible &= bool(re.fullmatch(r'[^\s@]+@[^\s@]+', email)) and email.rpartition('@')[2] in self.settings.identity_domains()
             name = data.get('real_name') or data.get('display_name') or profile.get('real_name') or row['name']
             name = str(name)[:160]
         except Exception as error:

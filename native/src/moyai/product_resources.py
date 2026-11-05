@@ -45,6 +45,7 @@ class ProductResources:
         )
         from app.blob_storage import ObjectStorage
         from app.google_sso import GoogleSignIn
+        from app.okta_sso import OktaSignIn
         from app.security import Security
         from app.user_roles import UserRoles
 
@@ -55,6 +56,7 @@ class ProductResources:
         self.roles = UserRoles(self.store_proxy, settings)
         self.security = Security(settings, self.roles)
         self.google = GoogleSignIn(settings, self.security, self.store_proxy)
+        self.okta = OktaSignIn(settings, self.security, self.store_proxy)
         self.identity = ProductIdentityAdapter(
             settings, self.engine, native_engine=self.native_engine,
             allow_shared_identities=True,

@@ -296,6 +296,16 @@ class ProductSecrets:
                     or ((personal or session["visibility"] == "private") and session["owner_id"] != principal.id)
                 ):
                     raise HTTPException(404, "The credential session is no longer available.")
+        if principal.method == "oidc":
+            from app.oidc_identity import resolve_in
+            info = security.session_info(request) or {}
+            try:
+                mapped = resolve_in(connection, info['method'], info['identity'],
+                                    require_binding=info.get('oidc_bound', False))
+            except (ValueError, KeyError):
+                raise HTTPException(401, "The sign-in mapping changed before saving.") from None
+            if mapped != principal.id:
+                raise HTTPException(401, "The sign-in account changed before saving.")
         if principal.method == "cloudflare":
             info = security.session_info(request) or {}
             identity = info.get("identity") or {}

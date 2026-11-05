@@ -258,6 +258,13 @@ class Store:
                     user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
                     PRIMARY KEY(issuer,subject), UNIQUE(issuer,user_id), UNIQUE(issuer,email)
                 );
+                CREATE TABLE IF NOT EXISTS oidc_identities (
+                    provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL,
+                    email TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(provider,issuer,subject)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS oidc_identities_account ON oidc_identities(provider,issuer,user_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS oidc_identities_email ON oidc_identities(provider,issuer,email);
                 CREATE TABLE IF NOT EXISTS user_model_preferences (
                     user_id TEXT PRIMARY KEY REFERENCES users(id), model TEXT NOT NULL
                 );
@@ -278,6 +285,9 @@ class Store:
             """)
             if 'client' not in conn.column_names('login_states'):
                 conn.execute("ALTER TABLE login_states ADD COLUMN client TEXT NOT NULL DEFAULT ''")
+            for column in ('link_user_id', 'link_session_hash'):
+                if column not in conn.column_names('login_states'):
+                    conn.execute(f"ALTER TABLE login_states ADD COLUMN {column} TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS login_states_client ON login_states(client, expires)")
             if 'metadata' not in conn.column_names('slack_outbox'):
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
@@ -480,7 +490,7 @@ class Store:
     def session_view_owner_in(conn, user_id: str) -> str:
         """Resolve shared-workspace view links, never authentication or authorship."""
         linked = conn.execute("""SELECT target.id FROM users source JOIN users target
-            ON target.id=source.linked_user_id AND target.kind IN ('google','cloudflare')
+            ON target.id=source.linked_user_id AND target.kind IN ('google','cloudflare','okta')
             WHERE source.id=? AND source.kind='slack'""", (user_id,)).fetchone()
         return linked['id'] if linked else user_id
 
@@ -607,7 +617,7 @@ class Store:
     def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None, received_at=None, private_owner_id=''):
         if private_owner_id:
             owners = self.rows('SELECT kind FROM users WHERE id=?', (private_owner_id,))
-            if private_owner_id != user_id or not owners or owners[0]['kind'] not in {'google', 'cloudflare'}:
+            if private_owner_id != user_id or not owners or owners[0]['kind'] not in {'google', 'cloudflare', 'okta'}:
                 raise ValueError('Private sessions require a verified individual owner.')
             if not chat_enabled or side_chat_of or swarm_budget_seconds is not None:
                 raise ValueError('Private sessions require a direct chat without derivation or swarms.')
@@ -945,24 +955,32 @@ class Store:
         """Only call with the server-verified session, never request JSON."""
         if info.get('method') == 'cloudflare':
             return self.access_identity(info['identity'])
-        if info.get('method') == 'google':
-            identity = info['identity']
-            user_id = 'google:' + identity['sub']
-            kind, email, name = 'google', identity['email'].strip().lower(), identity.get('name') or identity['email']
-        else:
-            kind, email = 'shared', ''
-            user_id = 'shared:' + info.get('method', 'password') + ':' + info.get('role', 'admin')
-            name = 'Local preview' if info.get('method') == 'local' else 'Shared password sign-in'
+        if info.get('method') in {'google', 'okta'}:
+            if info.get('oidc_bound'):
+                return self.oidc_actor(info)
+            return self.oidc_identity(info['method'], info['identity'])
+        kind, email = 'shared', ''
+        user_id = 'shared:' + info.get('method', 'password') + ':' + info.get('role', 'admin')
+        name = 'Local preview' if info.get('method') == 'local' else 'Shared password sign-in'
         stamp = now()
         with self.connect() as conn:
             conn.begin_write()
-            old = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
             conn.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name,updated_at=excluded.updated_at',
                          (user_id, kind, email, name, stamp, stamp))
-            if kind == 'google':
-                for value in {email, old['email'] if old else email}:
-                    self.reconcile_email_in(conn, value)
         return user_id
+
+    def oidc_actor(self, info):
+        from .oidc_identity import resolve_in
+        with self.connect() as conn:
+            return resolve_in(conn, info['method'], info['identity'], require_binding=info.get('oidc_bound', False))
+
+    def oidc_identity(self, provider, identity, *, link_info=None):
+        from .oidc_identity import enroll_in
+        with self.connect() as conn:
+            conn.begin_write()
+            user_id = enroll_in(conn, provider, identity, now(), link_info=link_info)
+            self.reconcile_email_in(conn, identity['email'])
+            return user_id
 
     def access_actor(self, identity):
         """Read a pinned account from this request's verified Access claims."""
@@ -1035,12 +1053,12 @@ class Store:
     def reconcile_email_in(self, conn, email):
         """Accounting links only. Never authenticate a user or grant a role here.
 
-        The email must have come from a checked Slack profile or Google OIDC.
+        The email must have come from a checked Slack profile or verified OIDC.
         Once bound, provider IDs stay authoritative; changes need admin review.
         """
         if not email or not self.auto_link_identities:
             return
-        google = conn.execute("SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,)).fetchall()
+        google = conn.execute("SELECT id FROM users WHERE kind IN ('google','cloudflare','okta') AND email=?", (email,)).fetchall()
         slack = conn.execute("SELECT * FROM users WHERE kind='slack' AND email=? AND profile_eligible=1", (email,)).fetchall()
         fresh_after = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         # Retain collision detection for older/deactivated Slack identities too:

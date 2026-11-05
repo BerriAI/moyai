@@ -256,3 +256,27 @@ def test_private_network_ui_access_is_explicit_and_preserves_broker_credentials(
     ):
         with pytest.raises(ValidationError):
             Settings(_env_file=None, **(values | changes))
+
+
+@pytest.mark.parametrize("issuer", ["https://company.okta.com", "https://login.example.com/oauth2/default"])
+def test_okta_settings_require_scoped_verified_identity_policy(issuer):
+    values = dict(_env_file=None, okta_issuer=issuer, okta_client_id="client", okta_client_secret="secret",
+                  okta_allowed_domains="EXAMPLE.TEST", okta_admin_emails="Admin@Example.Test")
+    settings = Settings(**values)
+    assert settings.okta_enabled() and settings.person_login_enabled()
+    assert settings.okta_domains() == {"example.test"}
+    assert settings.okta_admins() == {"admin@example.test"}
+    assert "secret-not-in-repr" not in repr(settings.model_copy(update={"okta_client_secret": "secret-not-in-repr"}))
+    for changed in ({"okta_client_secret": ""}, {"okta_allowed_domains": ""},
+                    {"okta_admin_emails": "admin@outside.test"}):
+        with pytest.raises(ValidationError):
+            Settings(**(values | changed))
+
+
+@pytest.mark.parametrize("issuer", ["http://company.okta.com", "https://company.okta.com/",
+    "https://user:pass@company.okta.com", "https://company.okta.com?client=foo",
+    "https://company.okta.com/#fragment", "https://company.okta.com/oauth2/default/../other"])
+def test_okta_issuer_rejects_ambiguous_or_insecure_urls(issuer):
+    with pytest.raises(ValidationError, match="OKTA_ISSUER"):
+        Settings(_env_file=None, okta_issuer=issuer, okta_client_id="client", okta_client_secret="secret",
+                 okta_allowed_domains="example.test", okta_admin_emails="admin@example.test")

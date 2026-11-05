@@ -259,7 +259,7 @@ class Spend:
         tracked_since = self.store.rows('SELECT MIN(created_at) AS value FROM model_requests WHERE 1=1' + scope, scope_params)[0]['value']
         def empty():
             return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0, 'sessions': set()}
-        groups = {user['id']: empty() for user in users.values() if user['kind'] in {'google', 'cloudflare'}}
+        groups = {user['id']: empty() for user in users.values() if user['kind'] in {'google', 'cloudflare', 'okta'}}
         sessions, models = {}, {}
         # Aggregate the entire scoped ledger, before the 500-row detail limit.
         daily = {(start + timedelta(days=i)).isoformat(): empty()
@@ -334,7 +334,7 @@ class Spend:
             info = self.security.session_info(request)
             if info['role'] == 'admin':
                 return self.report(start, end)
-            if info['method'] not in {'google', 'cloudflare'}:
+            if info['method'] not in {'google', 'cloudflare', 'okta'}:
                 raise HTTPException(403, 'Sign in with your Google account to view your personal LLM spend. Shared passwords do not identify an individual.')
             user_id = self.store.identity(info)
             return self.report(start, end, user_id=user_id)
@@ -357,7 +357,7 @@ class Spend:
             with self.store.connect() as conn:
                 conn.begin_write()
                 source = conn.execute("SELECT id,linked_user_id FROM users WHERE id=? AND kind='slack'", (body.slack_user_id,)).fetchone()
-                target = conn.execute("SELECT id FROM users WHERE id=? AND kind IN ('google','cloudflare')", (body.google_user_id,)).fetchone()
+                target = conn.execute("SELECT id FROM users WHERE id=? AND kind IN ('google','cloudflare','okta')", (body.google_user_id,)).fetchone()
                 if not source or not target:
                     raise HTTPException(422, 'Choose a Slack account and an existing Google sign-in.')
                 conn.execute("UPDATE users SET linked_user_id=?,link_method='manual',link_status='manual',updated_at=? WHERE id=?", (body.google_user_id, now(), body.slack_user_id))

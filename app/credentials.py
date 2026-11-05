@@ -453,8 +453,8 @@ class Credentials:
     def insert_secret(self, conn, body, user_id, admin, root_id='', *, authorized_native_root=None):
         if body.scope == 'organization' and not admin:
             raise HTTPException(403, 'Only an administrator can save organization credentials.')
-        if body.scope != 'organization' and not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
-            raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
+        if body.scope != 'organization' and not user_id.startswith(('google:', 'cloudflare:', 'okta:')) and not self.security.local_preview():
+            raise HTTPException(403, 'Use an individual organization sign-in to save personal credentials.')
         root_id = root_id or body.root_id if body.lifetime == 'session' else ''
         if body.lifetime == 'session' and not root_id:
             raise HTTPException(422, 'Session credentials must be associated with a session.')
@@ -1103,8 +1103,8 @@ class Credentials:
                 # An administrator can make a shared credential personal only to themselves.
                 values['owner_id'] = user_id
                 values['client_id'] = 'ownership-' + secret_id
-                if not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
-                    raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
+                if not user_id.startswith(('google:', 'cloudflare:', 'okta:')) and not self.security.local_preview():
+                    raise HTTPException(403, 'Use an individual organization sign-in to save personal credentials.')
             if values['lifetime'] == 'session':
                 if not authorized_native_root or values['root_id'] != authorized_native_root:
                     root = self.store.run(values['root_id'], connection=conn) if values['root_id'] else None

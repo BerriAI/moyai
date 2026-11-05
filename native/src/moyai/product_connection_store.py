@@ -9,7 +9,7 @@ QUERIES = {
     "SELECT * FROM connections WHERE provider=?": "connections",
     "SELECT enabled,read_only,checked_at,check_status FROM connection_policies WHERE provider=?": "connection_policies",
     "SELECT * FROM users WHERE id=?": "users",
-    "SELECT id,email FROM users WHERE kind IN ('google','cloudflare')": "users",
+    "SELECT id,email FROM users WHERE kind IN ('google','cloudflare','okta')": "users",
     "SELECT * FROM users WHERE id IN (?,?)": "users",
     "SELECT * FROM personal_slack_grants WHERE owner_id=?": "personal_slack_grants",
     "SELECT encrypted FROM connections WHERE provider='github'": "connections",

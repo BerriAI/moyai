@@ -28,7 +28,6 @@ NOT_JSON = {
     ("GET", "/api/sessions/{session_id}/messages/{message_id}/source"),
     ("GET", "/api/uploads/{upload_id}"),
     ("GET", "/auth/github/register"),
-    ("GET", "/auth/google/callback"),
     ("POST", "/broker/native/v1/{route}"),
     ("POST", "/hooks/automations/{identity}"),
     ("POST", "/hooks/automations/{identity}/{provider}"),

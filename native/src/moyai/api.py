@@ -436,6 +436,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             ) if product is not None else True,
             google_enabled=bool(product and product.settings.google_enabled()
                                 and not product.settings.cloudflare_access_login),
+            okta_enabled=bool(product and product.settings.okta_enabled()
+                              and not product.settings.cloudflare_access_login),
             access_enabled=bool(product and product.settings.cloudflare_access_login),
         )
 

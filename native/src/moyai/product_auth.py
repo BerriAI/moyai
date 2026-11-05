@@ -73,6 +73,20 @@ class ProductUserDirectory(BaseModel):
     note: str
 
 
+class LinkedSignInProvider(BaseModel):
+    model_config = _OUTPUT
+    provider: Literal["google", "okta"]
+    enabled: bool
+    linked: bool
+
+
+class LinkedSignIns(BaseModel):
+    model_config = _OUTPUT
+    email: str
+    can_link: bool
+    providers: list[LinkedSignInProvider]
+
+
 async def user_directory(runtime: Runtime) -> ProductUserDirectory:
     """GET /api/settings/users in product mode; settings_api owns the route."""
     product = runtime.product
@@ -116,7 +130,27 @@ def routes(runtime: Runtime, actor) -> APIRouter:
     product = runtime.product
     assert product is not None
     router = APIRouter()
-    router.include_router(product.google.routes())
+    router.include_router(product.google.routes(authorize=product.identity.authenticate))
+    router.include_router(product.okta.routes(authorize=product.identity.authenticate))
+
+    @router.get("/api/auth/identities", operation_id="listLinkedSignIns")
+    async def identities(request: Request, user: User = Depends(actor)) -> LinkedSignIns:
+        info = product.security.session_info(request) or {}
+        can_link = info.get('method') in {'google', 'okta'} and not product.settings.cloudflare_access_login
+        records = await asyncio.to_thread(product.store_proxy.rows,
+            "SELECT provider,issuer,email FROM oidc_identities WHERE user_id=?", (user.id,))
+        from app.oidc_identity import GOOGLE_ISSUER
+        providers = []
+        name: Literal["google", "okta"]
+        for name in ("google", "okta"):
+            flow = product.google if name == "google" else product.okta
+            issuer = GOOGLE_ISSUER if name == 'google' else product.settings.okta_issuer
+            providers.append(LinkedSignInProvider(
+                provider=name, enabled=flow.enabled(),
+                linked=any(row['provider'] == name and row['issuer'] == issuer for row in records)
+                    or (not any(row['provider'] == name for row in records) and info.get('method') == name),
+            ))
+        return LinkedSignIns(email=info.get('identity', {}).get('email', ''), can_link=can_link, providers=providers)
 
     @router.put("/api/settings/users/role", operation_id="updateProductUserRole")
     async def role(body: RoleEdit, request: Request, user: User = Depends(actor)) -> ProductUserRoleResult:

@@ -738,7 +738,7 @@ class ProductAutomationService:
             principal = await self.identity.individual_for_admission(db, scope.product_grant)
         if not allowed_local and (
             not principal.individual or not self.settings.person_login_enabled()
-            or principal.email.rpartition("@")[2] not in self.settings.google_domains()
+            or principal.email.rpartition("@")[2] not in self.settings.identity_domains()
         ):
             raise HTTPException(403, "Automation tools require an individual Google or Cloudflare identity.")
         return principal

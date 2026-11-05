@@ -33,7 +33,7 @@ Integration contract (the caller owns activation and reviewed schema migrations)
   onboarding as a second canonical user directory. Native disable/auth_version
   overrides are enforced as an additional fence and are never reset by projection.
   If shared-password identities are explicitly allowed, they remain nonindividual:
-  private sessions still require an individual Google/Access principal. Historical
+  private sessions still require an individual Google/Access/Okta principal. Historical
   sessions retain their original SessionPrivacy rules, including no admin bypass.
 
 ``legacy_security.decrypt`` reads explicitly legacy-tagged ciphertext only.
@@ -107,7 +107,7 @@ class ProductPrincipal:
 
     @property
     def individual(self) -> bool:
-        return self.kind in {"google", "cloudflare"} and self.method in {"google", "cloudflare"}
+        return self.kind in {"google", "cloudflare", "okta"} and self.method in {"google", "cloudflare", "okta", "oidc"}
 
     @property
     def grant(self) -> ProductGrant:
@@ -118,6 +118,22 @@ class SlackAuthority(Protocol):
     async def current(
         self, db: AsyncSession, row: Mapping[str, Any], controls: tuple[bool, int],
     ) -> ProductPrincipal: ...
+
+
+class _OIDCConnection:
+    """Read-only SQL adapter so both runtimes use the same account resolver."""
+
+    def __init__(self, session: Any, table):
+        self.session, self.table = session, table
+
+    def execute(self, statement, parameters=()):
+        if not statement.startswith("SELECT "):
+            raise ValueError("Identity resolution is read-only")
+        for table in ("users", "oidc_identities"):
+            statement = re.sub(r"\b" + table + r"\b", self.table(table), statement)
+        parts = statement.split("?")
+        query = "".join(part + (f":p{i}" if i < len(parts) - 1 else "") for i, part in enumerate(parts))
+        return self.session.execute(text(query), {f"p{i}": value for i, value in enumerate(parameters)}).mappings()
 
 
 class _RoleConnection:
@@ -236,10 +252,12 @@ class ProductIdentityAdapter:
             return await self.slack_authority.current(db, dict(row), (enabled, controls[1]))
         revision = 0
         binding = None
-        if kind in {"google", "cloudflare"}:
+        if kind in {"google", "cloudflare", "okta"}:
             if not self.roles.eligible(email):
                 raise HTTPException(401, "The product account is outside the allowed organization.")
             if self.settings.cloudflare_access_login:
+                if kind == "okta":
+                    raise HTTPException(401, "This account requires an OIDC sign-in.")
                 method = "cloudflare"
                 binding = (await db.execute(text(
                     f"SELECT issuer,subject,email,user_id FROM {self._table('access_identities')} "
@@ -247,8 +265,26 @@ class ProductIdentityAdapter:
                 ), {"issuer": self.access.issuer, "id": user_id})).mappings().first()
                 if binding is None or binding["email"] != email:
                     raise HTTPException(401, "The Access account mapping requires review.")
-            elif kind == "google" and self.settings.google_enabled():
-                method = "google"
+            elif kind in {"google", "okta"}:
+                from app.oidc_identity import GOOGLE_ISSUER, eligible_binding
+                from app.security import digest
+                records = (await db.execute(text(
+                    f"SELECT * FROM {self._table('oidc_identities')} WHERE user_id=:id ORDER BY provider,issuer,subject"
+                ), {"id": user_id})).mappings().all()
+                bindings = [dict(item) for item in records if item['email'] == email and eligible_binding(self.settings, item)]
+                # Old cookies and persisted owners keep their original IDs.
+                # The first provider login pins a real binding; no data moves.
+                if not any(item['provider'] == kind for item in records):
+                    issuer = GOOGLE_ISSUER if kind == 'google' else self.settings.okta_issuer
+                    original = (user_id.startswith('google:') if kind == 'google' else
+                                user_id.startswith('okta:' + digest(issuer) + ':'))
+                    legacy = {'provider': kind, 'issuer': issuer, 'email': email, 'user_id': user_id}
+                    if original and eligible_binding(self.settings, legacy):
+                        bindings.append(legacy)
+                if not bindings:
+                    raise HTTPException(401, "No enabled sign-in identity remains for this account.")
+                method = "oidc"
+                binding = {"identities": bindings}
             else:
                 raise HTTPException(401, "This product sign-in method is no longer enabled.")
             role, revision = await db.run_sync(
@@ -289,6 +325,12 @@ class ProductIdentityAdapter:
                 "password": self.settings.workspace_member_password if role == "member" else self.settings.workspace_password,
             },
         }
+        if method == "oidc":
+            authority["policy"].update({
+                "okta_issuer": self.settings.okta_issuer,
+                "okta_client_id": self.settings.okta_client_id,
+                "okta_domains": sorted(self.settings.okta_domains()),
+            })
         version = hmac.new(
             self.legacy_security.secret.encode(),
             json.dumps(authority, sort_keys=True, separators=(",", ":")).encode(),
@@ -350,7 +392,7 @@ class ProductIdentityAdapter:
         if not 0 <= age < PROFILE_MAX_AGE_SECONDS or not self.roles.eligible(actor["email"]):
             return None
         owners = (await db.execute(text(
-            f"SELECT id FROM {self._table('users')} WHERE kind IN ('google','cloudflare') AND email=:email",
+            f"SELECT id FROM {self._table('users')} WHERE kind IN ('google','cloudflare','okta') AND email=:email",
         ), {"email": actor["email"]})).scalars().all()
         if len(owners) != 1 or not (await self._native_controls(owners[0], db))[0]:
             return None
@@ -429,17 +471,21 @@ class ProductIdentityAdapter:
             if binding is None:
                 raise HTTPException(401, "This Access identity must be enrolled by the product first.")
             user_id = binding["user_id"]
-        elif method == "google":
-            subject = info["identity"]["sub"]
-            if not isinstance(subject, str) or not subject:
-                raise HTTPException(401, "Invalid product identity subject.")
-            user_id = "google:" + subject
+        elif method in {"google", "okta"}:
+            from app.oidc_identity import resolve_in
+            try:
+                async with self._reader(self.source_engine) as db:
+                    user_id = await db.run_sync(lambda session: resolve_in(
+                        _OIDCConnection(session, self._table), method, info["identity"], require_binding=info.get("oidc_bound", False),
+                    ))
+            except ValueError:
+                raise HTTPException(401, "The sign-in account mapping requires review.") from None
         else:
             user_id = f"shared:{method}:{info['role']}"
         principal = await self.current(user_id)
-        if method in {"google", "cloudflare"} and principal.email != info["identity"]["email"].strip().lower():
+        if method in {"google", "cloudflare", "okta"} and principal.email != info["identity"]["email"].strip().lower():
             raise HTTPException(401, "The product identity mapping changed.")
-        if principal.method != method:
+        if principal.method != ("oidc" if method in {"google", "okta"} else method):
             raise HTTPException(401, "The product sign-in method changed.")
         if admin and principal.role != "admin":
             raise HTTPException(403, "An organization administrator must perform this action.")

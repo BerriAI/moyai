@@ -192,7 +192,7 @@ class Settings(BaseSettings):
                 'WORKSPACE_ACCESS_CLIENT_SECRET': self.cloudflare_access_client_secret}
 
     def person_login_enabled(self) -> bool:
-        return self.google_enabled() or self.cloudflare_access_login
+        return self.google_enabled() or self.okta_enabled() or self.cloudflare_access_login
 
     workspace_password: str = ""
     workspace_member_password: str = ""
@@ -201,6 +201,27 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_allowed_domains: str = ""
     google_admin_emails: str = ""
+    okta_issuer: str = ""
+    okta_client_id: str = ""
+    okta_client_secret: str = Field(default="", repr=False)
+    okta_allowed_domains: str = ""
+    okta_admin_emails: str = ""
+
+    @model_validator(mode="after")
+    def okta_configuration(self):
+        values = (self.okta_issuer, self.okta_client_id, self.okta_client_secret)
+        if any(values) and not all(values):
+            raise ValueError("Set OKTA_ISSUER, OKTA_CLIENT_ID and OKTA_CLIENT_SECRET together.")
+        if any(values):
+            issuer = urlsplit(self.okta_issuer)
+            if (issuer.scheme != "https" or not issuer.hostname or issuer.username or issuer.password
+                    or issuer.query or issuer.fragment or issuer.port not in (None, 443)
+                    or not re.fullmatch(r"(?:/oauth2/[A-Za-z0-9_-]+)?", issuer.path)):
+                raise ValueError("OKTA_ISSUER must be an HTTPS org or authorization-server URL without a trailing slash.")
+            if (not self.okta_domains() or not self.okta_admins()
+                    or any(email.rpartition("@")[2] not in self.okta_domains() for email in self.okta_admins())):
+                raise ValueError("Configure OKTA_ALLOWED_DOMAINS and OKTA_ADMIN_EMAILS in those domains.")
+        return self
     organization_name: str = Field(default="Internal team", min_length=1, max_length=80)
     session_secret: str = ""
     encryption_key: str = ""
@@ -488,6 +509,21 @@ class Settings(BaseSettings):
 
     def google_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
+
+    def okta_enabled(self) -> bool:
+        return bool(self.okta_issuer and self.okta_client_id and self.okta_client_secret)
+
+    def okta_domains(self) -> set[str]:
+        return {value.strip().lower() for value in self.okta_allowed_domains.split(",") if value.strip()}
+
+    def okta_admins(self) -> set[str]:
+        return {value.strip().lower() for value in self.okta_admin_emails.split(",") if value.strip()}
+
+    def identity_domains(self) -> set[str]:
+        return self.google_domains() | (self.okta_domains() if self.okta_enabled() and not self.cloudflare_access_login else set())
+
+    def identity_admins(self) -> set[str]:
+        return self.google_admins() | (self.okta_admins() if self.okta_enabled() and not self.cloudflare_access_login else set())
 
     def allowed_models(self) -> list[str]:
         # Preserve custom gateway defaults without replacing the shared catalog.

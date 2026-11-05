@@ -828,7 +828,7 @@ class BillingReader:
             SourceRef("legacy", row["id"]),
             _source("legacy", row.get("linked_user_id")),
             row["kind"], str(row.get("link_method") or ""), str(row.get("link_status") or ""),
-            row["kind"] == "slack" and known.get(row.get("linked_user_id"), {}).get("kind") in {"google", "cloudflare"},
+            row["kind"] == "slack" and known.get(row.get("linked_user_id"), {}).get("kind") in {"google", "cloudflare", "okta"},
         ) for row in rows)
 
     async def families(self, run_ids: Iterable[str]) -> dict[str, str]:

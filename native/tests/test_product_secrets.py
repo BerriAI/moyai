@@ -23,8 +23,21 @@ from moyai.product_secrets import ProductSecrets
 bridge = canonical_connections
 
 
-@pytest_asyncio.fixture
-async def secrets_api(runtime, bridge):
+@pytest_asyncio.fixture(params=["google", "okta"])
+async def secrets_api(runtime, bridge, request):
+    method = request.param
+    profile = {"sub": "owner", "email": "owner@example.test", "domain": "example.test", "name": "Owner"}
+    if method == "okta":
+        bridge.settings.okta_issuer = "https://example.okta.com"
+        bridge.settings.okta_client_id = "local-client"
+        bridge.settings.okta_client_secret = "local-secret"
+        bridge.settings.okta_allowed_domains = "example.test"
+        bridge.settings.okta_admin_emails = "admin@example.test"
+        profile["issuer"] = bridge.settings.okta_issuer
+    user_id = bridge.store.oidc_identity(method, profile, link_info=(
+        {"method": "google", "identity": {"sub": "owner", "email": "owner@example.test"}}
+        if method == "okta" else None
+    ))
     bridge.security.user_roles = UserRoles(bridge.store, bridge.settings)
     source = create_async_engine(f"sqlite+aiosqlite:///file:{bridge.store.path}?mode=ro&uri=true")
     identity = ProductIdentityAdapter(
@@ -42,13 +55,12 @@ async def secrets_api(runtime, bridge):
         transport=httpx.ASGITransport(app=app), base_url=bridge.settings.public_url,
     ) as client:
         response = Response()
-        sid = bridge.security.new_session(response, identity={
-            "sub": "owner", "email": "owner@example.test", "domain": "example.test", "name": "Owner",
-        })
+        sid = bridge.security.new_session(response, identity=profile, method=method)
         cookie = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
         client.cookies.set("workspace_session", cookie)
         client.headers.update({"Origin": bridge.settings.public_url, "X-CSRF-Token": bridge.security.csrf(sid)})
-        yield SimpleNamespace(client=client, service=service, runtime=runtime, bridge=bridge, identity=identity)
+        yield SimpleNamespace(client=client, service=service, runtime=runtime, bridge=bridge,
+                              identity=identity, user_id=user_id)
     runtime.product = None
     await source.dispose()
 
@@ -78,6 +90,8 @@ async def test_canonical_secret_crud_encryption_revision_replay_and_revocation(s
     assert inventory.json()["capabilities"]["scopes"] == ["personal"]
     encrypted = secrets_api.bridge.store.rows("SELECT encrypted FROM provider_secrets WHERE id=?", (identity,))[0]["encrypted"]
     assert "synthetic-secret-value" not in encrypted
+    owner = secrets_api.bridge.store.rows("SELECT owner_id FROM provider_secrets WHERE id=?", (identity,))[0]["owner_id"]
+    assert owner == secrets_api.user_id
     updated = await client.patch("/api/credentials/secrets/" + identity, json={"revision": row["revision"], "label": "Changed"})
     assert updated.status_code == 200
     stale = await client.patch("/api/credentials/secrets/" + identity, json={"revision": row["revision"], "label": "Old"})
@@ -102,7 +116,7 @@ async def test_secret_mutations_require_csrf_and_org_admin_and_hide_invalid_valu
 
 
 async def test_native_session_secret_scope_is_namespaced_and_unusable_by_legacy_runs(secrets_api):
-    principal = await secrets_api.identity.current("google:owner")
+    principal = await secrets_api.identity.current(secrets_api.user_id)
     async with secrets_api.runtime.database.sessions.begin() as db:
         actor = await secrets_api.identity.project_native_user(db, principal)
     session = await secrets_api.runtime.database.create_session(actor, NewSession())

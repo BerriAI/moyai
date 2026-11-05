@@ -1,4 +1,4 @@
-"""Administrator-managed Google Workspace roles, separate from spend identities."""
+"""Administrator-managed organization roles, separate from spend identities."""
 import re
 from typing import Literal
 
@@ -30,7 +30,7 @@ class UserRoles:
             initialize_schema(store)
 
     def eligible(self, email):
-        return bool(email and email.rpartition('@')[2] in self.settings.google_domains())
+        return bool(email and email.rpartition('@')[2] in self.settings.identity_domains())
 
     def role_in(self, conn, email):
         return self.role_and_revision_in(conn, email)[0]
@@ -38,7 +38,7 @@ class UserRoles:
     def role_and_revision_in(self, conn, email):
         row = conn.execute('SELECT role,revision FROM user_roles WHERE email=?', (email,)).fetchone()
         return (row['role'], row['revision']) if row else (
-            'admin' if email in self.settings.google_admins() else 'member', 0,
+            'admin' if email in self.settings.identity_admins() else 'member', 0,
         )
 
     def role(self, email):
@@ -46,7 +46,7 @@ class UserRoles:
             return self.role_in(conn, email.strip().lower())
 
     def admins_in(self, conn):
-        admins = set(self.settings.google_admins())
+        admins = set(self.settings.identity_admins())
         for row in conn.execute('SELECT email,role FROM user_roles'):
             if row['role'] == 'admin':
                 admins.add(row['email'])
@@ -59,14 +59,14 @@ class UserRoles:
             conn.begin_read()
             assignments = {row['email']: dict(row) for row in conn.execute('SELECT * FROM user_roles')}
             people = {email: {'email': email, 'name': '', 'has_signed_in': False, 'last_seen': None}
-                      for email in set(self.settings.google_admins()) | assignments.keys() if self.eligible(email)}
+                      for email in set(self.settings.identity_admins()) | assignments.keys() if self.eligible(email)}
             # Slack profiles may appear before Google sign-in. They do not grant authentication.
-            for row in conn.execute("SELECT email,name,kind,updated_at FROM users WHERE kind IN ('google','cloudflare') OR (kind='slack' AND profile_eligible=1) ORDER BY updated_at"):
+            for row in conn.execute("SELECT email,name,kind,updated_at FROM users WHERE kind IN ('google','cloudflare','okta') OR (kind='slack' AND profile_eligible=1) ORDER BY updated_at"):
                 email = row['email'].strip().lower()
                 if not self.eligible(email):
                     continue
                 person = people.setdefault(email, {'email': email, 'name': '', 'has_signed_in': False, 'last_seen': None})
-                if row['kind'] in {'google', 'cloudflare'}:
+                if row['kind'] in {'google', 'cloudflare', 'okta'}:
                     person.update(name=row['name'], has_signed_in=True, last_seen=row['updated_at'])
                 elif not person['name']:
                     person['name'] = row['name']
@@ -75,18 +75,18 @@ class UserRoles:
                 person.update(role=self.role_in(conn, email), revision=assignment.get('revision', 0))
             audit = [dict(row) for row in conn.execute('SELECT email,previous_role,role,actor,created_at FROM user_role_audit ORDER BY id DESC LIMIT 30')]
         return {'users': sorted(people.values(), key=lambda row: (row['role'] != 'admin', row['email'])),
-                'activity': audit, 'domains': sorted(self.settings.google_domains())}
+                'activity': audit, 'domains': sorted(self.settings.identity_domains())}
 
     def change(self, body, actor):
         if not actor:
             raise HTTPException(401, 'Sign in to the workspace.')
         if not self.eligible(body.email):
-            raise HTTPException(422, 'Use an email in the workspace’s allowed Google domains.')
+            raise HTTPException(422, 'Use an email in the workspace’s allowed organization domains.')
         with self.store.connect() as conn:
             # Serialize authorization, the last-admin check, and the write. Two
             # concurrent demotions must never remove both remaining admins.
             conn.begin_write()
-            if actor.get('method') in {'google', 'cloudflare'}:
+            if actor.get('method') in {'google', 'cloudflare', 'okta'}:
                 actor_email = actor['identity']['email'].strip().lower()
                 if not self.eligible(actor_email) or self.role_in(conn, actor_email) != 'admin':
                     raise HTTPException(403, 'An organization administrator must perform this action.')
@@ -104,7 +104,7 @@ class UserRoles:
                 raise HTTPException(409, 'Keep at least one administrator. Promote another user first.')
             if previous and previous['role'] == body.role:
                 return {'email': body.email, 'role': body.role, 'revision': revision}
-            known = previous or body.email in self.settings.google_admins() or conn.execute(
+            known = previous or body.email in self.settings.identity_admins() or conn.execute(
                 'SELECT 1 FROM users WHERE lower(email)=? LIMIT 1', (body.email,)).fetchone()
             stamp = now()
             conn.execute('''INSERT INTO user_roles VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET

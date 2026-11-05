@@ -62,16 +62,16 @@ class PersonalSlack:
                 raise ConnectorError('Sign in again with your individual work account.')
             return None
         user = rows[0]
-        if user['kind'] in {'google', 'cloudflare'}:
+        if user['kind'] in {'google', 'cloudflare', 'okta'}:
             if (not self.settings.person_login_enabled()
-                    or user['email'].rpartition('@')[2] not in self.settings.google_domains()):
+                    or user['email'].rpartition('@')[2] not in self.settings.identity_domains()):
                 if self.configured(user['id']):
                     raise ConnectorError('Sign in again with your individual work account.')
                 return None
             return user['id']
         if user['kind'] == 'slack':
             match = self.same_requester or getattr(self.connectors.slack_identities, 'same_requester', None)
-            individuals = self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare')")
+            individuals = self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare','okta')")
             candidates = [u['id'] for u in individuals if match and match(u['id'], actor)]
             if len(candidates) != 1:
                 # A never-linked Slack sender has no personal owner/grant.

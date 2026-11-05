@@ -58,7 +58,7 @@ async def product_database_state(tmp_path, *, template="template0", initialize_l
                 )
                 await asyncio.to_thread(migrate, source_settings)
             async with source.begin() as connection:
-                statements = SCHEMA if initialize_legacy else SCHEMA[:2]
+                statements = SCHEMA if initialize_legacy else (SCHEMA[:2] + (SCHEMA[-1],))
                 for statement in statements:
                     await connection.execute(text(
                         statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS moyai.", 1)

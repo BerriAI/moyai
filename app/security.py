@@ -88,7 +88,7 @@ class Security:
                 or any(email.rpartition("@")[2] not in settings.google_domains() for email in settings.google_admins())):
             raise ValueError("Configure GOOGLE_ALLOWED_DOMAINS and GOOGLE_ADMIN_EMAILS in those domains.")
         if not self.local and not settings.person_login_enabled() and (not settings.password_login_enabled or not settings.workspace_password):
-            raise ValueError("Configure Google sign-in or WORKSPACE_PASSWORD before exposing the workspace.")
+            raise ValueError("Configure organization sign-in or WORKSPACE_PASSWORD before exposing the workspace.")
         if settings.workspace_password and len(settings.workspace_password) < 16:
             raise ValueError("Set WORKSPACE_PASSWORD to at least 16 characters before exposing the workspace.")
         if not self.local and not self.origin.startswith("https://"):
@@ -121,6 +121,16 @@ class Security:
                 if (not self.settings.google_enabled() or domain not in self.settings.google_domains()
                         or email.rpartition("@")[2] != domain or not identity.get("sub")
                         or info.get("client_id") != self.settings.google_client_id):
+                    return None
+                role = self.google_role(email)
+            elif method == "okta":
+                identity = info.get("identity", {})
+                email = identity.get("email", "")
+                if (not self.settings.okta_enabled()
+                        or identity.get("issuer") != self.settings.okta_issuer
+                        or info.get("client_id") != self.settings.okta_client_id
+                        or email.rpartition("@")[2] not in self.settings.okta_domains()
+                        or not isinstance(identity.get("sub"), str) or not identity["sub"]):
                     return None
                 role = self.google_role(email)
             elif method == "local":
@@ -169,7 +179,7 @@ class Security:
             if connection is not None:
                 return self.user_roles.role_in(connection, email.strip().lower())
             return self.user_roles.role(email)
-        return 'admin' if email in self.settings.google_admins() else 'member'
+        return 'admin' if email in self.settings.identity_admins() else 'member'
 
     def local_preview(self) -> bool:
         return self.local and not self.settings.workspace_password and not self.settings.person_login_enabled()
@@ -214,11 +224,20 @@ class Security:
         if request.headers.get("origin") != self.origin:
             raise HTTPException(403, "This request must come from the workspace.")
 
-    def new_session(self, response, role: str = "admin", *, identity: dict | None = None, local: bool = False) -> str:
+    def require_recent_sign_in(self, request, *, max_age=300):
+        try:
+            self.signer.loads(request.cookies.get(self.session_cookie, ''), max_age=max_age)
+        except (BadSignature, SignatureExpired):
+            raise HTTPException(403, 'Sign out and sign in again before linking another sign-in method.') from None
+
+    def new_session(self, response, role: str = "admin", *, identity: dict | None = None, local: bool = False,
+                    method: str = "google", oidc_bound: bool = False) -> str:
         sid = secrets.token_urlsafe(32)
-        info = {"sid": sid, "role": role, "method": "google" if identity else "local" if local else "password"}
+        info = {"sid": sid, "role": role, "method": method if identity else "local" if local else "password"}
         if identity:
-            info.update(identity=identity, client_id=self.settings.google_client_id)
+            if oidc_bound:
+                info["oidc_bound"] = True
+            info.update(identity=identity, client_id=self.settings.okta_client_id if method == "okta" else self.settings.google_client_id)
         elif role == "member":
             info["password_tag"] = digest(self.settings.workspace_member_password)
         self.set_session_cookie(response, info)

@@ -9,7 +9,7 @@ def same_requester(store, owner_id, actor_id, *, connection=None):
     if owner_id == actor_id:
         return bool(owner_id)
     rows = store.rows('SELECT * FROM users WHERE id IN (?,?)', (owner_id, actor_id), connection=connection)
-    owner = next((u for u in rows if u['id'] == owner_id and u['kind'] in {'google', 'cloudflare'}), None)
+    owner = next((u for u in rows if u['id'] == owner_id and u['kind'] in {'google', 'cloudflare', 'okta'}), None)
     actor = next((u for u in rows if u['id'] == actor_id and u['kind'] == 'slack'), None)
     if not owner or not actor or not actor['profile_eligible'] or actor['profile_conflict'] or not actor['email']:
         return False

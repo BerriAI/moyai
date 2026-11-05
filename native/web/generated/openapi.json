@@ -2608,6 +2608,10 @@
             "title": "Mode",
             "type": "string"
           },
+          "okta_enabled": {
+            "title": "Okta Enabled",
+            "type": "boolean"
+          },
           "password_enabled": {
             "title": "Password Enabled",
             "type": "boolean"
@@ -2617,6 +2621,7 @@
           "mode",
           "password_enabled",
           "google_enabled",
+          "okta_enabled",
           "access_enabled"
         ],
         "title": "AuthConfig",
@@ -8516,6 +8521,59 @@
           "url"
         ],
         "title": "LinkInput",
+        "type": "object"
+      },
+      "LinkedSignInProvider": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "linked": {
+            "title": "Linked",
+            "type": "boolean"
+          },
+          "provider": {
+            "enum": [
+              "google",
+              "okta"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "enabled",
+          "linked"
+        ],
+        "title": "LinkedSignInProvider",
+        "type": "object"
+      },
+      "LinkedSignIns": {
+        "properties": {
+          "can_link": {
+            "title": "Can Link",
+            "type": "boolean"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/LinkedSignInProvider"
+            },
+            "title": "Providers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "email",
+          "can_link",
+          "providers"
+        ],
+        "title": "LinkedSignIns",
         "type": "object"
       },
       "LiveEvent": {
@@ -16996,7 +17054,6 @@
         "type": "object"
       },
       "SignInRedirect": {
-        "description": "Where the browser goes next: Google's authorization page, or a local path.",
         "properties": {
           "url": {
             "title": "Url",
@@ -17011,6 +17068,11 @@
       },
       "SignInStart": {
         "properties": {
+          "link": {
+            "default": false,
+            "title": "Link",
+            "type": "boolean"
+          },
           "return_to": {
             "default": "/#tasks",
             "maxLength": 1600,
@@ -19488,6 +19550,62 @@
     "/api/auth/google/start": {
       "post": {
         "operationId": "startGoogleSignIn",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInRedirect"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start"
+      }
+    },
+    "/api/auth/identities": {
+      "get": {
+        "operationId": "listLinkedSignIns",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkedSignIns"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Identities"
+      }
+    },
+    "/api/auth/okta/start": {
+      "post": {
+        "operationId": "startOktaSignIn",
         "requestBody": {
           "content": {
             "application/json": {
@@ -26870,64 +26988,6 @@
           }
         },
         "summary": "Registration"
-      }
-    },
-    "/auth/google/callback": {
-      "get": {
-        "operationId": "callback_auth_google_callback_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "state",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "State",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "code",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Code",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "error",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Error",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Callback"
       }
     },
     "/broker/native/v1/{route}": {

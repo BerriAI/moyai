@@ -16,7 +16,7 @@ import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
 import { ApiError, csrfToken, setCsrf } from "./api"
-import { getMe, listPullRequestStatuses, startGoogleSignIn, listSessionFolders, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
+import { getMe, listPullRequestStatuses, startGoogleSignIn, startOktaSignIn, listSessionFolders, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
 import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, getSessionActivity, getSessionPlan, listConnections, listSessionMessages, listSessions, loginWithPassword, logout, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending, type PlanStep, type SessionDetail } from "./generated/api"
 import { listHistorySessions, searchHistory, type HistorySessionList, type SourcedHistorySession } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
@@ -421,12 +421,12 @@ function navigateAuth(value: string, sameOrigin = false) {
 }
 function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   const [config, setConfig] = useState<AuthConfig | null>(null)
-  const [error, setError] = useState("")
+  const [error, setError] = useState(new URLSearchParams(location.search).get("signin") === "link_required"
+    ? "This email already has a Moyai account. Sign in with your existing method, then open Settings → Sign-in to link another provider." : "")
   const [busy, setBusy] = useState(false)
   const [retry, setRetry] = useState(0)
   useEffect(() => {
     const controller = new AbortController()
-    setError("")
     void getAuthConfig({ signal: controller.signal }).then(({ data: value }) => { if (!controller.signal.aborted) setConfig(value) }, reason => { if (!controller.signal.aborted) setError(String(reason)) })
     return () => controller.abort()
   }, [retry])
@@ -438,6 +438,11 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
       try { const { data: result } = await startGoogleSignIn({ body: { return_to: "/" } }); navigateAuth(result.url) }
       catch (reason) { setError(String(reason)); setBusy(false) }
     }}>Continue with Google</Button>}
+    {config?.okta_enabled && <Button variant="outline" disabled={busy} onClick={async () => {
+      setBusy(true); setError("")
+      try { const { data: result } = await startOktaSignIn({ body: { return_to: "/" } }); navigateAuth(result.url) }
+      catch (reason) { setError(String(reason)); setBusy(false) }
+    }}>Continue with Okta</Button>}
     {config?.password_enabled && <form className="login-password" onSubmit={async event => {
       event.preventDefault(); setBusy(true); setError("")
       const form = new FormData(event.currentTarget)
@@ -451,11 +456,11 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
       } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
     }}>
       {config.mode === "standalone" && <label>Username<Input name="username" autoComplete="username" required autoFocus disabled={busy} /></label>}
-      <label>{config.mode === "existing" ? "Workspace password" : "Password"}<Input name="password" type="password" autoComplete="current-password" required autoFocus={config.mode === "existing" && !config.google_enabled} disabled={busy} /></label>
+      <label>{config.mode === "existing" ? "Workspace password" : "Password"}<Input name="password" type="password" autoComplete="current-password" required autoFocus={config.mode === "existing" && !config.google_enabled && !config.okta_enabled} disabled={busy} /></label>
       <Button type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Button>
     </form>}
     {config?.access_enabled && <><p>Your organization uses Cloudflare Access. Continue through your organization’s sign-in to open Moyai.</p><Button onClick={() => location.reload()}>Continue to workspace</Button></>}
-    {config && !config.password_enabled && !config.google_enabled && !config.access_enabled && <p>No sign-in method is enabled. Contact your workspace administrator.</p>}
+    {config && !config.password_enabled && !config.google_enabled && !config.okta_enabled && !config.access_enabled && <p>No sign-in method is enabled. Contact your workspace administrator.</p>}
     {error && <p className="error" role="alert">{error}</p>}
     {!config && error && <Button variant="outline" onClick={() => setRetry(value => value + 1)}>Retry sign-in options</Button>}
   </section></main>
