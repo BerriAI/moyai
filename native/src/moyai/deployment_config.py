@@ -238,7 +238,7 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
         MOYAI_NATIVE_KEY_FORMAT="sha256-text-fernet-v1",
         MOYAI_NATIVE_OBJECT_FORMAT="fernet-hmac-sha256-v1",
         MOYAI_MODAL_APP=values.get("MODAL_APP_NAME") or f"{name}-moyai",
-        PASSWORD_LOGIN_ENABLED="true",
+        PASSWORD_LOGIN_ENABLED=values.get("PASSWORD_LOGIN_ENABLED", "true"),
         GOOGLE_ALLOWED_DOMAINS=values.get("GOOGLE_ALLOWED_DOMAINS", ""),
         GOOGLE_ADMIN_EMAILS=values.get("GOOGLE_ADMIN_EMAILS", ""),
         SESSION_TITLES_ENABLED=values.get("SESSION_TITLES_ENABLED", "false"),
