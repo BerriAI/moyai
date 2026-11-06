@@ -347,7 +347,9 @@ async def test_unreachable_target_retires_dirty_idle_row_at_every_check(slack, a
         return httpx.Response(200, json={"ok": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
-        await service.sync(client)
+        # Exercise each authority checkpoint without the batch scheduler's
+        # wall-clock budget expiring on a busy PostgreSQL test runner.
+        await service.sync_one(client, thread.id)
         assert len(checks) == phase
         assert requests == []
         async with runtime.database.sessions() as db:

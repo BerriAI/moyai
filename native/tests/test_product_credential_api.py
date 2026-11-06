@@ -67,6 +67,9 @@ async def mixed_request(f):
 async def assembled_client(f, runtime, monkeypatch, *, sub=None, email="admin@example.test"):
     # Use the real app factory and auth/CSRF dependencies. Unrelated OAuth routes
     # are empty because this SQL fixture seeds only canonical identity/vault data.
+    def oauth_routes(*, authorize):
+        return APIRouter()
+
     with monkeypatch.context() as patch:
         patch.setattr(runtime, "database", f.product.database)
         patch.setattr(runtime, "security", f.runtime.security)
@@ -76,7 +79,8 @@ async def assembled_client(f, runtime, monkeypatch, *, sub=None, email="admin@ex
         patch.setattr(runtime, "settings", f.product.settings.model_copy(update={
             "public_url": f.runtime.product.settings.public_url,
         }))
-        patch.setattr(f.runtime.product, "google", SimpleNamespace(routes=APIRouter), raising=False)
+        for provider in ("google", "okta"):
+            patch.setattr(f.runtime.product, provider, SimpleNamespace(routes=oauth_routes), raising=False)
         patch.setattr(f.runtime, "product_secrets", f.vault, raising=False)
         cookie, csrf = google_cookie(f.product.adapter, sub=sub or f.product.subject, email=email)
         async with httpx.AsyncClient(
