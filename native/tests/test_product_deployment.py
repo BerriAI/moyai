@@ -141,13 +141,14 @@ def test_snapshot_uses_real_product_aliases_without_ambient_environment_or_doten
         assert secret not in repr(config)
 
 
-@pytest.mark.parametrize("selected", ["", "astra", "sol", "synthetic/custom-model"])
+@pytest.mark.parametrize("selected", ["", "astra", "sol", "DeepSeek V4.1 Flash", "synthetic/custom-model"])
 def test_product_model_aliases_and_default_catalog_are_preserved(environment, selected):
     environment["AGENT_MODEL"] = selected
     config = configured(environment)
     source = config.legacy_settings()
     native = Settings(_env_file=None, **config.native_overrides())
     assert native.default_model == source.resolve_model()
+    assert "fireworks_ai/deepseek-v4p1-flash" in native.models
     assert set(native.models) == {source.resolve_model(value) for value in source.allowed_models()}
 
 
