@@ -21,13 +21,13 @@ jobs:
       run:
         working-directory: native
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
           cache: npm
       - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6.8.0
         with:
           python-version: '3.13'
       - run: uv sync --frozen
@@ -71,13 +71,13 @@ jobs:
       run:
         working-directory: native
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
           cache: npm
       - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6.8.0
         with:
           python-version: '3.13'
       - run: uv sync --frozen
@@ -90,7 +90,7 @@ jobs:
           --junitxml="test-results/native-${SHARD}.xml"
       - name: Save shard results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: native-tests-${{ matrix.shard }}
           path: native/test-results/
@@ -104,16 +104,16 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
           cache: npm
       - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6.8.0
         with:
           python-version: '3.13'
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v3.7.0
       - run: uv sync --frozen
       - name: Verify dependency install and preview use the pinned runtime
         run: uv run --frozen python -m scripts.node_runtime_smoke --platform "${{ matrix.platform }}"

@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
       - name: Build the desktop with Chromium and pinned OCU
         run: docker build -t moyai-desktop-test evals/tasks/desktop_license/environment
       - name: Check real desktop actions, worker recovery, and browser failures
@@ -39,7 +39,7 @@ jobs:
       MOYAI_EVAL_JUDGE_MODEL: ${{ vars.MOYAI_EVAL_JUDGE_MODEL }}
       MOYAI_TEST_POSTGRES: postgresql://postgres:eval-only@127.0.0.1:5432/postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
       - name: Check eval configuration
         id: eval-config
         run: |
@@ -54,7 +54,7 @@ jobs:
             exit 0
           fi
           echo "enabled=true" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6.8.0
         if: steps.eval-config.outputs.enabled == 'true'
         with:
           python-version: '3.13'
@@ -116,7 +116,7 @@ jobs:
           PY
       - name: Upload Harbor jobs
         if: always() && steps.eval-config.outputs.enabled == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: moyai-harbor-jobs
           path: evals/jobs/
