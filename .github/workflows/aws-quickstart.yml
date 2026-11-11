@@ -12,11 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v4.4.0
+      - uses: hashicorp/setup-terraform@v3.1.2
         with:
           terraform_version: 1.13.5
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6.8.0
       - run: uv sync --frozen
       - run: terraform -chdir=deploy/aws init -backend=false -input=false
       - run: terraform -chdir=deploy/aws fmt -check -recursive

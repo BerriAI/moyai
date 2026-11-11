@@ -24,20 +24,20 @@ jobs:
     env:
       MOYAI_TEST_POSTGRES_URL: postgresql://postgres:synthetic-release-test@127.0.0.1:5432/moyai_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
           cache: npm
       - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6.8.0
       - name: Install the locked workspace for runtime contract checks
         run: uv sync --frozen --python 3.13
       - name: Verify startup, shutdown and PostgreSQL migration contracts
         run: uv run --frozen --python 3.13 pytest -q tests/test_render.py tests/test_render_shutdown.py tests/test_online_migrations.py
       - name: Keep old and new readers working through a real additive migration
         run: uv run --frozen --python 3.13 python -m scripts.online_migration_probe --output /tmp/moyai-online-migration
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
           name: online-migration-proof

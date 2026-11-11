@@ -11,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v4.4.0
+      - uses: docker/setup-buildx-action@v3.12.0
       - name: Build the single runtime image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v6.19.2
         with:
           context: .
           load: true
@@ -23,7 +23,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=moyai-docker-smoke
       - name: Verify authentication, persistence, privileges and maintenance startup
         run: python scripts/docker_smoke.py moyai-docker-smoke --output /tmp/docker-evidence
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
           name: docker-startup-evidence
@@ -40,16 +40,16 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v4.4.0
+      - uses: docker/setup-qemu-action@v3.7.0
+      - uses: docker/setup-buildx-action@v3.12.0
+      - uses: docker/login-action@v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish the verified revision for AMD64 and ARM64
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v6.19.2
         id: image
         with:
           context: .

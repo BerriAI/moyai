@@ -18,13 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
           cache: npm
       - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6.8.0
       - name: Install the locked Python schemas used by UI contract checks
         run: uv sync --frozen --python 3.13
       - run: npm test
