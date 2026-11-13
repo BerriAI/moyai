@@ -5396,8 +5396,34 @@
         "title": "ComputerState",
         "type": "object"
       },
+      "ConnectionCheck": {
+        "properties": {
+          "tool_count": {
+            "title": "Tool Count",
+            "type": "integer"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectionToolPreview"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tool_count",
+          "tools"
+        ],
+        "title": "ConnectionCheck",
+        "type": "object"
+      },
       "ConnectionInput": {
         "properties": {
+          "clear_credential": {
+            "default": false,
+            "title": "Clear Credential",
+            "type": "boolean"
+          },
           "credential": {
             "format": "password",
             "title": "Credential",
@@ -5414,7 +5440,8 @@
               "github",
               "linear",
               "notion",
-              "slack"
+              "slack",
+              "mcp"
             ],
             "title": "Kind",
             "type": "string"
@@ -5465,6 +5492,16 @@
             ],
             "title": "Allowed Tools"
           },
+          "mcp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteMCPConfig-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "product": {
             "anyOf": [
               {
@@ -5502,6 +5539,16 @@
             ],
             "title": "Allowed Tools"
           },
+          "mcp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteMCPConfig-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "product": {
             "anyOf": [
               {
@@ -5525,9 +5572,35 @@
         "required": [
           "allowed_tools",
           "require_approval",
-          "product"
+          "product",
+          "mcp"
         ],
         "title": "ConnectionPolicyView",
+        "type": "object"
+      },
+      "ConnectionToolPreview": {
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ],
+        "title": "ConnectionToolPreview",
         "type": "object"
       },
       "ConnectionView": {
@@ -5541,6 +5614,13 @@
             "type": "string"
           },
           "kind": {
+            "enum": [
+              "github",
+              "linear",
+              "notion",
+              "slack",
+              "mcp"
+            ],
             "title": "Kind",
             "type": "string"
           },
@@ -14522,6 +14602,51 @@
         "title": "ReadThrough",
         "type": "object"
       },
+      "RemoteMCPConfig-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "transport": {
+            "const": "streamable_http",
+            "default": "streamable_http",
+            "title": "Transport",
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "RemoteMCPConfig",
+        "type": "object"
+      },
+      "RemoteMCPConfig-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "transport": {
+            "const": "streamable_http",
+            "default": "streamable_http",
+            "title": "Transport",
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "transport"
+        ],
+        "title": "RemoteMCPConfig",
+        "type": "object"
+      },
       "Resolve": {
         "additionalProperties": false,
         "properties": {
@@ -20029,6 +20154,46 @@
           }
         },
         "summary": "Edit Connection"
+      }
+    },
+    "/api/connections/{connection_id}/check": {
+      "post": {
+        "operationId": "checkConnection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionCheck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check Connection"
       }
     },
     "/api/connections/{provider}": {

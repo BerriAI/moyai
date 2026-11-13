@@ -7,6 +7,7 @@ const {spawnSync}=require('node:child_process');
 const ts=require('typescript');
 const React=require('react');
 const {renderToStaticMarkup}=require('react-dom/server');
+const {mcpConnection}=require('./fixtures/settings.cjs');
 const root=path.resolve(__dirname,'..'),nativeId='12345678-1234-1234-1234-123456789abc',legacyId='a'.repeat(32);
 let server,ui,homeSubmission;
 test.before(async()=>{
@@ -62,6 +63,47 @@ test('account metadata preserves canonical provider identity and member-only vie
   assert.match(html,/Organization GitHub App/);assert.match(html,/Paused/);assert.match(html,/Read-only policy/);assert.match(html,/View access/);assert.doesNotMatch(html,/>Manage</);
 });
 
+const connectionDraft=(row=mcpConnection(),patch={})=>({name:row.name,kind:row.kind,url:row.policy.mcp?.url||'',credential:'',clear_credential:false,shared:row.shared,read_only:row.read_only,enabled:row.enabled,...patch});
+test('remote MCP bodies support no token and bearer tokens with the typed Streamable HTTP policy',()=>{
+  for(const credential of ['','synthetic-bearer']){
+    const body=ui.connectionInput(connectionDraft(undefined,{credential}),{require_approval:true});
+    assert.deepEqual(body,{name:'Research gateway',kind:'mcp',credential,clear_credential:false,shared:false,read_only:true,enabled:true,policy:{require_approval:true,mcp:{url:'https://gateway.example.com/mcp',transport:'streamable_http'}}});
+  }
+  assert.throws(()=>ui.connectionInput(connectionDraft(undefined,{url:'  '}),{}),/server URL/);
+  assert.throws(()=>ui.connectionInput(connectionDraft(undefined,{kind:'stdio'}),{}),/supported service/);
+});
+
+test('remote MCP updates preserve policies and require replacement or explicit clear before changing URL',()=>{
+  const row=mcpConnection({shared:true,read_only:false});
+  row.policy.require_approval=false;
+  const body=ui.connectionInput(connectionDraft(row,{name:'Renamed gateway'}),row.policy,row);
+  assert.equal(body.credential,'');assert.equal(body.clear_credential,false);
+  assert.deepEqual(body.policy,row.policy);assert.equal(body.shared,true);assert.equal(body.read_only,false);
+  const changed=connectionDraft(row,{url:'https://replacement.example.com/mcp'});
+  assert.throws(()=>ui.connectionInput(changed,row.policy,row),/requires a replacement bearer token/);
+  const rotated=ui.connectionInput({...changed,credential:'new-synthetic-token'},row.policy,row);
+  assert.equal(rotated.credential,'new-synthetic-token');assert.equal(rotated.clear_credential,false);
+  assert.deepEqual(rotated.policy.allowed_tools,['lookup']);assert.equal(rotated.policy.require_approval,false);
+  const cleared=ui.connectionInput({...changed,clear_credential:true},row.policy,row);
+  assert.equal(cleared.credential,'');assert.equal(cleared.clear_credential,true);assert.equal(cleared.policy.mcp.url,changed.url);
+  assert.throws(()=>ui.connectionInput({...changed,credential:'new-token',clear_credential:true},row.policy,row),/Remove the replacement token/);
+  assert.deepEqual(row.policy.mcp,{url:'https://gateway.example.com/mcp',transport:'streamable_http'});
+});
+
+test('native service payloads retain blank-token update semantics without MCP-only fields',()=>{
+  for(const kind of ['github','linear','notion','slack']){
+    const policy={require_approval:false,allowed_tools:['read'],product:null};
+    const body=ui.connectionInput({name:'Original account',kind,credential:'',shared:true,read_only:true,enabled:false},policy);
+    assert.deepEqual(body,{name:'Original account',kind,credential:'',shared:true,read_only:true,enabled:false,policy});
+  }
+});
+
+test('MCP check failures never render remote exception text or credentials',()=>{
+  const failure=ui.connectionCheckError(new Error('Authorization: Bearer NEVER_RENDER_THIS https://internal.test/?token=secret'));
+  assert.match(failure,/Verify the server URL and bearer token/);
+  assert.doesNotMatch(failure,/NEVER_RENDER_THIS|internal\.test|token=secret/);
+});
+
 test('OAuth/setup destinations allow authenticated local handoff and HTTPS, rejecting script/credential URLs',()=>{
   assert.equal(ui.productRedirect('/auth/github/register?state=synthetic','http://127.0.0.1:8807'),'http://127.0.0.1:8807/auth/github/register?state=synthetic');
   assert.equal(ui.productRedirect('https://github.com/apps/example/installations/new','https://moyai.test'),'https://github.com/apps/example/installations/new');
@@ -105,6 +147,16 @@ test('Home first message includes only eligible selected account IDs and stable 
 });
 
 const python=path.join(root,'.venv/bin/python');
+test('MCP form create, rotation and clear payloads validate against the Python connection schema',{skip:!fs.existsSync(python)&&'Native Python environment not installed'},()=>{
+  const row=mcpConnection();
+  const payloads=[
+    ui.connectionInput(connectionDraft(),{require_approval:true}),
+    ui.connectionInput(connectionDraft(row,{url:'https://replacement.example.com/mcp',credential:'synthetic-token'}),row.policy,row),
+    ui.connectionInput(connectionDraft(row,{url:'https://public.example.com/mcp',clear_credential:true}),row.policy,row),
+  ];
+  const result=spawnSync(python,['-c','import json,sys; from moyai.api import ConnectionInput; [ConnectionInput.model_validate(v) for v in json.load(sys.stdin)]; print("validated")'],{cwd:root,input:JSON.stringify(payloads),encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'validated');
+});
 test('UI note/credential payloads validate against canonical and native-root Python schemas',{skip:!fs.existsSync(python)&&'Native Python environment not installed'},()=>{
   const payload={note:ui.productMemoryWrite(note(),{title:'Saved title',content:'Saved note content',kind:'preference',repo_url:''},'request-0001'),create:ui.productCredentialBody(draft({root_id:'native:'+nativeId,lifetime:'session'}),undefined,'request-0001'),update:ui.productCredentialBody(draft({value:''}),secret(),'ignored')};
   const result=spawnSync(python,['-c','import json,sys; from app.memory import Note; from moyai.product_secrets import ProductSaveSecret,ProductUpdateSecret; v=json.load(sys.stdin); Note.model_validate(v["note"]); ProductSaveSecret.model_validate(v["create"]); ProductUpdateSecret.model_validate(v["update"]); print("validated")'],{cwd:root,input:JSON.stringify(payload),encoding:'utf8'});

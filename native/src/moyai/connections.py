@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
+from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import Toolset, durable_operation
@@ -12,6 +13,7 @@ from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, DynamicToolset
+from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai_harness.github import GitHub
 from pydantic_ai_harness.linear import Linear
 from pydantic_ai_harness.notion import Notion
@@ -52,11 +54,26 @@ def selected_connections(scope: RunScope) -> tuple[SelectedConnection, ...]:
         SelectedConnection(grant, ConnectionPolicy.model_validate(grant.policy))
         for grant in sorted(scope.grants, key=lambda item: item.id)
     )
-    if any(item.grant.kind not in SERVICES for item in selected):
+    if any(item.grant.kind not in SERVICES and item.grant.kind != "mcp" for item in selected):
         raise ValueError("Unsupported connected service.")
     if len({item.prefix for item in selected}) != len(selected):
         raise ValueError("Selected account tool prefixes collide.")
     return selected
+
+
+class MCPConnectionCatalogToolset(CatalogToolset):
+    """MCP definitions retain turn scope and require current authority on release."""
+
+    async def get_tools(self, ctx: RunContext[RunScope]) -> dict[str, ToolsetTool[RunScope]]:
+        from .runtime import current
+
+        try:
+            tools = await super().get_tools(ctx)
+            await current().database.authorize_scope(ctx.deps)
+            return tools
+        except (PermissionError, HTTPException):
+            self.catalog.discard(self.key)
+            raise
 
 
 def product_service() -> ProductConnections:
@@ -126,7 +143,23 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
 
     def scoped(ctx: RunContext[RunScope], connection: SelectedConnection) -> AbstractToolset[RunScope]:
         grant, policy = connection.grant, connection.policy
-        if policy.product is not None:
+        if grant.kind == "mcp":
+            from .mcp_remote import remote_mcp_toolset
+            from .runtime import current
+
+            if policy.mcp is None or policy.product is not None:
+                raise ValueError("Remote MCP connections require their own endpoint configuration.")
+            runtime = current()
+
+            async def authorize() -> None:
+                await runtime.database.authorize_scope(ctx.deps)
+
+            native = remote_mcp_toolset(
+                policy.mcp, security.unseal(grant.credential).decode(),
+                runtime.settings.mcp_allowed_origins, identity=f"connection_{grant.id}",
+                authorize=authorize,
+            ).filtered(lambda _ctx, tool: not grant.read_only or read_only_tool(tool))
+        elif policy.product is not None:
             native = product_service().toolset(ctx.deps, grant)
         else:
             credential = security.unseal(grant.credential).decode()
@@ -202,7 +235,11 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
             return ProductCatalogToolset(
                 catalog, ctx, lambda name: build(ctx, name), reconstruct=lambda tool: reconstruct(ctx, tool),
             )
-        return CatalogToolset(
+        catalog_type = (
+            MCPConnectionCatalogToolset if any(grant.kind == "mcp" for grant in ctx.deps.grants)
+            else CatalogToolset
+        )
+        return catalog_type(
             catalog, ctx, lambda name: build(ctx, name), reconstruct=lambda tool: reconstruct(ctx, tool),
         )
 

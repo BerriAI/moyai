@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from test_product_connections import save
 
-from moyai.models import Session, Turn, User
+from moyai.models import Base, Connection, Session, Turn, User
 
 bridge = context_tests.bridge
 slack = context_tests.slack
@@ -25,6 +25,12 @@ async def connections(bridge, request):
         yield bridge.resolve_grants
         return
     engine = create_async_engine(f"sqlite+aiosqlite:///{bridge.store.path}")
+    # Product admission sees both the native and canonical schemas on one
+    # connection. Mirror that topology for explicit-ID grant classification.
+    async with engine.begin() as connection:
+        await connection.run_sync(lambda sync: Base.metadata.create_all(
+            sync, tables=[User.__table__, Connection.__table__],
+        ))
     bridge.product.identity = SimpleNamespace(schema=None)
 
     async def resolve(*args, **kwargs):

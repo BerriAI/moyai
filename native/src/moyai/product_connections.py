@@ -34,9 +34,11 @@ from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
+from sqlalchemy import select
 
 from .connection_catalog import CatalogToolset, ConnectionCatalog, ConnectionDefinitionChanged
 from .contracts import Grant, RunScope
+from .models import Connection
 from .product_connector_execution import CanonicalConnectorExecution
 
 if TYPE_CHECKING:
@@ -169,6 +171,27 @@ class ProductConnections:
     ) -> list[Grant]:
         if not selections:
             return []
+        candidates = [identity for identity in dict.fromkeys(selections) if identity not in PROVIDERS]
+        native: list[Grant] = []
+        if candidates:
+            async def native_selection(transaction: AsyncSession) -> list[Grant]:
+                identities = list(await transaction.scalars(select(Connection.id).where(
+                    Connection.id.in_(candidates), Connection.kind == "mcp",
+                )))
+                return await self.database.native_grants(
+                    transaction, actor_id, identities, shared_session=shared_session,
+                    kinds=frozenset({"mcp"}),
+                )
+
+            if db is not None:
+                native = await native_selection(db)
+            else:
+                async with self.database.sessions() as transaction:
+                    native = await native_selection(transaction)
+            native_ids = {grant.id for grant in native}
+            selections = [identity for identity in selections if identity not in native_ids]
+            if not selections:
+                return sorted(native, key=lambda item: item.id)
         if db is not None:
             from types import SimpleNamespace
 
@@ -196,7 +219,7 @@ class ProductConnections:
                 self._grants, actor_id, shared_session=shared_session, surface=surface,
                 selected_ids=selections,
             )
-        selected: dict[str, Grant] = {}
+        selected: dict[str, Grant] = {grant.id: grant for grant in native}
         for selection in dict.fromkeys(selections):
             matches = [g for g in available if g.id == selection or g.kind == selection]
             if not matches:
@@ -230,9 +253,7 @@ class ProductConnections:
 
     @staticmethod
     def _check_grants(scope: RunScope, current: list[Grant]) -> None:
-        if [(g.id, g.policy) for g in current] != [
-            (g.id, g.policy) for g in sorted(scope.grants, key=lambda item: item.id)
-        ]:
+        if sorted(current, key=lambda item: item.id) != sorted(scope.grants, key=lambda item: item.id):
             raise PermissionError("The selected product account authority changed.")
 
     async def check(self, scope: RunScope, grant: Grant) -> None:
