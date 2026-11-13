@@ -163,8 +163,11 @@ class ProductContinuationService:
             SELECT id,owner_id,private_owner_id,parent_run_id,status,created_at,updated_at,
                 display_title,agent_label,substr(prompt,1,300) AS prompt,model,harness,repo_url,
                 github_repository_id,environment_id,environment_build_id,sandbox_provider,
+                to_jsonb(source_run)->>'repository_provider' AS repository_provider,
+                to_jsonb(source_run)->>'repository_origin' AS repository_origin,
+                (to_jsonb(source_run)->>'gitlab_project_id')::bigint AS gitlab_project_id,
                 sandbox_id,snapshot_id,token_hash,checkpoint_error,deleted_at,deletion_requested_at
-            FROM {self.table('runs')} WHERE id=:id
+            FROM {self.table('runs')} AS source_run WHERE id=:id
         """), {"id": source_id})).mappings().first()
         if (
             row is None or row["deleted_at"] or row["deletion_requested_at"]
@@ -178,7 +181,13 @@ class ProductContinuationService:
             })
         if row["private_owner_id"] and row["private_owner_id"] != row["owner_id"]:
             raise HTTPException(409, "The source ownership record must be repaired before continuation.")
-        return dict(row)
+        result = dict(row)
+        # Old source schemas have no provider columns. Do not change their
+        # preview fingerprints merely by projecting absent optional fields.
+        for key in ("repository_provider", "repository_origin", "gitlab_project_id"):
+            if result.get(key) is None:
+                result.pop(key, None)
+        return result
 
     async def lookup(
         self, db: AsyncSession, source_id: str, principal: ProductPrincipal,
@@ -521,7 +530,10 @@ class ProductContinuationService:
         if visibility == "private" and target_surface != "web":
             raise HTTPException(403, "Private history cannot be exported to another surface.")
         context = await self.workspace.capture_workspace_context(db, current, {
-            **{key: root.get(key) for key in ("repo_url", "github_repository_id", "environment_id")},
+            **{key: root.get(key) for key in (
+                "repo_url", "repository_provider", "repository_origin", "github_repository_id",
+                "gitlab_project_id", "environment_id",
+            )},
             # A session without a captured old build must not silently adopt a
             # newly selected organization default.
             "environment_build_id": root.get("environment_build_id") or "none",

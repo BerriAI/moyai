@@ -1,5 +1,4 @@
 """Native app adapters. Credentials stay in this process, outside agent sandboxes."""
-from .personal_slack import PersonalSlack
 import asyncio
 import html
 import json
@@ -10,13 +9,22 @@ from urllib.parse import urlencode
 import httpx
 from pydantic import Field
 
-from .db import Store, database, now
-from .connector_errors import ConnectorError
-from .github import GitHub, TOOLS as GITHUB_TOOLS
-from .github_coding import READS as GITHUB_CODING_READS
-from .slack_origin import metadata as slack_metadata
-from .connector_schemas import Args, CursorPage, LinearIssueId, LinearUpdateIssue, LinearOptions
 from . import notion_tools, slack_tools
+from .connector_errors import ConnectorError
+from .connector_schemas import (
+    Args,
+    CursorPage,
+    LinearIssueId,
+    LinearOptions,
+    LinearUpdateIssue,
+)
+from .db import Store, database, now
+from .github import TOOLS as GITHUB_TOOLS
+from .github import GitHub
+from .github_coding import READS as GITHUB_CODING_READS
+from .gitlab import GitLab
+from .personal_slack import PersonalSlack
+from .slack_origin import metadata as slack_metadata
 
 
 class Search(Args):
@@ -151,8 +159,9 @@ def linear_page(data, args, collection, scope):
 class Connectors:
     def __init__(self, store: Store, security, settings):
         self.store, self.security, self.settings = store, security, settings
-        self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion", "github")}
+        self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion", "github", "gitlab")}
         self.github = GitHub(store, security, settings, self)
+        self.gitlab = GitLab(store, security, settings, self)
         self.slack_identities = None
         self.personal_slack = PersonalSlack(store, security, settings, self)
 
@@ -183,12 +192,14 @@ class Connectors:
     def configured_oauth(self, provider):
         if provider == 'github':
             return True
+        if provider == 'gitlab':
+            return False
         return bool(getattr(self.settings, f"{provider}_client_id") and getattr(self.settings, f"{provider}_client_secret"))
 
     def list(self):
         connected = {row["provider"]: row for row in self.store.rows("SELECT * FROM connections")}
         result = []
-        for provider in ("linear", "slack", "notion", "github"):
+        for provider in ("linear", "slack", "notion", "github", "gitlab"):
             row = connected.get(provider, {})
             credentials = json.loads(self.security.decrypt(row["encrypted"])) if row else {}
             identity = ("Shared user OAuth" if provider == "slack" else "OAuth connection") if credentials.get("kind") == "oauth" else ("Personal API key" if provider == "linear" else "Integration token")
@@ -196,11 +207,15 @@ class Connectors:
                 identity = 'Moyai bot sends · shared user reads' if credentials.get('bot', {}).get('access_token') else 'Shared user reads · bot required to send'
             if provider == 'github':
                 identity = 'Organization GitHub App'
+            if provider == 'gitlab':
+                identity = 'Organization GitLab token · selected projects'
             result.append({"id": provider, "connected": bool(row), "scope": "organization",
                            "oauth_configured": self.configured_oauth(provider),
                            "label": row.get("label", ""), "updated_at": row.get("updated_at"),
                            "identity": identity if row else "Not connected", **self.policy(provider),
                            **({'repositories': self.github.repository_options(), 'app_registered': bool(self.github.app_config())} if provider == 'github' else {}),
+                           **({'repositories': self.gitlab.repository_options(),
+                               'base_url': credentials.get('base_url', 'https://gitlab.com')} if provider == 'gitlab' else {}),
                            "tools": [{"name": name, "write": spec[1], "requires_approval": False, "description": spec[3]}
                                      for name, spec in TOOLS.items() if spec[0] == provider]})
         return result
@@ -234,7 +249,7 @@ class Connectors:
         """Admission needs provider state, not decrypted UI metadata."""
         return {row['provider'] for row in self.store.rows(
             """SELECT c.provider FROM connections c LEFT JOIN connection_policies p ON p.provider=c.provider
-                WHERE c.provider IN ('linear','slack','notion','github') AND coalesce(p.enabled,1)=1""",
+                WHERE c.provider IN ('linear','slack','notion','github','gitlab') AND coalesce(p.enabled,1)=1""",
             connection=connection)}
 
     def audit(self, provider, action):
@@ -332,6 +347,8 @@ class Connectors:
     async def verify(self, provider, credentials):
         if provider == 'github':
             return await self.github.verify(credentials)
+        if provider == 'gitlab':
+            return await self.gitlab.verify(credentials)
         token = credentials["access_token"]
         headers = self.headers(provider, credentials)
         if provider == "linear":

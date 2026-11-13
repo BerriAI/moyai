@@ -51,7 +51,14 @@ function attachmentUrl(value: string, kind: AttachmentKind) {
   let parsed: URL
   try { parsed = new URL(text) } catch { throw new Error("Use a complete HTTP or HTTPS web address.") }
   if (!["https:", "http:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) throw new Error("Use an HTTP(S) address without embedded credentials.")
-  if (kind === "pull_request" && (parsed.protocol !== "https:" || parsed.hostname !== "github.com" || (parsed.port && parsed.port !== "443") || !/^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*\/?$/.test(parsed.pathname))) throw new Error("Use a GitHub pull request URL.")
+  if (kind === "pull_request") {
+    const github = parsed.hostname === "github.com" && (!parsed.port || parsed.port === "443")
+      && /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*\/?$/.test(parsed.pathname)
+    const gitlab = /^\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\/-\/merge_requests\/[1-9][0-9]*\/?$/.test(parsed.pathname)
+    const transport = parsed.protocol === "https:" || (gitlab && parsed.protocol === "http:"
+      && (parsed.hostname === "[::1]" || /^127(?:\.[0-9]{1,3}){3}$/.test(parsed.hostname)))
+    if (!transport || (!github && !gitlab) || /^https?:\/\/[^/]*@/i.test(text)) throw new Error("Use a GitHub pull request or GitLab merge request URL.")
+  }
   return text
 }
 
@@ -180,7 +187,7 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
           const name = summary?.title || link.title || link.url
           return <div className="workspace-picker-row" key={link.url}><Button type="button" className="workspace-resource-action" variant="ghost" title={name} onClick={() => onPullRequest(link.url, name)}><Icon size={18} className={`workspace-pr-${state}`} aria-hidden="true" /><span><strong>{name}</strong><small>{label}</small></span><ChevronRight size={15} aria-hidden="true" /></Button>{removeControl(link)}</div>
         })}
-        {!prs.length && <p className="workspace-picker-empty">Attach a PR or mention its GitHub URL in chat.</p>}
+        {!prs.length && <p className="workspace-picker-empty">Attach a GitHub PR or GitLab MR, or mention its URL in chat.</p>}
       </section>
       <section aria-label="Subagents">{heading("Subagents", data.subagents.length)}
         {data.subagents.map(agent => <div className="workspace-picker-row" key={agent.id}><Button type="button" className="workspace-resource-action workspace-agent-action" variant="ghost" disabled={!agent.can_inspect} title={agent.can_inspect ? agent.name : `${agent.name}: details are available only to the requester`} onClick={() => onSubagent(agent)}>
@@ -203,7 +210,7 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
       event.preventDefault()
       if (opener.current?.isConnected) opener.current.focus({ preventScroll: true })
       else root.current?.focus({ preventScroll: true })
-    }}><DialogHeader><DialogTitle>{linkKind === "pull_request" ? "Attach pull request" : "Add output link"}</DialogTitle><DialogDescription>The link will be visible to everyone who can access this session.</DialogDescription></DialogHeader>
+    }}><DialogHeader><DialogTitle>{linkKind === "pull_request" ? "Attach pull request" : "Add output link"}</DialogTitle><DialogDescription>{linkKind === "pull_request" ? "GitHub pull requests and GitLab merge requests are supported. " : ""}The link will be visible to everyone who can access this session.</DialogDescription></DialogHeader>
       <form className="workspace-link-form" onSubmit={event => {
         event.preventDefault()
         if (write.current || !linkKind) return

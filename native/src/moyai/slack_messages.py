@@ -14,11 +14,11 @@ from .pull_requests import parse_pr_url
 VIOLET = "#5B3FD1"
 NAVIGATION_ACTIONS = {"moyai_open_session", "moyai_view_pr", "moyai_review_pr"}
 PR_REFERENCE_LABEL = re.compile(
-    r"(?:reference(?:\s+(?:PR|pull request))?|PR|pull request)"
+    r"(?:reference(?:\s+(?:PR|MR|pull request|merge request))?|PR|MR|pull request|merge request)"
     r"(?:\s*(?:\(not created or reviewed(?: here)?\)|[—–-]\s*not created or reviewed(?: here)?))?\s*:",
     re.IGNORECASE,
 )
-PR_TEXT_LINK = re.compile(r"<(https://github\.com/[^\s<>|]+)(?:\|[^>\n]*)?>|(https://github\.com/[^\s<>]+)")
+PR_TEXT_LINK = re.compile(r"<(https://[^\s<>|]+)(?:\|[^>\n]*)?>|(https://[^\s<>]+)")
 
 
 def plain_slack_title(text: str) -> str:
@@ -62,7 +62,7 @@ def pr_cards(answer: str, url: str) -> list[dict[str, Any]]:
     prose = re.sub(r"```.*?(?:```|\Z)|`[^`\n]*`", "", answer, flags=re.DOTALL)
     labels = {
         match[2]: match[1]
-        for match in re.finditer(r"\[([^\]\n]{1,200})\]\((https://github\.com/[^\s<>)]{1,2048})\)", prose)
+        for match in re.finditer(r"\[([^\]\n]{1,200})\]\((https://[^\s<>)]{1,2048})\)", prose)
     }
     cards, seen = [], set()
     for match in PR_MENTION.finditer(prose):
@@ -82,12 +82,13 @@ def pr_cards(answer: str, url: str) -> list[dict[str, Any]]:
         # A URL used as its own Markdown label adds no useful title.
         if title.startswith(("https://", "http://")):
             title = ""
-        heading = f"PR #{pr.number}" + (" · " + title if title else "")
-        actions = [button("View PR", pr.url, "moyai_view_pr", primary=True)]
+        kind, marker = ("MR", "!") if pr.provider == "gitlab" else ("PR", "#")
+        heading = f"{kind} {marker}{pr.number}" + (" · " + title if title else "")
+        actions = [button("View " + kind, pr.url, "moyai_view_pr", primary=True)]
         if url:
             actions.append(button("Open Moyai session", url, "moyai_open_session"))
         cards.append({
-            "color": VIOLET, "fallback": f"{pr.repository} #{pr.number}: {pr.url}",
+            "color": VIOLET, "fallback": f"{pr.repository} {marker}{pr.number}: {pr.url}",
             "blocks": [
                 {"type": "context", "elements": [
                     {"type": "plain_text", "text": "🚅 LiteLLM · Moyai"},

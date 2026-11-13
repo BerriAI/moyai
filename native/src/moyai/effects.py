@@ -40,7 +40,7 @@ AUTOMATION_EFFECTS = {
 SCOPED_AUTOMATION_EFFECTS = {
     "automation_grant", "automation_self_update", "automation_claim_item", "automation_webhook_setup",
 }
-SERVICE_PREFIXES = ("github_", "linear_", "notion_", "slack_")
+SERVICE_PREFIXES = ("github_", "gitlab_", "linear_", "notion_", "slack_")
 SHELL_RECOVERY_VERSION = "moyai-shell-readiness-v1"
 SHELL_READINESS_SUPPORTED = "moyai_shell_readiness_supported"
 
@@ -272,8 +272,12 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 )
         if requires_receipt(tool_def):
             await self.confirm(effect_id(ctx, call))
-            is_creation = call.tool_name.startswith("github_") and call.tool_name.endswith(
-                ("_create_pull_request", "_open_pull_request")
+            is_creation = (
+                call.tool_name.startswith("github_")
+                and call.tool_name.endswith(("_create_pull_request", "_open_pull_request"))
+            ) or (
+                call.tool_name.startswith("gitlab_")
+                and call.tool_name.endswith(("_create_merge_request", "_open_merge_request"))
             )
             if is_creation and (not workflow.in_workflow() or workflow.patched("moyai-pr-publications-v1")):
                 try:

@@ -25,7 +25,7 @@ description: Implement or fix code in a repository, including setup, tests, and 
 6. Check the diff and have the native reviewer examine meaningful risks.
 7. Save the computer checkpoint and hand off the actual result.
 
-If authentication is needed, use the configured native GitHub connection.
+If authentication is needed, use the configured native GitHub or GitLab connection.
 Never write account tokens into repository files, URLs, shell history, or output.
 Do not replace a missing integration with a mock and call it live verification.
 
@@ -45,3 +45,11 @@ request key, including `update_pull_request` for follow-ups. Never automatically
 repeat an incomplete operation with a new key.
 Rebase publishes one prepared commit on the current base and requires the exact
 expected PR head. Never approve, merge, enable auto-merge, or clear queue blockers.
+
+For GitLab, discover the selected project's `gitlab_` tools. Use its permanent
+project ID and the merge request's project-local number; subgroup paths can
+contain more than two components. Use the GitLab checkout and publication tools
+for staged changes, with the same exact-base, expected-head and stable-request-key
+rules. Create regular merge requests and preserve the user's target and source
+branches. Keep GitLab credentials on the trusted worker. Inspect the provider's
+reported capabilities when a review or stack operation depends on its version.

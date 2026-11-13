@@ -37,6 +37,7 @@ import { useSessionUpdates } from "./use-session-updates"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
+import { reviewLabels } from "./review-labels"
 import { FilesPanel, OutputPanel } from "./output"
 import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
 import type { ActionSelection, OutputResource, WorkspaceTab } from "./workspace-types"
@@ -772,7 +773,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       id: `side-chat:${workspaceRequest.child.id}`, kind: "side-chat",
       sessionId: workspaceRequest.child.id, title: workspaceRequest.child.title,
     } })
-    else if (workspaceRequest.url) dispatchPanel({ type: "open", tab: { id: `pr:${workspaceRequest.url.toLowerCase()}`, kind: "pull-request", title: "Pull request", url: workspaceRequest.url } })
+    else if (workspaceRequest.url) dispatchPanel({ type: "open", tab: { id: `pr:${workspaceRequest.url.toLowerCase()}`, kind: "pull-request", title: reviewLabels(workspaceRequest.url).name, url: workspaceRequest.url } })
   }, [workspaceRequest, sideMode])
   useEffect(() => { if (visible) heading.current?.focus() }, [Boolean(view), visible])
   const displayedTitle = view ? sessionUpdates.apply(view.session).title : undefined

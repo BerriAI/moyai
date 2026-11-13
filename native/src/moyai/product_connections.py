@@ -11,24 +11,26 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import ipaddress
 import json
 import re
 import secrets
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid5
 from weakref import WeakValueDictionary
 
 from app.db import database as source_database
 from app.public_url import app_path
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_ai import RunContext, Tool
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.tools import ToolDefinition
@@ -45,8 +47,30 @@ if TYPE_CHECKING:
     from .database import Database
     from .product_resources import ProductResources
 
-Provider = Literal["github", "linear", "notion", "slack"]
-PROVIDERS = ("github", "linear", "notion", "slack")
+Provider = Literal["github", "gitlab", "linear", "notion", "slack"]
+PROVIDERS = ("github", "gitlab", "linear", "notion", "slack")
+
+
+def _gitlab_origin(value: str) -> str:
+    """HTTPS origin; explicit literal loopback HTTP supports local installations."""
+    from app.repository_identity import canonical_origin
+
+    try:
+        normalized = canonical_origin(value)
+        parts = urlsplit(normalized)
+        if parts.scheme == "http" and not ipaddress.ip_address(parts.hostname or "").is_loopback:
+            raise ValueError
+        return normalized
+    except (ValueError, TypeError):
+        raise ValueError(
+            "Use an HTTPS GitLab origin without credentials, an API path, query, or fragment. "
+            "HTTP is allowed only for a literal loopback address."
+        ) from None
+
+
+def _gitlab_revision(encrypted: str | None) -> str:
+    # Opaque compare-and-set version; never return ciphertext to the browser.
+    return hashlib.sha256((encrypted or "").encode()).hexdigest()
 
 
 class ProductConnections:
@@ -139,6 +163,17 @@ class ProductConnections:
                         # metadata migration; never do provider I/O under an
                         # admission transaction or break unrelated accounts.
                         continue
+                origin = None
+                if provider == "gitlab":
+                    try:
+                        origin = _gitlab_origin(credentials["base_url"])
+                        ids = credentials["repository_ids"]
+                        if not isinstance(ids, list) or not ids or any(type(item) is not int or item <= 0 for item in ids):
+                            continue
+                        scopes = sorted(set(ids))
+                    except (KeyError, TypeError, ValueError):
+                        # Incomplete or legacy token rows grant no project access.
+                        continue
                 app_version = connectors.github.connection_version() if provider == "github" else None
                 for repository_id in scopes:
                     reference: dict[str, Any] = {
@@ -149,6 +184,8 @@ class ProductConnections:
                     }
                     if provider == "github":
                         reference["app_version"] = app_version
+                    if provider == "gitlab":
+                        reference["base_url"] = origin
                     digest = hashlib.sha256(json.dumps(reference, sort_keys=True).encode()).hexdigest()
                     identity = str(uuid5(NAMESPACE_URL, "moyai/canonical-connection/" + digest))
                     if surface == "slack" and access == "bot" and identity not in selected_ids:
@@ -159,6 +196,7 @@ class ProductConnections:
                         policy={"require_approval": False, "product": {
                             "provider": provider, "personal_owner": owner, "access": access,
                             "repository_id": repository_id, "authority": digest,
+                            **({"base_url": origin} if provider == "gitlab" else {}),
                         }},
                     ))
         return result
@@ -248,6 +286,30 @@ class ProductConnections:
         await self.check(scope, grant)
         if write and grant.read_only:
             raise PermissionError("This product account is read only.")
+        async with self._credential_lock(grant):
+            value = await self._credentials(grant, write=write)
+        await self.check(scope, grant)
+        return value
+
+    async def read_credentials(
+        self, grant: Grant, authorize: Callable[[], Awaitable[None]],
+    ) -> dict[str, Any]:
+        """Issue read credentials under a caller's live viewer/selection authority.
+
+        Historical views have no running turn. Their authorizer must verify the
+        current actor, session access, and exact selected grant before and after
+        each await; execution credentials retain their separate running-scope check.
+        """
+        if not grant.policy.get("product"):
+            raise PermissionError("This product account was not selected.")
+        await authorize()
+        async with self._credential_lock(grant):
+            await authorize()
+            value = await self._credentials(grant, write=False)
+            await authorize()
+        return value
+
+    def _credential_lock(self, grant: Grant) -> asyncio.Lock:
         lock = self.connectors.locks[grant.kind]
         if grant.kind == "github":
             # Installation tokens are independently minted/cached per repository.
@@ -256,10 +318,7 @@ class ProductConnections:
             # Other providers still serialize refresh of their shared credentials.
             repository = grant.policy["product"]["repository_id"]
             lock = self._github_credential_locks.setdefault(repository, asyncio.Lock())
-        async with lock:
-            value = await self._credentials(grant, write=write)
-        await self.check(scope, grant)
-        return value
+        return lock
 
     async def _credentials(self, grant: Grant, *, write: bool) -> dict[str, Any]:
         reference = grant.policy["product"]
@@ -277,6 +336,19 @@ class ProductConnections:
                 ),
             )
             value = {"access_token": token}
+        elif grant.kind == "gitlab":
+            credentials = await self.execution.call(lambda connectors: connectors.credentials("gitlab"))
+            repository_id = reference["repository_id"]
+            if (
+                _gitlab_origin(credentials["base_url"]) != reference["base_url"]
+                or repository_id not in credentials["repository_ids"]
+            ):
+                raise PermissionError("The selected GitLab project authority changed.")
+            value = {
+                "kind": "personal", "access_token": credentials["access_token"],
+                "base_url": reference["base_url"], "repository_ids": [repository_id],
+                "repositories": [row for row in credentials.get("repositories", []) if row["id"] == repository_id],
+            }
         else:
             value = await self.execution.call(lambda connectors: connectors.credentials(grant.kind))
         return value
@@ -353,24 +425,50 @@ class ProductConnections:
     def toolset(self, scope: RunScope, grant: Grant) -> AbstractToolset[RunScope]:
         if grant.kind == "github":
             return ProductGitHubToolset(self, scope, grant)
+        if grant.kind == "gitlab":
+            from .product_gitlab import ProductGitLabToolset
+            return ProductGitLabToolset(self, scope, grant)
         return self._canonical_tools(scope, grant)
 
     async def prepare_repository(self, scope: RunScope, sandbox: Any, context: dict[str, Any]) -> dict[str, Any]:
+        from app.repository_identity import repository_provider
+
+        if context.get("repository_provider") == "gitlab" or repository_provider(context.get("repo_url") or "") == "gitlab":
+            from .product_gitlab_bootstrap import prepare_repository as prepare_gitlab
+            return await prepare_gitlab(self, scope, sandbox, context)
         from .product_github_bootstrap import prepare_repository
         return await prepare_repository(self, scope, sandbox, context)
 
     async def repository_context(self, scope: RunScope, context: dict[str, Any]) -> dict[str, Any] | None:
+        from app.repository_identity import repository_provider
+
+        if context.get("repository_provider") == "gitlab" or repository_provider(context.get("repo_url") or "") == "gitlab":
+            from .product_gitlab_bootstrap import repository_context as gitlab_context
+            return await gitlab_context(self, scope, context)
         from .product_github_bootstrap import repository_context
         return await repository_context(self, scope, context)
 
     async def repository_receipt(self, db, *, session_id: str, workspace_id: str, workspace_scope: str, repo_url: str) -> dict[str, Any] | None:
+        from app.repository_identity import repository_provider
+
+        if repository_provider(repo_url) == "gitlab":
+            from .product_gitlab_bootstrap import repository_receipt as gitlab_receipt
+            return await gitlab_receipt(
+                self, db, session_id=session_id, workspace_id=workspace_id, workspace_scope=workspace_scope, repo_url=repo_url,
+            )
         from .product_github_bootstrap import repository_receipt
         return await repository_receipt(
             self, db, session_id=session_id, workspace_id=workspace_id, workspace_scope=workspace_scope, repo_url=repo_url,
         )
 
-    async def resolve_repository(self, grant, repository: str = "", repository_id: int | None = None, *, selected: bool) -> dict[str, Any]:
+    async def resolve_repository(
+        self, grant, repository: str = "", repository_id: int | None = None, *,
+        selected: bool, provider: Literal["github", "gitlab"] = "github", base_url: str | None = None,
+    ) -> dict[str, Any]:
         """Resolve a permanent ID outside a caller's writer transaction."""
+        if provider == "gitlab":
+            from .product_gitlab_bootstrap import resolve_repository as resolve_gitlab
+            return await resolve_gitlab(self, grant, repository, repository_id, selected=selected, base_url=base_url)
         principal = await self.product.identity.require_current(grant)
         if selected:
             before = await self.resolve_grants(principal.id, ["github"], shared_session=True, surface="automation")
@@ -623,6 +721,39 @@ class TokenConnection(BaseModel):
     token: SecretStr = Field(min_length=1, max_length=100_000)
 
 
+class GitLabTokenConnection(TokenConnection):
+    token: SecretStr = Field(min_length=1, max_length=4096)
+    base_url: str = Field(default="https://gitlab.com", max_length=2048)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_origin(cls, value: str) -> str:
+        return _gitlab_origin(value)
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("Enter a GitLab access token.")
+        return SecretStr(value.get_secret_value().strip())
+
+
+class GitLabProjectDiscovery(GitLabTokenConnection):
+    page: int = Field(default=1, ge=1, le=10_000)
+    search: str = Field(default="", max_length=200)
+    revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+class GitLabProjectSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repository_ids: list[Annotated[int, Field(strict=True, gt=0)]] = Field(min_length=1, max_length=200)
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class GitLabOrganizationSetup(GitLabTokenConnection, GitLabProjectSelection):
+    pass
+
+
 class PolicyChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
@@ -645,6 +776,15 @@ class OrganizationConnectionRepository(OrganizationConnectionResponse):
     full_name: str
 
 
+class GitLabProjectDiscoveryResult(OrganizationConnectionResponse):
+    base_url: str
+    repositories: list[OrganizationConnectionRepository]
+    selected_ids: list[int]
+    next_page: int | None
+    truncated: bool
+    revision: str
+
+
 class OrganizationConnectionPolicy(OrganizationConnectionResponse):
     enabled: bool
     read_only: bool
@@ -663,9 +803,10 @@ class OrganizationConnection(OrganizationConnectionPolicy):
     updated_at: str | None
     identity: str
     tools: list[OrganizationConnectionTool]
-    # GitHub only.
+    # Repository providers expose selected projects, never credentials.
     repositories: list[OrganizationConnectionRepository] | None = None
     app_registered: bool | None = None
+    base_url: str | None = None
 
 
 class OrganizationConnectionConnected(OrganizationConnectionResponse):
@@ -761,11 +902,124 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(security.require, request)
         return [OrganizationConnection.model_validate(row) for row in await service.accounts()]
 
+    async def gitlab_current(request: Request, expected: str | None) -> None:
+        await service.product.identity.require_request_current(request)
+        if await source_database(connectors.connection_revision, "gitlab") != expected:
+            raise HTTPException(409, "The GitLab connection changed. Reload its projects before saving.")
+
+    async def gitlab_projects(
+        request: Request, credentials: dict[str, Any], expected: str | None, *, page: int, search: str,
+    ) -> GitLabProjectDiscoveryResult:
+        origin = _gitlab_origin(credentials["base_url"])
+
+        async def discover(bound: Any):
+            return await bound.gitlab.request(
+                "GET", "/projects", token=credentials["access_token"], base_url=origin,
+                params={"membership": True, "simple": True, "per_page": 100, "page": page,
+                        "order_by": "id", "sort": "asc", "search": search},
+            )
+
+        values = await service.execution.call(
+            discover, authorize=lambda: gitlab_current(request, expected), recheck=True,
+        )
+        if not isinstance(values, list) or len(values) > 100:
+            raise ConnectorError("GitLab did not return a valid project page.", dispatched=False)
+        repositories = [gitlab_project(value) for value in values]
+        return GitLabProjectDiscoveryResult(
+            base_url=origin, repositories=repositories,
+            selected_ids=credentials.get("repository_ids", []),
+            next_page=page + 1 if len(repositories) == 100 and page < 10_000 else None,
+            truncated=len(repositories) == 100 and page == 10_000,
+            revision=_gitlab_revision(expected),
+        )
+
+    def gitlab_project(value: Any, *, expected_id: int | None = None) -> OrganizationConnectionRepository:
+        if (
+            not isinstance(value, dict) or type(value.get("id")) is not int or value["id"] <= 0
+            or not isinstance(value.get("path_with_namespace"), str) or not value["path_with_namespace"]
+            or (expected_id is not None and value["id"] != expected_id)
+        ):
+            raise ConnectorError("GitLab did not confirm the selected project identity.", dispatched=False)
+        return OrganizationConnectionRepository(id=value["id"], full_name=value["path_with_namespace"])
+
+    @router.post("/api/connections/gitlab/projects/discover", operation_id="discoverGitLabProjects")
+    async def discover_gitlab(body: GitLabProjectDiscovery, request: Request) -> GitLabProjectDiscoveryResult:
+        await source_database(security.require, request, mutation=True, admin=True)
+        expected = await source_database(connectors.connection_revision, "gitlab")
+        if body.revision is not None and body.revision != _gitlab_revision(expected):
+            raise HTTPException(409, "The GitLab connection changed. Discover its projects again.")
+        return await gitlab_projects(request, {
+            "access_token": body.token.get_secret_value(), "base_url": body.base_url,
+        }, expected, page=body.page, search=body.search)
+
+    @router.get("/api/connections/gitlab/projects", operation_id="listGitLabProjects")
+    async def list_gitlab(
+        request: Request, page: int = Query(default=1, ge=1, le=10_000),
+        search: str = Query(default="", max_length=200),
+        revision: str | None = Query(default=None, pattern=r"^[a-f0-9]{64}$"),
+    ) -> GitLabProjectDiscoveryResult:
+        await source_database(security.require, request, admin=True)
+        expected = await source_database(connectors.connection_revision, "gitlab")
+        if expected is None:
+            raise HTTPException(409, "Connect GitLab before selecting projects.")
+        if revision is not None and revision != _gitlab_revision(expected):
+            raise HTTPException(409, "The GitLab connection changed. Reload its projects before saving.")
+        credentials = json.loads(security.decrypt(expected))
+        return await gitlab_projects(request, credentials, expected, page=page, search=search)
+
+    async def save_gitlab(
+        request: Request, body: GitLabProjectSelection, credentials: dict[str, Any], expected: str | None,
+    ) -> OrganizationConnectionConnected:
+        if body.revision != _gitlab_revision(expected):
+            raise HTTPException(409, "The GitLab connection changed. Reload its projects before saving.")
+        origin = _gitlab_origin(credentials["base_url"])
+
+        async def verify(bound: Any):
+            repositories = []
+            for identity in sorted(set(body.repository_ids)):
+                value = await bound.gitlab.request(
+                    "GET", f"/projects/{identity}", token=credentials["access_token"], base_url=origin,
+                )
+                repositories.append(gitlab_project(value, expected_id=identity).model_dump())
+            value = {
+                "kind": "personal", "access_token": credentials["access_token"], "base_url": origin,
+                "repository_ids": [row["id"] for row in repositories], "repositories": repositories,
+            }
+            label = await bound.gitlab.verify(value)
+            return value, label
+
+        credentials, label = await service.execution.call(
+            verify, authorize=lambda: gitlab_current(request, expected), recheck=True,
+        )
+        await gitlab_current(request, expected)
+        await source_database(save_if_unchanged, store, security, "gitlab", credentials, label, expected)
+        await source_database(connectors.record_check, "gitlab", "healthy")
+        await source_database(connectors.audit, "gitlab", "Updated organization GitLab projects")
+        return OrganizationConnectionConnected(connected=True, label=label)
+
+    @router.post("/api/connections/gitlab/connect", operation_id="connectGitLabOrganization")
+    async def connect_gitlab(body: GitLabOrganizationSetup, request: Request) -> OrganizationConnectionConnected:
+        await source_database(security.require, request, mutation=True, admin=True)
+        expected = await source_database(connectors.connection_revision, "gitlab")
+        return await save_gitlab(request, body, {
+            "access_token": body.token.get_secret_value(), "base_url": body.base_url,
+        }, expected)
+
+    @router.put("/api/connections/gitlab/projects", operation_id="selectGitLabProjects")
+    async def select_gitlab(body: GitLabProjectSelection, request: Request) -> OrganizationConnectionConnected:
+        await source_database(security.require, request, mutation=True, admin=True)
+        expected = await source_database(connectors.connection_revision, "gitlab")
+        if expected is None:
+            raise HTTPException(409, "Connect GitLab before selecting projects.")
+        return await save_gitlab(request, body, json.loads(security.decrypt(expected)), expected)
+
     @router.post("/api/connections/{provider}", operation_id="connectOrganizationConnection")
     async def connect(provider: Provider, body: TokenConnection, request: Request) -> OrganizationConnectionConnected:
         await source_database(security.require, request, mutation=True, admin=True)
         if provider == "github":
             raise HTTPException(400, "Install the organization GitHub App; raw tokens are not accepted.")
+        if provider == "gitlab":
+            raise HTTPException(400, "Connect GitLab with an HTTPS origin and explicitly selected projects.")
         value = {"access_token": body.token.get_secret_value().strip(), "kind": "personal"}
         expected = await source_database(connectors.connection_revision, provider)
         label = await connectors.verify(provider, value)
@@ -801,6 +1055,7 @@ def routes(service: ProductConnections) -> APIRouter:
     @router.post("/api/connections/{provider}/check", operation_id="checkOrganizationConnection")
     async def check(provider: Provider, request: Request) -> OrganizationConnectionCheck:
         await source_database(security.require, request, mutation=True, admin=True)
+        expected = await source_database(connectors.connection_revision, provider)
         try:
             if provider == "github":
                 await service.execution.call(lambda bound: bound.github.refresh_connection())
@@ -808,7 +1063,11 @@ def routes(service: ProductConnections) -> APIRouter:
             else:
                 async def verify(bound: Any):
                     return await bound.verify(provider, await bound.credentials(provider))
-                label = await service.execution.call(verify)
+                label = await service.execution.call(
+                    verify,
+                    authorize=(lambda: gitlab_current(request, expected)) if provider == "gitlab" else None,
+                    recheck=provider == "gitlab",
+                )
         except ConnectorError:
             await source_database(connectors.record_check, provider, "needs_attention")
             raise

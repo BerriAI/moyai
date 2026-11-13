@@ -229,10 +229,13 @@ async def publication(admitted_product):
                 raise ConnectorError("The provider token is currently unavailable.")
             return "synthetic-token"
         def saved_credentials(self): return {}
+    async def unexpected_gitlab(*args, **kwargs):
+        pytest.fail("GitHub publication must not dispatch a GitLab request.")
     service = SimpleNamespace(
         database=product.database, product=SimpleNamespace(identity=product.adapter),
         connectors=SimpleNamespace(
-            github=SourceGit(), personal_slack=SimpleNamespace(),
+            github=SourceGit(), gitlab=SimpleNamespace(request=unexpected_gitlab),
+            personal_slack=SimpleNamespace(),
             locks={"github": asyncio.Lock()}, request=provider.request,
         ), check=check, credentials=credentials,
         store=SimpleNamespace(rows=lambda *_args: []),
@@ -311,7 +314,7 @@ async def test_shared_creation_cannot_be_attributed_to_another_connection_or_rep
         f.scope, "github_create_pull_request", arguments, result, confirmed, connection_id=f.grant.id,
     )
     assert receipt is not None
-    with pytest.raises(ValueError, match="matching GitHub operation"):
+    with pytest.raises(ValueError, match="matching provider operation"):
         await persist_publication(f.product.database, f.scope, identity, replace(receipt, **changed_identity))
     async with f.product.database.sessions() as db:
         saved = await db.get(PRPublication, identity)

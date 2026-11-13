@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from temporalio.client import ScheduleCalendarSpec, ScheduleRange, ScheduleSpec
 
 from .automation_sources import EventTrigger
+from .repository_identity import canonical_repository_url, repository_provider
 
 
 class SelfManagement(BaseModel):
@@ -103,9 +104,10 @@ class Definition(BaseModel):
         description='Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed.')
     repo_url: str = Field(default='', max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
+    gitlab_project_id: int | None = Field(default=None, gt=0, strict=True)
     environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$',
                                 description='Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.')
-    plugins: list[Literal['linear', 'github', 'slack', 'notion']] = Field(default_factory=list, max_length=4)
+    plugins: list[Literal['linear', 'github', 'gitlab', 'slack', 'notion']] = Field(default_factory=list, max_length=5)
     model: str = Field(default='', max_length=120)
     # Missing on old saved definitions: preserve their original runtime.
     harness: str = Field(default='hermes', min_length=1, max_length=80)
@@ -137,15 +139,19 @@ class Definition(BaseModel):
     def distinct_triggers(self):
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
+        if self.gitlab_project_id is not None and (
+            not self.repo_url or repository_provider(self.repo_url) != 'gitlab'
+            or self.github_repository_id is not None
+        ):
+            raise ValueError('A GitLab project ID requires its GitLab repository URL.')
+        if self.repo_url and repository_provider(self.repo_url) == 'gitlab' and self.github_repository_id is not None:
+            raise ValueError('A GitHub repository ID cannot select a GitLab project.')
         return self
 
     @field_validator('repo_url')
     @classmethod
     def repository(cls, value):
-        value = value.removesuffix('/')
-        if value and not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', value):
-            raise ValueError('Use a https://github.com/owner/repository URL.')
-        return value
+        return canonical_repository_url(value)
 
 
 class Save(BaseModel):

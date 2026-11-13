@@ -150,6 +150,8 @@ development. Preserve `.data` and its generated encryption key across restarts.
 
 - [Using Moyai](docs/usage.md): chat, files, computer control, connections, Settings,
   Slack, approvals and recovery.
+- [GitLab](docs/gitlab.md): selected-project setup, native MR workflows, review
+  handling and supported capability boundaries.
 - [Swarms](docs/native-swarms.md): persistent teams, shared findings, independent
   member computers, and durable Pause/Resume/time controls on Pydantic AI.
 - [Architecture](docs/architecture.md): how requests move through the system and

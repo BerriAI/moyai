@@ -351,7 +351,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
 export function UnsupportedSettings({ definition }: { definition: AutomationDefinition }) {
   const entries = [
     !definition.session_id && definition.plugins.length ? ["Connections", definition.plugins.join(", ")] : null,
-    !definition.session_id && (definition.repo_url || definition.github_repository_id) ? ["Repository", definition.repo_url || `Repository ID ${definition.github_repository_id}`] : null,
+    !definition.session_id && (definition.repo_url || definition.github_repository_id || definition.gitlab_project_id) ? ["Repository", definition.repo_url || `Repository ID ${definition.github_repository_id ?? definition.gitlab_project_id}`] : null,
     definition.session_id ? ["Project and connections", "From the selected chat"] : ["Environment", definition.environment_id],
     definition.mode !== "modal" ? ["Execution mode", definition.mode] : null,
     definition.self_management.instructions || definition.self_management.schedule ? ["Self-management", "Instructions or schedule permissions are enabled."] : null,
@@ -387,7 +387,7 @@ function CheckField({ label, checked, disabled, onChange }: { label: string; che
 const eventFieldLimits: Record<string, number> = {
   session_id: 36, repository: 200, team_id: 36, assignee_id: 128, label_id: 36, label: 100, channel_id: 32,
   text_contains: 200, text_starts_with: 200, reaction: 100, action: 80, status: 100, conclusion: 60,
-  branch: 200, project: 100, epic: 100, service_id: 100, urgency: 30, payload_pattern: 500,
+  branch: 200, project: 100, epic: 100, service_id: 100, urgency: 30, payload_pattern: 500, gitlab_origin: 2048,
 }
 export function EventFields({ event, choices, disabled, onChange }: {
   event: AutomationEvent; choices: [string, string][]; disabled: boolean; onChange: (event: AutomationEvent) => void
@@ -410,6 +410,7 @@ export function EventFields({ event, choices, disabled, onChange }: {
     {event.provider === "session" && <p className="ns-field-hint">Watches new human messages in shared sessions after activation. Leave the session ID blank for all eligible sessions, or use the exact original 32-character ID or native UUID. Existing messages are not replayed.</p>}
     {event.provider === "slack" && <p className="ns-field-hint">Uses the installed organization Slack app and allowed users. Add the bot to watched channels and configure the required event subscriptions and scopes.</p>}
     {event.provider === "github" && typeof event.repository_id === "number" && <p className="ns-field-hint">Saved repository ID: {event.repository_id}. Changing the repository name requires the service to resolve it again.</p>}
+    {event.provider === "gitlab" && typeof event.repository_id === "number" && <p className="ns-field-hint">Saved project ID: {event.repository_id} on {event.gitlab_origin}. Changing the project or server requires verification again.</p>}
   </div>
 }
 
@@ -422,7 +423,7 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
   onCancel: () => void; onSave: (definition: AutomationDefinition) => Promise<void>
 }) {
   const [definition, setDefinition] = useState<AutomationDefinition>(() => existing ? structuredClone(existing) : {
-    name: "", prompt: "", session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null,
+    name: "", prompt: "", session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null, gitlab_project_id: null,
     environment_id: "auto", plugins: [], metadata: {}, queue_events: false, max_runs_per_hour: 50,
     self_management: { instructions: false, schedule: false },
     triggers: [{ id: crypto.randomUUID(), schedule: { ...automationDefaultSchedule(), cron: "", run_at: null } }],
@@ -465,7 +466,7 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
         {chatError && <p className="ns-error" role="alert">{chatError}{onRefreshChats && <Button type="button" variant="outline" onClick={onRefreshChats}>Retry chats</Button>}</p>}
       </div>
       <div className="ns-field"><label htmlFor={`${id}-model`}>Model</label><Choice id={`${id}-model`} label="Automation model" value={definition.model || "__default__"} options={availableModels} disabled={busy} onChange={value => change({ model: value === "__default__" ? "" : value })} /></div>
-      {!definition.session_id && <><div className="ns-field"><label htmlFor={`${id}-repository`}>Repository</label><Input id={`${id}-repository`} type="url" maxLength={500} placeholder="https://github.com/owner/repository" value={definition.repo_url} disabled={busy} onChange={event => setDefinition(previous => changeAutomationRepository(previous, event.target.value))} /><p className="ns-field-hint">Public repositories use a credential-free checkout. Private repositories require their selected GitHub connection. Choose a validated environment below when the workflow needs prepared dependencies.</p></div>
+      {!definition.session_id && <><div className="ns-field"><label htmlFor={`${id}-repository`}>Repository</label><Input id={`${id}-repository`} type="url" maxLength={500} placeholder="https://gitlab.com/group/project" value={definition.repo_url} disabled={busy} onChange={event => setDefinition(previous => changeAutomationRepository(previous, event.target.value))} /><p className="ns-field-hint">GitLab projects require their selected GitLab connection. Public GitHub repositories support credential-free checkout; private repositories require their selected connection. GitHub and GitLab repositories can use a matching validated environment.</p></div>
       <div className="ns-field"><label htmlFor={`${id}-environment`}>Execution environment</label><Choice id={`${id}-environment`} label="Execution environment" value={definition.environment_id} options={environmentOptions} disabled={busy || environmentLoading} onChange={value => change({ environment_id: value })} />
         {environmentLoading && <p className="ns-field-hint" role="status">Loading saved environments…</p>}
         {environmentError && <p className="ns-error" role="alert">{environmentError}{onRefreshEnvironments && <Button type="button" variant="outline" onClick={onRefreshEnvironments}>Retry environments</Button>}</p>}
@@ -491,7 +492,7 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
     {!definition.session_id && <section className="pa-editor-section"><h3>Connections and tools</h3><p className="ns-field-hint">Choose which connected apps this workflow may use. The service rechecks account permissions for shared automation sessions before activation.</p>
       {connectionLoading && <p role="status" className="ns-muted">Loading connected apps…</p>}
       {connectionError && <p className="ns-error" role="alert">{connectionError}{onRefreshConnections && <Button type="button" variant="outline" onClick={onRefreshConnections}>Retry connections</Button>}</p>}
-      {(["linear", "github", "slack", "notion"] as const).map(provider => {
+      {(["linear", "github", "gitlab", "slack", "notion"] as const).map(provider => {
         const account = connections.find(connection => connection.id === provider), selected = definition.plugins.includes(provider)
         return <div className="pa-connection" key={provider}><CheckField label={`${automationSources[provider] || (provider === "notion" ? "Notion" : provider)} · ${account ? !account.connected ? "Not connected" : !account.enabled ? "Disabled" : account.read_only ? "Read only" : "Connected" : "Availability unavailable"}`}
           checked={selected} disabled={busy || (!selected && (connectionLoading || !account?.connected || !account.enabled))} onChange={checked => change({ plugins: checked ? [...definition.plugins, provider] : definition.plugins.filter(value => value !== provider) })} />

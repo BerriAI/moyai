@@ -31,6 +31,9 @@ class ProductEnvironment(ResponseModel):
     name: str
     repository: str
     repository_id: int | None
+    repository_provider: Literal["gitlab"] | MISSING = absent()
+    repository_origin: str | MISSING = absent()
+    gitlab_project_id: int | MISSING = absent()
     revision: int
     enabled: bool
     active_build: str | None

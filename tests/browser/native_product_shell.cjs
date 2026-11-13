@@ -107,6 +107,7 @@ async function handle(req,res,next) {
       return json({id:'resumed-turn',status:'queued'},202);
     }
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
+    if(url.pathname.endsWith('/pull-request'))return json({detail:'Review content is covered by the dedicated review fixture.'},404);
     if(url.pathname.endsWith('/computer')) {
       if(req.method==='POST'&&data.action==='handoff') {
         state.computer={...state.computer,controlled:false,can_release:false,controller:null};
@@ -1136,6 +1137,46 @@ test('sidebar PR icons retain multi-PR selection without numeric badges',async t
   await page.locator('.session-pr-ready').click();
   await page.getByRole('button',{name:'Review change 12 example/project#12',exact:true}).waitFor();
   await page.getByRole('button',{name:'Review change 13 example/project#13',exact:true}).waitFor();
+});
+
+for(const width of [1440,768,320])for(const theme of ['dark','light'])test(`GitLab sidebar references and panel tab labels at ${width}px ${theme}`,async t=>{
+  const url='https://gitlab.example/team/subgroup/project/-/merge_requests/12';
+  reset({status:'idle',prStatuses:{[sessionId]:[{url,repository:'team/subgroup/project',
+    number:12,title:'GitLab change',state:'open',draft:false,accessible:true}]}});
+  const page=await pageFor(t,'',width,page=>page.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme));
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  const indicator=page.getByRole('button',{name:'Ready merge requests: 1. team/subgroup/project!12: GitLab change',exact:true});
+  await indicator.waitFor();
+  assert.equal(await indicator.innerText(),'MR ready');
+  await indicator.click();
+  const tab=page.getByRole('tab',{name:'Merge request',exact:true});
+  await tab.waitFor();
+  assert.equal(await tab.getAttribute('data-tab-id'),`pr:${url.toLowerCase()}`);
+  await page.getByRole('button',{name:'Close Merge request tab',exact:true}).waitFor();
+  assert.equal(await page.getByRole('tab',{name:'Pull request',exact:true}).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('mixed sidebar review menu keeps provider-specific numbers and GitHub tab labels',async t=>{
+  const github='https://github.com/example/project/pull/12';
+  const gitlab='http://127.0.0.1:58990/team/subgroup/project/-/merge_requests/12';
+  reset({status:'idle',prStatuses:{[sessionId]:[
+    {url:github,repository:'example/project',number:12,title:'GitHub change',state:'open',draft:false,accessible:true},
+    {url:gitlab,repository:'team/subgroup/project',number:12,title:'GitLab change',state:'open',draft:false,accessible:true},
+  ]}});
+  const page=await pageFor(t,'');
+  const indicator=page.getByRole('button',{name:/^Ready pull and merge requests: 2\./});
+  await indicator.waitFor();
+  assert.equal(await indicator.innerText(),'PRs/MRs ready');
+  await indicator.click();
+  const mr=page.getByRole('button',{name:'GitLab change team/subgroup/project!12',exact:true});
+  await mr.waitFor();
+  await mr.click();
+  await page.getByRole('tab',{name:'Merge request',exact:true}).waitFor();
+  await indicator.click();
+  await page.getByRole('button',{name:'GitHub change example/project#12',exact:true}).click();
+  await page.getByRole('tab',{name:'Pull request',exact:true}).waitFor();
+  assert.equal(await page.getByRole('tab',{name:'Merge request',exact:true}).getAttribute('data-tab-id'),`pr:${gitlab}`);
 });
 
 async function assertWorkspaceSeparated(page) {

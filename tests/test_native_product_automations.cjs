@@ -133,6 +133,19 @@ test('repository edits discard stale permanent IDs without mutating the saved de
   assert.throws(()=>data.validateAutomation(definition({repo_url:'https://user:secret@github.com/owner/repo'})),/repository URL/);
 });
 
+test('GitLab editor retains a verified project until its repository or origin changes',()=>{
+  const original=definition({repo_url:'https://gitlab.example/team/subgroup/project',gitlab_project_id:42,plugins:['gitlab']});
+  data.validateAutomation(original);
+  assert.equal(data.changeAutomationRepository(original,original.repo_url).gitlab_project_id,42);
+  assert.equal(data.changeAutomationRepository(original,'https://other-gitlab.example/team/subgroup/project').gitlab_project_id,null);
+  const event={provider:'gitlab',event:'merge_request',repository:'team/project',repository_id:42,gitlab_origin:'https://gitlab.example'};
+  assert.equal(data.changeAutomationEventField(event,'gitlab_origin','https://other-gitlab.example').repository_id,null);
+  assert.equal(data.changeAutomationEventField(event,'action','open').repository_id,42);
+  assert.equal(event.repository_id,42);
+  const html=render(ui.DefinitionEditor,{existing:original,models:['enabled-model'],defaultModel:'enabled-model',connections:[{id:'gitlab',connected:true,enabled:true,read_only:false}],busy:false,onCancel(){},async onSave(){}});
+  assert.match(html,/GitLab/);assert.match(html,/gitlab.example\/team\/subgroup\/project/);
+});
+
 const eventExamples=()=>[
   {provider:'session',event:'message.posted',session_id:'a'.repeat(32),text_contains:'please'},
   {provider:'session',event:'message.posted',session_id:'12345678-1234-1234-1234-123456789abc'},

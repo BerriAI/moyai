@@ -11,8 +11,13 @@ import hashlib
 import json
 import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
+from app.repository_identity import (
+    canonical_origin,
+    canonical_repository_url,
+    repository_origin,
+    repository_provider,
+)
 from fastapi import HTTPException
 from pydantic import TypeAdapter
 from sqlalchemy import bindparam, select, text
@@ -46,23 +51,55 @@ def build_fingerprint(build: Any) -> str:
 
 
 def canonical_repository(value: str) -> str:
-    if not value:
-        return ""
-    if len(value) > 2048 or any(ord(c) <= 32 or ord(c) == 127 for c in value):
-        raise HTTPException(422, "Choose a canonical GitHub repository URL.")
     try:
-        parsed = urlsplit(value)
-        authority = value.split("://", 1)[1].split("/", 1)[0]
-        repository = parsed.path.strip("/").removesuffix(".git")
+        return canonical_repository_url(value)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+
+
+def gitlab_context(context: dict[str, Any]) -> bool:
+    return context.get("repository_provider") == "gitlab" or (
+        bool(context.get("repo_url")) and repository_provider(context["repo_url"]) == "gitlab"
+    )
+
+
+def gitlab_recipe_identity(recipe: dict[str, Any]) -> tuple[str, str, int]:
+    """Validate new recipe metadata without rewriting immutable recipe bytes."""
+    try:
+        if not isinstance(recipe, dict):
+            raise TypeError
+        origin = canonical_origin(recipe["repository_origin"])
+        target = recipe["gitlab_project_id"]
+        url = origin + "/" + recipe["repository"]
         if (
-            parsed.scheme != "https" or parsed.netloc.lower() != "github.com"
-            or parsed.username is not None or parsed.password is not None or "@" in authority
-            or parsed.query or parsed.fragment or not REPOSITORY.fullmatch(repository)
+            recipe.get("repository_provider") != "gitlab"
+            or recipe["repository_origin"] != origin
+            or repository_provider(url) != "gitlab" or canonical_repository_url(url) != url
+            or type(target) is not int or target <= 0
+            or recipe.get("github_repository_id") is not None
+            or (recipe.get("repository_id") is not None and (
+                type(recipe["repository_id"]) is not int or recipe["repository_id"] != target
+            ))
+            or recipe.get("clone_access", "gitlab") not in {"gitlab", "public"}
         ):
             raise ValueError
-    except (ValueError, IndexError):
-        raise HTTPException(422, "Choose a credential-free https://github.com/owner/repository URL.") from None
-    return "https://github.com/" + repository
+        return url, origin, target
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(409, "The GitLab environment recipe has an invalid provider, origin or project identity.") from None
+
+
+def gitlab_build_identity(build: Any) -> tuple[str, str, int]:
+    try:
+        original = gitlab_recipe_identity(json.loads(build["recipe"]))
+        resolved = gitlab_recipe_identity(json.loads(build["resolved_recipe"]))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(409, "The validated GitLab environment recipes cannot be read.") from None
+    if (
+        original != resolved or not build["snapshot_id"]
+        or not re.fullmatch(r"[0-9a-f]{40}", build["commit_sha"] or "")
+    ):
+        raise HTTPException(409, "The validated GitLab image needs matching recipes, a snapshot and an exact commit.")
+    return resolved
 
 
 class ProductWorkspaceCompatibility:
@@ -78,6 +115,30 @@ class ProductWorkspaceCompatibility:
 
     @staticmethod
     def authorize_project_grants(context: dict[str, Any], grants: list[Grant]) -> None:
+        if gitlab_context(context):
+            try:
+                origin = repository_origin(context["repo_url"])
+                target = context.get("gitlab_project_id")
+                if (
+                    context.get("repository_provider") != "gitlab"
+                    or context.get("repository_origin") != origin
+                    or type(target) is not int or target <= 0
+                    or (context.get("repository_id") is not None and (
+                        type(context["repository_id"]) is not int or context["repository_id"] != target
+                    ))
+                ):
+                    raise ValueError
+                selected = [
+                    grant for grant in grants if grant.kind == "gitlab"
+                    and type(grant.policy.get("product", {}).get("repository_id")) is int
+                    and grant.policy.get("product", {}).get("repository_id") == target
+                    and canonical_origin(grant.policy.get("product", {}).get("base_url", "")) == origin
+                ]
+                if len(selected) != 1:
+                    raise ValueError
+            except (KeyError, ValueError):
+                raise HTTPException(403, "Select the current GitLab connection for this exact origin and project.") from None
+            return
         if context.get("clone_access") in {"public", None}:
             return
         repository_id = context.get("repository_id")
@@ -92,6 +153,26 @@ class ProductWorkspaceCompatibility:
             raise HTTPException(503, "Canonical project configuration is unavailable.")
         return identifier(self.schema) + "." + identifier(name)
 
+    async def _check_gitlab_build(self, db: AsyncSession, context: dict[str, Any]) -> None:
+        if not context.get("environment_build_id"):
+            return
+        build = (await db.execute(text(
+            f"SELECT {BUILD_COLUMNS} FROM {self.table('environment_builds')} WHERE id=:id"
+        ), {"id": context["environment_build_id"]})).mappings().first()
+        enabled = await db.scalar(text(
+            f"SELECT enabled FROM {self.table('environments')} WHERE id=:id"
+        ), {"id": context["environment_id"]})
+        if (
+            build is None or enabled is None or (not enabled and not context.get("pinned_source_build"))
+            or build["phase"] != "ready" or build["sandbox_provider"] != "modal"
+            or build["environment_id"] != context["environment_id"]
+            or build_fingerprint(build) != context["build_fingerprint"]
+            or gitlab_build_identity(build) != (
+                context["repo_url"], context["repository_origin"], context["gitlab_project_id"],
+            )
+        ):
+            raise PermissionError("The pinned GitLab project build changed or was disabled.")
+
     async def catalog(self, principal: ProductPrincipal) -> list[dict[str, Any]]:
         if self.identity is None:
             raise HTTPException(503, "Canonical environment configuration is unavailable.")
@@ -99,7 +180,7 @@ class ProductWorkspaceCompatibility:
         async with self.runtime.database.sessions() as db:
             rows = (await db.execute(text(f"""
                 SELECT e.id,e.recipe,e.revision,e.enabled,e.activate_on_ready,e.active_build,e.is_default,
-                    b.recipe AS build_recipe,b.phase,b.snapshot_id,b.commit_sha,b.sandbox_provider,
+                    b.recipe AS build_recipe,b.resolved_recipe,b.phase,b.snapshot_id,b.commit_sha,b.sandbox_provider,
                     b.revision AS build_revision
                 FROM {self.table('environments')} e
                 LEFT JOIN {self.table('environment_builds')} b ON b.id=e.active_build
@@ -113,7 +194,7 @@ class ProductWorkspaceCompatibility:
                 recipe = json.loads(row["build_recipe"] or row["recipe"])
                 ready = bool(row["enabled"] and row["phase"] == "ready" and row["snapshot_id"]
                              and row["sandbox_provider"] == "modal")
-                catalog.append({
+                item = {
                     "id": row["id"], "name": str(recipe["name"])[:200],
                     "repository": recipe["repository"], "repository_id": recipe.get("repository_id"),
                     "revision": row["revision"], "enabled": bool(row["enabled"]),
@@ -123,7 +204,17 @@ class ProductWorkspaceCompatibility:
                         "id": row["active_build"], "revision": row["build_revision"],
                         "commit_sha": row["commit_sha"], "sandbox_provider": row["sandbox_provider"],
                     } if row["active_build"] else None,
-                })
+                }
+                if recipe.get("repository_provider") == "gitlab":
+                    _, origin, target = gitlab_recipe_identity(recipe)
+                    item.update(repository_provider="gitlab", repository_origin=origin,
+                                gitlab_project_id=target, repository_id=None)
+                    if ready:
+                        try:
+                            gitlab_build_identity({**row, "recipe": row["build_recipe"]})
+                        except HTTPException:
+                            item["ready"] = False
+                catalog.append(item)
         await self.identity.require_current(principal.grant)
         return catalog
 
@@ -131,7 +222,13 @@ class ProductWorkspaceCompatibility:
         self, db: AsyncSession, selection: dict[str, Any], *, require_ready: bool,
     ) -> dict[str, Any]:
         repo_url = canonical_repository(str(selection.get("repo_url") or ""))
-        repository_id = selection.get("github_repository_id")
+        provider = selection.get("repository_provider") or repository_provider(repo_url)
+        if provider not in {"github", "gitlab"} or (repo_url and provider != repository_provider(repo_url)):
+            raise HTTPException(422, "The repository provider does not match its URL.")
+        gitlab = self._gitlab_selection(selection, repo_url) if provider == "gitlab" else None
+        if provider == "github" and selection.get("gitlab_project_id") is not None:
+            raise HTTPException(422, "A GitLab project ID cannot select a GitHub repository.")
+        repository_id = gitlab["gitlab_project_id"] if gitlab else selection.get("github_repository_id")
         if repository_id is not None and (type(repository_id) is not int or repository_id <= 0):
             raise HTTPException(422, "Use the canonical permanent repository ID.")
         requested = str(selection.get("environment_id") or "auto")
@@ -140,6 +237,17 @@ class ProductWorkspaceCompatibility:
         explicit_build = str(selection.get("environment_build_id") or "")
         if explicit_build not in {"", "none"} and not BUILD_ID.fullmatch(explicit_build):
             raise HTTPException(422, "The saved environment build reference is invalid.")
+        catalog_available = True
+        if gitlab and (
+            explicit_build not in {"", "none"} or (requested != "none" and explicit_build != "none")
+        ):
+            # These are retained source tables, not a mandatory native schema.
+            # New GitLab bare tasks must also work in installations without them.
+            catalog_available = bool(await db.scalar(text(
+                "SELECT to_regclass(:environments) IS NOT NULL AND to_regclass(:builds) IS NOT NULL"
+            ), {"environments": self.table("environments"), "builds": self.table("environment_builds")}))
+            if not catalog_available and (requested != "auto" or explicit_build not in {"", "none"}):
+                raise HTTPException(409, "The validated environment store is unavailable. Use a bare repository checkout.")
         environment = None
         build = None
         if explicit_build not in {"", "none"}:
@@ -153,7 +261,7 @@ class ProductWorkspaceCompatibility:
             ), {"id": build["environment_id"]})).mappings().first()
             if environment is None or (requested not in {"auto", "none"} and requested != build["environment_id"]):
                 raise HTTPException(409, "The saved build no longer belongs to the selected environment.")
-        elif requested != "none" and explicit_build != "none":
+        elif requested != "none" and explicit_build != "none" and catalog_available:
             if requested != "auto":
                 candidates = list((await db.execute(text(
                     f"SELECT * FROM {self.table('environments')} WHERE id=:id"
@@ -178,13 +286,24 @@ class ProductWorkspaceCompatibility:
                 candidate_build = builds.get(candidate["active_build"])
                 try:
                     recipe = json.loads(candidate_build["recipe"] if candidate_build else candidate["recipe"])
+                    if not isinstance(recipe, dict):
+                        raise TypeError
                 except (ValueError, TypeError):
                     raise HTTPException(409, "The environment recipe is invalid; rebuild it in Environments.") from None
-                match = (
-                    repository_id == recipe.get("repository_id") if repository_id is not None
-                    else bool(repo_url and repo_url.casefold() ==
-                              canonical_repository("https://github.com/" + recipe["repository"]).casefold())
-                )
+                if recipe.get("repository_provider", "github") != provider:
+                    if requested != "auto":
+                        raise HTTPException(409, "The environment uses a different repository provider.")
+                    continue
+                if gitlab:
+                    match = gitlab_recipe_identity(recipe) == (
+                        repo_url, gitlab["repository_origin"], repository_id,
+                    )
+                else:
+                    match = (
+                        repository_id == recipe.get("repository_id") if repository_id is not None
+                        else bool(repo_url and repo_url.casefold() ==
+                                  canonical_repository("https://github.com/" + recipe["repository"]).casefold())
+                    )
                 if requested != "auto" or match or (not repo_url and repository_id is None and candidate["is_default"]):
                     if candidate_build is not None and candidate_build["environment_id"] != candidate["id"]:
                         raise HTTPException(409, "The selected environment has an invalid active build reference.")
@@ -202,11 +321,18 @@ class ProductWorkspaceCompatibility:
                     raise HTTPException(409, "Prepare this environment for Modal before native execution.")
                 try:
                     recipe = json.loads(build.get("resolved_recipe") or build["recipe"])
+                    if not isinstance(recipe, dict):
+                        raise TypeError
                 except (ValueError, TypeError):
                     raise HTTPException(409, "The validated environment recipe cannot be read.") from None
-                built_repo = canonical_repository("https://github.com/" + str(recipe.get("repository") or ""))
-                built_id = recipe.get("repository_id")
-                if repo_url and repo_url.casefold() != built_repo.casefold():
+                if recipe.get("repository_provider", "github") != provider:
+                    raise HTTPException(409, "The environment uses a different repository provider.")
+                if gitlab:
+                    built_repo, _, built_id = gitlab_build_identity(build)
+                else:
+                    built_repo = canonical_repository("https://github.com/" + str(recipe.get("repository") or ""))
+                    built_id = recipe.get("repository_id")
+                if repo_url and (repo_url != built_repo if gitlab else repo_url.casefold() != built_repo.casefold()):
                     raise HTTPException(409, "The repository no longer matches the selected environment.")
                 if repository_id is not None and built_id != repository_id:
                     raise HTTPException(409, "The permanent repository identity changed.")
@@ -225,13 +351,40 @@ class ProductWorkspaceCompatibility:
             "commit_sha": build["commit_sha"] if build else None,
             "working_dir": "/workspace/repo" if repo_url else "/workspace",
         }
+        if gitlab:
+            result.update(
+                selection=gitlab["selection"], repository_provider="gitlab",
+                repository_origin=gitlab["repository_origin"], gitlab_project_id=repository_id,
+                clone_access="gitlab",
+            )
         result["context_fingerprint"] = fingerprint(result)
         return result
+
+    def _gitlab_selection(self, selection: dict[str, Any], repo_url: str) -> dict[str, Any]:
+        """Validate explicit GitLab identity before reading any environment."""
+        target = selection.get("gitlab_project_id")
+        if not repo_url or selection.get("github_repository_id") is not None:
+            raise HTTPException(422, "Use a GitLab repository URL and gitlab_project_id, not a GitHub repository ID.")
+        if type(target) is not int or target <= 0:
+            raise HTTPException(422, "Resolve the selected GitLab project to its permanent numeric ID before admission.")
+        origin = repository_origin(repo_url)
+        if selection.get("repository_origin") not in {None, "", origin}:
+            raise HTTPException(422, "The GitLab repository origin changed.")
+        requested = str(selection.get("environment_id") or "auto")
+        return {
+            "selection": {
+                "repo_url": repo_url, "repository_provider": "gitlab", "repository_origin": origin,
+                "gitlab_project_id": target, "environment_id": requested,
+            },
+            "repo_url": repo_url, "repository_provider": "gitlab", "repository_origin": origin,
+            "gitlab_project_id": target,
+        }
 
     async def automation_blockers(self, db: AsyncSession, owner_id: str, definition: Any) -> list[str]:
         selection = {
             name: getattr(definition, name, None)
-            for name in ("repo_url", "github_repository_id", "environment_id")
+            for name in ("repo_url", "repository_provider", "repository_origin",
+                         "github_repository_id", "gitlab_project_id", "environment_id")
         } if not isinstance(definition, dict) else definition
         try:
             context = await self._selection(db, selection, require_ready=True)
@@ -261,7 +414,12 @@ class ProductWorkspaceCompatibility:
         fresh = await self.capture_workspace_context(db, principal, selection)
         # Routine validated-build refreshes are adopted per occurrence. Changing
         # the selected permanent repository/environment requires explicit enable.
-        if saved.get("selection") != fresh["selection"] or saved.get("repository_id") != fresh["repository_id"]:
+        if (
+            saved.get("selection") != fresh["selection"] or saved.get("repository_id") != fresh["repository_id"]
+            or saved.get("repository_provider", "github") != fresh.get("repository_provider", "github")
+            or saved.get("repository_origin") != fresh.get("repository_origin")
+            or saved.get("gitlab_project_id") != fresh.get("gitlab_project_id")
+        ):
             raise HTTPException(409, "The saved repository/environment selection changed. Review and enable again.")
         return fresh
 
@@ -305,6 +463,8 @@ class ProductWorkspaceCompatibility:
                     or build_fingerprint(current) != context["build_fingerprint"]
                 ):
                     raise PermissionError("The pinned project build changed or was disabled.")
+                if gitlab_context(context):
+                    await self._check_gitlab_build(db, context)
         await self.runtime.database.authorize_scope(scope)
         return context
 
@@ -347,6 +507,8 @@ class ProductWorkspaceCompatibility:
                 return await prepare_workspace(self.runtime, prepared)
             return prepared
         self.authorize_project_grants(context, scope.grants)
+        if gitlab_context(context):
+            await self._check_gitlab_scope(context, scope)
         materialized = dict(context)
         if context.get("environment_build_id"):
             async with self.runtime.database.sessions() as db:
@@ -363,7 +525,25 @@ class ProductWorkspaceCompatibility:
         prepared = await self.restorer.prepare(prepared, materialized)
         await self.turn_context(scope)
         self.authorize_project_grants(context, scope.grants)
+        if gitlab_context(context):
+            await self._check_gitlab_scope(context, scope)
         return prepared
+
+    async def _check_gitlab_scope(
+        self, context: dict[str, Any], scope: RunScope, *, historical: bool = False,
+    ) -> None:
+        self.authorize_project_grants(context, scope.grants)
+        connections = getattr(self.runtime, "product_connections", None)
+        if connections is None:
+            raise PermissionError("Current GitLab authority is unavailable.")
+        selected = next(
+            grant for grant in scope.grants if grant.kind == "gitlab"
+            and grant.policy.get("product", {}).get("repository_id") == context["gitlab_project_id"]
+            and canonical_origin(grant.policy.get("product", {}).get("base_url", "")) == context["repository_origin"]
+        )
+        await connections.require_scope(scope)
+        if not historical:
+            await connections.check(scope, selected)
 
     async def repository_session(
         self, db: AsyncSession, native_session_id: str, current: ProductPrincipal,
@@ -409,8 +589,10 @@ class ProductWorkspaceCompatibility:
                 ), {"id": context["environment_build_id"]})).mappings().first()
                 if build is None or build_fingerprint(build) != context["build_fingerprint"]:
                     raise PermissionError("The selected repository build changed.")
+                if gitlab_context(context):
+                    await self._check_gitlab_build(db, context)
             if (
-                not context.get("repository_id") and context.get("repo_url")
+                (not context.get("repository_id") or gitlab_context(context)) and context.get("repo_url")
                 and connections is not None and callable(getattr(connections, "repository_receipt", None))
             ):
                 turn = await db.get(Turn, row.turn_id)
@@ -436,6 +618,50 @@ class ProductWorkspaceCompatibility:
         await self.identity.require_current(grant)
         if context.get("source_session_id") and self.runtime.product_history:
             await self.runtime.product_history.require(current, context["source_session_id"])
+        if gitlab_context(context):
+            if prepared is None or connections is None:
+                return None
+            if receipt is not None:
+                if (
+                    receipt.get("repository_provider") != "gitlab" or receipt.get("public") is not False
+                    or receipt.get("repository_origin") != context.get("repository_origin")
+                    or context.get("gitlab_project_id") not in {None, receipt.get("gitlab_project_id")}
+                    or context.get("repository_id") not in {None, receipt.get("gitlab_project_id")}
+                ):
+                    raise PermissionError("The GitLab receipt changed the frozen project identity.")
+                if not any(
+                    item.kind == "gitlab" and item.id == receipt.get("connection_id")
+                    and item.revision == receipt.get("connection_revision")
+                    and item.policy.get("product", {}).get("repository_id") == receipt.get("gitlab_project_id")
+                    and canonical_origin(item.policy.get("product", {}).get("base_url", "")) == receipt["repository_origin"]
+                    for item in prepared.scope.grants
+                ):
+                    raise PermissionError("The GitLab receipt's original account is no longer selected.")
+                context = {**context, **{key: receipt[key] for key in (
+                    "repository_id", "gitlab_project_id", "repo_url",
+                )}}
+            # A completed turn cannot pass live execution authorization. Its
+            # original admitted principal and current exact grant selection are
+            # checked independently before releasing historical memory scope.
+            await self._check_gitlab_scope(context, prepared.scope, historical=True)
+            current = await self.identity.require_current(grant)
+            async with self.runtime.database.sessions() as db:
+                session = await self.repository_session(db, native_session_id, current)
+                turn = await db.get(Turn, prepared.scope.turn_id)
+                if (
+                    turn is None or turn.preparation != saved_preparation
+                    or session.visibility != prepared.scope.visibility or session.surface != prepared.scope.surface
+                ):
+                    raise PermissionError("The historical GitLab task changed during authorization.")
+                await self.runtime.database._check_product_turn(db, turn, grant)
+                await self._check_gitlab_build(db, context)
+            if context.get("source_session_id") and self.runtime.product_history:
+                await self.runtime.product_history.require(current, context["source_session_id"])
+            return {key: context.get(key) for key in (
+                "source_schema", "source_session_id", "repository_id", "repo_url", "repository_provider",
+                "repository_origin", "gitlab_project_id", "environment_id", "environment_build_id",
+                "environment_revision", "context_fingerprint",
+            )}
         if receipt is not None and prepared is not None and connections is not None:
             await connections.require_scope(prepared.scope)
             if receipt["public"]:

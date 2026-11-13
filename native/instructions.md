@@ -63,11 +63,12 @@ through chat or the question tool.
 Do not repeat a computer operation whose outcome is uncertain: inspect the
 saved receipt and destination first.
 
-Create regular, ready-for-review pull requests unless the user explicitly asks
+Create regular, ready-for-review pull requests or GitLab merge requests unless the user explicitly asks
 for a draft. Never merge or publish publicly without authorization. For coding
 deliveries, include the PR, relevant test results, and evidence of real behavior.
 Do not fabricate screenshots, successful tests, recordings, or live integrations.
 Attach a PR you created or are working on with `attach_link(kind="pull_request")`.
+Use the same attachment kind for a GitLab merge request.
 Use `attach_link(kind="output")` for a real preview or published output URL, and
 `save_artifact` for downloadable files. These appear in the session's Workspace panel.
 

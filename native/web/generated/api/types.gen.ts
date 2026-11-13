@@ -1481,6 +1481,10 @@ export type AutomationDefinition = {
      */
     github_repository_id?: number | null;
     /**
+     * Gitlab Project Id
+     */
+    gitlab_project_id?: number | null;
+    /**
      * Harness
      */
     harness?: string;
@@ -1509,7 +1513,7 @@ export type AutomationDefinition = {
     /**
      * Plugins
      */
-    plugins?: Array<'linear' | 'github' | 'slack' | 'notion'>;
+    plugins?: Array<'linear' | 'github' | 'gitlab' | 'slack' | 'notion'>;
     /**
      * Prompt
      */
@@ -3558,6 +3562,10 @@ export type EventTriggerInput = {
      */
     event?: string;
     /**
+     * Gitlab Origin
+     */
+    gitlab_origin?: string;
+    /**
      * Include Thread Replies
      */
     include_thread_replies?: boolean;
@@ -3663,6 +3671,10 @@ export type EventTriggerOutput = {
      * Event
      */
     event: string;
+    /**
+     * Gitlab Origin
+     */
+    gitlab_origin: string;
     /**
      * Include Thread Replies
      */
@@ -3957,6 +3969,90 @@ export type GitHubSetupRedirect = {
      * Url
      */
     url: string;
+};
+
+/**
+ * GitLabOrganizationSetup
+ */
+export type GitLabOrganizationSetup = {
+    /**
+     * Base Url
+     */
+    base_url?: string;
+    /**
+     * Repository Ids
+     */
+    repository_ids: Array<number>;
+    /**
+     * Revision
+     */
+    revision: string;
+};
+
+/**
+ * GitLabProjectDiscovery
+ */
+export type GitLabProjectDiscovery = {
+    /**
+     * Base Url
+     */
+    base_url?: string;
+    /**
+     * Page
+     */
+    page?: number;
+    /**
+     * Revision
+     */
+    revision?: string | null;
+    /**
+     * Search
+     */
+    search?: string;
+};
+
+/**
+ * GitLabProjectDiscoveryResult
+ */
+export type GitLabProjectDiscoveryResult = {
+    /**
+     * Base Url
+     */
+    base_url: string;
+    /**
+     * Next Page
+     */
+    next_page: number | null;
+    /**
+     * Repositories
+     */
+    repositories: Array<OrganizationConnectionRepository>;
+    /**
+     * Revision
+     */
+    revision: string;
+    /**
+     * Selected Ids
+     */
+    selected_ids: Array<number>;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+};
+
+/**
+ * GitLabProjectSelection
+ */
+export type GitLabProjectSelection = {
+    /**
+     * Repository Ids
+     */
+    repository_ids: Array<number>;
+    /**
+     * Revision
+     */
+    revision: string;
 };
 
 /**
@@ -5146,13 +5242,13 @@ export type Note = {
     /**
      * Repo Url
      *
-     * Leave empty for general personal preferences across repositories. For repository-specific notes, use selected_repository_url or a confirmed repository_id from the current memory context. A mentioned name alone is not a confirmed identity.
+     * Leave empty for general preferences. Repository notes require the verified repository URL from current memory context, including its origin and full project path.
      */
     repo_url?: string;
     /**
      * Repository Id
      *
-     * Confirmed permanent ID from github_repositories; supports repository scope when the session picker is empty.
+     * Legacy GitHub repository ID. GitLab notes must use the verified repository URL from current memory context.
      */
     repository_id?: number | null;
     /**
@@ -5180,6 +5276,10 @@ export type OrganizationConnection = {
      */
     app_registered: boolean | null;
     /**
+     * Base Url
+     */
+    base_url: string | null;
+    /**
      * Check Status
      */
     check_status: string | null;
@@ -5198,7 +5298,7 @@ export type OrganizationConnection = {
     /**
      * Id
      */
-    id: 'github' | 'linear' | 'notion' | 'slack';
+    id: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack';
     /**
      * Identity
      */
@@ -5597,6 +5697,10 @@ export type ProductAutomationDefinition = {
      */
     github_repository_id: number | null;
     /**
+     * Gitlab Project Id
+     */
+    gitlab_project_id: number | null;
+    /**
      * Harness
      */
     harness: string;
@@ -5625,7 +5729,7 @@ export type ProductAutomationDefinition = {
     /**
      * Plugins
      */
-    plugins: Array<'linear' | 'github' | 'slack' | 'notion'>;
+    plugins: Array<'linear' | 'github' | 'gitlab' | 'slack' | 'notion'>;
     /**
      * Prompt
      */
@@ -6296,6 +6400,10 @@ export type ProductEnvironment = {
      */
     enabled: boolean;
     /**
+     * Gitlab Project Id
+     */
+    gitlab_project_id?: number;
+    /**
      * Id
      */
     id: string;
@@ -6324,6 +6432,14 @@ export type ProductEnvironment = {
      * Repository Id
      */
     repository_id: number | null;
+    /**
+     * Repository Origin
+     */
+    repository_origin?: string;
+    /**
+     * Repository Provider
+     */
+    repository_provider?: 'gitlab';
     /**
      * Revision
      */
@@ -10934,6 +11050,54 @@ export type ConnectionInputWritable = {
 };
 
 /**
+ * GitLabOrganizationSetup
+ */
+export type GitLabOrganizationSetupWritable = {
+    /**
+     * Base Url
+     */
+    base_url?: string;
+    /**
+     * Repository Ids
+     */
+    repository_ids: Array<number>;
+    /**
+     * Revision
+     */
+    revision: string;
+    /**
+     * Token
+     */
+    token: string;
+};
+
+/**
+ * GitLabProjectDiscovery
+ */
+export type GitLabProjectDiscoveryWritable = {
+    /**
+     * Base Url
+     */
+    base_url?: string;
+    /**
+     * Page
+     */
+    page?: number;
+    /**
+     * Revision
+     */
+    revision?: string | null;
+    /**
+     * Search
+     */
+    search?: string;
+    /**
+     * Token
+     */
+    token: string;
+};
+
+/**
  * Login
  */
 export type LoginWritable = {
@@ -11621,6 +11785,119 @@ export type SelectGitHubRepositoriesResponses = {
 
 export type SelectGitHubRepositoriesResponse = SelectGitHubRepositoriesResponses[keyof SelectGitHubRepositoriesResponses];
 
+export type ConnectGitLabOrganizationData = {
+    body: GitLabOrganizationSetupWritable;
+    path?: never;
+    query?: never;
+    url: '/api/connections/gitlab/connect';
+};
+
+export type ConnectGitLabOrganizationErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConnectGitLabOrganizationError = ConnectGitLabOrganizationErrors[keyof ConnectGitLabOrganizationErrors];
+
+export type ConnectGitLabOrganizationResponses = {
+    /**
+     * Successful Response
+     */
+    200: OrganizationConnectionConnected;
+};
+
+export type ConnectGitLabOrganizationResponse = ConnectGitLabOrganizationResponses[keyof ConnectGitLabOrganizationResponses];
+
+export type ListGitLabProjectsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Page
+         */
+        page?: number;
+        /**
+         * Search
+         */
+        search?: string;
+        /**
+         * Revision
+         */
+        revision?: string | null;
+    };
+    url: '/api/connections/gitlab/projects';
+};
+
+export type ListGitLabProjectsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListGitLabProjectsError = ListGitLabProjectsErrors[keyof ListGitLabProjectsErrors];
+
+export type ListGitLabProjectsResponses = {
+    /**
+     * Successful Response
+     */
+    200: GitLabProjectDiscoveryResult;
+};
+
+export type ListGitLabProjectsResponse = ListGitLabProjectsResponses[keyof ListGitLabProjectsResponses];
+
+export type SelectGitLabProjectsData = {
+    body: GitLabProjectSelection;
+    path?: never;
+    query?: never;
+    url: '/api/connections/gitlab/projects';
+};
+
+export type SelectGitLabProjectsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SelectGitLabProjectsError = SelectGitLabProjectsErrors[keyof SelectGitLabProjectsErrors];
+
+export type SelectGitLabProjectsResponses = {
+    /**
+     * Successful Response
+     */
+    200: OrganizationConnectionConnected;
+};
+
+export type SelectGitLabProjectsResponse = SelectGitLabProjectsResponses[keyof SelectGitLabProjectsResponses];
+
+export type DiscoverGitLabProjectsData = {
+    body: GitLabProjectDiscoveryWritable;
+    path?: never;
+    query?: never;
+    url: '/api/connections/gitlab/projects/discover';
+};
+
+export type DiscoverGitLabProjectsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DiscoverGitLabProjectsError = DiscoverGitLabProjectsErrors[keyof DiscoverGitLabProjectsErrors];
+
+export type DiscoverGitLabProjectsResponses = {
+    /**
+     * Successful Response
+     */
+    200: GitLabProjectDiscoveryResult;
+};
+
+export type DiscoverGitLabProjectsResponse = DiscoverGitLabProjectsResponses[keyof DiscoverGitLabProjectsResponses];
+
 export type DisconnectPersonalSlackData = {
     body?: never;
     path?: never;
@@ -11721,7 +11998,7 @@ export type DisconnectOrganizationConnectionData = {
         /**
          * Provider
          */
-        provider: 'github' | 'linear' | 'notion' | 'slack';
+        provider: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack';
     };
     query?: never;
     url: '/api/connections/{provider}';
@@ -11751,7 +12028,7 @@ export type ConnectOrganizationConnectionData = {
         /**
          * Provider
          */
-        provider: 'github' | 'linear' | 'notion' | 'slack';
+        provider: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack';
     };
     query?: never;
     url: '/api/connections/{provider}';
@@ -11781,7 +12058,7 @@ export type CheckOrganizationConnectionData = {
         /**
          * Provider
          */
-        provider: 'github' | 'linear' | 'notion' | 'slack';
+        provider: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack';
     };
     query?: never;
     url: '/api/connections/{provider}/check';
@@ -11811,7 +12088,7 @@ export type StartOrganizationConnectionOAuthData = {
         /**
          * Provider
          */
-        provider: 'github' | 'linear' | 'notion' | 'slack';
+        provider: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack';
     };
     query?: never;
     url: '/api/connections/{provider}/oauth';
@@ -11841,7 +12118,7 @@ export type UpdateOrganizationConnectionPolicyData = {
         /**
          * Provider
          */
-        provider: 'github' | 'linear' | 'notion' | 'slack';
+        provider: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack';
     };
     query?: never;
     url: '/api/connections/{provider}/policy';
@@ -16201,7 +16478,7 @@ export type CallbackOauthProviderCallbackGetData = {
         /**
          * Provider
          */
-        provider: 'github' | 'linear' | 'notion' | 'slack';
+        provider: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack';
     };
     query?: {
         /**

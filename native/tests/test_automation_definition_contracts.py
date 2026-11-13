@@ -46,12 +46,19 @@ def test_json_schema_matches_original_public_contract(name):
     if event is not None:
         assert event["properties"]["session_id"]["maxLength"] == 36
         event["properties"]["session_id"]["maxLength"] = 32
+        assert event["properties"].pop("gitlab_origin")["default"] == ""
     # Chat continuation adds one optional destination; retain the original contract otherwise.
     definition = schema if name == "Definition" else schema.get("$defs", {}).get("Definition")
     if definition is not None:
         destination = definition["properties"].pop("session_id")
         assert destination["default"] is None
         assert "session_id" not in definition.get("required", [])
+        assert definition["properties"].pop("gitlab_project_id")["default"] is None
+        plugins = definition["properties"]["plugins"]
+        assert "gitlab" in plugins["items"]["enum"]
+        plugins["items"]["enum"].remove("gitlab")
+        assert plugins["maxItems"] == 5
+        plugins["maxItems"] = 4
     assert hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest() == SCHEMAS[name]
 
 
@@ -98,6 +105,58 @@ def test_legacy_draft_upgrade_keeps_defaults_and_shared_definition_semantics():
         "event": {"provider": "slack", "event": "message.posted", "text_contains": "status", "max_runs_per_hour": 9},
     })
     assert event.max_runs_per_hour == 9 and event.triggers[0].event.provider == "slack"
+
+
+def test_gitlab_definitions_retain_origin_and_separate_project_identity():
+    definition = definitions.Definition(
+        name="GitLab check", prompt="Read the project",
+        repo_url="https://gitlab.example/team/subgroup/project.git",
+        gitlab_project_id=42, plugins=["gitlab"],
+    )
+    assert definition.repo_url == "https://gitlab.example/team/subgroup/project"
+    assert definition.github_repository_id is None
+    assert definitions.Definition.model_validate_json(definition.model_dump_json()) == definition
+    with pytest.raises(ValidationError):
+        definition.model_validate({**definition.model_dump(), "github_repository_id": 42})
+    with pytest.raises(ValidationError):
+        definition.model_validate({**definition.model_dump(), "repo_url": "https://github.com/team/project"})
+
+
+def test_optional_gitlab_fields_preserve_old_automation_digest():
+    from moyai.product_automations import _digest, definition_digest, definition_payload
+
+    definition = definitions.Definition(
+        name="Existing GitHub", prompt="Read the issue",
+        triggers=[{"id": "issues", "event": {
+            "provider": "github", "event": "issues", "repository": "team/project", "repository_id": 42,
+        }}],
+    )
+    old_payload = definition.model_dump(mode="json", exclude={"session_id", "gitlab_project_id"})
+    old_payload["triggers"][0]["event"].pop("gitlab_origin")
+    assert definition_payload(definition) == old_payload
+    assert definition_digest(definition) == _digest(old_payload)
+
+
+def test_gitlab_events_match_permanent_project_and_origin_but_keep_legacy_path_filters():
+    from app.automation_sources import normalize
+
+    trigger = EventTrigger(
+        provider="gitlab", event="merge_request", repository="team/original",
+        repository_id=42, gitlab_origin="https://gitlab.example",
+    )
+    payload = {
+        "object_kind": "merge_request",
+        "project": {"id": 42, "path_with_namespace": "team/renamed", "web_url": "https://gitlab.example/team/renamed"},
+        "object_attributes": {"iid": 7, "title": "Test change", "action": "open"},
+    }
+    assert normalize(trigger, payload) is not None
+    payload["project"]["web_url"] = "https://other-gitlab.example/team/renamed"
+    assert normalize(trigger, payload) is None
+    payload["project"]["web_url"] = "https://gitlab.example/team/renamed"
+    payload["project"]["id"] = 99
+    assert normalize(trigger, payload) is None
+    legacy = EventTrigger(provider="gitlab", event="merge_request", repository="team/renamed")
+    assert normalize(legacy, payload) is not None
 
 
 @pytest.mark.parametrize(("name", "value"), [

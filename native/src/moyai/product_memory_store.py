@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.memory import Note, Observation, search_terms
+from app.repository_identity import canonical_origin, repository_origin, repository_provider
 from fastapi import HTTPException
 from pydantic import Field, ValidationError, model_validator
 from pydantic_ai import RunContext
@@ -150,7 +151,28 @@ class ProductMemoryStore:
         ):
             raise ToolFailed("Repository memory needs an explicit validated source identity.")
         try:
-            return Note.repository(descriptor["repo_url"])
+            if not isinstance(descriptor.get("repo_url"), str) or not descriptor["repo_url"]:
+                raise ValueError
+            url = Note.repository(descriptor["repo_url"])
+            provider = repository_provider(url)
+            if descriptor.get("repository_provider", "github") != provider:
+                raise ValueError
+            if provider == "gitlab":
+                origin = repository_origin(url)
+                if (
+                    descriptor.get("repository_origin") != origin
+                    or type(descriptor.get("gitlab_project_id")) is not int
+                    or descriptor["gitlab_project_id"] != repository_id
+                    or not any(
+                        grant.kind == "gitlab"
+                        and type(grant.policy.get("product", {}).get("repository_id")) is int
+                        and grant.policy.get("product", {}).get("repository_id") == repository_id
+                        and canonical_origin(grant.policy.get("product", {}).get("base_url", "")) == origin
+                        for grant in self.scope.grants
+                    )
+                ):
+                    raise ValueError
+            return url
         except (KeyError, ValueError, TypeError):
             raise ToolFailed("Repository memory scope requires review.") from None
 

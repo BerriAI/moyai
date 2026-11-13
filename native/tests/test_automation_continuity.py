@@ -1,8 +1,6 @@
 """Real local persistence and model inputs for scheduled chat continuity."""
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 from uuid import uuid4
 
@@ -46,8 +44,9 @@ async def run_turn(ctx, turn_id, response, *, workspace=None):
 def test_old_definitions_keep_their_enabled_digest():
     definition = fixtures.definition()
     assert definition.session_id is None
-    old = definition.model_dump(mode="json", exclude={"session_id"})
-    assert definition_digest(definition) == hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()
+    # Captured from the pre-GitLab schema; dumping the current model would add
+    # newly introduced optional fields to this historical comparison.
+    assert definition_digest(definition) == "b66407b93bb1e4532c98a7d1bfc4b17aa51e87833c1fe988ba0e075c16af93d8"
 
 
 @pytest.mark.parametrize("continued", [False, True])

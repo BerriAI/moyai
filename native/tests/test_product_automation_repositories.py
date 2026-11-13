@@ -141,6 +141,80 @@ async def test_github_event_identity_is_pinned_without_injecting_execution_tools
     assert saved["plugins"] == [] and adapter.calls == [("synthetic/original", None, True)]
 
 
+class GitLabMetadata(RepositoryMetadata):
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.origin = "https://gitlab.example"
+        self.grants = [Grant("synthetic-gitlab-grant", "gitlab", 1, "", policy={"product": {
+            "repository_id": 42, "base_url": "https://gitlab.example",
+        }})]
+
+    async def resolve_repository(
+        self, grant, repository="", repository_id=None, *, selected, provider="github", base_url=None,
+    ):
+        assert provider == "gitlab" and selected
+        value = await super().resolve_repository(grant, repository, repository_id, selected=selected)
+        return {
+            **value, "repository_provider": "gitlab", "repository_origin": self.origin,
+            "gitlab_project_id": self.target, "repo_url": self.origin + "/" + self.name,
+            "connection_id": "synthetic-gitlab-grant",
+        }
+
+
+async def test_gitlab_selection_and_trigger_pin_origin_and_project_without_github_identity(automations):
+    ctx = automations
+    adapter = GitLabMetadata(ctx)
+    ctx.service.connections = adapter
+    row = await fixtures.create(
+        ctx, repo_url="https://gitlab.example/synthetic/original", plugins=["gitlab"],
+        triggers=[{"id": "gitlab-event", "event": {
+            "provider": "gitlab", "event": "merge_request", "repository": "synthetic/original",
+            "gitlab_origin": "https://gitlab.example",
+        }}],
+    )
+    saved = json.loads((await source(ctx, row["id"]))["definition"])
+    assert saved["gitlab_project_id"] == 42 and saved["github_repository_id"] is None
+    assert saved["repo_url"] == "https://gitlab.example/synthetic/renamed"
+    assert saved["triggers"][0]["event"]["repository_id"] == 42
+    assert saved["triggers"][0]["event"]["gitlab_origin"] == "https://gitlab.example"
+
+
+async def test_gitlab_lookup_rechecks_selected_authority_before_saving(automations):
+    ctx = automations
+    adapter = GitLabMetadata(ctx)
+    ctx.service.connections = adapter
+
+    async def disconnected():
+        adapter.grants = []
+
+    adapter.during_read = disconnected
+    with pytest.raises(HTTPException, match="authority changed before"):
+        await fixtures.create(ctx, repo_url="https://gitlab.example/synthetic/original", plugins=["gitlab"])
+    async with ctx.product.source.connect() as db:
+        assert await db.scalar(text("SELECT count(*) FROM moyai.automations")) == 0
+
+
+async def test_gitlab_project_requires_explicit_execution_connection(automations):
+    ctx = automations
+    adapter = GitLabMetadata(ctx)
+    ctx.service.connections = adapter
+    with pytest.raises(HTTPException, match="Select the GitLab connection"):
+        await fixtures.create(ctx, repo_url="https://gitlab.example/synthetic/original")
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize("origin", ["https://other-gitlab.example", "invalid-origin"])
+async def test_gitlab_preflight_rejects_equal_id_from_another_origin(automations, origin):
+    ctx = automations
+    adapter = GitLabMetadata(ctx)
+    adapter.origin = origin
+    ctx.service.connections = adapter
+    with pytest.raises(HTTPException, match="origin or identity changed"):
+        await fixtures.create(ctx, repo_url="https://gitlab.example/synthetic/original", plugins=["gitlab"])
+    async with ctx.product.source.connect() as db:
+        assert await db.scalar(text("SELECT count(*) FROM moyai.automations")) == 0
+
+
 async def test_repository_lookup_refusal_leaves_no_false_pending_automation_effect(automations):
     ctx = automations
     adapter = setup(ctx)
