@@ -80,6 +80,12 @@
 .native-settings .ns-connection-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--ui-border); padding-top: 16px; }
 .native-settings .ns-connection-footer button { color: var(--ui-foreground); }
 .native-settings .ns-connection-card button { white-space: normal; height: auto; min-height: 32px; }
+.native-settings .ns-mcp-connections { margin-top: 40px; }
+.native-settings .ns-mcp-connections > h2 { margin-bottom: 8px; }
+.native-settings .ns-connection-url { font-size: 12px; overflow-wrap: anywhere; }
+.native-settings-dialog .ns-tool-preview { min-width: 0; overflow-wrap: anywhere; }
+.native-settings-dialog .ns-tool-preview ul { max-height: 320px; overflow-y: auto; }
+.native-settings-dialog .ns-tool-preview li > p { margin-top: 4px; color: var(--ui-muted); }
 .native-settings .ns-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-block: 24px; }
 .native-settings .ns-search { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; padding-inline-start: 12px; border: 1px solid var(--ui-control-border); border-radius: 8px; color: var(--ui-muted); }
 .native-settings .ns-search > svg { flex: none; }

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +43,7 @@ class Settings(BaseSettings):
         default="openai/gpt-6-astra", validation_alias=AliasChoices("MOYAI_MODEL", "AGENT_MODEL")
     )
     model_catalog: str = Field(default="", validation_alias="MOYAI_MODELS")
+    mcp_allowed_origins: list[str] = Field(default_factory=list, validation_alias="MOYAI_MCP_ALLOWED_ORIGINS")
     temporal_address: str = Field(default="127.0.0.1:7233", validation_alias="TEMPORAL_ADDRESS")
     temporal_namespace: str = Field(default="default", validation_alias="TEMPORAL_NAMESPACE")
     temporal_queue: str = Field(default="moyai-pydantic-v1", validation_alias="TEMPORAL_TASK_QUEUE")
@@ -128,6 +129,22 @@ class Settings(BaseSettings):
     artifact_session_token: SecretStr = Field(
         default=SecretStr(""), validation_alias="OBJECT_STORAGE_SESSION_TOKEN",
     )
+
+    @field_validator("mcp_allowed_origins")
+    @classmethod
+    def validate_mcp_origins(cls, values: list[str]) -> list[str]:
+        for value in values:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+                or any(ord(char) <= 32 or ord(char) == 127 for char in value) or "\\" in value
+            ):
+                raise ValueError("MCP allowlist entries must be HTTP(S) origins without paths or credentials.")
+            # Accessing port also rejects malformed and out-of-range ports.
+            _ = parsed.port
+        return values
 
     @model_validator(mode="after")
     def worker_version_is_complete(self) -> Settings:

@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "agentchat @ git+https://github.com/BerriAI/agentchat.git@6985d192b3ba4f3d1cc77379c4e0354078b8a8a7",
     "pydantic-ai[temporal]==2.55.0",
+    "fastmcp-slim[client]>=4.1,<5",
     "openai==3.29.0",
     "pydantic-ai-harness[coder,modal,skills,github,linear,notion,slack,temporal,playwright,code-mode]==0.55.0",
     # Harness 0.55 references FilesystemExecutionError, removed by Modal 1.6.
@@ -13,6 +14,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
     "httpx>=0.28,<1",
+    "httpx2>=2.13.1,<3",
     "websockets>=15,<17",
     "pydantic-settings>=2.8,<3",
     "python-dotenv>=1,<2",
