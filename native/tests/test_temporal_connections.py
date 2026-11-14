@@ -149,13 +149,14 @@ async def test_shared_github_routes_in_activity_and_replays_without_provider_acc
         assert calls == [8]
 
 
-@pytest.mark.parametrize(("product", "read_only"), [
-    pytest.param(False, True, id="encrypted-account"),
-    pytest.param(True, True, id="canonical-github-read"),
-    pytest.param(True, False, id="canonical-github-publication"),
+@pytest.mark.parametrize(("product", "read_only", "kind"), [
+    pytest.param(False, True, "github", id="encrypted-account"),
+    pytest.param(True, True, "github", id="canonical-github-read"),
+    pytest.param(True, False, "github", id="canonical-github-publication"),
+    pytest.param(False, True, "mcp", id="remote-mcp-read"),
 ])
 async def test_connections_resolve_in_activities_and_replay_without_provider_access(
-    runtime, actor, monkeypatch, product, read_only,
+    runtime, actor, monkeypatch, product, read_only, kind,
 ):
     constructions: list[str] = []
     discovery_activities: set[str] = set()
@@ -183,6 +184,11 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
                 dispatched_connections.append(identity)
             calls.append(f"{owner}/{repo}")
             return "Repository read completed."
+
+        if kind == "mcp":
+            @tools.tool_plain
+            async def write_repository() -> str:
+                raise AssertionError("Unannotated MCP tools cannot pass a read-only connection.")
 
         return tools
 
@@ -224,7 +230,16 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             def get_toolset(self):
                 return provider_tools()
 
-        monkeypatch.setitem(SERVICES, "github", Provider)
+        if kind == "mcp":
+            def remote_tools(config, token, allowed_origins, *, identity, authorize):
+                require_activity()
+                assert config.url == "https://gateway.example.com/mcp"
+                assert token == "synthetic-account-token"
+                return provider_tools(identity.removeprefix("connection_"))
+
+            monkeypatch.setattr("moyai.mcp_remote.remote_mcp_toolset", remote_tools)
+        else:
+            monkeypatch.setitem(SERVICES, kind, Provider)
         unseal = runtime.security.unseal
 
         def decrypt(value):
@@ -237,19 +252,22 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
     credential = runtime.security.seal("synthetic-account-token")
     async with runtime.database.sessions.begin() as db:
         connection = Connection(
-            id=new_id(), owner_id=actor.id, kind="github", name="Selected repository",
+            id=new_id(), owner_id=actor.id, kind=kind, name="Selected repository",
             credential=credential, read_only=read_only,
-            policy=json.dumps({"product": {"repository_id": 7}} if product else {}),
+            policy=json.dumps(
+                {"product": {"repository_id": 7}} if product else
+                {"mcp": {"url": "https://gateway.example.com/mcp"}} if kind == "mcp" else {}
+            ),
         )
         db.add(connection)
         unrelated = Connection(
-            id=new_id(), owner_id=actor.id, kind="github", name="Another selected repository",
+            id=new_id(), owner_id=actor.id, kind=kind, name="Another selected repository",
             credential=credential, read_only=read_only,
             policy=json.dumps({"product": {"repository_id": 8}}) if product else connection.policy,
         )
         db.add(unrelated)
 
-    prefix = "github_" if product else f"github_{connection.id[:8]}_"
+    prefix = "github_" if product else f"{kind}_{connection.id[:8]}_"
     tool_name = prefix + "read_repository"
     publication_writes = ("create_pull_request", "update_pull_request", "request_pull_request_write_access")
     required_tools = {
@@ -261,6 +279,8 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
 
     async def stream(messages, info):
         names = {tool.name for tool in info.function_tools}
+        if kind == "mcp":
+            assert not any(name.endswith("_write_repository") for name in names)
         if not required_tools <= names:
             assert "search_tools" in names
             target = min(required_tools - names)
@@ -270,7 +290,9 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
                 for message in messages for part in message.parts
             ), f"Targeted discovery did not reveal {target}."
             yield {0: DeltaToolCall(
-                name="search_tools", json_args=json.dumps({"queries": [target]}),
+                name="search_tools", json_args=json.dumps({
+                    "queries": [target, prefix + "write_repository"] if kind == "mcp" else [target],
+                }),
                 tool_call_id=search_id,
             )}
             return

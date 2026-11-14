@@ -12,13 +12,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import quote, urlsplit
+from uuid import UUID
 
 from app.public_url import app_path, base_path, cookie_name, origin
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr, TypeAdapter, field_validator
+from pydantic import BaseModel, Field, SecretStr, TypeAdapter, field_validator, model_validator
 from pydantic_ai import ConversationTypeAdapter, DeferredToolResults
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse, ask_user_result
@@ -28,6 +29,8 @@ from temporalio.service import RPCError
 
 from .api_views import (
     AuthConfig,
+    ConnectionCheck,
+    ConnectionToolPreview,
     ConnectionView,
     EffectResolveResult,
     GoalCommandResult,
@@ -71,6 +74,7 @@ from .history_handoff import is_turn_run
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
 from .live_stream import authorized_events
+from .mcp_remote import remote_mcp_toolset, validate_mcp_endpoint
 from .models import (
     Artifact,
     Connection,
@@ -113,8 +117,9 @@ class Login(BaseModel):
 
 class ConnectionInput(BaseModel):
     name: str = Field(min_length=1, max_length=150)
-    kind: Literal["github", "linear", "notion", "slack"]
+    kind: Literal["github", "linear", "notion", "slack", "mcp"]
     credential: SecretStr
+    clear_credential: bool = False
     shared: bool = False
     read_only: bool = True
     enabled: bool = True
@@ -126,6 +131,22 @@ class ConnectionInput(BaseModel):
         if value.get_secret_value().strip().lower() == "oauth":
             raise ValueError("Enter an access token; interactive OAuth is not supported on the worker.")
         return value
+
+    @model_validator(mode="after")
+    def service_configuration(self) -> ConnectionInput:
+        if self.kind == "mcp":
+            credential = self.credential.get_secret_value()
+            if len(credential) > 8192 or any(not 33 <= ord(char) <= 126 for char in credential):
+                raise ValueError("Use a bearer token of at most 8192 printable ASCII characters without whitespace.")
+            if self.policy.mcp is None:
+                raise ValueError("Provide the remote MCP endpoint configuration.")
+            if self.policy.product is not None:
+                raise ValueError("Remote MCP connections cannot contain product account references.")
+        elif self.policy.mcp is not None or self.clear_credential:
+            raise ValueError("MCP configuration and credential clearing require an MCP connection.")
+        if self.clear_credential and self.credential.get_secret_value():
+            raise ValueError("Choose either a replacement credential or clearing the saved credential.")
+        return self
 
 
 SAVED_ACTIVITY = TypeAdapter(list[SavedActivity])
@@ -267,6 +288,68 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             await runtime.database.prefetch_session_audiences(
                 user, [session_id], deleted=request.url.path.endswith("/restore"),
             )
+
+    # UUID matching keeps this route distinct from the canonical provider check
+    # registered below, while OpenAPI retains the ordinary connection_id path.
+    @app.post("/api/connections/{connection_id:uuid}/check", operation_id="checkConnection")
+    async def check_connection(
+        connection_id: UUID, request: Request, user: User = Depends(actor),
+    ) -> ConnectionCheck:
+        identity = str(connection_id)
+        async with runtime.database.sessions() as db:
+            row = await db.get(Connection, identity)
+            if row is None or (row.owner_id != user.id and not row.shared):
+                raise HTTPException(404, "Connection not found.")
+            if row.kind != "mcp":
+                raise HTTPException(422, "Only remote MCP connections support this check.")
+            grant = (await runtime.database.native_grants(
+                db, user.id, [identity], kinds=frozenset({"mcp"}),
+            ))[0]
+
+        async def authorize() -> None:
+            if runtime.product_identity is not None:
+                await runtime.product_identity.require_request_current(request)
+            current_user = await runtime.database.user(user.id)
+            if current_user.auth_version != user.auth_version or current_user.role != user.role:
+                raise HTTPException(401, "Your account changed. Sign in again before checking the connection.")
+            async with runtime.database.sessions() as db:
+                current = await runtime.database.native_grants(
+                    db, user.id, [identity], kinds=frozenset({"mcp"}),
+                )
+                if current != [grant]:
+                    raise HTTPException(409, "The connection changed while checking. Try again.")
+
+        try:
+            policy = ConnectionPolicy.model_validate(grant.policy)
+            if policy.mcp is None or policy.product is not None:
+                raise ValueError("Invalid remote MCP configuration.")
+            credential = runtime.security.unseal(grant.credential).decode()
+            async with remote_mcp_toolset(
+                policy.mcp, credential, runtime.settings.mcp_allowed_origins,
+                identity=f"connection_check_{identity}", authorize=authorize,
+            ) as toolset:
+                tools = await toolset.list_tools()
+            preview = [
+                ConnectionToolPreview(
+                    name=str(redact(tool.name, [credential])),
+                    description=str(redact(tool.description, [credential])) if tool.description is not None else None,
+                )
+                for tool in tools if policy.allows(tool.name) and (
+                    not grant.read_only or (
+                        tool.annotations is not None
+                        and tool.annotations.model_dump(by_alias=True).get("readOnlyHint") is True
+                    )
+                )
+            ]
+        except Exception:  # noqa: BLE001 - remote errors may contain credentials or provider payloads
+            # SDKs can wrap an authorization failure. Resolve its current,
+            # trusted status without exposing any provider exception content.
+            await authorize()
+            raise HTTPException(502, "The MCP connection could not be checked. Verify its endpoint and access.") from None
+        # The transport rechecks after DNS, before each send; the same authority
+        # gates release after discovery and teardown. Provider I/O holds no DB transaction.
+        await authorize()
+        return ConnectionCheck(tool_count=len(preview), tools=preview)
 
     app.include_router(image_routes(runtime, actor))
     app.include_router(computer_routes(runtime, actor, cookie_name=session_cookie))
@@ -1063,23 +1146,35 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 context = await runtime.database.execution_context(db, session)
                 shared, surface = context.visibility == "shared", context.surface
         if runtime.product_connections is not None:
-            return [ConnectionView.model_validate(item) for item in await runtime.product_connections.catalog(
+            canonical = [ConnectionView.model_validate(item) for item in await runtime.product_connections.catalog(
                 user.id, shared_session=shared, surface=surface,
             )]
+        else:
+            canonical = []
         async with runtime.database.sessions() as db:
-            rows = await db.scalars(select(Connection).where(
+            query = select(Connection).where(
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
-            ))
-            return [ConnectionView.model_validate(connection_view(row)) for row in rows if not shared or row.shared]
+            )
+            if runtime.product_connections is not None:
+                query = query.where(Connection.kind == "mcp")
+            rows = await db.scalars(query.order_by(Connection.id))
+            return canonical + [
+                ConnectionView.model_validate(connection_view(row)) for row in rows if not shared or row.shared
+            ]
 
     @app.post("/api/connections", operation_id="createConnection")
     async def create_connection(body: ConnectionInput, user: User = Depends(actor)) -> ConnectionView:
-        if runtime.product_connections is not None:
+        if runtime.product_connections is not None and body.kind != "mcp":
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
         if body.shared and user.role != "admin":
             raise HTTPException(403, "Only administrators can publish a shared connection.")
-        if not body.credential.get_secret_value():
+        if body.kind != "mcp" and not body.credential.get_secret_value():
             raise HTTPException(422, "Provide a credential.")
+        if body.policy.mcp is not None:
+            try:
+                validate_mcp_endpoint(body.policy.mcp, runtime.settings.mcp_allowed_origins)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from None
         async with runtime.database.sessions.begin() as db:
             row = Connection(
                 id=new_id(), owner_id=user.id, kind=body.kind, name=body.name,
@@ -1094,22 +1189,47 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def edit_connection(
         connection_id: str, body: ConnectionInput, user: User = Depends(actor),
     ) -> ConnectionView:
-        if runtime.product_connections is not None:
+        if runtime.product_connections is not None and body.kind != "mcp":
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
         async with runtime.database.sessions.begin() as db:
             row = await db.get(Connection, connection_id)
             if row is None or row.owner_id != user.id:
                 raise HTTPException(404, "Connection not found.")
+            if runtime.product_connections is not None and row.kind != "mcp":
+                raise HTTPException(409, "Manage the existing product accounts in Connections.")
             if body.kind != row.kind:
                 raise HTTPException(422, "Create a new connection to change its service.")
             if (row.shared or body.shared) and user.role != "admin":
                 raise HTTPException(403, "Only administrators can change a shared connection.")
-            row.name, row.enabled = body.name, body.enabled
-            row.shared, row.read_only = body.shared, body.read_only
-            if body.credential.get_secret_value():
-                row.credential = runtime.security.seal(body.credential.get_secret_value())
-            row.policy = body.policy.model_dump_json()
-            row.revision += 1
+            if body.policy.mcp is not None:
+                try:
+                    validate_mcp_endpoint(body.policy.mcp, runtime.settings.mcp_allowed_origins)
+                except ValueError as error:
+                    raise HTTPException(422, str(error)) from None
+                previous = ConnectionPolicy.model_validate_json(row.policy)
+                if (
+                    previous.mcp is not None and previous.mcp.url != body.policy.mcp.url
+                    and not body.credential.get_secret_value() and not body.clear_credential
+                    and runtime.security.unseal(row.credential)
+                ):
+                    raise HTTPException(422, "Replace or clear the saved credential when changing the MCP endpoint.")
+            values: dict[str, Any] = {
+                "name": body.name, "enabled": body.enabled,
+                "shared": body.shared, "read_only": body.read_only,
+                "policy": body.policy.model_dump_json(), "revision": Connection.revision + 1,
+            }
+            if body.clear_credential:
+                values["credential"] = runtime.security.seal("")
+            elif body.credential.get_secret_value():
+                values["credential"] = runtime.security.seal(body.credential.get_secret_value())
+            # Concurrent edits must not share a revision or invalidate the
+            # endpoint/retained-token decision made against this exact row.
+            changed = await db.scalar(update(Connection).where(
+                Connection.id == row.id, Connection.revision == row.revision,
+            ).values(**values).returning(Connection.id).execution_options(synchronize_session=False))
+            if changed is None:
+                raise HTTPException(409, "The connection changed while saving. Refresh before trying again.")
+            await db.refresh(row)
         return ConnectionView.model_validate(connection_view(row))
 
     @app.get("/api/sessions/{session_id}/files", operation_id="listSessionFiles")

@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ApiError, csrfToken } from "./api"
-import { createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
+import { checkConnection, createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
@@ -62,14 +62,32 @@ async function loadUsers(signal: AbortSignal): Promise<UserDirectory> {
 type Connection = ConnectionView
 const loadConnections = async (signal: AbortSignal) => (await listConnections({ signal })).data
 const loadSessions = async (signal: AbortSignal) => (await listSessions({ signal })).data
-const connectionKinds = ["github", "linear", "notion", "slack"] as const
-function connectionInput(values: FormValues, policy: ConnectionPolicy): ConnectionInputWritable {
-  const kind = connectionKinds.find(item => item === values.kind)
+const connectionServices = [
+  { value: "github", label: "GitHub" }, { value: "slack", label: "Slack" },
+  { value: "linear", label: "Linear" }, { value: "notion", label: "Notion" },
+  { value: "mcp", label: "MCP server / gateway" },
+] satisfies { value: ConnectionInputWritable["kind"]; label: string }[]
+export function connectionInput(values: FormValues, policy: ConnectionPolicy, original?: Connection): ConnectionInputWritable {
+  const kind = connectionServices.find(item => item.value === values.kind)?.value
   if (!kind) throw new Error("Choose a supported service.")
-  return {
-    name: String(values.name ?? ""), kind, credential: String(values.credential ?? ""),
-    shared: values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy,
+  const credential = String(values.credential ?? "")
+  const clearCredential = kind === "mcp" && values.clear_credential === true
+  let nextPolicy = policy
+  if (kind === "mcp") {
+    const url = String(values.url ?? "").trim()
+    if (!url) throw new Error("Enter the MCP server URL.")
+    if (clearCredential && credential) throw new Error("Remove the replacement token or uncheck “Clear saved token”.")
+    if (original && url !== original.policy.mcp?.url && !credential && !clearCredential) {
+      throw new Error("Changing the server URL requires a replacement bearer token or “Clear saved token”.")
+    }
+    nextPolicy = { ...policy, mcp: { url, transport: "streamable_http" } }
   }
+  const input: ConnectionInputWritable = {
+    name: String(values.name ?? ""), kind, credential,
+    shared: values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy: nextPolicy,
+  }
+  if (kind === "mcp") input.clear_credential = clearCredential
+  return input
 }
 type Option = { value: string; label: string }
 type Resource<T> = { data: T | undefined; loading: boolean; error: string; refresh: () => void }
@@ -204,7 +222,7 @@ function Editor({ title, description, fields, initial, onSave, onClose, submitLa
           const fieldId = `${id}-${field.name}`, hintId = `${fieldId}-hint`
           const change = (value: string | number | boolean) => setValues(previous => ({ ...previous, [field.name]: value }))
           return <div className={`ns-field ${field.type === "checkbox" ? "ns-check" : ""}`} key={field.name}>
-            {field.type === "checkbox" ? <><Checkbox id={fieldId} checked={values[field.name] === true} disabled={mutation.busy || field.disabled} onCheckedChange={value => change(value === true)} /><label htmlFor={fieldId}>{field.label}</label></>
+            {field.type === "checkbox" ? <><Checkbox id={fieldId} checked={values[field.name] === true} disabled={mutation.busy || field.disabled} aria-describedby={field.hint ? hintId : undefined} onCheckedChange={value => change(value === true)} /><label htmlFor={fieldId}>{field.label}</label></>
               : <><label htmlFor={fieldId}>{field.label}</label>
                 {field.type === "textarea" ? <Textarea id={fieldId} rows={8} value={String(values[field.name] ?? "")} required={field.required} maxLength={field.maxLength} disabled={mutation.busy || field.disabled} aria-describedby={field.hint ? hintId : undefined} onChange={event => change(event.target.value)} />
                   : field.type === "select" ? <Choice id={fieldId} label={field.label} value={String(values[field.name] ?? "")} options={field.options ?? []} disabled={mutation.busy || field.disabled} onChange={change} />
@@ -681,6 +699,8 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
   const opener = useRef<HTMLElement | null>(null)
   const open = (connection: OrganizationConnection) => { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setSelected({ connection, mode: "manage" }) }
   return <>
+    <section aria-label="Organization connections">
+    <h2>Organization connections</h2>
     <LoadState resource={resource}>{data => {
       const rows = data.filter(row => contains(search, row.id, row.label, row.identity) && (filter === "all" || row.id === filter))
       return <><p className="ns-help">These accounts are shared with your workspace.</p>
@@ -692,6 +712,12 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
       </>
     }}</LoadState>
     <p className="ns-help ns-footer-help">To use your own Slack account, connect <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
+    </section>
+    <section className="ns-mcp-connections" aria-label="MCP connections">
+      <h2>MCP connections</h2>
+      <p className="ns-help">Connect a remote MCP server or gateway. Personal connections work in private chats; administrators can share their connections with the workspace.</p>
+      <ConnectionsPage user={user} initialKind="mcp" allowedKinds={["mcp"]} />
+    </section>
   </>
 }
 function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onClose, onUpdated }: {
@@ -891,30 +917,76 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
   </>
 }
 
-function ConnectionsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource("/connections", loadConnections)
+export function connectionCheckError(error: unknown): string {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return "You no longer have access to check this connection. Refresh the connections list."
+  if (error instanceof ApiError && error.status === 404) return "This connection is no longer available. Refresh the connections list."
+  return "Could not check this MCP connection. Verify the server URL and bearer token, then try again."
+}
+
+function ConnectionCheckDialog({ connection, onClose }: { connection: Connection; onClose: () => void }) {
+  const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  const resource = useResource(`/connections/${connection.id}/check:${connection.revision}`, async signal => {
+    try { return (await checkConnection({ path: { connection_id: connection.id }, signal })).data }
+    catch (error) {
+      if (!signal.aborted && error instanceof ApiError && error.status === 403) window.dispatchEvent(new Event("moyai:access-changed"))
+      throw new Error(connectionCheckError(error))
+    }
+  })
+  return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); returnFocus.current?.focus() }}>
+    <DialogHeader><DialogTitle>Check {connection.name}</DialogTitle><DialogDescription>Preview the tools available under this connection’s policy. Checking does not run any tools.</DialogDescription></DialogHeader>
+    {resource.loading ? <p className="ns-muted" role="status">Checking connection…</p>
+      : resource.error ? <p className="ns-error" role="alert">{resource.error}</p>
+        : resource.data && <div className="ns-tool-preview">
+          <p role="status">{count(resource.data.tool_count)} {resource.data.tool_count === 1 ? "tool" : "tools"} available</p>
+          {resource.data.tools.length ? <ul className="ns-supporting-files" tabIndex={0} aria-label="Available MCP tools">{resource.data.tools.map(tool => <li key={tool.name}><code>{tool.name}</code>{tool.description && <p>{tool.description}</p>}</li>)}</ul>
+            : <p className="ns-help">No tools are available under this connection’s policy. Review the server’s tools, read-only setting and allowed tools.</p>}
+        </div>}
+    <div className="ns-dialog-actions"><Button variant="outline" onClick={onClose}>Close</Button><Button disabled={resource.loading} onClick={resource.refresh}>{resource.error ? "Try again" : "Check again"}</Button></div>
+  </DialogContent></Dialog>
+}
+
+function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user: SettingsUser; initialKind?: ConnectionInputWritable["kind"]; allowedKinds?: readonly ConnectionInputWritable["kind"][] }) {
+  const [accessVersion, setAccessVersion] = useState(0)
+  const resource = useResource(`/connections:${user.id}:${user.role}:${user.individual}:${accessVersion}`, loadConnections)
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [editor, setEditor] = useState<Connection | "new" | null>(null), [disable, setDisable] = useState<Connection | null>(null)
-  const services = [{ value: "github", label: "GitHub" }, { value: "slack", label: "Slack" }, { value: "linear", label: "Linear" }, { value: "notion", label: "Notion" }]
-  const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", shared: row.shared, read_only: row.read_only, enabled: row.enabled }, row.policy)
+  const [checking, setChecking] = useState<Connection | null>(null)
+  useEffect(() => {
+    setEditor(null); setDisable(null); setChecking(null)
+    const clearAccess = () => { setEditor(null); setDisable(null); setChecking(null); setAccessVersion(value => value + 1) }
+    window.addEventListener("moyai:access-changed", clearAccess)
+    return () => window.removeEventListener("moyai:access-changed", clearAccess)
+  }, [user.id, user.role, user.individual])
+  const services = connectionServices.filter(service => !allowedKinds || allowedKinds.includes(service.value))
+  const mcpOnly = services.length === 1 && services[0].value === "mcp"
+  const canManage = (row: Connection) => user.individual !== false && row.owner_id === user.id && (!row.shared || user.role === "admin")
+  const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", url: row.policy.mcp?.url ?? "", shared: row.shared, read_only: row.read_only, enabled: row.enabled }, row.policy, row)
   return <LoadState resource={resource}>{data => {
-    const rows = data.filter(row => contains(search, row.name, row.kind) && (filter === "all" || row.kind === filter))
+    const rows = data.filter(row => (!allowedKinds || services.some(service => service.value === row.kind)) && contains(search, row.name, row.kind, row.policy.mcp?.url) && (filter === "all" || row.kind === filter))
     return <><p className="ns-muted">Choose default connections in <a className="ns-link" href="#settings/general">General preferences</a>.</p>
-      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...services]} />}
-        action={<Button onClick={() => setEditor("new")}><Plus />Add connection</Button>} />
+      {user.individual === false && <p className="ns-help">Sign in with your individual work account to add or edit connections.</p>}
+      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={!mcpOnly && <Choice label="Service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...services]} />}
+        action={<Button disabled={user.individual === false} onClick={() => setEditor("new")}><Plus />{mcpOnly ? "Add MCP connection" : "Add connection"}</Button>} />
       {rows.length ? <div className="ns-records">{rows.map(row => <article className="ns-record" key={row.id}><Link2 className="ns-record-icon" aria-hidden="true" />
         <div className="ns-record-copy"><div className="ns-record-title"><h2>{row.name}</h2><span className="ns-badge">{row.shared ? "Shared" : "Personal"}</span></div>
           <p>{services.find(service => service.value === row.kind)?.label ?? row.kind} · {row.enabled ? row.read_only ? "Read only" : row.policy?.require_approval === false ? "Can make changes" : "Changes require approval" : "Disabled"}</p>
+          {row.kind === "mcp" && row.policy.mcp && <p className="ns-connection-url"><code>{row.policy.mcp.url}</code></p>}
           <small>{row.owner_id === user.id ? row.shared && user.role !== "admin" ? "Administrator access is required to edit this shared connection." : "Your connection" : "Managed by another workspace member"}</small></div>
-        {row.owner_id === user.id && (!row.shared || user.role === "admin") && <div className="ns-row-actions"><Button variant="outline" size="sm" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.name}</span></Button>{row.enabled && <Button variant="ghost" size="sm" onClick={() => setDisable(row)}>Disable<span className="visually-hidden"> {row.name}</span></Button>}</div>}
-      </article>)}</div> : <Empty filtered={Boolean(search) || filter !== "all"} noun="connections" onClear={() => { setSearch(""); setFilter("all") }} />}
-      {editor && <Editor title={editor === "new" ? "Add connection" : "Edit connection"} description="Use an access token for the selected service. Interactive OAuth is not supported by this connection form." initial={editor === "new" ? { name: "", kind: "github", credential: "", shared: false, read_only: true, enabled: true } : { name: editor.name, kind: editor.kind, credential: "", shared: editor.shared, read_only: editor.read_only, enabled: editor.enabled }} fields={values => [
+        <div className="ns-row-actions">
+          {row.kind === "mcp" && row.enabled && user.individual !== false && <Button variant="outline" size="sm" onClick={() => setChecking(row)}>Check connection<span className="visually-hidden"> {row.name}</span></Button>}
+          {canManage(row) && <><Button variant="outline" size="sm" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.name}</span></Button>{row.enabled && <Button variant="ghost" size="sm" onClick={() => setDisable(row)}>Disable<span className="visually-hidden"> {row.name}</span></Button>}</>}
+        </div>
+      </article>)}</div> : <Empty filtered={Boolean(search) || filter !== "all"} noun={mcpOnly ? "MCP connections" : "connections"} onClear={() => { setSearch(""); setFilter("all") }} />}
+      {editor && (editor === "new" || data.some(row => row.id === editor.id && canManage(row))) && <Editor title={editor === "new" ? mcpOnly ? "Add MCP connection" : "Add connection" : "Edit connection"} description="Use a service access token, or connect an MCP server over Streamable HTTP with an optional bearer token." initial={editor === "new" ? { name: "", kind: initialKind, url: "", credential: "", clear_credential: false, shared: false, read_only: true, enabled: true } : { name: editor.name, kind: editor.kind, url: editor.policy.mcp?.url ?? "", credential: "", clear_credential: false, shared: editor.shared, read_only: editor.read_only, enabled: editor.enabled }} fields={values => [
         { name: "name", label: "Account name", required: true, maxLength: 150 }, { name: "kind", label: "Service", type: "select", options: services, disabled: editor !== "new" },
-        { name: "credential", label: editor === "new" ? "Access token" : "Replacement token", type: "password", required: editor === "new", hint: values.kind === "slack" ? "Use a Slack user token, not a bot token." : values.kind === "notion" ? "Use a Notion OAuth access token, not an integration token." : editor === "new" ? "Token permissions determine which resources this account can reach." : "Leave blank to keep the current token." },
-        { name: "read_only", label: "Read only", type: "checkbox" }, { name: "enabled", label: "Enable this connection", type: "checkbox" },
+        ...(values.kind === "mcp" ? [{ name: "url", label: "Server URL", type: "url" as const, required: true, hint: "For example, https://gateway.example.com/mcp. Use a Streamable HTTP endpoint; OAuth and local stdio servers are not supported." }] : []),
+        { name: "credential", label: values.kind === "mcp" ? editor === "new" ? "Bearer token (optional)" : "Replacement bearer token" : editor === "new" ? "Access token" : "Replacement token", type: "password", required: editor === "new" && values.kind !== "mcp", disabled: values.kind === "mcp" && values.clear_credential === true, hint: values.kind === "mcp" ? editor === "new" ? "Leave blank for a server that does not require authentication." : "Leave blank to keep the saved token. To change the URL, enter a replacement or clear the saved token." : editor !== "new" ? "Leave blank to keep the current token." : values.kind === "slack" ? "Use a Slack user token, not a bot token." : values.kind === "notion" ? "Use a Notion OAuth access token, not an integration token." : "Token permissions determine which resources this account can reach." },
+        ...(values.kind === "mcp" && editor !== "new" ? [{ name: "clear_credential", label: "Clear saved token", type: "checkbox" as const, hint: "Remove the saved bearer token and connect without authentication.", disabled: Boolean(values.credential) }] : []),
+        { name: "read_only", label: "Read only", type: "checkbox", hint: values.kind === "mcp" ? "Only tools the server marks read-only are available. These annotations describe the server’s behavior; connect only to servers you trust." : undefined }, { name: "enabled", label: "Enable this connection", type: "checkbox" },
         ...(user.role === "admin" ? [{ name: "shared", label: "Share with workspace members", type: "checkbox" as const }] : []),
-      ]} onSave={async values => { await (editor === "new" ? createConnection({ body: connectionInput(values, { require_approval: true }) }) : updateConnection({ path: { connection_id: editor.id }, body: connectionInput(values, editor.policy) })); resource.refresh() }} onClose={() => setEditor(null)} />}
-      {disable && <Confirm title={`Disable ${disable.name}?`} description="New work cannot use this connection until you enable it again. The saved credential is kept." label="Disable connection" onConfirm={async () => { await updateConnection({ path: { connection_id: disable.id }, body: { ...connectionBody(disable), enabled: false } }); resource.refresh() }} onClose={() => setDisable(null)} />}
+      ]} onSave={async values => { await (editor === "new" ? createConnection({ body: connectionInput(values, { require_approval: true }) }) : updateConnection({ path: { connection_id: editor.id }, body: connectionInput(values, editor.policy, editor) })); resource.refresh() }} onClose={() => setEditor(null)} />}
+      {checking && data.some(row => row.id === checking.id && row.revision === checking.revision && row.enabled) && <ConnectionCheckDialog key={`${checking.id}:${checking.revision}`} connection={checking} onClose={() => setChecking(null)} />}
+      {disable && data.some(row => row.id === disable.id && canManage(row)) && <Confirm title={`Disable ${disable.name}?`} description="New work cannot use this connection until you enable it again. The saved credential is kept." label="Disable connection" onConfirm={async () => { await updateConnection({ path: { connection_id: disable.id }, body: { ...connectionBody(disable), enabled: false } }); resource.refresh() }} onClose={() => setDisable(null)} />}
     </>
   }}</LoadState>
 }

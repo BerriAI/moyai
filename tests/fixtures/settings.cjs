@@ -2,10 +2,18 @@
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs/promises');
+const {randomUUID} = require('node:crypto');
 const personalPath = '/api/connections/slack/personal';
+const mcpConnection = (patch={}) => ({
+  id:'12345678-1234-1234-1234-123456789abc',name:'Research gateway',kind:'mcp',owner_id:'viewer',
+  shared:false,read_only:true,enabled:true,revision:1,source:null,
+  policy:{require_approval:true,allowed_tools:['lookup'],product:null,mcp:{url:'https://gateway.example.com/mcp',transport:'streamable_http'}},
+  ...patch,
+});
 function defaults() {
   return {
-    requests: [], individual: true,
+    requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
+    connectionCheck:{tool_count:1,tools:[{name:'lookup',description:'Search the synthetic research catalog.'}]},
     personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.'},
     memory: {source:'canonical',scope:{kind:'personal',owner_id:'viewer'},preferences:{enabled:true,auto_save:true,revision:1},
       capabilities:{read:true,create:true,update:true,delete:true,preferences:true},
@@ -28,14 +36,55 @@ async function settingsFixture() {
   const cache = await fs.mkdtemp(path.join(os.tmpdir(),'moyai-settings-'));
   const server = await createServer({configFile:path.resolve('native/web/vite.config.ts'),cacheDir:cache,server:{host:'127.0.0.1',port:0,strictPort:false},plugins:[{
     name:'settings-fixture',configureServer(vite){vite.middlewares.use(async(req,res,next)=>{
-      const url=new URL(req.url,'http://localhost');if(!url.pathname.startsWith('/api/'))return next();
+      const url=new URL(req.url,'http://localhost');
+      if(url.pathname==='/settings-props.html'){
+        const html=await vite.transformIndexHtml(url.pathname,`<!doctype html><html><body><div id="settings-root"></div><script type="module">
+          import React from "react";
+          import {createRoot} from "react-dom/client";
+          import {SettingsPage} from "/settings.tsx";
+          import "/@fs/${path.resolve('frontend/theme.css')}";
+          const root=createRoot(document.getElementById("settings-root"));
+          window.renderSettingsUser=user=>root.render(React.createElement(SettingsPage,{
+            user,page:"connections",productMode:"existing",sidebarCollapsed:false,
+            onNavigate(){},onBack(){},onStartPrivateChat(){},onToggleSidebar(){},onPreferences(){}
+          }));
+          window.renderSettingsUser({id:"viewer",name:"Alex Example",role:"admin",individual:true});
+        </script></body></html>`);
+        res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end(html);
+      }
+      if(!url.pathname.startsWith('/api/'))return next();
       const state=fixture.state;let raw='';for await(const chunk of req)raw+=chunk;
       const body=raw?JSON.parse(raw):null;
       state.requests.push({path:url.pathname,method:req.method,body});
       const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
-      if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Alex Example',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:'existing'});
+      if(url.pathname==='/api/me')return json({user:{id:state.userId,name:'Alex Example',role:state.role,individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.productMode});
       if(url.pathname==='/api/history/sessions')return json({sessions:[],ancestors:[],has_more:false});
-      if(['/api/session-folders','/api/connections','/api/sessions'].includes(url.pathname))return json([]);
+      if(['/api/session-folders','/api/sessions'].includes(url.pathname))return json([]);
+      if(url.pathname==='/api/connections'){
+        if(state.connectionsError)return json({detail:'Connections could not be loaded.'},503);
+        if(req.method==='POST'){
+          if(state.connectionSaveError)return json({detail:state.connectionSaveError},422);
+          const {credential,clear_credential,...metadata}=body;
+          const row=mcpConnection({...metadata,id:randomUUID(),owner_id:state.userId,policy:{allowed_tools:null,require_approval:true,product:null,mcp:null,...body.policy}});
+          state.connections.push(row);return json(row);
+        }
+        return json(state.connections);
+      }
+      const connectionMatch=url.pathname.match(/^\/api\/connections\/([^/]+)(\/check)?$/);
+      if(connectionMatch){
+        const row=state.connections.find(item=>item.id===connectionMatch[1]);
+        if(!row)return json({detail:'Connection not found.'},404);
+        if(connectionMatch[2]){
+          if(state.connectionCheckGate)await state.connectionCheckGate;
+          if(state.connectionCheckError)return json({detail:state.connectionCheckError},state.connectionCheckStatus||502);
+          return json(state.connectionCheck);
+        }
+        if(req.method==='PUT'){
+          if(state.connectionSaveError)return json({detail:state.connectionSaveError},422);
+          const {credential,clear_credential,...metadata}=body;
+          Object.assign(row,metadata,{revision:row.revision+1});return json(row);
+        }
+      }
       if(url.pathname==='/api/settings/performance')return json(report());
       if(url.pathname==='/api/settings/billing')return json({activity:report()});
       if(url.pathname==='/api/settings/general')return json({delivery_mode:'when_idle',connection_ids:null});
@@ -64,5 +113,5 @@ async function settingsFixture() {
   await server.listen();fixture.base=`http://127.0.0.1:${server.httpServer.address().port}`;
   fixture.close=async()=>{await server.close();await fs.rm(cache,{recursive:true,force:true});};return fixture;
 }
-module.exports={settingsFixture,personalPath};
+module.exports={settingsFixture,personalPath,mcpConnection};
 if(require.main===module)settingsFixture().then(fixture=>console.log(fixture.base));

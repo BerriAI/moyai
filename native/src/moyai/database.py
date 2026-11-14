@@ -740,10 +740,20 @@ class Database:
             )
         if self.product_authority_enabled and ids:
             raise HTTPException(503, "Canonical product connections are not configured.")
+        return await self.native_grants(db, actor_id, ids, shared_session=shared_session)
+
+    async def native_grants(
+        self, db: AsyncSession, actor_id: str, ids: list[str], *, shared_session: bool = False,
+        kinds: frozenset[str] | None = None,
+    ) -> list[Grant]:
+        """Resolve stored native grants on the caller's admission transaction."""
         grants: list[Grant] = []
         for connection_id in dict.fromkeys(ids):
             row = await db.get(Connection, connection_id)
-            if row is None or not row.enabled or (not row.shared and row.owner_id != actor_id):
+            if (
+                row is None or not row.enabled or (not row.shared and row.owner_id != actor_id)
+                or (kinds is not None and row.kind not in kinds)
+            ):
                 raise HTTPException(403, "A selected connection is no longer available.")
             if shared_session and not row.shared:
                 raise HTTPException(403, "Use a private conversation for a personal connection.")

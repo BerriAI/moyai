@@ -12,6 +12,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai_harness.ask_user import AskUserRequest
 
 from .general_preferences import GeneralPreferences
+from .mcp_remote import RemoteMCPConfig
 from .product_history import absent
 
 
@@ -510,12 +511,13 @@ class ConnectionPolicyView(ApiView):
     allowed_tools: list[str] | None = None
     require_approval: bool = True
     product: dict[str, JsonValue] | None = None
+    mcp: RemoteMCPConfig | None = None
 
 
 class ConnectionView(ApiView):
     id: str
     name: str
-    kind: str
+    kind: Literal["github", "gitlab", "linear", "notion", "slack", "mcp"]
     owner_id: str
     shared: bool
     read_only: bool
@@ -523,6 +525,16 @@ class ConnectionView(ApiView):
     revision: int
     policy: ConnectionPolicyView
     source: Literal["product"] | None = None
+
+
+class ConnectionToolPreview(ApiView):
+    name: str
+    description: str | None
+
+
+class ConnectionCheck(ApiView):
+    tool_count: int
+    tools: list[ConnectionToolPreview]
 
 
 class SessionFile(ApiView):

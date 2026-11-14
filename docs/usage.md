@@ -239,7 +239,7 @@ not restarted automatically.
 The account's Settings button opens a dedicated rail with Overview, General, Skills,
 Automations, Memory, Connections and Secrets. Administrators also see Users,
 Performance and Spend & usage. These pages use native application records,
-not the legacy application's database or APIs.
+or the connected product's account services when running in a hosted workspace.
 
 - **General:** save your message-delivery and connection preferences. **Queue next**
   waits for the current task; **Send now** delivers input as soon as the run can
@@ -288,7 +288,9 @@ not the legacy application's database or APIs.
   admissions; work already admitted follows the normal Stop controls. Creation
   requires a registered Settings worker. Schedules are private and belong to
   their requester.
-- **Connections:** manage accounts available to your chats. Choose defaults in **General**.
+- **Connections:** manage accounts and remote MCP servers available to your chats.
+  Hosted workspaces show organization accounts alongside personal and shared MCP
+  connections. Choose defaults in **General**.
 - **Secrets:** encrypted personal/shared storage with metadata-only reads and
   rotation. Values are never returned to the browser or automatically injected
   into tools or computers. Explicit scoped runtime secret grants remain future
@@ -409,9 +411,47 @@ inheriting files from an account that is no longer selected.
 - Notion's hosted tools require an OAuth access token, not an integration token.
 - Personal Slack tools require a user token, not a bot token.
 
+To add a remote MCP connection, open **Settings → Connections → Add MCP
+connection** in a hosted workspace, or **Add connection** and select **MCP
+server / gateway** in standalone Moyai. Enter a name and a Streamable HTTP server
+URL such as `https://gateway.example.com/mcp`. Leave **Bearer token** blank for
+an unauthenticated server, or enter its bearer token. Interactive OAuth, local
+stdio servers and custom authentication headers are not supported.
+
+Personal MCP connections are available in your private web chats. Administrators
+can publish their own connections with **Share with workspace members**. Only
+the owner can edit a connection, and editing a shared connection also requires
+administrator access. **Enable this connection** controls whether new work can
+use it. Existing allowed-tool and approval policies are preserved when editing.
+
+After saving, use **Check connection** to preview the tools available under the
+connection's policy. This discovers tools without executing them; a successful
+check does not verify every tool's behavior. A failed check leaves the saved
+configuration intact and can be retried. With **Read only** enabled, only tools
+explicitly marked read-only by the server are available. Server annotations are
+hints, so use servers you trust.
+
+Saved bearer tokens are never returned to the browser. When editing, leave
+**Replacement bearer token** blank to keep the existing token, or select
+**Clear saved token** to remove it. Changing the server URL requires a replacement
+token or an explicit clear, including when the server uses no authentication.
+This prevents a saved token from being sent to a different server by accident.
+MCP endpoints use public HTTPS by default. For a private gateway, set
+`MOYAI_MCP_ALLOWED_ORIGINS='["https://gateway.internal.example.com"]'` on both
+the API and worker. Entries are exact origins, including any nonstandard port,
+without a path. A local development server can use an explicitly allowed HTTP
+origin such as `http://127.0.0.1:8000`. Only add origins your users should be
+allowed to reach.
+
+Redirects and environment proxies are disabled. The server must support
+uncompressed responses. Tool listing has a 30-second deadline and each MCP
+connection session accepts at most 16 MiB of response data. Shared MCP
+connections are selectable in web chats; adding one does not automatically
+enable it in Slack conversations.
+
 Moyai uses the SDK's provider tool catalog and schemas. Token permissions establish
 resource access. An optional `allowed_tools` policy narrows the catalog further.
-Merge, approving-review and repository deletion tools are excluded. Account
+Built-in provider connections exclude merge, approving-review and repository deletion tools. Account
 credentials never enter the coding computer, so a shell cannot obtain a
 merge-capable token from the application's connection configuration.
 

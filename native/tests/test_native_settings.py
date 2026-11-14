@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import socket
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
+import httpx2
 import pytest
 from fastapi import HTTPException, Request
 from pydantic_ai import Agent
@@ -17,11 +20,13 @@ from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import ScheduleAlreadyRunningError
 from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
+from test_product_connections import bridge as bridge  # noqa: PLC0414 - pytest fixture re-export
 
 from moyai.agent import make_agent
 from moyai.api import COOKIE, create_app
@@ -232,6 +237,374 @@ async def test_demoted_owner_cannot_edit_or_unshare_shared_connection(runtime, a
         assert saved.shared and saved.enabled and saved.read_only
         assert saved.name == body["name"] and saved.revision == shared["revision"]
         assert runtime.security.unseal(saved.credential).decode() == body["credential"]
+
+
+def mcp_connection(**changes):
+    return {
+        "name": "Synthetic remote MCP", "kind": "mcp", "credential": "",
+        "shared": False, "read_only": True, "enabled": True,
+        "policy": {"mcp": {"url": "https://mcp.example.test/mcp", "transport": "streamable_http"}},
+        **changes,
+    }
+
+
+async def test_mcp_credentials_preserve_rotate_clear_and_fence_endpoint_changes(runtime, actor):
+    async with client_for(runtime, actor) as client:
+        body = mcp_connection(credential="synthetic-bearer")
+        response = await client.post("/api/connections", json=body)
+        assert response.status_code == 200
+        created = response.json()
+        assert "synthetic-bearer" not in response.text and "credential" not in created
+        identity = created["id"]
+        async with runtime.database.sessions() as db:
+            saved = await db.get(Connection, identity)
+            assert saved.credential != "synthetic-bearer"
+            assert runtime.security.unseal(saved.credential).decode() == "synthetic-bearer"
+
+        kept = await client.put(f"/api/connections/{identity}", json={**body, "credential": "", "name": "Renamed"})
+        assert kept.status_code == 200 and kept.json()["revision"] == created["revision"] + 1
+        changed_endpoint = mcp_connection(policy={
+            "mcp": {"url": "https://other.example.test/mcp", "transport": "streamable_http"},
+        })
+        assert (await client.put(f"/api/connections/{identity}", json=changed_endpoint)).status_code == 422
+        assert (await client.put(f"/api/connections/{identity}", json={
+            **changed_endpoint, "credential": "replacement", "clear_credential": True,
+        })).status_code == 422
+        async with runtime.database.sessions() as db:
+            saved = await db.get(Connection, identity)
+            assert saved.revision == kept.json()["revision"]
+            assert runtime.security.unseal(saved.credential).decode() == "synthetic-bearer"
+        rotated = await client.put(f"/api/connections/{identity}", json={
+            **changed_endpoint, "credential": "replacement",
+        })
+        assert rotated.status_code == 200
+        cleared = await client.put(f"/api/connections/{identity}", json={
+            **body, "credential": "", "clear_credential": True,
+        })
+        assert cleared.status_code == 200
+        async with runtime.database.sessions() as db:
+            saved = await db.get(Connection, identity)
+            assert runtime.security.unseal(saved.credential) == b""
+        assert (await client.put(f"/api/connections/{identity}", json=changed_endpoint)).status_code == 200
+        assert (await client.post("/api/connections", json=mcp_connection())).status_code == 200
+        assert (await client.post("/api/connections", json={
+            "name": "Existing provider", "kind": "github", "credential": "",
+        })).status_code == 422
+
+
+@pytest.mark.parametrize("concurrent_change", ["credential", "endpoint"])
+async def test_mcp_concurrent_updates_cannot_reuse_revision_or_forward_a_new_token(
+    runtime, actor, monkeypatch, concurrent_change,
+):
+    async with client_for(runtime, actor) as client:
+        created = (await client.post("/api/connections", json=mcp_connection())).json()
+        identity = created["id"]
+        first_loaded, both_loaded, release_second = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_get, reads = AsyncSession.get, 0
+
+        async def overlapping_get(db, entity, ident, **kwargs):
+            nonlocal reads
+            result = await original_get(db, entity, ident, **kwargs)
+            if entity is Connection and ident == identity:
+                reads += 1
+                if reads == 1:
+                    first_loaded.set()
+                    await asyncio.wait_for(both_loaded.wait(), timeout=5)
+                elif reads == 2:
+                    both_loaded.set()
+                    await asyncio.wait_for(release_second.wait(), timeout=5)
+            return result
+
+        monkeypatch.setattr(AsyncSession, "get", overlapping_get)
+        second_body = mcp_connection(credential="second-token") if concurrent_change == "credential" else mcp_connection(
+            policy={"mcp": {"url": "https://other.example.test/mcp", "transport": "streamable_http"}},
+        )
+        first = asyncio.create_task(client.put(
+            f"/api/connections/{identity}", json=mcp_connection(credential="first-token"),
+        ))
+        await asyncio.wait_for(first_loaded.wait(), timeout=5)
+        second = asyncio.create_task(client.put(f"/api/connections/{identity}", json=second_body))
+        try:
+            assert (await asyncio.wait_for(first, timeout=5)).status_code == 200
+        finally:
+            release_second.set()
+        rejected = await asyncio.wait_for(second, timeout=5)
+        assert rejected.status_code == 409
+        async with runtime.database.sessions() as db:
+            row = await db.get(Connection, identity)
+            assert row.revision == created["revision"] + 1
+            assert runtime.security.unseal(row.credential).decode() == "first-token"
+            assert json.loads(row.policy)["mcp"]["url"] == "https://mcp.example.test/mcp"
+        session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+        turn = await runtime.database.submit(actor, session.id, NewMessage(
+            prompt="Synthetic selected scope", request_key="after-first-edit", connections=[identity],
+        ))
+        await runtime.database.claim_next()
+        prepared = await runtime.database.prepare(turn.id)
+        retried = await client.put(f"/api/connections/{identity}", json=second_body)
+        if concurrent_change == "credential":
+            assert retried.status_code == 200 and retried.json()["revision"] == created["revision"] + 2
+            with pytest.raises(PermissionError, match="Connection access changed"):
+                await runtime.database.authorize_scope(prepared.scope)
+        else:
+            assert retried.status_code == 422
+
+
+@pytest.mark.parametrize("changes", [
+    {"policy": {}},
+    {"policy": {"mcp": {"url": "https://mcp.example.test/mcp"}, "product": {}}},
+    {"policy": {"mcp": {"url": "https://mcp.example.test/mcp", "transport": "sse"}}},
+    {"policy": {"mcp": {"url": "https://user:synthetic-bearer@mcp.example.test/mcp"}}},
+    {"policy": {"mcp": {"url": "https://mcp.example.test/mcp?token=synthetic-bearer"}}},
+    {"policy": {"mcp": {"url": "http://127.0.0.1:8090/mcp"}}},
+    {"policy": {"mcp": {"url": "https://127.0.0.1/mcp"}}},
+    {"kind": "github"},
+    {"credential": "synthetic-bearer "},
+    {"credential": "synthetic-bearer\r\nAuthorization: injected"},
+    {"credential": "synthetic-bearer\u007f"},
+    {"credential": "synthetic-beareré"},
+    {"credential": "synthetic-bearer" + "x" * 8192},
+])
+async def test_mcp_invalid_configuration_is_rejected_without_credential_reflection(runtime, actor, changes):
+    async with client_for(runtime, actor) as client:
+        response = await client.post("/api/connections", json=mcp_connection(**{
+            "credential": "synthetic-bearer", **changes,
+        }))
+        assert response.status_code == 422
+        assert "synthetic-bearer" not in response.text
+
+
+async def test_mcp_operator_origin_allowlist_applies_to_create_and_update(runtime, actor):
+    runtime.settings.mcp_allowed_origins = ["http://127.0.0.1:8090"]
+    body = mcp_connection(policy={"mcp": {"url": "http://127.0.0.1:8090/mcp"}})
+    async with client_for(runtime, actor) as client:
+        response = await client.post("/api/connections", json=body)
+        assert response.status_code == 200
+        identity = response.json()["id"]
+        runtime.settings.mcp_allowed_origins = []
+        assert (await client.put(f"/api/connections/{identity}", json=body)).status_code == 422
+
+
+@pytest.mark.parametrize("product", [False, True])
+async def test_mcp_api_ownership_shared_visibility_and_product_union(runtime, actor, bridge, product):
+    if product:
+        runtime.product_connections = bridge
+        bridge.product.identity = SimpleNamespace(authenticate=lambda *args, **kwargs: None)
+    other = await member(runtime)
+    async with client_for(runtime, actor) as owner, client_for(runtime, other) as outsider:
+        private = (await owner.post("/api/connections", json=mcp_connection())).json()
+        shared = (await owner.post("/api/connections", json=mcp_connection(shared=True))).json()
+        visible = (await outsider.get("/api/connections")).json()
+        assert shared["id"] in {item["id"] for item in visible}
+        assert private["id"] not in {item["id"] for item in visible}
+        assert (await outsider.put(f"/api/connections/{private['id']}", json=mcp_connection())).status_code == 404
+        assert (await outsider.put(f"/api/connections/{shared['id']}", json=mcp_connection(shared=True))).status_code == 404
+        assert (await outsider.post("/api/connections", json=mcp_connection(shared=True))).status_code == 403
+        visible = (await owner.get("/api/connections", params={"shared": True})).json()
+        assert shared["id"] in {item["id"] for item in visible}
+        assert private["id"] not in {item["id"] for item in visible}
+        if product:
+            assert (await owner.post("/api/connections", json={
+                "name": "Legacy", "kind": "github", "credential": "legacy-token",
+            })).status_code == 409
+            async with runtime.database.sessions.begin() as db:
+                legacy = Connection(
+                    id=new_id(), owner_id=actor.id, kind="github", name="Old native account",
+                    credential=runtime.security.seal("legacy-token"),
+                )
+                db.add(legacy)
+            assert (await owner.put(f"/api/connections/{legacy.id}", json=mcp_connection())).status_code == 409
+            assert legacy.id not in {item["id"] for item in (await owner.get("/api/connections")).json()}
+            assert await bridge.catalog(actor.id, shared_session=True, surface="slack") == []
+
+
+async def test_connection_api_returns_gitlab_projects_alongside_native_mcp(runtime, actor, bridge):
+    from test_product_connections import gitlab_accounts
+
+    runtime.product_connections = bridge
+    bridge.product.identity = SimpleNamespace(authenticate=lambda *args, **kwargs: None)
+    gitlab_accounts(bridge, ids=(7,))
+    session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    async with client_for(runtime, actor) as client:
+        created = await client.post("/api/connections", json=mcp_connection(shared=True))
+        assert created.status_code == 200
+        remote = created.json()
+        for params in ({}, {"shared": True}, {"session_id": session.id}):
+            response = await client.get("/api/connections", params=params)
+            assert response.status_code == 200
+            rows = response.json()
+            assert {row["kind"] for row in rows} == {"gitlab", "mcp"}
+            assert next(row for row in rows if row["kind"] == "mcp") == remote
+            project = next(row for row in rows if row["kind"] == "gitlab")
+            assert project["policy"]["product"]["repository_id"] == 7
+            assert project["source"] == "product"
+            assert "synthetic-token" not in response.text
+        # GitLab is managed through product setup, not native token creation.
+        assert (await client.post("/api/connections", json={
+            "name": "Unsupported native GitLab", "kind": "gitlab", "credential": "synthetic-token",
+        })).status_code == 422
+
+
+class MCPPreviewTools:
+    def __init__(self, on_list=None, *, authorize=None):
+        self.on_list = on_list
+        self.authorize = authorize
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        self.closed = True
+
+    async def list_tools(self):
+        from mcp.types import Tool, ToolAnnotations
+
+        if self.authorize:
+            await self.authorize()
+        if self.on_list:
+            await self.on_list()
+        return [
+            Tool(name="read", description="Read records", inputSchema={"type": "object"},
+                 annotations=ToolAnnotations(readOnlyHint=True)),
+            Tool(name="write", description=None, inputSchema={"type": "object"},
+                 annotations=ToolAnnotations(readOnlyHint=False)),
+            Tool(name="unknown", description=None, inputSchema={"type": "object"}),
+            Tool(name="delete_repository", description=None, inputSchema={"type": "object"},
+                 annotations=ToolAnnotations(readOnlyHint=True)),
+        ]
+
+
+@pytest.mark.parametrize("product", [False, True])
+async def test_mcp_check_uses_saved_access_filters_tools_and_preserves_provider_route(
+    runtime, actor, bridge, monkeypatch, product,
+):
+    if product:
+        runtime.product_connections = bridge
+
+        async def authenticate(*args, **kwargs):
+            pass
+
+        bridge.product.identity = SimpleNamespace(authenticate=authenticate)
+    opened = []
+
+    def remote(config, credential, allowed_origins, *, identity, authorize):
+        assert config.url == "https://mcp.example.test/mcp"
+        assert credential == "synthetic-bearer"
+        toolset = MCPPreviewTools(authorize=authorize)
+        opened.append(toolset)
+        return toolset
+
+    monkeypatch.setattr("moyai.api.remote_mcp_toolset", remote)
+    async with client_for(runtime, actor) as client:
+        body = mcp_connection(credential="synthetic-bearer")
+        created = (await client.post("/api/connections", json=body)).json()
+        endpoint = f"/api/connections/{created['id']}/check"
+        checked = await client.post(endpoint)
+        assert checked.status_code == 200
+        assert checked.json() == {"tool_count": 1, "tools": [{"name": "read", "description": "Read records"}]}
+        assert opened[-1].closed
+        body["policy"]["allowed_tools"] = ["write", "unknown", "delete_repository"]
+        body["read_only"] = False
+        assert (await client.put(f"/api/connections/{created['id']}", json=body)).status_code == 200
+        assert (await client.post(endpoint)).json() == {
+            "tool_count": 2, "tools": [{"name": "write", "description": None}, {"name": "unknown", "description": None}],
+        }
+        if product:
+            assert (await client.post("/api/connections/linear/check")).status_code == 401
+        client.headers.pop("X-Moyai-CSRF")
+        assert (await client.post(endpoint)).status_code == 403
+
+
+@pytest.mark.parametrize("change", ["credential", "policy", "sharing", "disabled", "actor", "actor_version"])
+async def test_mcp_check_rechecks_connection_and_requester_after_discovery(runtime, actor, monkeypatch, change):
+    other = await member(runtime)
+    async with client_for(runtime, actor) as owner, client_for(runtime, other) as client:
+        created = (await owner.post("/api/connections", json=mcp_connection(shared=True))).json()
+
+        async def changed():
+            async with runtime.database.sessions.begin() as db:
+                row = await db.get(Connection, created["id"])
+                if change == "credential":
+                    row.credential = runtime.security.seal("rotated")
+                    row.revision += 1
+                elif change == "policy":
+                    row.policy = json.dumps({"mcp": {"url": "https://other.example.test/mcp"}})
+                    row.revision += 1
+                elif change == "sharing":
+                    row.shared = False
+                    row.revision += 1
+                elif change == "disabled":
+                    row.enabled = False
+                    row.revision += 1
+                else:
+                    user = await db.get(User, other.id)
+                    if change == "actor":
+                        user.enabled = False
+                    else:
+                        user.auth_version += 1
+
+        toolset = MCPPreviewTools(changed)
+        monkeypatch.setattr("moyai.api.remote_mcp_toolset", lambda *args, **kwargs: toolset)
+        response = await client.post(f"/api/connections/{created['id']}/check")
+        assert response.status_code in {401, 403, 409}
+        assert "Read records" not in response.text and "tools" not in response.json()
+        assert toolset.closed
+
+
+@pytest.mark.parametrize("change", ["credential", "actor"])
+async def test_mcp_check_rechecks_authority_after_dns_before_sending_saved_credential(
+    runtime, actor, monkeypatch, change,
+):
+    lookups, sends = [], []
+    async with client_for(runtime, actor) as client:
+        created = (await client.post("/api/connections", json=mcp_connection(credential="synthetic-bearer"))).json()
+
+        async def resolve(host, port, **kwargs):
+            lookups.append(host)
+            async with runtime.database.sessions.begin() as db:
+                if change == "credential":
+                    row = await db.get(Connection, created["id"])
+                    row.credential = runtime.security.seal("rotated")
+                else:
+                    user = await db.get(User, actor.id)
+                    user.enabled = False
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+        async def send(_transport, request):
+            sends.append(request)
+            raise AssertionError("Revoked MCP check reached outbound dispatch.")
+
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+        monkeypatch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", send)
+        response = await client.post(f"/api/connections/{created['id']}/check")
+        assert response.status_code == (409 if change == "credential" else 401)
+        assert lookups and sends == []
+        assert "synthetic-bearer" not in response.text
+
+
+async def test_mcp_check_sanitizes_failure_and_denies_unavailable_connections(runtime, actor, monkeypatch):
+    other = await member(runtime)
+    opened = []
+
+    async def failure():
+        opened.append(True)
+        raise RuntimeError("Authorization: Bearer synthetic-secret-provider-payload")
+
+    toolset = MCPPreviewTools(failure)
+    monkeypatch.setattr("moyai.api.remote_mcp_toolset", lambda *args, **kwargs: toolset)
+    async with client_for(runtime, actor) as owner, client_for(runtime, other) as outsider:
+        created = (await owner.post("/api/connections", json=mcp_connection())).json()
+        endpoint = f"/api/connections/{created['id']}/check"
+        assert (await outsider.post(endpoint)).status_code == 404
+        assert not opened
+        response = await owner.post(endpoint)
+        assert response.status_code == 502
+        assert "synthetic-secret-provider-payload" not in response.text
+        assert toolset.closed
+        assert (await owner.put(f"/api/connections/{created['id']}", json=mcp_connection(enabled=False))).status_code == 200
+        assert (await owner.post(endpoint)).status_code == 403
+        assert len(opened) == 1
 
 
 async def test_native_memory_uses_actor_namespace_and_optimistic_versions(runtime, actor, active):

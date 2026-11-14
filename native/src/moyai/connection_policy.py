@@ -5,6 +5,8 @@ from typing import Literal, assert_never
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.tools import ToolDefinition
 
+from .mcp_remote import RemoteMCPConfig
+
 PROHIBITED_TOOLS = frozenset({
     "merge_pull_request", "delete_repository", "delete_file",
     "pull_request_review_write", "create_and_submit_pull_request_review",
@@ -33,6 +35,7 @@ class ConnectionPolicy(BaseModel):
     allowed_tools: list[str] | None = Field(default=None, max_length=200)
     require_approval: bool = True
     product: dict[str, object] | None = None
+    mcp: RemoteMCPConfig | None = None
 
     def allows(self, operation: str) -> bool:
         if operation in PROHIBITED_TOOLS:

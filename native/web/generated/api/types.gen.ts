@@ -2869,9 +2869,27 @@ export type ComputerState = {
 };
 
 /**
+ * ConnectionCheck
+ */
+export type ConnectionCheck = {
+    /**
+     * Tool Count
+     */
+    tool_count: number;
+    /**
+     * Tools
+     */
+    tools: Array<ConnectionToolPreview>;
+};
+
+/**
  * ConnectionInput
  */
 export type ConnectionInput = {
+    /**
+     * Clear Credential
+     */
+    clear_credential?: boolean;
     /**
      * Enabled
      */
@@ -2879,7 +2897,7 @@ export type ConnectionInput = {
     /**
      * Kind
      */
-    kind: 'github' | 'linear' | 'notion' | 'slack';
+    kind: 'github' | 'linear' | 'notion' | 'slack' | 'mcp';
     /**
      * Name
      */
@@ -2903,6 +2921,7 @@ export type ConnectionPolicy = {
      * Allowed Tools
      */
     allowed_tools?: Array<string> | null;
+    mcp?: RemoteMcpConfigInput | null;
     /**
      * Product
      */
@@ -2923,6 +2942,7 @@ export type ConnectionPolicyView = {
      * Allowed Tools
      */
     allowed_tools: Array<string> | null;
+    mcp: RemoteMcpConfigOutput | null;
     /**
      * Product
      */
@@ -2933,6 +2953,20 @@ export type ConnectionPolicyView = {
      * Require Approval
      */
     require_approval: boolean;
+};
+
+/**
+ * ConnectionToolPreview
+ */
+export type ConnectionToolPreview = {
+    /**
+     * Description
+     */
+    description: string | null;
+    /**
+     * Name
+     */
+    name: string;
 };
 
 /**
@@ -2950,7 +2984,7 @@ export type ConnectionView = {
     /**
      * Kind
      */
-    kind: string;
+    kind: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack' | 'mcp';
     /**
      * Name
      */
@@ -8278,6 +8312,34 @@ export type ReadThrough = {
 };
 
 /**
+ * RemoteMCPConfig
+ */
+export type RemoteMcpConfigInput = {
+    /**
+     * Transport
+     */
+    transport?: 'streamable_http';
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * RemoteMCPConfig
+ */
+export type RemoteMcpConfigOutput = {
+    /**
+     * Transport
+     */
+    transport: 'streamable_http';
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
  * Resolve
  */
 export type Resolve = {
@@ -11023,6 +11085,10 @@ export type WorkspaceSubagent = {
  */
 export type ConnectionInputWritable = {
     /**
+     * Clear Credential
+     */
+    clear_credential?: boolean;
+    /**
      * Credential
      */
     credential: string;
@@ -11033,7 +11099,7 @@ export type ConnectionInputWritable = {
     /**
      * Kind
      */
-    kind: 'github' | 'linear' | 'notion' | 'slack';
+    kind: 'github' | 'linear' | 'notion' | 'slack' | 'mcp';
     /**
      * Name
      */
@@ -11991,6 +12057,36 @@ export type UpdateConnectionResponses = {
 };
 
 export type UpdateConnectionResponse = UpdateConnectionResponses[keyof UpdateConnectionResponses];
+
+export type CheckConnectionData = {
+    body?: never;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/connections/{connection_id}/check';
+};
+
+export type CheckConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CheckConnectionError = CheckConnectionErrors[keyof CheckConnectionErrors];
+
+export type CheckConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionCheck;
+};
+
+export type CheckConnectionResponse = CheckConnectionResponses[keyof CheckConnectionResponses];
 
 export type DisconnectOrganizationConnectionData = {
     body?: never;

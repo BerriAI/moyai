@@ -337,6 +337,10 @@ def test_receipt_registration_preserves_parallel_non_effect_tools():
     assert not requires_receipt(ToolDefinition(name="read_file"))
     for name in ("automation_grant", "automation_self_update", "automation_claim_item", "automation_webhook_setup"):
         assert requires_receipt(ToolDefinition(name=name))
+    assert requires_receipt(ToolDefinition(name="mcp_12345678_save_note"))
+    assert not requires_receipt(ToolDefinition(
+        name="mcp_12345678_lookup", metadata={"annotations": {"readOnlyHint": True}},
+    ))
 
 
 @pytest.mark.parametrize("enabled", [False, True])

@@ -13,6 +13,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_core import ValidationError
 
 from moyai.connection_catalog import CatalogToolset, ConnectionCatalog, connection_search
+from moyai.connections import MCPConnectionCatalogToolset
 from moyai.contracts import ExecutionContext, Grant, RunScope
 from moyai.product_connections import ProductCatalogToolset
 from moyai.product_identity import ProductGrant
@@ -370,8 +371,11 @@ def test_product_schema_reuse_keeps_identity_grants_and_provenance_isolated(chan
     assert first.key != changed.key
 
 
-async def test_product_discovery_rechecks_revocation_after_await_and_discards_definitions(monkeypatch):
+@pytest.mark.parametrize("remote_mcp", [False, True])
+async def test_product_discovery_rechecks_revocation_after_await_and_discards_definitions(monkeypatch, remote_mcp):
     catalog, ctx = ConnectionCatalog(), product_context()
+    if remote_mcp:
+        ctx = context(grants=[Grant("connection", "mcp", 1, "sealed-token")])
     entered, release = asyncio.Event(), asyncio.Event()
     revoked = False
 
@@ -379,8 +383,12 @@ async def test_product_discovery_rechecks_revocation_after_await_and_discards_de
         if revoked:
             raise PermissionError("Turn stopped")
 
+    async def authorize_scope(scope):
+        await check(scope, None)
+
     monkeypatch.setattr("moyai.runtime.current", lambda: SimpleNamespace(
         product_connections=SimpleNamespace(check=check),
+        database=SimpleNamespace(authorize_scope=authorize_scope),
     ))
 
     class SlowTools(FunctionToolset):
@@ -395,7 +403,8 @@ async def test_product_discovery_rechecks_revocation_after_await_and_discards_de
         return tools
 
     async def discover():
-        async with ProductCatalogToolset(catalog, ctx, factory) as tools:
+        toolset = MCPConnectionCatalogToolset if remote_mcp else ProductCatalogToolset
+        async with toolset(catalog, ctx, factory) as tools:
             return await tools.get_tools(ctx)
 
     pending = asyncio.create_task(discover())

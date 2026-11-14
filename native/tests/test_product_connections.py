@@ -15,14 +15,16 @@ from fastapi import HTTPException
 from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_product_identity import settings_for
 
 from moyai.contracts import RunScope
+from moyai.models import Base, Connection, User, new_id
 from moyai.product_connections import ProductConnections, ProductGitHubToolset
 
 
 @pytest.fixture
-def bridge(tmp_path):
+def bridge(tmp_path, runtime):
     settings = settings_for(tmp_path)
     store = Store(settings.data_dir, settings.agent_model)
     security = Security(settings)
@@ -41,7 +43,10 @@ def bridge(tmp_path):
 
     service = ProductConnections(
         SimpleNamespace(store_proxy=store, security=security, settings=settings),
-        SimpleNamespace(authorize_scope=authorize),
+        SimpleNamespace(
+            authorize_scope=authorize, sessions=runtime.database.sessions,
+            native_grants=runtime.database.native_grants,
+        ),
     )
     yield service
     store.close()
@@ -168,6 +173,131 @@ async def test_reference_only_grants_follow_live_disconnect_reconnect_and_policy
     with pytest.raises(HTTPException):
         await bridge.require_scope(scope)
     assert (await scope_for(bridge, "linear")).grants[0].id != grant.id
+
+
+@pytest.fixture
+async def mixed_connections(bridge, runtime):
+    """Put canonical and native rows on one SQL connection, as product admission does."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{bridge.store.path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(lambda sync: Base.metadata.create_all(
+            sync, tables=[User.__table__, Connection.__table__],
+        ))
+    async with sessions.begin() as db:
+        db.add(User(
+            id="google:owner", username="owner", display_name="Owner", password="unused", role="admin",
+        ))
+    bridge.database.sessions = sessions
+    bridge.product.identity = SimpleNamespace(schema=None)
+    save(bridge, "linear")
+    try:
+        yield bridge
+    finally:
+        await engine.dispose()
+
+
+def native_mcp(runtime, **changes):
+    return Connection(
+        id=new_id(), owner_id="google:owner", kind="mcp", name="Synthetic MCP",
+        credential=runtime.security.seal("synthetic-mcp-token"),
+        policy=json.dumps({"mcp": {"url": "https://mcp.example.test/mcp", "transport": "streamable_http"}}),
+        **changes,
+    )
+
+
+@pytest.mark.parametrize("provider", ["linear", "gitlab"])
+async def test_product_mcp_grants_share_canonical_transaction_and_keep_stable_order(
+    mixed_connections, runtime, monkeypatch, provider,
+):
+    service = mixed_connections
+    if provider == "gitlab":
+        gitlab_accounts(service, ids=(7,))
+    async with service.database.sessions.begin() as db:
+        row = native_mcp(runtime)
+        db.add(row)
+        await db.flush()
+
+        def no_source_checkout(*args, **kwargs):
+            pytest.fail("Mixed admission must reuse the supplied transaction.")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(service.store, "rows", no_source_checkout)
+            grants = await service.resolve_grants("google:owner", [row.id, provider, row.id], db=db)
+            reversed_grants = await service.resolve_grants(
+                "google:owner", [provider, row.id], db=db,
+            )
+        assert grants == reversed_grants
+        assert len(grants) == 2 and [grant.id for grant in grants] == sorted(grant.id for grant in grants)
+        remote = next(grant for grant in grants if grant.kind == "mcp")
+        assert remote.credential == row.credential and "synthetic-mcp-token" not in remote.credential
+        assert next(grant for grant in grants if grant.kind == provider).credential == ""
+    scope = RunScope("session", "turn", "google:owner", "test", grants)
+    await service.require_scope(scope)
+    await service.check(scope, next(grant for grant in grants if grant.kind == provider))
+    assert await service.resolve_grants("google:owner", [provider, row.id]) == grants
+    assert all(item["kind"] != "mcp" for item in await service.catalog("google:owner"))
+
+
+@pytest.mark.parametrize("selection", ["unknown", "mcp", "native-provider"])
+async def test_product_mcp_partition_never_drops_unknown_or_non_mcp_selections(
+    mixed_connections, runtime, selection,
+):
+    service = mixed_connections
+    async with service.database.sessions.begin() as db:
+        remote = native_mcp(runtime)
+        legacy = Connection(
+            id=new_id(), owner_id="google:owner", kind="notion", name="Native legacy",
+            credential=runtime.security.seal("synthetic-native-provider"),
+        )
+        db.add_all([remote, legacy])
+        await db.flush()
+        invalid = legacy.id if selection == "native-provider" else selection
+        with pytest.raises(HTTPException) as error:
+            await service.resolve_grants("google:owner", [remote.id, "linear", invalid], db=db)
+        assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize("change", ["revision", "credential", "read_only", "policy", "disabled"])
+async def test_product_mixed_scope_rechecks_every_native_grant_field(mixed_connections, runtime, change):
+    service = mixed_connections
+    async with service.database.sessions.begin() as db:
+        row = native_mcp(runtime)
+        db.add(row)
+    grants = await service.resolve_grants("google:owner", ["linear", row.id])
+    scope = RunScope("session", "turn", "google:owner", "test", grants)
+    canonical = next(grant for grant in grants if grant.kind == "linear")
+    async with service.database.sessions.begin() as db:
+        saved = await db.get(Connection, row.id)
+        if change == "revision":
+            saved.revision += 1
+        elif change == "credential":
+            saved.credential = runtime.security.seal("rotated")
+        elif change == "read_only":
+            saved.read_only = not saved.read_only
+        elif change == "policy":
+            saved.policy = json.dumps({"mcp": {"url": "https://other.example.test/mcp"}})
+        else:
+            saved.enabled = False
+    for check in (service.require_scope(scope), service.check(scope, canonical)):
+        with pytest.raises((PermissionError, HTTPException)):
+            await check
+
+
+async def test_product_mcp_visibility_reuses_native_owner_and_shared_checks(mixed_connections, runtime):
+    service = mixed_connections
+    async with service.database.sessions.begin() as db:
+        private, shared, disabled = native_mcp(runtime), native_mcp(runtime, shared=True), native_mcp(runtime, enabled=False)
+        db.add_all([private, shared, disabled])
+    for identity, actor, shared_session in (
+        (private.id, "other-owner", False),
+        (private.id, "google:owner", True),
+        (disabled.id, "google:owner", False),
+    ):
+        with pytest.raises(HTTPException) as error:
+            await service.resolve_grants(actor, [identity], shared_session=shared_session)
+        assert error.value.status_code == 403
+    assert len(await service.resolve_grants("other-owner", [shared.id], shared_session=True)) == 1
 
 
 async def test_refresh_preserves_authority_and_revocation_wins_while_awaiting(bridge, monkeypatch):
