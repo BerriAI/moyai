@@ -6,6 +6,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import SchemaValidator, core_schema
 
+from .repository_identity import canonical_origin, repository_origin
+
 EVENT_CHOICES = {
     'session': [('message.posted','New session message')],
     'slack': [('message.posted','New message'), ('reaction.added','Reaction added')],
@@ -57,6 +59,7 @@ class EventTrigger(BaseModel):
     event: str = Field(default='*', min_length=1, max_length=80)
     repository: str = Field(default='', max_length=200)
     repository_id: int | None = Field(default=None, gt=0, strict=True)
+    gitlab_origin: str = Field(default='', max_length=2048)
     team_id: str = Field(default='', max_length=36)
     assignee_id: str = Field(default='', max_length=128)
     label_id: str = Field(default='', max_length=36)
@@ -94,6 +97,10 @@ class EventTrigger(BaseModel):
         legacy_github = self.provider == 'github' and self.event.split('.')[0] in supported
         if self.provider != 'webhook' and self.event not in supported and not legacy_github:
             raise ValueError('Choose a supported event for this integration.')
+        if self.gitlab_origin:
+            if self.provider != 'gitlab':
+                raise ValueError('A GitLab origin requires a GitLab event source.')
+            self.gitlab_origin = canonical_origin(self.gitlab_origin)
         if (self.provider == 'gitlab' or self.provider == 'github' and self.repository_id is None) and not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+', self.repository):
             raise ValueError('Choose an exact repository or GitLab project path.')
         if self.provider == 'linear':
@@ -176,8 +183,17 @@ def normalize(t, payload, event_header=''):
             event += '.' + action
     elif t.provider == 'gitlab':
         project = obj(p.get('project'))
-        if text(project.get('path_with_namespace')).lower() != t.repository.lower():
+        if t.repository_id is not None:
+            if type(project.get('id')) is not int or project['id'] != t.repository_id:
+                return None
+        elif text(project.get('path_with_namespace')).lower() != t.repository.lower():
             return None
+        if t.gitlab_origin:
+            try:
+                if repository_origin(text(project.get('web_url'))) != t.gitlab_origin:
+                    return None
+            except ValueError:
+                return None
         data, changes = obj(p.get('object_attributes')), obj(p.get('changes'))
         event, action = text(p.get('object_kind')), text(data.get('action'))
         if event == 'note':
@@ -186,8 +202,11 @@ def normalize(t, payload, event_header=''):
         branch = text(p.get('ref') or data.get('ref') or data.get('source_branch')).removeprefix('refs/heads/')
         title = data.get('title') or obj(p.get('merge_request') or p.get('issue')).get('title') or (event + ' · ' + branch)
         body, url = data.get('note') or data.get('description'), data.get('url')
-        item = t.repository + ':' + scalar(data.get('iid') or data.get('id') or p.get('after'))
-        extra = {'repository':t.repository,'sha':text(data.get('sha') or p.get('after'))}
+        identity = f'{t.gitlab_origin}:{t.repository_id}' if t.gitlab_origin and t.repository_id else t.repository
+        item = identity + ':' + scalar(data.get('iid') or data.get('id') or p.get('after'))
+        extra = {'repository':text(project.get('path_with_namespace')) or t.repository,
+                 'repository_id':t.repository_id, 'gitlab_origin':t.gitlab_origin,
+                 'sha':text(data.get('sha') or p.get('after'))}
         bot = bool(obj(p.get('user')).get('bot'))
     elif t.provider == 'linear':
         data, previous = obj(p.get('data')), obj(p.get('updatedFrom'))

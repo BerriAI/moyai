@@ -517,7 +517,7 @@ class ConnectionPolicyView(ApiView):
 class ConnectionView(ApiView):
     id: str
     name: str
-    kind: Literal["github", "linear", "notion", "slack", "mcp"]
+    kind: Literal["github", "gitlab", "linear", "notion", "slack", "mcp"]
     owner_id: str
     shared: bool
     read_only: bool

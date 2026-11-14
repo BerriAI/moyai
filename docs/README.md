@@ -5,6 +5,7 @@
 | Guide | Purpose |
 | --- | --- |
 | [Using Moyai](usage.md) | Chat, computer, files, Settings, connections and Slack |
+| [GitLab](gitlab.md) | Selected-project setup, native MR workflows, reviews and capability boundaries |
 | [Architecture](architecture.md) | Execution ownership, service roles and storage boundaries |
 | [Docker installation](../deploy/docker/README.md) | Versioned standalone or split services and upgrades |
 | Managed operations | Deployment workflows and runbooks are maintained in a private repository |

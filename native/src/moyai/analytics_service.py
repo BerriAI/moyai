@@ -31,7 +31,7 @@ from .analytics import (
 from .analytics_identity import ReportIdentities, report_identities
 from .inference_usage import InferenceUsage
 from .models import Effect, ProductTurnAuthority, Session, Turn, User
-from .pr_publications import PRPublication, verified_status
+from .pr_publications import SHARED_CREATIONS, PRPublication, verified_status
 from .pull_requests import PullRequestService, parse_pr_url
 
 if TYPE_CHECKING:
@@ -268,11 +268,11 @@ async def publication_statuses(
             pr = parse_pr_url(target["url"])
         except (ValueError, UnicodeError, InvalidToken, KeyError, HTTPException):
             return
-        result = await service.get(scope, pr.path)
+        result = await service.record(scope, pr, target)
         checked += 1
         if result.error:
             return
-        snapshot = verified_status(row, result.value)
+        snapshot = verified_status(row, result.value, target)
         if snapshot:
             statuses[row.id] = snapshot
 
@@ -412,7 +412,13 @@ async def report(
             Turn.id.in_({row.turn_id for row in publications}),
         ))).all()) if status else {}
         candidate_effects = select(Effect.actor_id, func.count()).select_from(Effect).join(Turn, Turn.id == Effect.turn_id).where(
-            Effect.state == "confirmed", Effect.tool_name.like("github\\_%\\_create\\_pull\\_request", escape="\\"),
+            Effect.state == "confirmed", or_(
+                Effect.tool_name.in_(SHARED_CREATIONS),
+                Effect.tool_name.like("github\\_%\\_create\\_pull\\_request", escape="\\"),
+                Effect.tool_name.like("github\\_%\\_open\\_pull\\_request", escape="\\"),
+                Effect.tool_name.like("gitlab\\_%\\_create\\_merge\\_request", escape="\\"),
+                Effect.tool_name.like("gitlab\\_%\\_open\\_merge\\_request", escape="\\"),
+            ),
             Effect.created_at < upper,
             ~select(PRPublication.id).where(PRPublication.id == Effect.id).exists(),
         ).group_by(Effect.actor_id)
@@ -660,14 +666,14 @@ async def report(
                     for row in publications
                 ),
                 "unclassified_confirmed_create_calls": untracked,
-                "pr_tracking": "confirmed_native_github_tool_receipts",
+                "pr_tracking": "confirmed_native_provider_tool_receipts",
             },
             "methodology": {
                 **performance_report.METHODOLOGY,
                 "users": "User totals and filters combine saved Slack accounting links with their Google or SSO account. Names and emails alone never merge users; recorded actor IDs are preserved.",
                 "sessions": "Created uses Session.created_at; active is distinct sessions with a newly admitted turn or recorded inference in range. Daily active counts are distinct per UTC date.",
-                "prs_created": "Confirmed native GitHub create_pull_request receipts, dated by confirmation. Attachments, mentions, shell/CLI creations and old engine history are not counted.",
-                "prs_merged": "Verified GitHub merge events in range, including older creations. Status counts describe the creation cohort's current verified state; unavailable reads remain unknown.",
+                "prs_created": "Confirmed native GitHub PR and GitLab MR creation receipts, dated by confirmation. Attachments, mentions, shell/CLI creations and old engine history are not counted.",
+                "prs_merged": "Verified provider merge events in range, including older creations. Status counts describe the creation cohort's current verified state; unavailable reads remain unknown.",
                 "cost": "Actual reported USD subtotal only; partial coverage excludes missing amounts, never estimates them. Inference attempts use their recorded timestamp. Historical usage subtracts the exact admitted conversation's cumulative seed and stays unknown if that seed is unavailable. Only turns with no attempt ledger use this unpriced fallback.",
                 "requests": "New ledger requests count observed HTTP attempts, including retries. Historical fallback uses the admitted-seed usage delta. Attached steering inputs remain in input/turn counts but their inference belongs to the parent turn; they do not add missing-cost records.",
                 "coverage": "Coverage concerns observed records. Failed product turns with no SDK usage and no dispatched request in either durable ledger do not add missing costs. A verified SDK request delta above ALL attempt rows demonstrates a capture gap; retries can mask gaps, so absence of that signal is not proof of complete billing. Baseline reads are bounded and missing baselines remain unknown.",

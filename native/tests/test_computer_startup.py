@@ -174,7 +174,9 @@ async def test_full_agent_replays_pre_lazy_startup_commands(runtime, active, mon
     assert len(model_calls) == 1
 
 
-@pytest.mark.parametrize("tool_name", ["github_checkout", "github_11111111_checkout"])
+@pytest.mark.parametrize("tool_name", [
+    "github_checkout", "github_11111111_checkout", "gitlab_checkout", "gitlab_11111111_checkout",
+])
 async def test_github_checkout_acquires_and_persists_first_workspace(runtime, active, actor, tool_name):
     session, turn, _ = active
     directory = runtime.settings.data_dir.parent / "computer"

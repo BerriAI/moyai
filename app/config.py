@@ -333,6 +333,8 @@ class Settings(BaseSettings):
     startup_recovery_seconds: int = Field(default=600, ge=30, le=3600)
     transport_recovery_seconds: int = Field(default=600, ge=30, le=3600)
     demo_step_seconds: float = Field(default=0.8, ge=0, le=10)
+    # Explicit opt-in for a local GitLab instance; remote origins require HTTPS.
+    gitlab_allow_loopback_http: bool = False
     linear_client_id: str = ""
     linear_client_secret: str = ""
     slack_client_id: str = ""

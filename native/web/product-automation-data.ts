@@ -73,10 +73,14 @@ export function changeAutomationEvent(event: AutomationEvent, name: string): Aut
 }
 /** A renamed repository must be resolved again instead of retaining an unrelated numeric ID. */
 export function changeAutomationEventField(event: AutomationEvent, field: string, value: unknown): AutomationEvent {
-  return { ...event, [field]: value, ...(field === "repository" && value !== event.repository ? { repository_id: null } : {}) }
+  return { ...event, [field]: value, ...(["repository", "gitlab_origin"].includes(field) && value !== event[field] ? { repository_id: null } : {}) }
 }
 export function changeAutomationRepository(definition: AutomationDefinition, repoUrl: string): AutomationDefinition {
-  return { ...definition, repo_url: repoUrl, github_repository_id: repoUrl === definition.repo_url ? definition.github_repository_id : null }
+  return {
+    ...definition, repo_url: repoUrl,
+    github_repository_id: repoUrl === definition.repo_url ? definition.github_repository_id : null,
+    gitlab_project_id: repoUrl === definition.repo_url ? definition.gitlab_project_id : null,
+  }
 }
 export function automationMetadata(entries: { key: string; value: string }[]): Record<string, string> {
   const keys = entries.map(entry => entry.key.trim())
@@ -97,7 +101,7 @@ const blockerMessages: Record<string, string> = {
   event_trigger_adapter_required: "Event triggers are not supported by this migration yet.",
   connection_mapping_required: "Connected apps require an explicit migration mapping.",
   repository_bootstrap_adapter_required: "Repository preparation is unavailable in this deployment.",
-  repository_identity_requires_verified_metadata: "Save a verified repository selection, or select an environment built with its permanent GitHub repository identity.",
+  repository_identity_requires_verified_metadata: "Save a verified repository selection, or select an environment built with its permanent repository identity.",
   environment_adapter_required_choose_none_explicitly: "The saved environment needs migration. Select base tools explicitly only if this workflow does not need it.",
   automated_self_management_grants_not_supported: "Automatic changes to this workflow’s instructions or schedule are not supported yet.",
   delivery_adapter_required: "The saved delivery destination requires a delivery adapter.",
@@ -109,7 +113,7 @@ const blockerMessages: Record<string, string> = {
   slack_event_source_requires_installation_scopes_and_shared_authority: "The Slack source needs an installed app, the required scopes, and shared account access.",
   specific_legacy_session_requires_continuation_mapping: "This saved session filter needs a continuation mapping before it can receive new messages.",
   selected_connections_require_onboarding_or_authorization: "Set up or authorize the selected connections before activation.",
-  selected_environment_requires_its_current_repository_connection: "Select the current GitHub connection for this environment’s repository.",
+  selected_environment_requires_its_current_repository_connection: "Select the current connection for this repository.",
 }
 export function automationBlocker(code: string): string {
   if (code.startsWith("webhook_receiver_not_configured:")) return `Configure the ${code.split(":")[1]} webhook receiver before activation.`
@@ -142,7 +146,19 @@ export function validateAutomation(definition: AutomationDefinition, now = Date.
   if (definition.triggers.length < 1 || definition.triggers.length > 16) throw new Error("Use between 1 and 16 triggers.")
   if (new Set(definition.triggers.map(trigger => trigger.id)).size !== definition.triggers.length) throw new Error("Each trigger needs a unique identifier.")
   if (definition.max_runs_per_hour !== null && (!Number.isSafeInteger(definition.max_runs_per_hour) || definition.max_runs_per_hour < 1)) throw new Error("The hourly cap must be a positive whole number.")
-  if (definition.repo_url && !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/.test(definition.repo_url.trim())) throw new Error("Use a https://github.com/owner/repository URL.")
+  if (definition.repo_url) {
+    try {
+      const url = new URL(definition.repo_url.trim())
+      const local = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+      if (
+        !(url.protocol === "https:" || (url.protocol === "http:" && local))
+        || url.username || url.password || url.search || url.hash
+        || !/^\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\/?$/.test(url.pathname)
+      ) throw new Error()
+    } catch {
+      throw new Error("Use a GitHub or GitLab repository URL.")
+    }
+  }
   for (const trigger of definition.triggers) {
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(trigger.id)) throw new Error("A saved trigger identity is invalid. Refresh this definition.")
     if (Boolean(trigger.schedule) === Boolean(trigger.event)) throw new Error("Each trigger needs exactly one schedule or event source.")

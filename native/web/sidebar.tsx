@@ -7,6 +7,7 @@ import type { SessionFolder, SidebarSession } from "./session-actions"
 import { currentDragSession, movableSession, SESSION_DRAG_TYPE, sessionCreatedByMe, sessionDrop, sessionPlacement } from "./sidebar-drag"
 import type { SessionDrag, SessionDropTarget, SidebarDragContext } from "./sidebar-drag"
 import { sessionTree } from "./session-tree"
+import { reviewLabels } from "./review-labels"
 import slackLogo from "./assets/slack-logo.svg"
 import "./sidebar-layout.css"
 export type { SessionFolder, SidebarSession } from "./session-actions"
@@ -15,10 +16,14 @@ type PullRequestSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type OpenPullRequest = (sessionId: string, url: string) => void
 
 const pullRequestStates = {
-  ready: { label: "PR ready", plural: "Ready pull requests", Icon: GitPullRequest },
-  draft: { label: "Draft", plural: "Draft pull requests", Icon: GitPullRequestDraft },
-  merged: { label: "PR merged", plural: "Merged pull requests", Icon: GitMerge },
-  closed: { label: "Closed", plural: "Closed pull requests", Icon: GitPullRequestClosed },
+  ready: { label: "Ready", Icon: GitPullRequest },
+  draft: { label: "Draft", Icon: GitPullRequestDraft },
+  merged: { label: "Merged", Icon: GitMerge },
+  closed: { label: "Closed", Icon: GitPullRequestClosed },
+}
+
+function reviewReference(pr: PullRequestSummary) {
+  return `${pr.repository}${reviewLabels(pr.url).marker}${pr.number}`
 }
 
 function pullRequestState(pr: PullRequestSummary) {
@@ -31,9 +36,13 @@ function PullRequestIndicator({ session, state, requests, onOpen }: {
   session: SidebarSession; state: keyof typeof pullRequestStates; requests: PullRequestSummary[]; onOpen?: OpenPullRequest
 }) {
   const [open, setOpen] = useState(false)
-  const { label, plural, Icon } = pullRequestStates[state]
-  const description = `${plural}: ${requests.length}. ${requests.map(pr => `${pr.repository}#${pr.number}: ${pr.title}`).join("; ")}`
-  const content = <><Icon size={13} aria-hidden="true" /><span>{requests.length > 1 && state === "ready" ? "PRs ready" : requests.length > 1 && state === "merged" ? "PRs merged" : label}</span></>
+  const { label, Icon } = pullRequestStates[state]
+  const provider = reviewLabels(requests[0].url)
+  const mixed = requests.some(pr => reviewLabels(pr.url).short !== provider.short)
+  const plural = `${label} ${mixed ? "pull and merge requests" : provider.plural}`
+  const short = mixed ? "PRs/MRs" : `${provider.short}${requests.length > 1 ? "s" : ""}`
+  const description = `${plural}: ${requests.length}. ${requests.map(pr => `${reviewReference(pr)}: ${pr.title}`).join("; ")}`
+  const content = <><Icon size={13} aria-hidden="true" /><span>{state === "ready" || state === "merged" ? `${short} ${state}` : label}</span></>
   const className = `session-pr-indicator session-pr-${state}`
   if (!onOpen) return <span className={className} title={description}><span className="visually-hidden">{description}</span><span className="session-pr-content" aria-hidden="true">{content}</span></span>
   if (requests.length === 1) return <Button type="button" variant="ghost" size="xs" className={className} title={description} aria-label={description} onClick={() => onOpen(session.id, requests[0].url)}>{content}</Button>
@@ -42,7 +51,7 @@ function PullRequestIndicator({ session, state, requests, onOpen }: {
     <PopoverContent className="native-session-menu sidebar-pr-menu" align="start" side="bottom" collisionPadding={12} aria-label={`${plural} for ${session.title}`}>
       <p>{plural}</p>
       {requests.map(pr => <Button key={pr.url} type="button" variant="ghost" onClick={() => { setOpen(false); onOpen(session.id, pr.url) }}>
-        <Icon size={15} aria-hidden="true" /><span>{pr.title || `${pr.repository}#${pr.number}`}<small>{pr.repository}#{pr.number}</small></span>
+        <Icon size={15} aria-hidden="true" /><span>{pr.title || reviewReference(pr)}<small>{reviewReference(pr)}</small></span>
       </Button>)}
     </PopoverContent>
   </Popover>

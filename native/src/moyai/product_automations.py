@@ -23,6 +23,7 @@ from temporalio.common import RetryPolicy, SearchAttributeKey
 with workflow.unsafe.imports_passed_through():
     from app.automation_definitions import Definition, Trigger
     from app.connector_errors import ConnectorError
+    from app.repository_identity import repository_origin, repository_provider
     from cryptography.fernet import InvalidToken
     from fastapi import APIRouter, HTTPException, Query, Request
     from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -233,9 +234,21 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def definition_payload(definition: Definition) -> dict[str, Any]:
+    """Preserve existing receipts when new optional selections are absent."""
+    payload = definition.model_dump(mode="json")
+    for field in ("session_id", "gitlab_project_id"):
+        if payload[field] is None:
+            payload.pop(field)
+    for trigger in payload["triggers"]:
+        event = trigger.get("event")
+        if event is not None and not event.get("gitlab_origin"):
+            event.pop("gitlab_origin", None)
+    return payload
+
+
 def definition_digest(definition: Definition) -> str:
-    # Preserve digests of enabled definitions written before chat destinations.
-    return _digest(definition.model_dump(mode="json", exclude={"session_id"} if definition.session_id is None else None))
+    return _digest(definition_payload(definition))
 
 
 def _definition(row: dict[str, Any]) -> Definition:
@@ -364,7 +377,7 @@ class ProductAutomationService:
         if definition.session_id:
             pass  # The existing chat supplies its computer and connected accounts.
         elif self.workspace is None:
-            if definition.repo_url or definition.github_repository_id:
+            if definition.repo_url or definition.github_repository_id or definition.gitlab_project_id:
                 result.append("repository_bootstrap_adapter_required")
             if definition.environment_id != "none":
                 result.append("environment_adapter_required_choose_none_explicitly")
@@ -375,6 +388,7 @@ class ProductAutomationService:
                 try:
                     candidate = await self.workspace.capture_workspace_context(db, principal, {
                         "repo_url": definition.repo_url, "github_repository_id": definition.github_repository_id,
+                        "gitlab_project_id": definition.gitlab_project_id,
                         "environment_id": definition.environment_id,
                     })
                     if not self._repository_identity_known(candidate):
@@ -477,6 +491,7 @@ class ProductAutomationService:
                     connections = sorted({grant.id for grant in grants})
                 workspace = await self.workspace.capture_workspace_context(db, principal, {
                     "repo_url": definition.repo_url, "github_repository_id": definition.github_repository_id,
+                    "gitlab_project_id": definition.gitlab_project_id,
                     "environment_id": definition.environment_id,
                 }) if self.workspace else {}
             if not self._repository_identity_known(workspace):
@@ -545,6 +560,7 @@ class ProductAutomationService:
         if self.workspace is not None:
             workspace = await self.workspace.validate_workspace_context(db, principal, {
                 "repo_url": definition.repo_url, "github_repository_id": definition.github_repository_id,
+                "gitlab_project_id": definition.gitlab_project_id,
                 "environment_id": definition.environment_id,
             }, workspace)
             self.workspace.authorize_project_grants(workspace, current)
@@ -835,8 +851,8 @@ class ProductAutomationService:
         if action not in {"create", "update", "migrate", "enable"} or not callable(resolver):
             return None, set()
         if isinstance(body, Save) and not (
-            body.definition.repo_url or body.definition.github_repository_id
-            or any(t.event and t.event.provider == "github" for t in body.definition.triggers)
+            body.definition.repo_url or body.definition.github_repository_id or body.definition.gitlab_project_id
+            or any(t.event and t.event.provider in {"github", "gitlab"} for t in body.definition.triggers)
         ):
             return None, set()
         principal = await self.identity.require_current(grant)
@@ -869,34 +885,73 @@ class ProductAutomationService:
                 raise HTTPException(422, "Select an automation.")
         required: set[str] = set()
 
-        async def resolve(repository: str, repository_id: int | None, *, selected: bool) -> dict:
+        async def resolve(
+            repository: str, repository_id: int | None, *, selected: bool,
+            provider: Literal["github", "gitlab"] = "github", base_url: str | None = None,
+        ) -> dict:
             try:
-                value = await self.connections.resolve_repository(
-                    grant, repository, repository_id, selected=selected,
-                )
+                if provider == "gitlab":
+                    value = await self.connections.resolve_repository(
+                        grant, repository, repository_id, selected=selected, provider=provider, base_url=base_url,
+                    )
+                else:
+                    value = await self.connections.resolve_repository(
+                        grant, repository, repository_id, selected=selected,
+                    )
             except (ConnectorError, TimeoutError, OSError):
-                raise HTTPException(409, "The repository identity or selected GitHub access could not be verified.") from None
+                raise HTTPException(409, "The repository identity or selected access could not be verified.") from None
             target = value.get("repository_id")
             if type(target) is not int or target <= 0:
-                raise HTTPException(409, "GitHub did not confirm a permanent repository identity.")
+                raise HTTPException(409, "The provider did not confirm a permanent repository identity.")
             if repository_id is not None and target != repository_id:
                 raise HTTPException(409, "The permanent repository identity changed.")
+            if provider == "gitlab":
+                try:
+                    valid = (
+                        bool(value.get("repo_url"))
+                        and repository_provider(value["repo_url"]) == "gitlab"
+                        and value.get("repository_provider") == "gitlab"
+                        and value.get("gitlab_project_id") == target
+                        and value.get("repository_origin") == repository_origin(value.get("repo_url", ""))
+                        and (not base_url or value.get("repository_origin") == base_url)
+                    )
+                except (ValueError, TypeError):
+                    valid = False
+                if not valid:
+                    raise HTTPException(409, "The GitLab project origin or identity changed.")
             if selected:
                 connection_id = value.get("connection_id")
                 if not isinstance(connection_id, str) or not connection_id:
-                    raise HTTPException(409, "The repository has no current selected GitHub authority.")
+                    raise HTTPException(409, "The repository has no current selected authority.")
                 required.add(connection_id)
             return value
 
-        if not definition.session_id and (definition.repo_url or definition.github_repository_id):
-            repository = definition.repo_url.removeprefix("https://github.com/").removesuffix(".git")
-            value = await resolve(repository, definition.github_repository_id, selected="github" in definition.plugins)
-            definition.repo_url, definition.github_repository_id = value["repo_url"], value["repository_id"]
+        if not definition.session_id and (definition.repo_url or definition.github_repository_id or definition.gitlab_project_id):
+            if repository_provider(definition.repo_url) == "gitlab":
+                if "gitlab" not in definition.plugins:
+                    raise HTTPException(422, "Select the GitLab connection for this automation's project.")
+                value = await resolve(
+                    definition.repo_url, definition.gitlab_project_id, selected=True,
+                    provider="gitlab", base_url=repository_origin(definition.repo_url),
+                )
+                definition.repo_url, definition.gitlab_project_id = value["repo_url"], value["repository_id"]
+            else:
+                repository = definition.repo_url.removeprefix("https://github.com/").removesuffix(".git")
+                value = await resolve(repository, definition.github_repository_id, selected="github" in definition.plugins)
+                definition.repo_url, definition.github_repository_id = value["repo_url"], value["repository_id"]
         for trigger in definition.triggers:
             if trigger.event and trigger.event.provider == "github":
                 event = trigger.event
                 value = await resolve(event.repository, event.repository_id, selected=True)
                 event.repository, event.repository_id = value["repository"], value["repository_id"]
+            elif trigger.event and trigger.event.provider == "gitlab":
+                event = trigger.event
+                value = await resolve(
+                    event.repository, event.repository_id, selected=True, provider="gitlab",
+                    base_url=event.gitlab_origin or None,
+                )
+                event.repository, event.repository_id = value["repository"], value["repository_id"]
+                event.gitlab_origin = value["repository_origin"]
         await self.identity.require_current(grant)
         if scope is not None:
             await self.check_tool_caller(scope, scope.turn_id, grant)
@@ -910,8 +965,8 @@ class ProductAutomationService:
         if not re.fullmatch(r"[A-Za-z0-9_:-]{1,80}", operation_scope):
             raise HTTPException(422, "Invalid operation scope.")
         payload = body.model_dump(mode="json")
-        if isinstance(body, Save) and body.definition.session_id is None:
-            payload["definition"].pop("session_id", None)
+        if isinstance(body, Save):
+            payload["definition"] = definition_payload(body.definition)
         fingerprint = _digest({"action": action, "id": identity, "body": payload})
         identified, repository_grants = await self.repository_preflight(
             grant, action, identity, body, operation_scope, fingerprint, scope,
@@ -940,10 +995,10 @@ class ProductAutomationService:
             else:
                 if repository_grants:
                     current_grants = await self.connections.resolve_grants(
-                        principal.id, ["github"], shared_session=True, surface="automation", db=db,
+                        principal.id, sorted(repository_grants), shared_session=True, surface="automation", db=db,
                     )
                     if not repository_grants.issubset({item.id for item in current_grants}):
-                        raise HTTPException(409, "The selected GitHub authority changed before the automation was saved.")
+                        raise HTTPException(409, "The selected repository authority changed before the automation was saved.")
                 if action == "create":
                     if not isinstance(body, Save) or body.revision != 0:
                         raise HTTPException(409, "Creation requires a definition at revision zero.")

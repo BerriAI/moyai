@@ -418,6 +418,33 @@ async def test_mcp_api_ownership_shared_visibility_and_product_union(runtime, ac
             assert await bridge.catalog(actor.id, shared_session=True, surface="slack") == []
 
 
+async def test_connection_api_returns_gitlab_projects_alongside_native_mcp(runtime, actor, bridge):
+    from test_product_connections import gitlab_accounts
+
+    runtime.product_connections = bridge
+    bridge.product.identity = SimpleNamespace(authenticate=lambda *args, **kwargs: None)
+    gitlab_accounts(bridge, ids=(7,))
+    session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    async with client_for(runtime, actor) as client:
+        created = await client.post("/api/connections", json=mcp_connection(shared=True))
+        assert created.status_code == 200
+        remote = created.json()
+        for params in ({}, {"shared": True}, {"session_id": session.id}):
+            response = await client.get("/api/connections", params=params)
+            assert response.status_code == 200
+            rows = response.json()
+            assert {row["kind"] for row in rows} == {"gitlab", "mcp"}
+            assert next(row for row in rows if row["kind"] == "mcp") == remote
+            project = next(row for row in rows if row["kind"] == "gitlab")
+            assert project["policy"]["product"]["repository_id"] == 7
+            assert project["source"] == "product"
+            assert "synthetic-token" not in response.text
+        # GitLab is managed through product setup, not native token creation.
+        assert (await client.post("/api/connections", json={
+            "name": "Unsupported native GitLab", "kind": "gitlab", "credential": "synthetic-token",
+        })).status_code == 422
+
+
 class MCPPreviewTools:
     def __init__(self, on_list=None, *, authorize=None):
         self.on_list = on_list

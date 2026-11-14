@@ -50,14 +50,17 @@ class _Invocation:
         bound.locks = {provider: asyncio.Lock() for provider in bound.locks}
         bound.personal_slack = copy.copy(bound.personal_slack)
         bound.personal_slack.connectors, bound.personal_slack.locks = bound, {}
-        bound.github = copy.copy(bound.github)
-        bound.github.connectors = bound
-        for key, value in vars(bound.github).items():
-            if isinstance(value, asyncio.Lock):
-                setattr(bound.github, key, asyncio.Lock())
+        for provider in ("github", "gitlab"):
+            helper = copy.copy(getattr(bound, provider))
+            helper.connectors = bound
+            for key, value in vars(helper).items():
+                if isinstance(value, asyncio.Lock):
+                    setattr(helper, key, asyncio.Lock())
+            if self.authorize is not None:
+                helper.request = self.guarded(helper.request)
+            setattr(bound, provider, helper)
         if self.authorize is not None:
             bound.request = self.guarded(bound.request)
-            bound.github.request = self.guarded(bound.github.request)
 
         async def execute() -> T:
             return await operation(bound)

@@ -3,11 +3,10 @@
 Content is encrypted at rest. Search returns references; selected notes are
 resolved afresh at the model broker, never copied into sandbox tool results.
 """
-from .private_sinks import deny_export
 import hashlib
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
@@ -16,6 +15,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .db import database, now
 from .library_views import page
+from .private_sinks import deny_export
+from .repository_identity import (
+    canonical_origin,
+    canonical_repository_url,
+    repository_origin,
+    repository_provider,
+)
 
 KINDS = Literal['preference', 'feedback', 'project', 'reference']
 
@@ -35,17 +41,16 @@ class Note(Form):
     title: str = Field(min_length=3, max_length=120)
     content: str = Field(min_length=3)
     kind: KINDS = 'preference'
-    repo_url: str = Field(default='', max_length=240, description='Leave empty for general personal preferences across repositories. For repository-specific notes, use selected_repository_url or a confirmed repository_id from the current memory context. A mentioned name alone is not a confirmed identity.')
-    repository_id: int | None = Field(default=None, gt=0, description='Confirmed permanent ID from github_repositories; supports repository scope when the session picker is empty.')
+    repo_url: str = Field(default='', max_length=2048, description='Leave empty for general preferences. Repository notes require the verified repository URL from current memory context, including its origin and full project path.')
+    repository_id: int | None = Field(default=None, gt=0, description='Legacy GitHub repository ID. GitLab notes must use the verified repository URL from current memory context.')
     revision: int = Field(default=0, ge=0)
     request_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
 
     @field_validator('repo_url')
     @classmethod
     def repository(cls, value):
-        if value and not re.fullmatch(r'https://github\.com/[\w.-]+/[\w.-]+/?', value):
-            raise ValueError('Use a GitHub repository URL without credentials or query parameters.')
-        return value.rstrip('/').removesuffix('.git').lower()
+        canonical = canonical_repository_url(value)
+        return canonical.lower() if repository_provider(canonical) == "github" else canonical
 
 
 class Turn(Form):
@@ -147,6 +152,27 @@ class Memory:
         return [{'id': entry['id'], 'url': Note.repository('https://github.com/' + entry['full_name'])}
                 for entry in self.github.repository_options(connection=connection)]
 
+    def selected_repository(self, run, *, connection=None):
+        url = Note.repository(run.get('repo_url') or '')
+        if not url or repository_provider(url) == 'github':
+            return url
+        connectors = getattr(self.github, 'connectors', None)
+        gitlab = getattr(connectors, 'gitlab', None)
+        if (
+            connectors is None or gitlab is None or 'gitlab' not in run.get('plugins', [])
+            or not connectors.policy('gitlab', connection=connection)['enabled']
+            or type(run.get('gitlab_project_id')) is not int or run['gitlab_project_id'] <= 0
+        ):
+            raise HTTPException(403, 'GitLab repository memory requires its current selected project connection.')
+        credentials = gitlab.saved_credentials(connection=connection)
+        origin = repository_origin(url)
+        if canonical_origin(credentials.get('base_url', '')) != origin:
+            raise HTTPException(403, 'The selected GitLab repository origin changed.')
+        path = url.removeprefix(origin + '/')
+        if gitlab.target(path, credentials) != run['gitlab_project_id']:
+            raise HTTPException(403, 'The selected GitLab project identity changed.')
+        return url
+
     def owner(self, actor, conn=None):
         if self.security.local_preview() and actor == 'shared:local:admin':
             return actor
@@ -239,6 +265,8 @@ class Memory:
             deny_export(self.store, source['run_id'], conn)
         confirmed = self.repository_scopes(run, connection=conn) if run else []
         if body.repository_id is not None:
+            if body.repo_url and repository_provider(body.repo_url) != 'github':
+                raise HTTPException(422, 'Numeric GitHub IDs cannot identify GitLab repository memory.')
             chosen = next((r for r in confirmed if r['id'] == body.repository_id), None)
             if not chosen or (body.repo_url and body.repo_url != chosen['url']):
                 raise HTTPException(422, 'Use a confirmed repository ID and its matching canonical URL from the current memory context.')
@@ -256,7 +284,7 @@ class Memory:
             prefs = self.preferences(owner, conn)
             if not prefs['enabled'] or not prefs['auto_save']:
                 raise HTTPException(403, 'Automatic saving is off. The user can add this note in Settings → Memory.')
-            repo = Note.repository(fresh['repo_url']) if fresh['repo_url'] else ''
+            repo = self.selected_repository(fresh, connection=conn)
             if ((body.repo_url and body.repo_url not in {repo, *(r['url'] for r in confirmed)})
                     or (source['type'] == 'observation' and repo and not body.repo_url)):
                 raise HTTPException(422, 'Repository memory needs the selected repository or a confirmed authorized repository identity.')
@@ -281,7 +309,7 @@ class Memory:
                     or previous['source']['scope'] != source['scope']):
                 raise HTTPException(409, 'An observation cannot replace a user-backed note or change its scope. Use a separate key.')
         note_id, revision = (old['id'], old['revision'] + 1) if old else (uuid4().hex, 1)
-        expires = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat() if body.kind in {'project', 'reference'} else ''
+        expires = (datetime.now(UTC) + timedelta(days=90)).isoformat() if body.kind in {'project', 'reference'} else ''
         conn.execute('''INSERT INTO personal_memories VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET
             encrypted=excluded.encrypted,revision=excluded.revision,updated_at=excluded.updated_at,expires_at=excluded.expires_at''',
             (note_id, owner, key_hash, self.security.encrypt(json.dumps(payload, ensure_ascii=False)), revision,
@@ -392,7 +420,7 @@ class Memory:
     def automatic_notes(self, run, owner, messages):
         """Read-only selection, refreshed per inference; no model or remote lookup."""
         terms = search_terms(' '.join(m['content'] for m in messages))
-        repo = Note.repository(run['repo_url']) if run['repo_url'] else ''
+        repo = self.selected_repository(run)
         ranked = []
         for row in self.store.rows('''SELECT * FROM personal_memories WHERE owner_id=? AND deleted=0
                 AND (expires_at='' OR expires_at>?)''', (owner, now())):
@@ -419,7 +447,7 @@ class Memory:
             (run['id'], run['active_message_id'], run['active_user_id'], owner, owner, now()))
         notes = []
         messages = self.source_messages(run)
-        repo = Note.repository(run['repo_url']) if run['repo_url'] else ''
+        repo = self.selected_repository(run)
         for row in rows:
             note = self.unpack(row)
             if row['read_length'] is not None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from ipaddress import ip_address
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -14,7 +15,41 @@ from .database import Database
 from .models import Session, SessionLink, User, new_id
 
 PR_PATH = re.compile(r"^/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)/?$")
-PR_MENTION = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*(?![A-Za-z0-9])")
+MR_PATH = re.compile(r"^/([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)/-/merge_requests/([1-9][0-9]*)/?$")
+PR_MENTION = re.compile(
+    r"https://(?:github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/"
+    r"|[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+/-/merge_requests/)"
+    r"[1-9][0-9]*(?![A-Za-z0-9])"
+    r"|http://(?:127(?:\.[0-9]{1,3}){3}|\[::1\])(?::[0-9]+)?/"
+    r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+/-/merge_requests/[1-9][0-9]*(?![A-Za-z0-9])"
+)
+
+
+def gitlab_link(value: str) -> tuple[str, str, int]:
+    """Parse display identity only. A matching selected grant authorizes every read."""
+    parsed = urlsplit(value)
+    match = MR_PATH.fullmatch(parsed.path)
+    try:
+        loopback = ip_address(parsed.hostname or "").is_loopback
+    except ValueError:
+        loopback = False
+    if (
+        (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback))
+        or not parsed.hostname or parsed.username is not None
+        or parsed.password is not None or "@" in parsed.netloc or not match
+        or not (re.fullmatch(r"[A-Za-z0-9.-]+", parsed.hostname) or parsed.hostname == "::1")
+        or any(ord(char) < 33 or ord(char) == 127 for char in value)
+    ):
+        raise ValueError("Use an HTTPS GitLab merge request URL without credentials.")
+    project, iid = match.groups()
+    if any(part in {".", "..", "-"} for part in project.split("/")) or len(iid) > 10:
+        raise ValueError("Use an exact GitLab project and merge request number.")
+    port = parsed.port
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname.lower()
+    origin = parsed.scheme + "://" + host + (
+        f":{port}" if port not in {None, 443 if parsed.scheme == "https" else 80} else ""
+    )
+    return origin, project, int(iid)
 
 
 class LinkInput(BaseModel):
@@ -30,15 +65,23 @@ class LinkInput(BaseModel):
         if any(ord(character) < 32 for character in value):
             raise ValueError("Use a valid web address.")
         parsed = urlsplit(value)
-        if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password:
+        if (
+            parsed.scheme not in {"https", "http"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+        ):
             raise ValueError("Use an HTTP(S) address without embedded credentials.")
         # Reading port validates malformed or out-of-range values too.
         port = parsed.port
         self.title = self.title.strip()
         if self.kind == "pull_request":
+            if MR_PATH.fullmatch(parsed.path):
+                origin, project, iid = gitlab_link(value)
+                self.url = f"{origin}/{project}/-/merge_requests/{iid}"
+                self.title = self.title or f"{project} !{iid}"
+                return self
             match = PR_PATH.fullmatch(parsed.path)
             if parsed.scheme != "https" or parsed.hostname != "github.com" or port not in {None, 443} or not match:
-                raise ValueError("Use a GitHub pull request URL.")
+                raise ValueError("Use a GitHub pull request or GitLab merge request URL.")
             owner, repo, number = match.groups()
             self.url = f"https://github.com/{owner.lower()}/{repo.lower()}/pull/{number}"
             self.title = self.title or f"{owner}/{repo} #{number}"

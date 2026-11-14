@@ -32,7 +32,7 @@ STARTUP_VERSION = "moyai-on-demand-computer-v1"
 COMPUTER_TOOLS = frozenset({
     "shell", "read_file", "write_file", "edit_file", "list_files", "grep",
     "save_artifact", "attachment_copy", "browser_open", "browser_read", "browser_action",
-    "desktop_read", "desktop_action", "credentials_run", "delegate_task", "github_checkout",
+    "desktop_read", "desktop_action", "credentials_run", "delegate_task", "github_checkout", "gitlab_checkout",
 })
 ProjectInstructions = Callable[[RunContext[RunScope]], Awaitable[str]]
 PublishWorkspace = Callable[[RunScope, dict[str, Any]], Awaitable[None]]
@@ -161,7 +161,9 @@ class OnDemandRepository(WrapperCapability[RunScope]):
     ) -> dict[str, Any]:
         if tool_def.name == "delegate_task" and delegation_mode(ctx.deps) != "legacy":
             return args  # Only legacy SDK delegates share the parent's computer.
-        if tool_def.name not in COMPUTER_TOOLS and not re.fullmatch(r"github_[A-Za-z0-9]{8}_checkout", tool_def.name):
+        if tool_def.name not in COMPUTER_TOOLS and not re.fullmatch(
+            r"(?:github|gitlab)_[A-Za-z0-9]{8}_checkout", tool_def.name,
+        ):
             return args
         async with self.lock:
             if not self.ready:

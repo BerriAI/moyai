@@ -2649,6 +2649,18 @@
             ],
             "title": "Github Repository Id"
           },
+          "gitlab_project_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitlab Project Id"
+          },
           "harness": {
             "default": "hermes",
             "maxLength": 80,
@@ -2705,12 +2717,13 @@
               "enum": [
                 "linear",
                 "github",
+                "gitlab",
                 "slack",
                 "notion"
               ],
               "type": "string"
             },
-            "maxItems": 4,
+            "maxItems": 5,
             "title": "Plugins",
             "type": "array"
           },
@@ -5616,6 +5629,7 @@
           "kind": {
             "enum": [
               "github",
+              "gitlab",
               "linear",
               "notion",
               "slack",
@@ -6522,6 +6536,12 @@
             "title": "Event",
             "type": "string"
           },
+          "gitlab_origin": {
+            "default": "",
+            "maxLength": 2048,
+            "title": "Gitlab Origin",
+            "type": "string"
+          },
           "include_thread_replies": {
             "default": false,
             "title": "Include Thread Replies",
@@ -6708,6 +6728,12 @@
             "title": "Event",
             "type": "string"
           },
+          "gitlab_origin": {
+            "default": "",
+            "maxLength": 2048,
+            "title": "Gitlab Origin",
+            "type": "string"
+          },
           "include_thread_replies": {
             "default": false,
             "title": "Include Thread Replies",
@@ -6848,6 +6874,7 @@
           "event",
           "repository",
           "repository_id",
+          "gitlab_origin",
           "team_id",
           "assignee_id",
           "label_id",
@@ -7250,6 +7277,173 @@
           "url"
         ],
         "title": "GitHubSetupRedirect",
+        "type": "object"
+      },
+      "GitLabOrganizationSetup": {
+        "additionalProperties": false,
+        "properties": {
+          "base_url": {
+            "default": "https://gitlab.com",
+            "maxLength": 2048,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "repository_ids": {
+            "items": {
+              "exclusiveMinimum": 0.0,
+              "type": "integer"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Repository Ids",
+            "type": "array"
+          },
+          "revision": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Revision",
+            "type": "string"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "repository_ids",
+          "revision",
+          "token"
+        ],
+        "title": "GitLabOrganizationSetup",
+        "type": "object"
+      },
+      "GitLabProjectDiscovery": {
+        "additionalProperties": false,
+        "properties": {
+          "base_url": {
+            "default": "https://gitlab.com",
+            "maxLength": 2048,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "page": {
+            "default": 1,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "search": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Search",
+            "type": "string"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "GitLabProjectDiscovery",
+        "type": "object"
+      },
+      "GitLabProjectDiscoveryResult": {
+        "properties": {
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "next_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Page"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/OrganizationConnectionRepository"
+            },
+            "title": "Repositories",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "selected_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Selected Ids",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "base_url",
+          "repositories",
+          "selected_ids",
+          "next_page",
+          "truncated",
+          "revision"
+        ],
+        "title": "GitLabProjectDiscoveryResult",
+        "type": "object"
+      },
+      "GitLabProjectSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "repository_ids": {
+            "items": {
+              "exclusiveMinimum": 0.0,
+              "type": "integer"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Repository Ids",
+            "type": "array"
+          },
+          "revision": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_ids",
+          "revision"
+        ],
+        "title": "GitLabProjectSelection",
         "type": "object"
       },
       "GoalCommandResult": {
@@ -9277,8 +9471,8 @@
           },
           "repo_url": {
             "default": "",
-            "description": "Leave empty for general personal preferences across repositories. For repository-specific notes, use selected_repository_url or a confirmed repository_id from the current memory context. A mentioned name alone is not a confirmed identity.",
-            "maxLength": 240,
+            "description": "Leave empty for general preferences. Repository notes require the verified repository URL from current memory context, including its origin and full project path.",
+            "maxLength": 2048,
             "title": "Repo Url",
             "type": "string"
           },
@@ -9292,7 +9486,7 @@
                 "type": "null"
               }
             ],
-            "description": "Confirmed permanent ID from github_repositories; supports repository scope when the session picker is empty.",
+            "description": "Legacy GitHub repository ID. GitLab notes must use the verified repository URL from current memory context.",
             "title": "Repository Id"
           },
           "request_id": {
@@ -9336,6 +9530,17 @@
             ],
             "title": "App Registered"
           },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
           "check_status": {
             "anyOf": [
               {
@@ -9369,6 +9574,7 @@
           "id": {
             "enum": [
               "github",
+              "gitlab",
               "linear",
               "notion",
               "slack"
@@ -9444,7 +9650,8 @@
           "identity",
           "tools",
           "repositories",
-          "app_registered"
+          "app_registered",
+          "base_url"
         ],
         "title": "OrganizationConnection",
         "type": "object"
@@ -10004,6 +10211,18 @@
             ],
             "title": "Github Repository Id"
           },
+          "gitlab_project_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitlab Project Id"
+          },
           "harness": {
             "default": "hermes",
             "maxLength": 80,
@@ -10060,12 +10279,13 @@
               "enum": [
                 "linear",
                 "github",
+                "gitlab",
                 "slack",
                 "notion"
               ],
               "type": "string"
             },
-            "maxItems": 4,
+            "maxItems": 5,
             "title": "Plugins",
             "type": "array"
           },
@@ -10122,6 +10342,7 @@
           "self_management",
           "repo_url",
           "github_repository_id",
+          "gitlab_project_id",
           "environment_id",
           "plugins",
           "model",
@@ -11129,6 +11350,10 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "gitlab_project_id": {
+            "title": "Gitlab Project Id",
+            "type": "integer"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -11173,6 +11398,15 @@
               }
             ],
             "title": "Repository Id"
+          },
+          "repository_origin": {
+            "title": "Repository Origin",
+            "type": "string"
+          },
+          "repository_provider": {
+            "const": "gitlab",
+            "title": "Repository Provider",
+            "type": "string"
           },
           "revision": {
             "title": "Revision",
@@ -20037,6 +20271,188 @@
         "summary": "Select Repositories"
       }
     },
+    "/api/connections/gitlab/connect": {
+      "post": {
+        "operationId": "connectGitLabOrganization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitLabOrganizationSetup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionConnected"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Connect Gitlab"
+      }
+    },
+    "/api/connections/gitlab/projects": {
+      "get": {
+        "operationId": "listGitLabProjects",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 200,
+              "title": "Search",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Revision"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitLabProjectDiscoveryResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Gitlab"
+      },
+      "put": {
+        "operationId": "selectGitLabProjects",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitLabProjectSelection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionConnected"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Select Gitlab"
+      }
+    },
+    "/api/connections/gitlab/projects/discover": {
+      "post": {
+        "operationId": "discoverGitLabProjects",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitLabProjectDiscovery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitLabProjectDiscoveryResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discover Gitlab"
+      }
+    },
     "/api/connections/slack/personal": {
       "delete": {
         "operationId": "disconnectPersonalSlack",
@@ -20207,6 +20623,7 @@
             "schema": {
               "enum": [
                 "github",
+                "gitlab",
                 "linear",
                 "notion",
                 "slack"
@@ -20250,6 +20667,7 @@
             "schema": {
               "enum": [
                 "github",
+                "gitlab",
                 "linear",
                 "notion",
                 "slack"
@@ -20305,6 +20723,7 @@
             "schema": {
               "enum": [
                 "github",
+                "gitlab",
                 "linear",
                 "notion",
                 "slack"
@@ -20350,6 +20769,7 @@
             "schema": {
               "enum": [
                 "github",
+                "gitlab",
                 "linear",
                 "notion",
                 "slack"
@@ -20395,6 +20815,7 @@
             "schema": {
               "enum": [
                 "github",
+                "gitlab",
                 "linear",
                 "notion",
                 "slack"
@@ -27458,6 +27879,7 @@
             "schema": {
               "enum": [
                 "github",
+                "gitlab",
                 "linear",
                 "notion",
                 "slack"

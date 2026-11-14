@@ -252,6 +252,10 @@ class GitHubRepositories:
                 if table in tables:
                     for row in conn.execute(f'SELECT id,recipe FROM {table}').fetchall():
                         value = json.loads(row['recipe'])
+                        # Provider IDs are separate namespaces. Do not even
+                        # reserialize another provider's immutable build recipe.
+                        if value.get('repository_provider', 'github') != 'github':
+                            continue
                         updated = json.dumps(recipe(value, rename=table == 'environments'))
                         if updated != row['recipe']:
                             conn.execute(f'UPDATE {table} SET recipe=? WHERE id=?', (updated, row['id']))

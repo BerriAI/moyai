@@ -794,6 +794,115 @@ async def test_real_pg_repository_memory_uses_exact_completed_turn_receipt_and_c
 
 
 @PG
+async def test_real_pg_gitlab_continuation_copies_provider_origin_and_project_without_source_migration(continuation):
+    product = continuation
+    async with product.database.sessions() as db:
+        legacy = await product.service._root(db, ROOT, product.principal)
+    assert "repository_provider" not in legacy and "gitlab_project_id" not in legacy
+    await product.sql("ALTER TABLE moyai.runs ADD COLUMN repository_provider text,"
+                      "ADD COLUMN repository_origin text,ADD COLUMN gitlab_project_id bigint")
+    await product.sql(
+        "UPDATE moyai.runs SET repository_provider='gitlab',repository_origin=:origin,"
+        "repo_url=:url,gitlab_project_id=42 WHERE id=:id",
+        id=ROOT, origin="https://gitlab.example.test", url="https://gitlab.example.test/group/sub/project",
+    )
+    selected = Grant("gitlab-selected", "gitlab", 1, "", policy={"product": {
+        "base_url": "https://gitlab.example.test", "repository_id": 42,
+    }})
+    connections = SimpleNamespace(prepare_repository=AsyncMock(), resolve_grants=AsyncMock(return_value=[selected]))
+    product.runtime.product_connections = product.database.product_connections = connections
+    result = await admit(product, connections=["gitlab-selected"])
+    async with product.database.sessions() as db:
+        binding = await db.get(ProductContinuation, ("moyai", ROOT))
+        plan = json.loads(product.runtime.security.unseal(binding.workspace))
+        assert result["turn_id"] == binding.first_turn_id
+        assert plan["context"]["gitlab_project_id"] == 42
+        assert plan["context"]["repository_provider"] == "gitlab"
+        assert plan["context"]["repository_origin"] == "https://gitlab.example.test"
+        assert plan["context"]["environment_build_id"] is None
+        assert "github_repository_id" not in plan["context"]["selection"]
+
+
+@PG
+@pytest.mark.parametrize("case", [
+    "completed", "github-collision", "wrong-origin", "wrong-project", "changed-revision",
+    "revoked", "frozen-origin", "frozen-project", "no-preparation",
+])
+async def test_real_pg_gitlab_historical_memory_rechecks_exact_frozen_selection(continuation, case):
+    from moyai.product_gitlab_bootstrap import repository_receipt
+    product = continuation
+    workspace = product.runtime.product_workspace
+    session = await product.database.create_session(product.actor, NewSession())
+    turn = await product.database.submit(product.actor, session.id, NewMessage(prompt="new", request_key="gitlab-receipt"))
+    await product.database.claim_next()
+    prepared = await product.database.prepare(turn.id)
+    selected = Grant(
+        "gitlab-selected", "github" if case == "github-collision" else "gitlab",
+        2 if case == "changed-revision" else 1, "",
+        policy={"product": {
+            "base_url": "https://other.example.test" if case == "wrong-origin" else "https://gitlab.example.test",
+            "repository_id": 43 if case == "wrong-project" else 42,
+        }},
+    )
+    prepared.scope.grants = [selected]
+    prepared.workspace = {"provider": "modal", "id": "sb-gitlab-original"}
+    context = await workspace._selection(None, {
+        "repo_url": "https://gitlab.example.test/group/sub/project", "gitlab_project_id": 42,
+        "environment_id": "none",
+    }, require_ready=True)
+    receipt = {
+        "repository_provider": "gitlab", "repository_origin": "https://gitlab.example.test",
+        "gitlab_project_id": 42, "repository_id": 42, "repository": "group/sub/project",
+        "commit_sha": "a" * 40, "working_dir": "/workspace/repo", "access": "selected_connection",
+        "connection_id": "gitlab-selected", "connection_revision": 1,
+        "workspace_id": "sb-gitlab-original", "workspace_scope": prepared.scope.workspace_key,
+        "requested_url": context["repo_url"],
+    }
+    if case == "frozen-origin":
+        context["repository_origin"] = "https://other.example.test"
+    if case == "frozen-project":
+        context["gitlab_project_id"] = context["repository_id"] = 43
+    async with product.database.sessions.begin() as db:
+        await workspace.bind_automation_turn(db, session, turn, context)
+        saved_turn = await db.get(Turn, turn.id)
+        if case != "no-preparation":
+            saved_turn.preparation = product.runtime.security.seal(TypeAdapter(PreparedTurn).dump_json(prepared))
+        else:
+            saved_turn.preparation = None
+        saved_turn.status = "completed"
+        saved_session = await db.get(Session, session.id)
+        saved_session.active_turn, saved_session.status = None, "idle"
+        db.add(Effect(
+            id="gitlab-receipt", session_id=session.id, turn_id=turn.id, actor_id=product.actor.id,
+            tool_name="product_repository_prepare", arguments="{}", fingerprint="a" * 64, state="confirmed",
+            resolution=product.runtime.security.seal(receipt),
+        ))
+    service = SimpleNamespace(database=product.database)
+
+    async def read_receipt(db, **kwargs):
+        return await repository_receipt(service, db, **kwargs)
+
+    require_scope = AsyncMock(side_effect=PermissionError("revoked")) if case == "revoked" else AsyncMock()
+    product.runtime.product_connections = SimpleNamespace(
+        repository_receipt=read_receipt, require_scope=require_scope,
+        check=AsyncMock(side_effect=AssertionError("Historical memory must not require a running completed turn.")),
+    )
+    if case in {"completed", "no-preparation"}:
+        result = await workspace.repository_scope(session.id, product.principal.grant, turn_id=turn.id)
+        if case == "no-preparation":
+            assert result is None
+        else:
+            assert result["gitlab_project_id"] == result["repository_id"] == 42
+            assert result["repository_provider"] == "gitlab"
+            assert result["repository_origin"] == "https://gitlab.example.test"
+            assert result["context_fingerprint"] == context["context_fingerprint"]
+            require_scope.assert_awaited_once()
+    else:
+        with pytest.raises((PermissionError, HTTPException)):
+            await workspace.repository_scope(session.id, product.principal.grant, turn_id=turn.id)
+
+
+@PG
 async def test_real_pg_pre_manifest_local_archive_is_discovered_and_read_with_original_revision(continuation, tmp_path):
     product = continuation
     source = package(tmp_path / "original-local.zip")

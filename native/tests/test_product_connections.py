@@ -86,7 +86,7 @@ async def scope_for(bridge, kind):
     return RunScope("native-session", "native-turn", "google:owner", "test", grants)
 
 
-@pytest.mark.parametrize("provider", ["github", "linear", "notion", "slack"])
+@pytest.mark.parametrize("provider", ["github", "gitlab", "linear", "notion", "slack"])
 @pytest.mark.parametrize("read_only", [False, True])
 async def test_canonical_definitions_do_not_depend_on_turn_identity(bridge, monkeypatch, provider, read_only):
     if provider == "github":
@@ -104,6 +104,8 @@ async def test_canonical_definitions_do_not_depend_on_turn_identity(bridge, monk
             return tools
 
         monkeypatch.setattr(ProductGitHubToolset, "_native", native)
+    elif provider == "gitlab":
+        gitlab_accounts(bridge)
     else:
         save(bridge, provider)
     bridge.store.execute(
@@ -204,10 +206,13 @@ def native_mcp(runtime, **changes):
     )
 
 
+@pytest.mark.parametrize("provider", ["linear", "gitlab"])
 async def test_product_mcp_grants_share_canonical_transaction_and_keep_stable_order(
-    mixed_connections, runtime, monkeypatch,
+    mixed_connections, runtime, monkeypatch, provider,
 ):
     service = mixed_connections
+    if provider == "gitlab":
+        gitlab_accounts(service, ids=(7,))
     async with service.database.sessions.begin() as db:
         row = native_mcp(runtime)
         db.add(row)
@@ -218,19 +223,19 @@ async def test_product_mcp_grants_share_canonical_transaction_and_keep_stable_or
 
         with monkeypatch.context() as patch:
             patch.setattr(service.store, "rows", no_source_checkout)
-            grants = await service.resolve_grants("google:owner", [row.id, "linear", row.id], db=db)
+            grants = await service.resolve_grants("google:owner", [row.id, provider, row.id], db=db)
             reversed_grants = await service.resolve_grants(
-                "google:owner", ["linear", row.id], db=db,
+                "google:owner", [provider, row.id], db=db,
             )
         assert grants == reversed_grants
         assert len(grants) == 2 and [grant.id for grant in grants] == sorted(grant.id for grant in grants)
         remote = next(grant for grant in grants if grant.kind == "mcp")
         assert remote.credential == row.credential and "synthetic-mcp-token" not in remote.credential
-        assert next(grant for grant in grants if grant.kind == "linear").credential == ""
+        assert next(grant for grant in grants if grant.kind == provider).credential == ""
     scope = RunScope("session", "turn", "google:owner", "test", grants)
     await service.require_scope(scope)
-    await service.check(scope, next(grant for grant in grants if grant.kind == "linear"))
-    assert await service.resolve_grants("google:owner", ["linear", row.id]) == grants
+    await service.check(scope, next(grant for grant in grants if grant.kind == provider))
+    assert await service.resolve_grants("google:owner", [provider, row.id]) == grants
     assert all(item["kind"] != "mcp" for item in await service.catalog("google:owner"))
 
 
@@ -328,6 +333,391 @@ def github_accounts(bridge, count=16):
     bridge.connectors.save("github", credentials, "Selected repositories")
     bridge.connectors.github.save_app({"id": 1})
     return credentials
+
+
+def gitlab_accounts(bridge, *, origin="https://gitlab.com", ids=(7, 8)):
+    save(bridge, "gitlab", base_url=origin, repository_ids=list(ids),
+         repositories=[{"id": identity, "full_name": f"group/subgroup/project-{identity}"} for identity in ids])
+
+
+async def test_gitlab_viewer_credentials_use_live_selection_without_a_running_turn(bridge, monkeypatch):
+    gitlab_accounts(bridge)
+    scope = await scope_for(bridge, "gitlab")
+    grant = scope.grants[0]
+
+    async def no_running_turn(_scope):
+        raise PermissionError("The completed chat has no running turn.")
+
+    monkeypatch.setattr(bridge.database, "authorize_scope", no_running_turn)
+    with pytest.raises(PermissionError, match="no running turn"):
+        await bridge.credentials(scope, grant)
+    value = await bridge.read_credentials(grant, lambda: bridge.require_scope(scope))
+    assert value["repository_ids"] == [grant.policy["product"]["repository_id"]]
+    assert value["access_token"] == "synthetic-token"
+    assert value["base_url"] == "https://gitlab.com"
+
+
+@pytest.mark.parametrize("stage", ["waiting_for_lock", "credential_read"])
+@pytest.mark.parametrize("revocation", ["requester", "rotation"])
+async def test_gitlab_viewer_never_returns_credentials_after_revocation(
+    bridge, monkeypatch, stage, revocation,
+):
+    gitlab_accounts(bridge)
+    scope = await scope_for(bridge, "gitlab")
+    grant = scope.grants[0]
+    waiting, release = asyncio.Event(), asyncio.Event()
+    revoked, issued = False, []
+    original = bridge._credentials
+    lock = bridge.connectors.locks["gitlab"]
+
+    async def authorize():
+        if revoked:
+            raise PermissionError("Viewer access was revoked.")
+        await bridge.require_scope(scope)
+        if stage == "waiting_for_lock":
+            waiting.set()
+
+    async def issue(selected, *, write):
+        assert not write
+        value = await original(selected, write=write)
+        issued.append(True)
+        if stage == "credential_read":
+            waiting.set()
+            await release.wait()
+        return value
+
+    monkeypatch.setattr(bridge, "_credentials", issue)
+    if stage == "waiting_for_lock":
+        await lock.acquire()
+    task = asyncio.create_task(bridge.read_credentials(grant, authorize))
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        if revocation == "requester":
+            revoked = True
+        else:
+            gitlab_accounts(bridge)
+        if stage == "waiting_for_lock":
+            lock.release()
+        release.set()
+        with pytest.raises((PermissionError, HTTPException)):
+            await asyncio.wait_for(task, 1)
+        assert bool(issued) == (stage == "credential_read")
+    finally:
+        if lock.locked() and stage == "waiting_for_lock":
+            lock.release()
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_gitlab_local_http_requires_explicit_runtime_configuration(bridge, tmp_path, monkeypatch):
+    monkeypatch.delenv("GITLAB_ALLOW_LOOPBACK_HTTP", raising=False)
+    settings = settings_for(tmp_path)
+    assert not settings.gitlab_allow_loopback_http
+    bridge.connectors.gitlab.settings = settings
+    with pytest.raises(ConnectorError):
+        bridge.connectors.gitlab.normalize_base_url("http://127.0.0.1:58990")
+    monkeypatch.setenv("GITLAB_ALLOW_LOOPBACK_HTTP", "true")
+    enabled = settings_for(tmp_path)
+    runtime_connections = ProductConnections(
+        SimpleNamespace(store_proxy=bridge.store, security=bridge.security, settings=enabled),
+        bridge.database,
+    )
+    assert runtime_connections.connectors.gitlab.settings is enabled
+    assert runtime_connections.connectors.gitlab.allow_loopback_http
+    assert runtime_connections.connectors.gitlab.normalize_base_url("http://127.0.0.1:58990") == "http://127.0.0.1:58990"
+    with pytest.raises(ConnectorError):
+        runtime_connections.connectors.gitlab.normalize_base_url("http://gitlab.example.test")
+
+
+async def test_gitlab_project_grants_bind_origin_identity_revision_and_never_contain_tokens(bridge):
+    gitlab_accounts(bridge)
+    scope = await scope_for(bridge, "gitlab")
+    assert {grant.policy["product"]["repository_id"] for grant in scope.grants} == {7, 8}
+    assert all(grant.policy["product"]["base_url"] == "https://gitlab.com" for grant in scope.grants)
+    assert all(grant.kind == "gitlab" and grant.credential == "" for grant in scope.grants)
+    assert "synthetic-token" not in json.dumps(asdict(scope))
+    grant = scope.grants[0]
+    value = await bridge.credentials(scope, grant)
+    assert value["repository_ids"] == [grant.policy["product"]["repository_id"]]
+    assert [item["id"] for item in value["repositories"]] == value["repository_ids"]
+    with pytest.raises(ConnectorError, match="explicit project ID"):
+        bridge.connectors.gitlab.target("group/subgroup/unselected")
+    assert bridge.connectors.gitlab.target("group/subgroup/project-7") == 7
+    assert bridge.connectors.gitlab.target("7") == 7
+
+    for origin in ("https://gitlab.com", "https://gitlab.example.test"):
+        gitlab_accounts(bridge, origin=origin)
+        with pytest.raises(HTTPException):
+            await bridge.require_scope(scope)
+        scope = await scope_for(bridge, "gitlab")
+        assert scope.grants[0].id != grant.id
+        grant = scope.grants[0]
+
+
+async def test_gitlab_project_selection_and_policy_revoke_old_grants(bridge):
+    from app.connection_authority import set_policy
+
+    gitlab_accounts(bridge)
+    scope = await scope_for(bridge, "gitlab")
+    gitlab_accounts(bridge, ids=(7,))
+    with pytest.raises(HTTPException):
+        await bridge.require_scope(scope)
+    current = await scope_for(bridge, "gitlab")
+    assert len(current.grants) == 1
+    set_policy(bridge.store, bridge.security, "gitlab", True, True)
+    with pytest.raises(HTTPException):
+        await bridge.require_scope(current)
+    current = await scope_for(bridge, "gitlab")
+    with pytest.raises(PermissionError, match="read only"):
+        await bridge.credentials(current, current.grants[0], write=True)
+    bridge.store.execute("DELETE FROM connections WHERE provider='gitlab'")
+    with pytest.raises(HTTPException):
+        await bridge.require_scope(current)
+
+
+async def test_gitlab_origin_is_independent_grant_authority(bridge):
+    gitlab_accounts(bridge, ids=(7,))
+    scope = await scope_for(bridge, "gitlab")
+    credentials = bridge.connectors.gitlab.saved_credentials()
+    credentials["base_url"] = "https://another-gitlab.example.test"
+    # Even a metadata-only update retaining the credential epoch cannot move an
+    # admitted numeric project ID to a different GitLab instance.
+    bridge.store.execute(
+        "UPDATE connections SET encrypted=? WHERE provider='gitlab'",
+        (bridge.security.encrypt(json.dumps(credentials)),),
+    )
+    with pytest.raises(HTTPException):
+        await bridge.require_scope(scope)
+    updated = await scope_for(bridge, "gitlab")
+    assert updated.grants[0].id != scope.grants[0].id
+
+
+@pytest.mark.parametrize("ids", [None, [], [True], [-1], ["7"]])
+async def test_gitlab_invalid_saved_selection_never_creates_provider_wide_grant(bridge, ids):
+    save(bridge, "gitlab", base_url="https://gitlab.com", repository_ids=ids)
+    with pytest.raises(HTTPException):
+        await scope_for(bridge, "gitlab")
+
+
+@pytest.mark.parametrize("origin", [
+    "http://gitlab.com", "http://localhost:58990", "http://127.0.0.1.evil.test:58990",
+    "https://user:token@gitlab.com", "https://gitlab.com/api/v4",
+    "https://gitlab.com?token=private", "https://gitlab.com/#fragment", "https://gitlab.com\\@evil.test",
+])
+def test_gitlab_setup_rejects_unsafe_origins_without_including_secret(origin):
+    from pydantic import ValidationError
+
+    from moyai.product_connections import GitLabProjectDiscovery
+
+    with pytest.raises(ValidationError):
+        GitLabProjectDiscovery(token="synthetic-token", base_url=origin)
+
+
+@pytest.mark.parametrize("origin,normalized", [
+    ("https://GITLAB.com:443/", "https://gitlab.com"),
+    ("https://gitlab.example.test:8443", "https://gitlab.example.test:8443"),
+    ("http://127.0.0.1:58990", "http://127.0.0.1:58990"),
+    ("http://[::1]:58990/", "http://[::1]:58990"),
+])
+def test_gitlab_setup_accepts_https_and_explicit_literal_loopback(origin, normalized):
+    from moyai.product_connections import GitLabProjectDiscovery
+
+    assert GitLabProjectDiscovery(token="synthetic-token", base_url=origin).base_url == normalized
+
+
+@pytest.fixture
+async def gitlab_settings_client(bridge, monkeypatch):
+    import httpx
+    from fastapi import FastAPI, Response
+
+    from moyai.product_connections import routes
+
+    async def authorized(*args, **kwargs):
+        return None
+
+    async def request(method, path, **kwargs):
+        assert method == "GET"
+        assert kwargs["token"] == "synthetic-token"
+        assert kwargs["base_url"] == "https://gitlab.com"
+        if path == "/projects":
+            return [{"id": 7, "path_with_namespace": "group/subgroup/repo", "token": "must-not-leak"}]
+        identity = int(path.rsplit("/", 1)[-1])
+        return {"id": identity, "path_with_namespace": f"group/subgroup/repo-{identity}"}
+
+    async def verify(credentials):
+        return ", ".join(item["full_name"] for item in credentials["repositories"])
+
+    bridge.product.identity = SimpleNamespace(authenticate=authorized, require_request_current=authorized)
+    monkeypatch.setattr(bridge.connectors.gitlab, "request", request)
+    monkeypatch.setattr(bridge.connectors.gitlab, "verify", verify)
+    app = FastAPI()
+    app.include_router(routes(bridge))
+    response = Response()
+    sid = bridge.security.new_session(response)
+    cookie = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=bridge.settings.public_url) as client:
+        client.cookies.set("workspace_session", cookie)
+        client.headers.update({"Origin": bridge.settings.public_url, "X-CSRF-Token": bridge.security.csrf(sid)})
+        yield client
+
+
+async def test_gitlab_onboarding_requires_selection_and_returns_safe_metadata(bridge, gitlab_settings_client):
+    client = gitlab_settings_client
+    discovered = await client.post("/api/connections/gitlab/projects/discover", json={"token": "synthetic-token"})
+    assert discovered.status_code == 200, discovered.text
+    assert discovered.json()["repositories"] == [{"id": 7, "full_name": "group/subgroup/repo"}]
+    assert "must-not-leak" not in discovered.text and "synthetic-token" not in discovered.text
+    assert not bridge.connectors.gitlab.saved_credentials()
+    body = {"token": "synthetic-token", "repository_ids": [], "revision": discovered.json()["revision"]}
+    assert (await client.post("/api/connections/gitlab/connect", json=body)).status_code == 422
+    body["repository_ids"] = [7]
+    connected = await client.post("/api/connections/gitlab/connect", json=body)
+    assert connected.status_code == 200, connected.text
+    assert "synthetic-token" not in connected.text
+    assert bridge.connectors.gitlab.saved_credentials()["repository_ids"] == [7]
+    scope = await scope_for(bridge, "gitlab")
+    catalog = await bridge.catalog("google:owner")
+    assert next(row for row in catalog if row["kind"] == "gitlab")["name"] == "group/subgroup/repo-7"
+    accounts = await client.get("/api/product/connections")
+    gitlab = next(row for row in accounts.json() if row["id"] == "gitlab")
+    assert gitlab["base_url"] == "https://gitlab.com" and not gitlab["oauth_configured"]
+    assert "synthetic-token" not in accounts.text
+    assert (await client.post("/api/connections/gitlab", json={"token": "synthetic-token"})).status_code == 400
+    assert (await client.post("/api/connections/gitlab/oauth")).status_code == 409
+    listed = await client.get("/api/connections/gitlab/projects")
+    assert listed.json()["selected_ids"] == [7]
+    selected = await client.put("/api/connections/gitlab/projects", json={
+        "repository_ids": [8], "revision": listed.json()["revision"],
+    })
+    assert selected.status_code == 200, selected.text
+    with pytest.raises(HTTPException):
+        await bridge.require_scope(scope)
+    assert (await scope_for(bridge, "gitlab")).grants[0].policy["product"]["repository_id"] == 8
+
+
+async def test_gitlab_onboarding_stale_discovery_cannot_replace_rotated_connection(bridge, gitlab_settings_client):
+    client = gitlab_settings_client
+    discovered = await client.post("/api/connections/gitlab/projects/discover", json={"token": "synthetic-token"})
+    gitlab_accounts(bridge, ids=(8,))
+    revision = discovered.json()["revision"]
+    response = await client.post("/api/connections/gitlab/connect", json={
+        "token": "synthetic-token", "repository_ids": [7], "revision": revision,
+    })
+    assert response.status_code == 409
+    assert bridge.connectors.gitlab.saved_credentials()["repository_ids"] == [8]
+    response = await client.post("/api/connections/gitlab/projects/discover", json={
+        "token": "synthetic-token", "page": 2, "revision": revision,
+    })
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize("revoke", ["connection", "requester"])
+async def test_gitlab_setup_rechecks_after_provider_await_before_save(
+    bridge, gitlab_settings_client, monkeypatch, revoke,
+):
+    client = gitlab_settings_client
+    gitlab_accounts(bridge, ids=(8,))
+    listed = await client.get("/api/connections/gitlab/projects")
+
+    async def denied(*args, **kwargs):
+        raise HTTPException(403, "Requester access changed.")
+
+    async def request(method, path, **kwargs):
+        if revoke == "connection":
+            bridge.store.execute("DELETE FROM connections WHERE provider='gitlab'")
+        else:
+            bridge.product.identity.require_request_current = denied
+        return {"id": 7, "path_with_namespace": "group/subgroup/repo"}
+
+    monkeypatch.setattr(bridge.connectors.gitlab, "request", request)
+    selected = await client.put("/api/connections/gitlab/projects", json={
+        "repository_ids": [7], "revision": listed.json()["revision"],
+    })
+    assert selected.status_code == (409 if revoke == "connection" else 403)
+    assert bridge.connectors.gitlab.saved_credentials().get("repository_ids", []) != [7]
+
+
+async def test_gitlab_project_discovery_is_bounded_and_secret_validation_is_redacted(
+    bridge, gitlab_settings_client, monkeypatch,
+):
+    client = gitlab_settings_client
+    calls = []
+
+    async def request(method, path, **kwargs):
+        calls.append((method, path, kwargs["params"]))
+        return [{"id": i, "path_with_namespace": f"group/subgroup/repo-{i}"} for i in range(1, 101)]
+
+    monkeypatch.setattr(bridge.connectors.gitlab, "request", request)
+    response = await client.post("/api/connections/gitlab/projects/discover", json={
+        "token": "synthetic-token", "page": 3, "search": "subgroup",
+    })
+    assert response.status_code == 200
+    assert response.json()["next_page"] == 4
+    assert calls == [("GET", "/projects", {
+        "membership": True, "simple": True, "per_page": 100, "page": 3,
+        "order_by": "id", "sort": "asc", "search": "subgroup",
+    })]
+    response = await client.post("/api/connections/gitlab/projects/discover", json={
+        "token": "synthetic-token", "base_url": "https://user:secret@gitlab.com",
+    })
+    assert response.status_code == 422
+    assert "synthetic-token" not in response.text and "secret" not in response.text
+
+
+@pytest.mark.parametrize("scopes,access_level,expected", [
+    (["api"], 40, 200), (["read_api"], 40, 502), (["api"], 20, 502),
+])
+async def test_gitlab_setup_runs_real_provider_validation_over_mock_http_boundary(
+    bridge, gitlab_settings_client, monkeypatch, scopes, access_level, expected,
+):
+    import app.gitlab as provider
+    import httpx
+
+    # Exercise the actual request and verify functions as well as the API routes.
+    # Only the external network boundary is synthetic; this is not live E2E proof.
+    monkeypatch.delattr(bridge.connectors.gitlab, "request")
+    monkeypatch.delattr(bridge.connectors.gitlab, "verify")
+    project = {
+        "id": 7, "path_with_namespace": "group/subgroup/repo", "default_branch": "main",
+        "visibility": "private", "archived": False,
+        "permissions": {"project_access": {"access_level": access_level}},
+        "web_url": "https://untrusted.example.test/do-not-follow",
+        "private_field": "must-not-store",
+    }
+    paths = []
+
+    def handle(request):
+        assert request.headers["PRIVATE-TOKEN"] == "synthetic-token"
+        assert "synthetic-token" not in str(request.url)
+        assert request.method == "GET"
+        paths.append(request.url.path)
+        return httpx.Response(200, json={
+            "/api/v4/projects": [project],
+            "/api/v4/projects/7": project,
+            "/api/v4/user": {"id": 11, "username": "synthetic-user", "state": "active"},
+            "/api/v4/personal_access_tokens/self": {
+                "id": 21, "user_id": 11, "scopes": scopes, "active": True, "revoked": False,
+            },
+        }[request.url.path])
+
+    monkeypatch.setattr(provider, "GitLabTransport", lambda **kwargs: httpx.MockTransport(handle))
+    client = gitlab_settings_client
+    discovered = await client.post("/api/connections/gitlab/projects/discover", json={"token": "synthetic-token"})
+    assert discovered.status_code == 200, discovered.text
+    connected = await client.post("/api/connections/gitlab/connect", json={
+        "token": "synthetic-token", "repository_ids": [7], "revision": discovered.json()["revision"],
+    })
+    assert connected.status_code == expected, connected.text
+    if expected != 200:
+        assert not bridge.connectors.gitlab.saved_credentials()
+        return
+    credentials = bridge.connectors.gitlab.saved_credentials()
+    assert credentials["repository_ids"] == [7]
+    assert credentials["repositories"][0]["web_url"] == "https://gitlab.com/group/subgroup/repo"
+    assert "must-not-store" not in json.dumps(credentials)
+    assert "/api/v4/personal_access_tokens/self" in paths
 
 
 async def test_github_token_requests_overlap_across_repositories_but_share_same_repository(bridge, monkeypatch):
@@ -503,10 +893,10 @@ async def test_canonical_notion_helpers_run_as_native_toolset_and_recheck_after_
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("github", [False, True])
+@pytest.mark.parametrize("provider", [None, "github", "gitlab"])
 @pytest.mark.parametrize("read", [False, True])
 async def test_connector_execution_keeps_checks_on_owner_loop_and_retains_write_evidence(
-    bridge, monkeypatch, github, read,
+    bridge, monkeypatch, provider, read,
 ):
     owner = asyncio.get_running_loop()
     allowed, checks, requests = True, [], []
@@ -524,11 +914,11 @@ async def test_connector_execution_keeps_checks_on_owner_loop_and_retains_write_
         allowed = False
         return {"confirmed": True}
 
-    target = bridge.connectors.github if github else bridge.connectors
+    target = getattr(bridge.connectors, provider) if provider else bridge.connectors
     monkeypatch.setattr(target, "request", request)
 
     async def operation(bound):
-        transport = bound.github if github else bound
+        transport = getattr(bound, provider) if provider else bound
         return await transport.request("GET" if read else "POST", "/synthetic")
 
     call = bridge.execution.call(operation, authorize=authorize, recheck=read)

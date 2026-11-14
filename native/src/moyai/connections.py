@@ -54,7 +54,12 @@ def selected_connections(scope: RunScope) -> tuple[SelectedConnection, ...]:
         SelectedConnection(grant, ConnectionPolicy.model_validate(grant.policy))
         for grant in sorted(scope.grants, key=lambda item: item.id)
     )
-    if any(item.grant.kind not in SERVICES and item.grant.kind != "mcp" for item in selected):
+    if any(
+        item.grant.kind not in SERVICES
+        and item.grant.kind != "mcp"
+        and not (item.grant.kind == "gitlab" and item.policy.product is not None)
+        for item in selected
+    ):
         raise ValueError("Unsupported connected service.")
     if len({item.prefix for item in selected}) != len(selected):
         raise ValueError("Selected account tool prefixes collide.")

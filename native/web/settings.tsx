@@ -21,6 +21,7 @@ import {
 } from "./generated/api"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
+import { ProductGitLabSetup } from "./product-gitlab-settings"
 import type { GeneralPreferences } from "./general-preferences"
 import {
   checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
@@ -676,7 +677,7 @@ function ProductSkillsPage() {
   }}</LoadState>
 }
 
-const productProviders: Record<string, string> = { github: "GitHub", slack: "Slack", linear: "Linear", notion: "Notion" }
+const productProviders: Record<string, string> = { github: "GitHub", gitlab: "GitLab", slack: "Slack", linear: "Linear", notion: "Notion" }
 export function productRedirect(value: string, origin: string): string {
   if (typeof value !== "string" || !value) throw new Error("The connection service did not return a destination.")
   const url = new URL(value, origin)
@@ -730,11 +731,14 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
   const name = productProviders[connection.id] || connection.id
   return <Dialog open onOpenChange={open => { if (!open && !mutation.busy && !nestedBusy) onClose() }}><DialogContent className="native-settings-dialog"
     onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus({ preventScroll: true }) }}>
-    <DialogHeader><DialogTitle>{name} · {mode === "repositories" ? "Repositories" : mode === "connect" ? "Connect account" : "Organization access"}</DialogTitle>
+    <DialogHeader><DialogTitle>{name} · {mode === "repositories" ? connection.id === "gitlab" ? "Projects" : "Repositories" : mode === "connect" ? "Connect account" : "Organization access"}</DialogTitle>
       <DialogDescription>{mode === "manage" ? "Manage how your workspace can use this account." : "Connect an account for your workspace."}</DialogDescription></DialogHeader>
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}{notice && <p className="ns-notice" role="status">{notice}</p>}
     {mode === "manage" && <>
       <p>{connection.connected ? `${connection.label} · ${connection.identity}` : "No organization account is connected."}</p>
+      {connection.id === "gitlab" && connection.connected && <div><p>{connection.base_url}</p>
+        <details><summary>Selected projects ({connection.repositories?.length || 0})</summary><ul className="ns-supporting-files">{connection.repositories?.map(project => <li key={project.id}>{project.full_name} · #{project.id}</li>)}</ul></details>
+      </div>}
       {connection.tools.length > 0 && <details><summary>Available actions</summary><ul className="ns-supporting-files">{connection.tools.map((tool, index) => <li key={tool.name || index}>{tool.name && <code>{tool.name} · </code>}{tool.description}</li>)}</ul></details>}
       {admin ? <form onSubmit={event => { event.preventDefault(); void mutation.run(() => updateOrganizationConnectionPolicy({ path: { provider: connection.id }, body: { enabled, read_only: readOnly } }), onUpdated) }}>
         <div className="ns-fields"><label className="check-label"><Checkbox checked={enabled} disabled={mutation.busy} onCheckedChange={value => setEnabled(value === true)} />Available to organization sessions</label>
@@ -746,6 +750,7 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
         <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("connect")}>{connection.connected ? "Reconnect" : "Connect"} {name}</Button>
         {connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => checkOrganizationConnection({ path: { provider: connection.id } }), () => setNotice("The provider confirmed this connection."))}>Check connection</Button>}
         {connection.id === "github" && connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("repositories")}>Choose repositories</Button>}
+        {connection.id === "gitlab" && connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("repositories")}>Choose projects</Button>}
         {connection.connected && <Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button>}
       </div>}
       {disconnect && admin && <div className="ns-empty"><h3>Disconnect {name} for the organization?</h3><p>Future tasks cannot use this account. Actions already sent and provider credentials are not recalled.</p><div className="ns-dialog-actions">
@@ -753,8 +758,11 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
         <Button variant="destructive" disabled={mutation.busy} onClick={() => void mutation.run(() => disconnectOrganizationConnection({ path: { provider: connection.id } }), onUpdated)}>Disconnect for everyone</Button>
       </div></div>}
     </>}
-    {mode === "connect" && admin && <ProductConnectionSetup connection={connection} onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />}
+    {mode === "connect" && admin && (connection.id === "gitlab"
+      ? <ProductGitLabSetup key="connect-gitlab" connection={connection} mode="connect" onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />
+      : <ProductConnectionSetup connection={connection} onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />)}
     {mode === "repositories" && admin && connection.id === "github" && <ProductRepositorySelection onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />}
+    {mode === "repositories" && admin && connection.id === "gitlab" && <ProductGitLabSetup key="projects-gitlab" connection={connection} mode="projects" onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />}
     <Button variant="outline" disabled={mutation.busy || nestedBusy} onClick={onClose}>Close</Button>
   </DialogContent></Dialog>
 }

@@ -1,4 +1,4 @@
-"""Read-only GitHub PR presentation, authorized by native sessions/connections.
+"""Read-only PR/MR presentation, authorized by native sessions/connections.
 
 REST contracts: https://docs.github.com/en/rest/pulls/pulls
 https://docs.github.com/en/rest/checks/runs
@@ -28,7 +28,8 @@ from sqlalchemy import func, or_, select
 from .contracts import ExecutionContext
 from .delegation_authority import saved_authority
 from .delegation_models import DelegatedSession
-from .links import PR_MENTION, LinkInput
+from .gitlab_reviews import GitLabReviews, ReviewSelection, selection
+from .links import MR_PATH, PR_MENTION, LinkInput, gitlab_link
 from .models import Connection, Message, Session, SessionLink, User
 
 if TYPE_CHECKING:
@@ -53,22 +54,29 @@ class PullRequest:
     url: str
     repository: str
     number: int
+    provider: Literal["github", "gitlab"] = "github"
+    origin: str = "https://github.com"
 
     @property
     def path(self) -> str:
+        if self.provider != "github":
+            raise ValueError("GitLab API paths require an authorized immutable project ID.")
         return f"/repos/{self.repository}/pulls/{self.number}"
 
 
 def parse_pr_url(url: str) -> PullRequest:
     try:
         normalized = LinkInput(kind="pull_request", url=url).url
+        if MR_PATH.fullmatch(urlsplit(normalized).path):
+            origin, project, iid = gitlab_link(normalized)
+            return PullRequest(normalized, project, iid, "gitlab", origin)
         owner, repo, _, number = urlsplit(normalized).path.strip("/").split("/")
         # LinkInput normalizes attachments; reject path traversal even in legacy rows.
         if owner in {".", ".."} or repo in {".", ".."} or len(number) > 10:
             raise ValueError
         return PullRequest(normalized, f"{owner}/{repo}", int(number))
     except (ValidationError, ValueError):
-        raise HTTPException(422, "Use an HTTPS github.com/owner/repository/pull/number URL.") from None
+        raise HTTPException(422, "Use an HTTPS GitHub pull request or GitLab merge request URL.") from None
 
 
 def text(value: Any, limit: int = MAX_TEXT) -> str:
@@ -111,7 +119,8 @@ def summary(pr: PullRequest, value: JSON | None = None, error: str | None = None
     value = value or {}
     state = "merged" if value.get("merged") is True or value.get("merged_at") else value.get("state")
     return {
-        "url": pr.url, "title": text(value.get("title"), 1000) or f"{pr.repository} #{pr.number}",
+        "url": pr.url, "title": text(value.get("title"), 1000) or
+        f"{pr.repository} {'!' if pr.provider == 'gitlab' else '#'}{pr.number}",
         "repository": pr.repository, "number": pr.number,
         "state": state if state in {"open", "closed", "merged"} else "unknown",
         "draft": value.get("draft") is True, "accessible": error is None,
@@ -124,6 +133,7 @@ class Scope:
     key: str
     # Only encrypted database values are retained in a request scope.
     credentials: tuple[str, ...] = field(repr=False)
+    gitlab: ReviewSelection | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -152,6 +162,7 @@ class PullRequestService:
         self.cache_bytes = 0
         self.pending: dict[tuple[str, str], asyncio.Task[Result]] = {}
         self.network = asyncio.Semaphore(6)
+        self.gitlab = GitLabReviews(runtime)
 
     async def contexts(self, user: User, ids: list[str]) -> dict[str, Scope]:
         fresh = await self.runtime.database.user(user.id)
@@ -194,9 +205,11 @@ class PullRequestService:
                 fresh.id, fresh.auth_version, session.owner_id, session.visibility, session.surface,
                 [(c.id, c.revision, c.owner_id, c.shared, c.credential, c.policy) for c in permitted],
             ], separators=(",", ":"))
+            selected = await selection(self.runtime, user, session, context)
             result[session.id] = Scope(
-                hashlib.sha256(fingerprint.encode()).hexdigest(),
+                hashlib.sha256((fingerprint + (selected.key if selected else "")).encode()).hexdigest(),
                 tuple(c.credential for c in permitted),
+                selected,
             )
         return result
 
@@ -336,6 +349,8 @@ class PullRequestService:
         return copy.deepcopy(await asyncio.shield(self.pending[key]))
 
     async def metadata(self, scope: Scope, pr: PullRequest, refresh: bool = False) -> JSON:
+        if pr.provider == "gitlab":
+            return await self.gitlab.metadata(scope, pr)
         result = await self.get(scope, pr.path, refresh)
         value = obj(result.value)
         if result.error or value.get("number") != pr.number or value.get("state") not in {"open", "closed"}:
@@ -355,6 +370,8 @@ class PullRequestService:
         }
 
     async def section(self, scope: Scope, pr: PullRequest, detail: JSON, tab: Tab, refresh: bool) -> JSON:
+        if pr.provider == "gitlab":
+            return await self.gitlab.section(scope, pr, detail, tab)
         section_scope = Scope(
             f"{scope.key}:{detail.get('head_sha', '')}:{detail.get('base_sha', '')}", scope.credentials,
         )
@@ -473,6 +490,17 @@ class PullRequestService:
             "error": "Some check sources are unavailable. " + (checks.error or statuses.error or "")
             if checks.error or statuses.error else None,
         }
+
+    async def record(self, scope: Scope, pr: PullRequest, target: JSON | None = None) -> Result:
+        """Provider record for verified analytics, under the same viewer authority."""
+        if pr.provider == "gitlab":
+            if (
+                not target or target.get("provider") != "gitlab" or target.get("origin") != pr.origin
+                or type(target.get("project_id")) is not int or target["project_id"] <= 0
+            ):
+                return Result(error="The saved MR creation identity is incomplete.")
+            return await self.gitlab.read(scope, pr, project_id=target["project_id"])
+        return await self.get(scope, pr.path)
 
     async def statuses(self, user: User, ids: list[str]) -> dict[str, list[JSON]]:
         contexts = await self.contexts(user, ids)
