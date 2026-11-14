@@ -31,6 +31,7 @@ from .gitlab_schemas import (
     GitLabUser,
     path_component,
 )
+from .gitlab_text import safe_text
 from .gitlab_transport import (
     DEFAULT_BASE_URL,
     GitLabTransport,
@@ -63,10 +64,9 @@ def _write_text(value: object) -> None:
             if (
                 isinstance(key, str) and key.partition('[')[0] in {'body', 'note', 'description'}
                 and any(
-                    re.match(r'/[A-Za-z]', line.lstrip())
+                    _unsafe_text(text)
                     for text in (item if isinstance(item, (list, tuple)) else [item])
                     if isinstance(text, str)
-                    for line in text.splitlines()
                 )
             ):
                 raise preflight_error(
@@ -77,6 +77,14 @@ def _write_text(value: object) -> None:
     elif isinstance(value, (list, tuple)):
         for item in value:
             _write_text(item)
+
+
+def _unsafe_text(value: str) -> bool:
+    try:
+        safe_text(value)
+    except ValueError:
+        return True
+    return False
 
 
 def _validate_arguments(

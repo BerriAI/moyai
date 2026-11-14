@@ -9,7 +9,7 @@ from urllib.parse import unquote
 from app.gitlab_graphql import REQUEST_CHANGES, REVIEW_CAPABILITY
 from pydantic_ai.exceptions import ToolFailed
 
-from .gitlab_workflow_types import safe_text
+from .gitlab_workflow_types import branch_name, safe_text
 
 __all__ = ["REQUEST_CHANGES", "REVIEW_CAPABILITY", "validate_request"]
 
@@ -74,6 +74,13 @@ def validate_request(method: str, path: str, project: int, body: object = None) 
             and not re.match(r"(?i)^\s*(?:draft|wip)\b|^\s*[\[(](?:draft|wip)\b", str(body["title"]))
         )
     elif method == "PUT" and re.fullmatch(mr, suffix):
+        if set(body) == {"target_branch"}:
+            try:
+                if not isinstance(body["target_branch"], str):
+                    raise TypeError()
+                branch_name(body["target_branch"])
+            except (ValueError, TypeError):
+                raise ToolFailed("Invalid GitLab target branch.") from None
         allowed = (
             (set(body) == {"state_event"} and body["state_event"] in {"close", "reopen"})
             or (set(body) == {"target_branch"} and isinstance(body["target_branch"], str))

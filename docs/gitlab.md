@@ -7,11 +7,15 @@ GitHub do not have identical APIs or workflow capabilities.
 
 ## Connect selected projects
 
-1. Create an active **personal access token with the `api` scope** on the GitLab
+1. Create an active **project or group access token with the `api` scope** on the GitLab
    instance you want to connect. Its account must have **Developer or higher**
    access to each selected project. Projects must be unarchived, with repositories
    and merge requests enabled. These setup checks also apply when you choose
    Moyai's read-only policy; `read_api` alone is insufficient.
+   A project or group access token uses a bot user and is recommended over an
+   administrator's personal token: activity is attributed to the bot, and its
+   narrower project/group permissions reduce the blast radius. Personal access
+   tokens with `api` scope are also supported.
 2. As a Moyai organization admin, open **Settings → Connections**, choose
    **GitLab**, and select **Connect**. Enter the **GitLab URL** and token.
    Use `https://gitlab.com` or the HTTPS origin of a self-hosted instance,
@@ -94,6 +98,16 @@ quick-action execution. It refuses direct publication to the default branch or
 a protected branch, including names covered by wildcard protection rules.
 Incomplete protection information fails closed. An MR may target the default
 branch for review; publishing its feature branch does not merge into the target.
+
+The branch-protection check and push are not atomic. If a branch becomes
+protected between them and the token holder is permitted to push to protected
+branches (for example, a Maintainer), GitLab will not refuse that push solely
+because the branch became protected.
+
+Agent-published branches may modify `.gitlab-ci.yml` or other CI configuration.
+Resulting pipelines run with the token owner's identity and can access variables
+available to unprotected branches, not protected-branch variables. Review token
+permissions and unprotected-branch CI variables accordingly.
 
 Writes recheck the selected project grant and exact source/target state. Updates
 to an external MR need direct requester consent for content changes at the

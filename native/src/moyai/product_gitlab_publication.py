@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 
@@ -163,12 +163,24 @@ class Publications:
         validate_request(method, path, self.target, body)
         writing = method != "GET" and body != {"query": REVIEW_CAPABILITY}
         credentials = await self.credentials(write=writing)
-        return await self.service.execution.call(
-            lambda bound: bound.gitlab.request(
+        async def execute(bound):
+            if path == "/graphql" and writing and isinstance(body, Mapping):
+                project = await bound.gitlab.request(
+                    "GET", self.prefix, token=credentials["access_token"], base_url=self.origin,
+                )
+                self.require_project_identity(project, body["variables"]["projectPath"])
+            return await bound.gitlab.request(
                 method, path, token=credentials["access_token"], base_url=self.origin, **kwargs,
-            ),
+            )
+        return await self.service.execution.call(
+            execute,
             authorize=lambda: self.service.check(self.scope, self.grant), recheck=not writing,
         )
+
+    def require_project_identity(self, value: object, path: str) -> None:
+        project = parse(Project, value)
+        if project.id != self.target or project.path_with_namespace != path:
+            raise ToolFailed("The GitLab project path and selected immutable ID changed.")
 
     async def project(self) -> Project:
         project = parse(Project, await self.request("GET", self.prefix))

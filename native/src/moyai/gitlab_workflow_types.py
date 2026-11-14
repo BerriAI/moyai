@@ -9,6 +9,7 @@ from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from app.github import Change
+from app.gitlab_text import safe_text
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .github_workflow_types import SHA, Branch, Identifier, RequestKey, branch_name
@@ -34,14 +35,6 @@ def origin(value: str) -> str:
     except ValueError:
         raise ValueError("Invalid GitLab origin port.") from None
     return value.rstrip("/").lower()
-
-
-def safe_text(value: str) -> str:
-    # GitLab interprets quick-action lines even in descriptions and draft notes.
-    # Reject every command-shaped line, including commands not currently known.
-    if any(line.lstrip().startswith("/") for line in value.splitlines()) or "\x00" in value:
-        raise ValueError("GitLab quick-action lines are unavailable in descriptions and review notes.")
-    return value
 
 
 Text = Annotated[str, Field(max_length=100_000), AfterValidator(safe_text)]

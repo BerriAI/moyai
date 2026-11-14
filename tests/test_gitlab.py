@@ -199,6 +199,7 @@ async def test_auth_override_and_invalid_body_never_dispatch(arguments, gitlab, 
 @pytest.mark.parametrize('text', [
     '/merge', 'A comment\n/approve', 'A comment\r\n   /merge', '\t/close',
     'A comment\r/label ~secret', '\u2003/approve', '```\n/merge\n```',
+    '/', '/123', '/_command', 'hello\n /!', 'hello\x00world',
 ])
 @pytest.mark.parametrize('field', ['body', 'note', 'description'])
 async def test_quick_actions_rejected_before_write(text, field, gitlab, boundary):
@@ -375,10 +376,12 @@ async def test_unexpected_compression_refused_before_read(gitlab, boundary):
     assert stream.read == 0 and stream.closed
 
 
-async def test_verify_selected_ids_and_canonical_safe_metadata(gitlab, boundary):
+@pytest.mark.parametrize('bot', [False, True])
+async def test_verify_selected_ids_and_canonical_safe_metadata(gitlab, boundary, bot):
     selected = credentials(base_url='https://GitLab.Example.com:8443/', repository_ids=[17, 18, 17])
     selected['_authority'] = 'existing-authority'
     replies = {
+        '/api/v4/user': {'id': 9, 'username': 'test-user', 'state': 'active', 'locked': False, 'bot': bot},
         '/api/v4/projects/17': project(
             path_with_namespace='group/nested/repo',
             runners_token=BODY_SECRET, import_url='https://user:secret@elsewhere.test/repo',

@@ -163,9 +163,10 @@ class Workflows:
         async def execute(bound):
             # Guard at the final trusted transport boundary. Server-side
             # protection and the exact lease remain authoritative during push.
-            await bound.gitlab.request(
+            project = await bound.gitlab.request(
                 "GET", p.prefix, token=credentials["access_token"], base_url=p.origin,
             )
+            p.require_project_identity(project, intent["project"])
             return await transport.push(
                 base_url=p.origin, project_path=intent["project"], token=credentials["access_token"],
                 branch=intent["branch"], commit=document["commit"], expected_head=intent.get("previous"),

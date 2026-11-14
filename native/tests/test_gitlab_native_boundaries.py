@@ -36,6 +36,7 @@ from moyai.gitlab_workflow_types import (
 from moyai.product_gitlab import ProductGitLabToolset
 from moyai.product_gitlab_publication import Publications
 from moyai.product_gitlab_reads import Reads
+from moyai.product_gitlab_workflows import Workflows
 
 BASE = "a" * 40
 HEAD = "b" * 40
@@ -87,6 +88,7 @@ def test_provider_origin_project_and_operation_identity_never_collide():
 @pytest.mark.parametrize("text", [
     "/merge", "hello\n /approve", "\t/close", "```text\n/merge\n```", "\r/merge",
     "description\r/merge", "description\u2028/approve",
+    "/", "/123", "/_command", "hello\n /!", "hello\x00world",
 ])
 def test_quick_action_write_channels_refused(text):
     with pytest.raises(ValidationError):
@@ -101,6 +103,62 @@ def test_regular_creation_only(title):
     with pytest.raises(ValidationError):
         OpenMR(request_key="regular-mr", base_branch="main", head_branch="feature",
                expected_head_sha=HEAD, title=title, body="Description")
+
+
+@pytest.mark.parametrize("branch", ["", "HEAD", "a..b", "a b", "a.lock", "/main", "feature~1", None])
+def test_retarget_rejects_invalid_branch(branch):
+    with pytest.raises(ToolFailed):
+        validate_request("PUT", "/projects/123/merge_requests/7", 123, {"target_branch": branch})
+
+
+def test_retarget_accepts_branch():
+    validate_request("PUT", "/projects/123/merge_requests/7", 123, {"target_branch": "release/next"})
+
+
+@pytest.mark.parametrize("changed", [{"id": 124}, {"path_with_namespace": "group/renamed"}, {}, None])
+@pytest.mark.parametrize("operation", ["push", "request-changes"])
+async def test_path_write_rechecks_identity_at_transport_boundary(monkeypatch, changed, operation):
+    value = {} if changed == {} else {**PROJECT, **(changed or {})}
+    provider = SimpleNamespace(request=AsyncMock(return_value=value))
+
+    async def call(callback, **kwargs):
+        return await callback(SimpleNamespace(gitlab=provider))
+
+    service = SimpleNamespace(database=object(), execution=SimpleNamespace(call=call), check=AsyncMock(),
+                              connectors=SimpleNamespace(gitlab=provider))
+    p = Publications(service, SimpleNamespace(), grant())
+    monkeypatch.setattr(p, "credentials", AsyncMock(return_value={"access_token": "synthetic-token"}))
+    if operation == "request-changes":
+        action = p.request("POST", "/graphql", json={
+            "query": REQUEST_CHANGES, "variables": {"projectPath": PROJECT["path_with_namespace"], "iid": "7"},
+        })
+    else:
+        document = {"intent": {"branch": "feature", "project": PROJECT["path_with_namespace"]}, "commit": HEAD}
+        monkeypatch.setattr(p, "document", lambda row: document)
+
+        async def dispatch(row, key, callback):
+            return await callback()
+
+        monkeypatch.setattr(p, "dispatch", dispatch)
+        workflows = Workflows(p)
+        monkeypatch.setattr(workflows, "writable", AsyncMock(return_value=None))
+        monkeypatch.setattr(workflows, "push_receipt", lambda row, response: response)
+        push = AsyncMock(return_value={"ok": True})
+        monkeypatch.setattr(transport, "push", push)
+        action = workflows.push(SimpleNamespace())
+    if changed is not None:
+        with pytest.raises(ToolFailed):
+            await action
+    else:
+        await action
+    assert provider.request.call_args_list[0].args == ("GET", "/projects/123")
+    if operation == "push":
+        assert push.await_count == (1 if changed is None else 0)
+        assert provider.request.await_count == 1
+    else:
+        assert provider.request.await_count == (2 if changed is None else 1)
+        if changed is None:
+            assert provider.request.call_args_list[1].args == ("POST", "/graphql")
 
 
 @pytest.mark.parametrize("method,path,body", [

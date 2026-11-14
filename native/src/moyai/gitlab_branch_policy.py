@@ -40,7 +40,7 @@ async def require_writable(p: Publications, repo: Project, branch: str, *, exist
         for rule in rules:
             if not isinstance(rule, dict) or not isinstance(rule.get("name"), str):
                 raise ToolFailed("GitLab returned incomplete branch protection.")
-            # Project API includes inherited group rules; never filter them out.
+            # Includes inherited group rules: https://docs.gitlab.com/api/protected_branches/#list-protected-branches
             if pattern_matches(rule["name"], branch):
                 raise ToolFailed("A GitLab protected, wildcard or inherited rule covers this branch.")
         if len(rules) < 100:
