@@ -23,7 +23,7 @@ workflows:
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-node@v4.4.0'
         - 'astral-sh/setup-uv@v6.8.0'
-        - 'dtolnay/rust-toolchain@1.88.0'
+        - 'dtolnay/rust-toolchain@master'
     '.github/workflows/helm.yml':
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-python@v5.6.0'
@@ -36,30 +36,30 @@ workflows:
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-node@v4.4.0'
         - 'astral-sh/setup-uv@v6.8.0'
-        - 'dtolnay/rust-toolchain@1.88.0'
+        - 'dtolnay/rust-toolchain@master'
     '.github/workflows/postgres-runtime.yml':
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-node@v4.4.0'
         - 'astral-sh/setup-uv@v6.8.0'
-        - 'dtolnay/rust-toolchain@1.88.0'
+        - 'dtolnay/rust-toolchain@master'
     '.github/workflows/production-release-tests.yml':
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-node@v4.4.0'
         - 'actions/upload-artifact@v4.6.2'
         - 'astral-sh/setup-uv@v6.8.0'
-        - 'dtolnay/rust-toolchain@1.88.0'
+        - 'dtolnay/rust-toolchain@master'
     '.github/workflows/pydantic-native.yml':
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-node@v4.4.0'
         - 'actions/upload-artifact@v4.6.2'
         - 'astral-sh/setup-uv@v6.8.0'
         - 'docker/setup-qemu-action@v3.7.0'
-        - 'dtolnay/rust-toolchain@1.88.0'
+        - 'dtolnay/rust-toolchain@master'
     '.github/workflows/ui-unit.yml':
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-node@v4.4.0'
         - 'astral-sh/setup-uv@v6.8.0'
-        - 'dtolnay/rust-toolchain@1.88.0'
+        - 'dtolnay/rust-toolchain@master'
 dependencies:
     'actions/checkout@v4.4.0':
         ref: 'v4.4.0'
@@ -111,9 +111,9 @@ dependencies:
         commit: 'sha1-c7c53464625b32c7a7e944ae62b3e17d2b600130'
         owner_id: 5429470
         repo_id: 288487894
-    'dtolnay/rust-toolchain@1.88.0':
-        ref: '1.88.0'
-        commit: 'sha1-360a4e93673de6630fac2478bc9e35244b01a759'
+    'dtolnay/rust-toolchain@master':
+        ref: 'master'
+        commit: 'sha1-df2a88e9fe4098bad09cb42c3dec7187f15861fc'
         owner_id: 1940490
         repo_id: 260749683
     'hashicorp/setup-terraform@v3.1.2':
