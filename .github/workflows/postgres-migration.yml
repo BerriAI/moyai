@@ -43,7 +43,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.88.0'
       - uses: astral-sh/setup-uv@v6.8.0
       - name: Verify real database fidelity, constraints, concurrency and rollback
         run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_migration.py
