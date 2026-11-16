@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 from pydantic import TypeAdapter
 from pydantic_ai import Conversation, ConversationTypeAdapter
@@ -66,6 +67,7 @@ from .product_automation_models import ProductAutomationTurn
 from .product_identity import ProductGrant, ProductIdentityAdapter
 from .security import Security, password_hash
 from .settings import Settings
+from .settings_models import SettingAutomationRun
 from .swarm_models import SwarmMember
 from .swarm_service import SwarmService, dispatchable
 
@@ -572,8 +574,12 @@ class Database:
                     403, "Use a private web conversation for connected accounts. "
                     "Slack account export policies are not configured."
                 )
+            from .skill_invocations import gateway_connection_ids
+            selections = list(dict.fromkeys([
+                *body.connections, *gateway_connection_ids(body.prompt),
+            ]))
             grants = await self.resolve_grants(
-                transaction, actor.id, body.connections, shared_session=context.visibility == "shared",
+                transaction, actor.id, selections, shared_session=context.visibility == "shared",
                 surface=context.surface,
             )
             if delegated_authority is not None and grants != delegated_authority.grants:
@@ -753,6 +759,7 @@ class Database:
             if (
                 row is None or not row.enabled or (not row.shared and row.owner_id != actor_id)
                 or (kinds is not None and row.kind not in kinds)
+                or (row.kind == "litellm" and (row.shared or row.owner_id != actor_id))
             ):
                 raise HTTPException(403, "A selected connection is no longer available.")
             if shared_session and not row.shared:
@@ -774,6 +781,51 @@ class Database:
                 raise PermissionError("Scheduled work requires its original shared chat.")
             return ExecutionContext("shared", "automation")
         return await session_context(self, db, session)
+
+    async def human_origin(self, db: AsyncSession, scope: RunScope) -> str | None:
+        """Follow native persisted resume evidence, never a client request-key prefix."""
+        current = await db.get(Turn, scope.turn_id)
+        seen = set()
+        for _ in range(32):
+            if current is None or current.id in seen or (
+                current.session_id != scope.session_id or current.actor_id != scope.actor_id
+                or current.parent_turn is not None
+            ):
+                return None
+            seen.add(current.id)
+            if await db.get(ProductAutomationTurn, current.id) is not None:
+                return None
+            # Native interval admission records its receipt before submit and
+            # links turn_id afterward. Cover that publication window too.
+            scheduled = await db.scalar(select(SettingAutomationRun.id).where(
+                (SettingAutomationRun.turn_id == current.id)
+                | (("automation:" + SettingAutomationRun.id) == current.request_key),
+            ).limit(1))
+            if scheduled is not None:
+                return None
+            if await self._saved_product_grant(db, current) != scope.product_grant:
+                return None
+            authored = await db.scalar(select(Message.id).where(
+                Message.turn_id == current.id, Message.role == "user", Message.author_id == scope.actor_id,
+                Message.identity == f"user:{current.id}",
+            ).limit(1))
+            if authored is not None:
+                return current.id
+            if not current.deferred_results:
+                return None
+            try:
+                results = json.loads(self.security.unseal(current.deferred_results))
+            except (ValueError, TypeError, UnicodeError, RecursionError, InvalidToken):
+                return None
+            candidates = list(await db.scalars(select(Turn.id).where(
+                Turn.session_id == scope.session_id, Turn.actor_id == scope.actor_id,
+                Turn.status == "resumed", Turn.created_at <= current.created_at,
+            ).order_by(Turn.created_at.desc()).limit(100)))
+            previous = next((identity for identity in candidates if hashlib.sha256(json.dumps(
+                {"previous": identity, "results": results}, sort_keys=True,
+            ).encode()).hexdigest() == current.request_fingerprint), None)
+            current = await db.get(Turn, previous) if previous else None
+        return None
 
     async def scope_grants(self, db: AsyncSession, scope: RunScope, session: Session) -> list[Grant]:
         """Resolve under persisted execution policy, never private-child presentation."""

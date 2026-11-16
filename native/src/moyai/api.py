@@ -69,6 +69,7 @@ from .debug_trace import debug_trace
 from .failed_action_attempts import failed_action_attempt
 from .failure_diagnostics import failure_details
 from .file_preview import routes as file_preview_routes
+from .gateway_config import GatewayConfig, GatewayDefaults, GatewayDiscovery
 from .general_preferences import GeneralPreferences, general_preferences
 from .history_handoff import is_turn_run
 from .images import routes as image_routes
@@ -117,7 +118,7 @@ class Login(BaseModel):
 
 class ConnectionInput(BaseModel):
     name: str = Field(min_length=1, max_length=150)
-    kind: Literal["github", "linear", "notion", "slack", "mcp"]
+    kind: Literal["github", "linear", "notion", "slack", "mcp", "litellm"]
     credential: SecretStr
     clear_credential: bool = False
     shared: bool = False
@@ -134,11 +135,20 @@ class ConnectionInput(BaseModel):
 
     @model_validator(mode="after")
     def service_configuration(self) -> ConnectionInput:
-        if self.kind == "mcp":
+        if self.kind == "litellm":
+            if self.shared:
+                raise ValueError("LiteLLM gateway connections are personal and cannot be shared.")
+            if self.policy.gateway is None or self.policy.mcp is not None or self.policy.product is not None:
+                raise ValueError("Provide a LiteLLM gateway URL and capability selections.")
+            if self.clear_credential:
+                raise ValueError("A LiteLLM gateway requires a key; disable it to disconnect.")
+        elif self.policy.gateway is not None or self.policy.gateway_discovery is not None:
+            raise ValueError("Gateway configuration requires a LiteLLM connection.")
+        if self.kind in {"mcp", "litellm"}:
             credential = self.credential.get_secret_value()
             if len(credential) > 8192 or any(not 33 <= ord(char) <= 126 for char in credential):
                 raise ValueError("Use a bearer token of at most 8192 printable ASCII characters without whitespace.")
-            if self.policy.mcp is None:
+            if self.kind == "mcp" and self.policy.mcp is None:
                 raise ValueError("Provide the remote MCP endpoint configuration.")
             if self.policy.product is not None:
                 raise ValueError("Remote MCP connections cannot contain product account references.")
@@ -943,6 +953,21 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             session = await runtime.database.allowed_session(db, turn.session_id, user)
             await runtime.database.swarms.editable_input(db, turn)
             prompt = await runtime.skill_invocations.normalize(body.prompt, user, session)
+            from .contracts import RunScope
+            from .skill_invocations import gateway_connection_ids
+            connections = json.loads(turn.connections)
+            selections = list(dict.fromkeys([*connections, *gateway_connection_ids(prompt)]))
+            if selections != connections:
+                context = await runtime.database.execution_context(db, session, turn_id=turn.id)
+                grants = await runtime.database.resolve_grants(
+                    db, turn.actor_id, selections,
+                    shared_session=context.visibility == "shared", surface=context.surface,
+                )
+                proposed = RunScope(
+                    session.id, turn.id, turn.actor_id, turn.model, grants, session.visibility, session.surface,
+                )
+                if session.workspace and session.workspace_scope != proposed.workspace_key:
+                    raise HTTPException(409, "Start a new conversation for the changed gateway connection.")
             from .models import MessageSource
             message = await db.scalar(select(Message).where(Message.identity == f"user:{turn.id}"))
             source = await db.get(MessageSource, message.identity) if message else None
@@ -967,7 +992,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 source.mirror = True
             changed = await db.scalar(update(Turn).where(
                 Turn.id == turn.id, Turn.status == "queued"
-            ).values(prompt=runtime.security.seal(execution_prompt)).returning(Turn.id))
+            ).values(
+                prompt=runtime.security.seal(execution_prompt), connections=json.dumps(selections),
+            ).returning(Turn.id))
             if changed is None:
                 raise HTTPException(409, "The message was already admitted. Send a correction instead.")
             await db.execute(update(Message).where(
@@ -1156,7 +1183,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
             )
             if runtime.product_connections is not None:
-                query = query.where(Connection.kind == "mcp")
+                query = query.where(Connection.kind.in_(["mcp", "litellm"]))
             rows = await db.scalars(query.order_by(Connection.id))
             return canonical + [
                 ConnectionView.model_validate(connection_view(row)) for row in rows if not shared or row.shared
@@ -1164,7 +1191,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.post("/api/connections", operation_id="createConnection")
     async def create_connection(body: ConnectionInput, user: User = Depends(actor)) -> ConnectionView:
-        if runtime.product_connections is not None and body.kind != "mcp":
+        if runtime.product_connections is not None and body.kind not in {"mcp", "litellm"}:
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
         if body.shared and user.role != "admin":
             raise HTTPException(403, "Only administrators can publish a shared connection.")
@@ -1175,6 +1202,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 validate_mcp_endpoint(body.policy.mcp, runtime.settings.mcp_allowed_origins)
             except ValueError as error:
                 raise HTTPException(422, str(error)) from None
+        if body.kind == "litellm":
+            body.policy.gateway_discovery = await discover_gateway(body, user)
         async with runtime.database.sessions.begin() as db:
             row = Connection(
                 id=new_id(), owner_id=user.id, kind=body.kind, name=body.name,
@@ -1189,18 +1218,32 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def edit_connection(
         connection_id: str, body: ConnectionInput, user: User = Depends(actor),
     ) -> ConnectionView:
-        if runtime.product_connections is not None and body.kind != "mcp":
+        if runtime.product_connections is not None and body.kind not in {"mcp", "litellm"}:
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
         async with runtime.database.sessions.begin() as db:
             row = await db.get(Connection, connection_id)
             if row is None or row.owner_id != user.id:
                 raise HTTPException(404, "Connection not found.")
-            if runtime.product_connections is not None and row.kind != "mcp":
+            if runtime.product_connections is not None and row.kind not in {"mcp", "litellm"}:
                 raise HTTPException(409, "Manage the existing product accounts in Connections.")
             if body.kind != row.kind:
                 raise HTTPException(422, "Create a new connection to change its service.")
             if (row.shared or body.shared) and user.role != "admin":
                 raise HTTPException(403, "Only administrators can change a shared connection.")
+            if body.kind == "litellm":
+                previous = ConnectionPolicy.model_validate_json(row.policy)
+                if (
+                    previous.gateway and body.policy.gateway
+                    and previous.gateway.url != body.policy.gateway.url
+                    and not body.credential.get_secret_value()
+                ):
+                    raise HTTPException(422, "Enter a replacement key when changing the gateway URL.")
+                # Discovery is server-authored; never accept a client-supplied catalog.
+                body.policy.gateway_discovery = previous.gateway_discovery
+                if body.enabled:
+                    body.policy.gateway_discovery = await discover_gateway(
+                        body, user, runtime.security.unseal(row.credential).decode(),
+                    )
             if body.policy.mcp is not None:
                 try:
                     validate_mcp_endpoint(body.policy.mcp, runtime.settings.mcp_allowed_origins)
@@ -1231,6 +1274,40 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 raise HTTPException(409, "The connection changed while saving. Refresh before trying again.")
             await db.refresh(row)
         return ConnectionView.model_validate(connection_view(row))
+
+    @app.get("/api/gateway/defaults", operation_id="getGatewayDefaults")
+    async def gateway_defaults(user: User = Depends(actor)) -> GatewayDefaults:
+        # Only prefill the URL. The deployment's inference key never authorizes
+        # personal tools or skills, and is never sent to the browser.
+        try:
+            url = GatewayConfig(url=runtime.settings.gateway_url).url
+        except ValueError:
+            url = ""
+        return GatewayDefaults(url=url)
+
+    async def discover_gateway(body: ConnectionInput, user: User, previous_key: str = "") -> GatewayDiscovery:
+        from .gateway import GatewayClient
+
+        assert body.policy.gateway is not None
+        try:
+            validate_mcp_endpoint(body.policy.gateway.endpoint_config(), runtime.settings.mcp_allowed_origins)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+
+        async def authorize() -> None:
+            current = await runtime.database.user(user.id)
+            if current.auth_version != user.auth_version or current.role != user.role:
+                raise HTTPException(401, "Your account changed. Sign in again.")
+            if runtime.product_identity is not None:
+                await runtime.product_identity.require_current(getattr(user, "product_grant", None))
+
+        client = GatewayClient(
+            body.policy.gateway, body.credential.get_secret_value() or previous_key,
+            runtime.settings.mcp_allowed_origins, authorize,
+        )
+        result = await client.discover()
+        await authorize()
+        return result
 
     @app.get("/api/sessions/{session_id}/files", operation_id="listSessionFiles")
     async def files(session_id: str, user: User = Depends(actor)) -> list[SessionFile]:

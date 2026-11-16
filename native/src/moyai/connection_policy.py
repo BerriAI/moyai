@@ -5,6 +5,7 @@ from typing import Literal, assert_never
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.tools import ToolDefinition
 
+from .gateway_config import GatewayConfig, GatewayDiscovery
 from .mcp_remote import RemoteMCPConfig
 
 PROHIBITED_TOOLS = frozenset({
@@ -36,6 +37,8 @@ class ConnectionPolicy(BaseModel):
     require_approval: bool = True
     product: dict[str, object] | None = None
     mcp: RemoteMCPConfig | None = None
+    gateway: GatewayConfig | None = None
+    gateway_discovery: GatewayDiscovery | None = None
 
     def allows(self, operation: str) -> bool:
         if operation in PROHIBITED_TOOLS:

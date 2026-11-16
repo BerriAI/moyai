@@ -24,7 +24,6 @@ with workflow.unsafe.imports_passed_through():
     from app.automation_definitions import Definition, Trigger
     from app.connector_errors import ConnectorError
     from app.repository_identity import repository_origin, repository_provider
-    from cryptography.fernet import InvalidToken
     from fastapi import APIRouter, HTTPException, Query, Request
     from pydantic import BaseModel, ConfigDict, Field, field_validator
     from sqlalchemy import select, text, update
@@ -44,7 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.service import RPCError, RPCStatusCode
 
     from .contracts import RunScope
-    from .models import Effect, Message, Session, Turn, User, now
+    from .models import Effect, Session, Turn, User, now
     from .product_automation_context_models import ProductAutomationExecutionContext as ExecutionContext
     from .product_automation_models import (
         ProductAutomationBinding as Binding,
@@ -806,41 +805,7 @@ class ProductAutomationService:
         ), {"id": original}))
 
     async def human_origin(self, db: AsyncSession, scope: RunScope) -> str | None:
-        """Follow native persisted resume evidence, never a client request-key prefix."""
-        current = await db.get(Turn, scope.turn_id)
-        seen = set()
-        for _ in range(32):
-            if current is None or current.id in seen or (
-                current.session_id != scope.session_id or current.actor_id != scope.actor_id
-                or current.parent_turn is not None
-            ):
-                return None
-            seen.add(current.id)
-            if await db.get(ProductAutomationTurn, current.id) is not None:
-                return None
-            if await self.database._saved_product_grant(db, current) != scope.product_grant:
-                return None
-            authored = await db.scalar(select(Message.id).where(
-                Message.turn_id == current.id, Message.role == "user", Message.author_id == scope.actor_id,
-                Message.identity == f"user:{current.id}",
-            ).limit(1))
-            if authored is not None:
-                return current.id
-            if not current.deferred_results:
-                return None
-            try:
-                results = json.loads(self.database.security.unseal(current.deferred_results))
-            except (ValueError, TypeError, UnicodeError, RecursionError, InvalidToken):
-                return None
-            candidates = list(await db.scalars(select(Turn.id).where(
-                Turn.session_id == scope.session_id, Turn.actor_id == scope.actor_id,
-                Turn.status == "resumed", Turn.created_at <= current.created_at,
-            ).order_by(Turn.created_at.desc()).limit(100)))
-            previous = next((identity for identity in candidates if hashlib.sha256(json.dumps(
-                {"previous": identity, "results": results}, sort_keys=True,
-            ).encode()).hexdigest() == current.request_fingerprint), None)
-            current = await db.get(Turn, previous) if previous else None
-        return None
+        return await self.database.human_origin(db, scope)
 
     async def repository_preflight(
         self, grant: ProductGrant, action: Action, identity: str | None, body: Mutation,

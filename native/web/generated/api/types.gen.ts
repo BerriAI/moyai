@@ -2897,7 +2897,7 @@ export type ConnectionInput = {
     /**
      * Kind
      */
-    kind: 'github' | 'linear' | 'notion' | 'slack' | 'mcp';
+    kind: 'github' | 'linear' | 'notion' | 'slack' | 'mcp' | 'litellm';
     /**
      * Name
      */
@@ -2921,6 +2921,8 @@ export type ConnectionPolicy = {
      * Allowed Tools
      */
     allowed_tools?: Array<string> | null;
+    gateway?: GatewayConfigInput | null;
+    gateway_discovery?: GatewayDiscoveryInput | null;
     mcp?: RemoteMcpConfigInput | null;
     /**
      * Product
@@ -2942,6 +2944,8 @@ export type ConnectionPolicyView = {
      * Allowed Tools
      */
     allowed_tools: Array<string> | null;
+    gateway: GatewayConfigOutput | null;
+    gateway_discovery: GatewayDiscoveryOutput | null;
     mcp: RemoteMcpConfigOutput | null;
     /**
      * Product
@@ -2984,7 +2988,7 @@ export type ConnectionView = {
     /**
      * Kind
      */
-    kind: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack' | 'mcp';
+    kind: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack' | 'mcp' | 'litellm';
     /**
      * Name
      */
@@ -3897,6 +3901,156 @@ export type FolderName = {
      * Name
      */
     name: string;
+};
+
+/**
+ * GatewayCapability
+ */
+export type GatewayCapabilityInput = {
+    /**
+     * Count
+     */
+    count?: number;
+    /**
+     * Message
+     */
+    message?: string;
+    /**
+     * Status
+     */
+    status: 'ready' | 'disabled' | 'unauthorized' | 'unavailable' | 'error';
+};
+
+/**
+ * GatewayCapability
+ */
+export type GatewayCapabilityOutput = {
+    /**
+     * Count
+     */
+    count: number;
+    /**
+     * Message
+     */
+    message: string;
+    /**
+     * Status
+     */
+    status: 'ready' | 'disabled' | 'unauthorized' | 'unavailable' | 'error';
+};
+
+/**
+ * GatewayConfig
+ */
+export type GatewayConfigInput = {
+    /**
+     * Mcp
+     */
+    mcp?: boolean;
+    /**
+     * Skills
+     */
+    skills?: boolean;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * GatewayConfig
+ */
+export type GatewayConfigOutput = {
+    /**
+     * Mcp
+     */
+    mcp: boolean;
+    /**
+     * Skills
+     */
+    skills: boolean;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * GatewayDefaults
+ */
+export type GatewayDefaults = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * GatewayDiscovery
+ */
+export type GatewayDiscoveryInput = {
+    mcp: GatewayCapabilityInput;
+    /**
+     * Skill Catalog
+     */
+    skill_catalog?: Array<GatewaySkillInput>;
+    skills: GatewayCapabilityInput;
+};
+
+/**
+ * GatewayDiscovery
+ */
+export type GatewayDiscoveryOutput = {
+    mcp: GatewayCapabilityOutput;
+    /**
+     * Skill Catalog
+     */
+    skill_catalog: Array<GatewaySkillOutput>;
+    skills: GatewayCapabilityOutput;
+};
+
+/**
+ * GatewaySkill
+ */
+export type GatewaySkillInput = {
+    /**
+     * Description
+     */
+    description?: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string | null;
+    /**
+     * Version
+     */
+    version?: string | null;
+};
+
+/**
+ * GatewaySkill
+ */
+export type GatewaySkillOutput = {
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+    /**
+     * Version
+     */
+    version: string | null;
 };
 
 /**
@@ -11099,7 +11253,7 @@ export type ConnectionInputWritable = {
     /**
      * Kind
      */
-    kind: 'github' | 'linear' | 'notion' | 'slack' | 'mcp';
+    kind: 'github' | 'linear' | 'notion' | 'slack' | 'mcp' | 'litellm';
     /**
      * Name
      */
@@ -12500,6 +12654,22 @@ export type DownloadApiFilesArtifactIdGetResponses = {
      */
     200: unknown;
 };
+
+export type GetGatewayDefaultsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/gateway/defaults';
+};
+
+export type GetGatewayDefaultsResponses = {
+    /**
+     * Successful Response
+     */
+    200: GatewayDefaults;
+};
+
+export type GetGatewayDefaultsResponse = GetGatewayDefaultsResponses[keyof GetGatewayDefaultsResponses];
 
 export type SearchHistoryData = {
     body?: never;

@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ApiError, csrfToken } from "./api"
-import { checkConnection, createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
+import { getGatewayDefaults, checkConnection, createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
@@ -63,6 +63,7 @@ type Connection = ConnectionView
 const loadConnections = async (signal: AbortSignal) => (await listConnections({ signal })).data
 const loadSessions = async (signal: AbortSignal) => (await listSessions({ signal })).data
 const connectionServices = [
+  { value: "litellm", label: "LiteLLM Gateway" },
   { value: "github", label: "GitHub" }, { value: "slack", label: "Slack" },
   { value: "linear", label: "Linear" }, { value: "notion", label: "Notion" },
   { value: "mcp", label: "MCP server / gateway" },
@@ -73,6 +74,16 @@ export function connectionInput(values: FormValues, policy: ConnectionPolicy, or
   const credential = String(values.credential ?? "")
   const clearCredential = kind === "mcp" && values.clear_credential === true
   let nextPolicy = policy
+  if (kind === "litellm") {
+    const url = String(values.url ?? "").trim()
+    if (!url) throw new Error("Enter the LiteLLM gateway URL.")
+    if (original && url !== original.policy.gateway?.url && !credential) {
+      throw new Error("Changing the gateway URL requires a replacement key.")
+    }
+    nextPolicy = { ...policy, mcp: null, gateway: {
+      url, skills: values.gateway_skills !== false, mcp: values.gateway_mcp !== false,
+    } }
+  }
   if (kind === "mcp") {
     const url = String(values.url ?? "").trim()
     if (!url) throw new Error("Enter the MCP server URL.")
@@ -84,7 +95,7 @@ export function connectionInput(values: FormValues, policy: ConnectionPolicy, or
   }
   const input: ConnectionInputWritable = {
     name: String(values.name ?? ""), kind, credential,
-    shared: values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy: nextPolicy,
+    shared: kind !== "litellm" && values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy: nextPolicy,
   }
   if (kind === "mcp") input.clear_credential = clearCredential
   return input
@@ -713,6 +724,11 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
     }}</LoadState>
     <p className="ns-help ns-footer-help">To use your own Slack account, connect <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
     </section>
+    <section className="ns-mcp-connections" aria-label="LiteLLM gateways">
+      <h2>LiteLLM gateways</h2>
+      <p className="ns-help">Connect your personal key for Skills Hub and MCP tools in private chats. Model access is managed by your workspace.</p>
+      <ConnectionsPage user={user} initialKind="litellm" allowedKinds={["litellm"]} />
+    </section>
     <section className="ns-mcp-connections" aria-label="MCP connections">
       <h2>MCP connections</h2>
       <p className="ns-help">Connect a remote MCP server or gateway. Personal connections work in private chats; administrators can share their connections with the workspace.</p>
@@ -951,6 +967,8 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [editor, setEditor] = useState<Connection | "new" | null>(null), [disable, setDisable] = useState<Connection | null>(null)
   const [checking, setChecking] = useState<Connection | null>(null)
+  const mutation = useMutation()
+  const defaults = useResource(`/gateway-defaults:${user.id}`, useCallback(async (signal: AbortSignal) => (await getGatewayDefaults({ signal })).data, []))
   useEffect(() => {
     setEditor(null); setDisable(null); setChecking(null)
     const clearAccess = () => { setEditor(null); setDisable(null); setChecking(null); setAccessVersion(value => value + 1) }
@@ -959,31 +977,60 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
   }, [user.id, user.role, user.individual])
   const services = connectionServices.filter(service => !allowedKinds || allowedKinds.includes(service.value))
   const mcpOnly = services.length === 1 && services[0].value === "mcp"
+  const gatewayOnly = services.length === 1 && services[0].value === "litellm"
+  const gatewayDefaultsLoading = defaults.loading && services.some(service => service.value === "litellm")
   const canManage = (row: Connection) => user.individual !== false && row.owner_id === user.id && (!row.shared || user.role === "admin")
-  const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", url: row.policy.mcp?.url ?? "", shared: row.shared, read_only: row.read_only, enabled: row.enabled }, row.policy, row)
+  const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", url: row.policy.gateway?.url ?? row.policy.mcp?.url ?? "", shared: row.shared, read_only: row.read_only, enabled: row.enabled, gateway_skills: row.policy.gateway?.skills ?? true, gateway_mcp: row.policy.gateway?.mcp ?? true }, row.policy, row)
   return <LoadState resource={resource}>{data => {
-    const rows = data.filter(row => (!allowedKinds || services.some(service => service.value === row.kind)) && contains(search, row.name, row.kind, row.policy.mcp?.url) && (filter === "all" || row.kind === filter))
+    const rows = data.filter(row => (!allowedKinds || services.some(service => service.value === row.kind)) && contains(search, row.name, row.kind, row.policy.mcp?.url, row.policy.gateway?.url) && (filter === "all" || row.kind === filter))
     return <><p className="ns-muted">Choose default connections in <a className="ns-link" href="#settings/general">General preferences</a>.</p>
       {user.individual === false && <p className="ns-help">Sign in with your individual work account to add or edit connections.</p>}
-      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={!mcpOnly && <Choice label="Service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...services]} />}
-        action={<Button disabled={user.individual === false} onClick={() => setEditor("new")}><Plus />{mcpOnly ? "Add MCP connection" : "Add connection"}</Button>} />
+      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={!mcpOnly && !gatewayOnly && <Choice label="Service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...services]} />}
+        action={<Button disabled={user.individual === false || gatewayDefaultsLoading} aria-busy={gatewayDefaultsLoading} onClick={() => setEditor("new")}><Plus />{gatewayOnly ? "Connect LiteLLM Gateway" : mcpOnly ? "Add MCP connection" : "Add connection"}</Button>} />
+      {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
       {rows.length ? <div className="ns-records">{rows.map(row => <article className="ns-record" key={row.id}><Link2 className="ns-record-icon" aria-hidden="true" />
         <div className="ns-record-copy"><div className="ns-record-title"><h2>{row.name}</h2><span className="ns-badge">{row.shared ? "Shared" : "Personal"}</span></div>
           <p>{services.find(service => service.value === row.kind)?.label ?? row.kind} · {row.enabled ? row.read_only ? "Read only" : row.policy?.require_approval === false ? "Can make changes" : "Changes require approval" : "Disabled"}</p>
           {row.kind === "mcp" && row.policy.mcp && <p className="ns-connection-url"><code>{row.policy.mcp.url}</code></p>}
+          {row.kind === "litellm" && row.policy.gateway && <>
+            <p className="ns-connection-url"><code>{row.policy.gateway.url}</code></p>
+            <dl className="ns-gateway-capabilities">{(["skills", "mcp"] as const).map(capability => {
+              const result = row.policy.gateway_discovery?.[capability]
+              const status = !row.enabled || !row.policy.gateway?.[capability] ? "disabled" : result?.status
+              const hint = status === "unauthorized" ? "Ask your gateway administrator to grant your personal key access."
+                : status === "unavailable" ? "Check the gateway URL and that this capability is enabled on the gateway."
+                  : status === "error" ? "Discovery failed. Try Refresh capabilities again." : ""
+              return <div key={capability}><dt>{capability === "skills" ? "Skills Hub" : "MCP tools"}</dt>
+                <dd>{status === "disabled" ? "Disabled" : status === "ready" ? `${count(result?.count)} available` : status === "unauthorized" ? "Key needs access" : status === "unavailable" ? "Unavailable" : status === "error" ? "Needs attention" : "Not checked"}
+                  {hint && <p className="ns-help">{hint}</p>}</dd></div>
+            })}</dl>
+            <p className="ns-help">MCP tools load through tool search. Select a skill with / in chat to use it.</p>
+          </>}
           <small>{row.owner_id === user.id ? row.shared && user.role !== "admin" ? "Administrator access is required to edit this shared connection." : "Your connection" : "Managed by another workspace member"}</small></div>
         <div className="ns-row-actions">
           {row.kind === "mcp" && row.enabled && user.individual !== false && <Button variant="outline" size="sm" onClick={() => setChecking(row)}>Check connection<span className="visually-hidden"> {row.name}</span></Button>}
+          {row.kind === "litellm" && row.enabled && canManage(row) && <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => void mutation.run(() => updateConnection({ path: { connection_id: row.id }, body: connectionBody(row) }), resource.refresh)}>{mutation.busy ? "Discovering…" : "Refresh capabilities"}<span className="visually-hidden"> {row.name}</span></Button>}
           {canManage(row) && <><Button variant="outline" size="sm" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.name}</span></Button>{row.enabled && <Button variant="ghost" size="sm" onClick={() => setDisable(row)}>Disable<span className="visually-hidden"> {row.name}</span></Button>}</>}
         </div>
       </article>)}</div> : <Empty filtered={Boolean(search) || filter !== "all"} noun={mcpOnly ? "MCP connections" : "connections"} onClear={() => { setSearch(""); setFilter("all") }} />}
-      {editor && (editor === "new" || data.some(row => row.id === editor.id && canManage(row))) && <Editor title={editor === "new" ? mcpOnly ? "Add MCP connection" : "Add connection" : "Edit connection"} description="Use a service access token, or connect an MCP server over Streamable HTTP with an optional bearer token." initial={editor === "new" ? { name: "", kind: initialKind, url: "", credential: "", clear_credential: false, shared: false, read_only: true, enabled: true } : { name: editor.name, kind: editor.kind, url: editor.policy.mcp?.url ?? "", credential: "", clear_credential: false, shared: editor.shared, read_only: editor.read_only, enabled: editor.enabled }} fields={values => [
+      {editor && (editor === "new" || data.some(row => row.id === editor.id && canManage(row))) && <Editor title={editor === "new" ? gatewayOnly ? "Connect LiteLLM Gateway" : mcpOnly ? "Add MCP connection" : "Add connection" : "Edit connection"} description="Connect your own accounts. LiteLLM connects personal MCP tools and Skills Hub; model access stays managed by your workspace." initial={editor === "new" ? { name: "", kind: initialKind, url: defaults.data?.url ?? "", credential: "", clear_credential: false, shared: false, read_only: true, enabled: true, gateway_skills: true, gateway_mcp: true } : { name: editor.name, kind: editor.kind, url: editor.policy.gateway?.url ?? editor.policy.mcp?.url ?? "", credential: "", clear_credential: false, shared: editor.shared, read_only: editor.read_only, enabled: editor.enabled, gateway_skills: editor.policy.gateway?.skills ?? true, gateway_mcp: editor.policy.gateway?.mcp ?? true }} fields={values => [
         { name: "name", label: "Account name", required: true, maxLength: 150 }, { name: "kind", label: "Service", type: "select", options: services, disabled: editor !== "new" },
         ...(values.kind === "mcp" ? [{ name: "url", label: "Server URL", type: "url" as const, required: true, hint: "For example, https://gateway.example.com/mcp. Use a Streamable HTTP endpoint; OAuth and local stdio servers are not supported." }] : []),
-        { name: "credential", label: values.kind === "mcp" ? editor === "new" ? "Bearer token (optional)" : "Replacement bearer token" : editor === "new" ? "Access token" : "Replacement token", type: "password", required: editor === "new" && values.kind !== "mcp", disabled: values.kind === "mcp" && values.clear_credential === true, hint: values.kind === "mcp" ? editor === "new" ? "Leave blank for a server that does not require authentication." : "Leave blank to keep the saved token. To change the URL, enter a replacement or clear the saved token." : editor !== "new" ? "Leave blank to keep the current token." : values.kind === "slack" ? "Use a Slack user token, not a bot token." : values.kind === "notion" ? "Use a Notion OAuth access token, not an integration token." : "Token permissions determine which resources this account can reach." },
+        ...(values.kind === "litellm" ? [
+          { name: "url", label: "Gateway URL", type: "url" as const, required: true, hint: "For example, https://gateway.example.com or https://gateway.example.com/v1." },
+          { name: "gateway_skills", label: "Connect Skills Hub", type: "checkbox" as const, hint: "Skills appear in the / picker. Instructions load when you invoke a skill." },
+          { name: "gateway_mcp", label: "Connect MCP Gateway", type: "checkbox" as const, hint: "The agent searches for relevant tools before their definitions are loaded." },
+        ] : []),
+        {
+          name: "credential", label: values.kind === "litellm" ? editor === "new" ? "Personal LiteLLM key" : "Replacement personal key" : values.kind === "mcp" ? editor === "new" ? "Bearer token (optional)" : "Replacement bearer token" : editor === "new" ? "Access token" : "Replacement token",
+          type: "password", required: editor === "new" && values.kind !== "mcp", disabled: values.kind === "mcp" && values.clear_credential === true,
+          hint: values.kind === "litellm"
+            ? `Use a personal LiteLLM key that belongs to you and is authorized for the Skills Hub and MCP tools you want to use. This connection does not inherit the deployment’s inference key.${editor !== "new" ? " Leave blank to keep the saved key. Enter a replacement key when changing the gateway URL." : ""}`
+            : values.kind === "mcp" ? editor === "new" ? "Leave blank for a server that does not require authentication." : "Leave blank to keep the saved token. To change the URL, enter a replacement or clear the saved token." : editor !== "new" ? "Leave blank to keep the current token." : values.kind === "slack" ? "Use a Slack user token, not a bot token." : values.kind === "notion" ? "Use a Notion OAuth access token, not an integration token." : "Token permissions determine which resources this account can reach.",
+        },
         ...(values.kind === "mcp" && editor !== "new" ? [{ name: "clear_credential", label: "Clear saved token", type: "checkbox" as const, hint: "Remove the saved bearer token and connect without authentication.", disabled: Boolean(values.credential) }] : []),
-        { name: "read_only", label: "Read only", type: "checkbox", hint: values.kind === "mcp" ? "Only tools the server marks read-only are available. These annotations describe the server’s behavior; connect only to servers you trust." : undefined }, { name: "enabled", label: "Enable this connection", type: "checkbox" },
-        ...(user.role === "admin" ? [{ name: "shared", label: "Share with workspace members", type: "checkbox" as const }] : []),
+        { name: "read_only", label: "Read only", type: "checkbox", hint: values.kind === "litellm" ? "Read-only MCP tools and skill browsing. Turn off to allow changes and skill uploads, subject to approval." : values.kind === "mcp" ? "Only tools the server marks read-only are available. These annotations describe the server’s behavior; connect only to servers you trust." : undefined }, { name: "enabled", label: "Enable this connection", type: "checkbox" },
+        ...(user.role === "admin" && values.kind !== "litellm" ? [{ name: "shared", label: "Share with workspace members", type: "checkbox" as const }] : []),
       ]} onSave={async values => { await (editor === "new" ? createConnection({ body: connectionInput(values, { require_approval: true }) }) : updateConnection({ path: { connection_id: editor.id }, body: connectionInput(values, editor.policy, editor) })); resource.refresh() }} onClose={() => setEditor(null)} />}
       {checking && data.some(row => row.id === checking.id && row.revision === checking.revision && row.enabled) && <ConnectionCheckDialog key={`${checking.id}:${checking.revision}`} connection={checking} onClose={() => setChecking(null)} />}
       {disable && data.some(row => row.id === disable.id && canManage(row)) && <Confirm title={`Disable ${disable.name}?`} description="New work cannot use this connection until you enable it again. The saved credential is kept." label="Disable connection" onConfirm={async () => { await updateConnection({ path: { connection_id: disable.id }, body: { ...connectionBody(disable), enabled: false } }); resource.refresh() }} onClose={() => setDisable(null)} />}

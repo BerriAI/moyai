@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote, unquote
 
-REFERENCE = re.compile(r"(?:personal|org|shared|bundled):[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
+REFERENCE = re.compile(r"(?:personal|org|shared|bundled|gateway-[0-9a-f-]{36}):[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
 MARKER = re.compile(r"\[/([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\]\(moyai-skill:([A-Za-z0-9%_.~-]+)\?icon=([A-Za-z0-9%_.~-]*)\)")
 
 

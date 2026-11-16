@@ -3,7 +3,7 @@ const {before,after,test}=require('node:test');
 const {chromium}=require('playwright');
 const path=require('node:path');
 const fs=require('node:fs/promises');
-const {settingsFixture,personalPath,mcpConnection}=require('../fixtures/settings.cjs');
+const {settingsFixture,personalPath,mcpConnection,gatewayConnection}=require('../fixtures/settings.cjs');
 let fixture,browser;
 before(async()=>{fixture=await settingsFixture();browser=await chromium.launch({headless:true});});
 after(async()=>{await browser?.close();await fixture?.close();});
@@ -118,7 +118,126 @@ for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Sett
 });
 
 const mcpSection=page=>page.getByRole('region',{name:'MCP connections',exact:true});
+const gatewaySection=page=>page.getByRole('region',{name:'LiteLLM gateways',exact:true});
 const connectionWrites=()=>fixture.state.requests.filter(r=>r.path.startsWith('/api/connections')&&['POST','PUT'].includes(r.method)&&!r.path.endsWith('/check'));
+
+for(const mode of ['existing','standalone'])test(`LiteLLM creation in ${mode} waits for defaults and sends a personal key through the generated API`,async t=>{
+  fixture.reset();fixture.state.productMode=mode;
+  let release;fixture.state.gatewayDefaultsGate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const page=await open(t,'connections');
+  const add=page.getByRole('button',{name:mode==='existing'?'Connect LiteLLM Gateway':'Add connection',exact:true});
+  await add.waitFor();assert.equal(await add.isEnabled(),false);
+  release();await add.click();
+  const dialog=page.getByRole('dialog');
+  if(mode==='standalone'){
+    await dialog.getByLabel('Share with workspace members',{exact:true}).check();
+    await dialog.getByRole('combobox',{name:'Service',exact:true}).click();
+    await page.getByRole('option',{name:'LiteLLM Gateway',exact:true}).click();
+  }
+  assert.equal(await dialog.getByLabel('Gateway URL',{exact:true}).inputValue(),fixture.state.gatewayDefaults.url);
+  const key=dialog.getByLabel('Personal LiteLLM key',{exact:true});
+  assert.equal(await key.inputValue(),'');assert.equal(await key.getAttribute('type'),'password');
+  assert.notEqual(await key.getAttribute('required'),null);
+  assert.match(await dialog.innerText(),/belongs to you.*authorized/i);
+  assert.match(await dialog.innerText(),/does not inherit.*inference key/i);
+  for(const label of ['Read only','Connect Skills Hub','Connect MCP Gateway'])assert.equal(await dialog.getByLabel(label,{exact:true}).isChecked(),true);
+  assert.equal(await dialog.getByLabel('Share with workspace members',{exact:true}).count(),0);
+  assert.equal(await dialog.getByLabel('Clear saved token',{exact:true}).count(),0);
+  await dialog.getByLabel('Account name',{exact:true}).fill('My personal gateway');
+  await key.fill('synthetic-personal-key');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  await page.getByRole('heading',{name:'My personal gateway',exact:true}).waitFor();
+  assert.deepEqual(connectionWrites().map(({method,body})=>({method,body})),[{method:'POST',body:{
+    name:'My personal gateway',kind:'litellm',credential:'synthetic-personal-key',shared:false,read_only:true,enabled:true,
+    policy:{require_approval:true,mcp:null,gateway:{url:fixture.state.gatewayDefaults.url,skills:true,mcp:true}},
+  }}]);
+  assert.doesNotMatch(await page.locator('.ns-content').innerText(),/synthetic-personal-key/);
+});
+
+test('LiteLLM edits preserve the key and policy, require replacement for URL changes and disable without clearing',async t=>{
+  fixture.reset();const original=gatewayConnection({read_only:false});
+  original.policy.require_approval=false;original.policy.allowed_tools=['lookup'];fixture.state.connections=[original];
+  const policy=structuredClone(original.policy),page=await open(t,'connections'),section=gatewaySection(page);
+  await section.getByRole('button',{name:'Edit Personal LiteLLM',exact:true}).click();
+  let dialog=page.getByRole('dialog');
+  assert.match(await dialog.innerText(),/Leave blank.*saved key.*replacement.*URL/i);
+  assert.equal(await dialog.getByLabel('Replacement personal key',{exact:true}).inputValue(),'');
+  await dialog.getByLabel('Account name',{exact:true}).fill('Renamed LiteLLM');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  assert.deepEqual(connectionWrites()[0].body,{name:'Renamed LiteLLM',kind:'litellm',credential:'',shared:false,read_only:false,enabled:true,policy});
+  await section.getByRole('button',{name:'Edit Renamed LiteLLM',exact:true}).click();dialog=page.getByRole('dialog');
+  await dialog.getByLabel('Gateway URL',{exact:true}).fill('https://replacement.example.com/v1');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();
+  await dialog.getByRole('alert').filter({hasText:'requires a replacement key'}).waitFor();
+  assert.equal(connectionWrites().length,1);
+  await dialog.getByLabel('Replacement personal key',{exact:true}).fill('replacement-personal-key');
+  await dialog.getByLabel('Connect MCP Gateway',{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  assert.deepEqual(connectionWrites()[1].body,{...connectionWrites()[0].body,credential:'replacement-personal-key',
+    policy:{...policy,gateway:{url:'https://replacement.example.com/v1',skills:true,mcp:false}}});
+  await section.getByRole('button',{name:'Disable Renamed LiteLLM',exact:true}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Disable connection',exact:true}).click();
+  await page.getByRole('dialog').waitFor({state:'hidden'});
+  assert.deepEqual(connectionWrites()[2].body,{...connectionWrites()[1].body,credential:'',enabled:false});
+  await section.getByText('LiteLLM Gateway · Disabled',{exact:true}).waitFor();
+  assert.equal(await section.getByRole('button',{name:/Refresh capabilities/}).count(),0);
+});
+
+test('LiteLLM capability refresh preserves an unrelated MCP editor draft and focus',async t=>{
+  fixture.reset();fixture.state.connections=[gatewayConnection(),mcpConnection({id:'second-connection'})];
+  let release;fixture.state.connectionSaveGate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const page=await open(t,'connections'),section=gatewaySection(page);
+  const request=page.waitForRequest(r=>r.method()==='PUT'&&r.url().endsWith('/api/connections/'+fixture.state.connections[0].id));
+  await section.getByRole('button',{name:'Refresh capabilities Personal LiteLLM',exact:true}).click();await request;
+  await mcpSection(page).getByRole('button',{name:'Edit Research gateway',exact:true}).click();
+  const dialog=page.getByRole('dialog'),name=dialog.getByLabel('Account name',{exact:true});
+  await name.fill('Keep my unsaved MCP draft');
+  release();
+  // The retained modal correctly hides the background from accessibility queries.
+  await page.locator('section[aria-label="LiteLLM gateways"] button').filter({hasText:'Refresh capabilities'}).waitFor();
+  assert.equal(await dialog.isVisible(),true,'Discovery must not invalidate unrelated editors');
+  assert.equal(await name.inputValue(),'Keep my unsaved MCP draft');
+  assert.equal(await name.evaluate(el=>el===document.activeElement),true);
+  assert.equal(connectionWrites().length,1);
+  assert.equal(connectionWrites()[0].body.credential,'');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+});
+
+for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`LiteLLM discovery guidance and editor fit ${width}px in ${theme}`,async t=>{
+  fixture.reset();const row=gatewayConnection({name:'Personal LiteLLM gateway with a long workspace identifier'});
+  row.policy.gateway.url='https://gateway.example.com/a-very-long-workspace-specific-endpoint-that-must-wrap-without-overflow';
+  row.policy.gateway_discovery.skills={status:'unauthorized',count:0,message:'Bearer NEVER_RENDER_THIS'};
+  row.policy.gateway_discovery.mcp={status:'unavailable',count:0,message:'https://private.example.test/?token=secret'};
+  fixture.state.connections=[row];
+  const page=await open(t,'connections',width,theme),section=gatewaySection(page);
+  await section.locator('dd').filter({hasText:'Key needs access'}).waitFor();
+  assert.match(await section.innerText(),/grant your personal key access/);
+  assert.match(await section.innerText(),/Check the gateway URL/);
+  assert.doesNotMatch(await section.innerText(),/NEVER_RENDER_THIS|private\.example\.test/);
+  await section.locator('article').scrollIntoViewIfNeeded();
+  assert.equal(await page.locator('.ns-content').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(process.env.MOYAI_UI_CAPTURE_DIR){await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`litellm-list-${width}-${theme}.png`)});}
+  await section.getByRole('button',{name:/^Edit /}).click();
+  const dialog=page.getByRole('dialog');await dialog.waitFor();
+  assert.equal(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  await dialog.getByLabel('Replacement personal key',{exact:true}).focus();await page.keyboard.press('Tab');
+  assert.equal(await dialog.getByLabel('Read only',{exact:true}).evaluate(el=>el===document.activeElement),true);
+  if(process.env.MOYAI_UI_CAPTURE_DIR)await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`litellm-editor-${width}-${theme}.png`)});
+  await dialog.getByRole('button',{name:'Save',exact:true}).scrollIntoViewIfNeeded();
+  const saveBounds=await dialog.getByRole('button',{name:'Save',exact:true}).boundingBox();
+  assert.ok(saveBounds.y>=0&&saveBounds.y+saveBounds.height<=page.viewportSize().height);
+  await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
+  fixture.state.gatewayDiscovery={skills:{status:'error',count:0,message:'NEVER_RENDER_THIS'},mcp:{status:'disabled',count:0,message:''},skill_catalog:[]};
+  await section.getByRole('button',{name:/^Refresh capabilities/}).click();
+  await section.getByText('Discovery failed. Try Refresh capabilities again.',{exact:true}).waitFor();
+  await section.getByText('Disabled',{exact:true}).waitFor();
+  fixture.state.gatewayDiscovery=gatewayConnection().policy.gateway_discovery;
+  await section.getByRole('button',{name:/^Refresh capabilities/}).click();
+  await section.getByText('2 available',{exact:true}).waitFor();await section.getByText('3 available',{exact:true}).waitFor();
+  assert.doesNotMatch(await section.innerText(),/grant your personal key access|Discovery failed|NEVER_RENDER_THIS/);
+});
+
 test('Hosted connections retain organization integrations and expose only custom MCP rows and service choices',async t=>{
   fixture.reset();
   fixture.state.connections=[mcpConnection(),mcpConnection({id:'shared',name:'Workspace gateway',shared:true,owner_id:'another-admin'}),mcpConnection({id:'legacy-slack',kind:'slack',name:'Canonical Slack'})];

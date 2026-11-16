@@ -10,9 +10,17 @@ const mcpConnection = (patch={}) => ({
   policy:{require_approval:true,allowed_tools:['lookup'],product:null,mcp:{url:'https://gateway.example.com/mcp',transport:'streamable_http'}},
   ...patch,
 });
+const gatewayConnection = (patch={}) => mcpConnection({
+  name:'Personal LiteLLM',kind:'litellm',
+  policy:{require_approval:true,allowed_tools:null,product:null,mcp:null,
+    gateway:{url:'https://gateway.example.com',skills:true,mcp:true},
+    gateway_discovery:{skills:{status:'ready',count:2,message:''},mcp:{status:'ready',count:3,message:''},skill_catalog:[]}},
+  ...patch,
+});
 function defaults() {
   return {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
+    gatewayDefaults:{url:'https://gateway.example.com/v1'},gatewayDiscovery:gatewayConnection().policy.gateway_discovery,
     connectionCheck:{tool_count:1,tools:[{name:'lookup',description:'Search the synthetic research catalog.'}]},
     personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.'},
     memory: {source:'canonical',scope:{kind:'personal',owner_id:'viewer'},preferences:{enabled:true,auto_save:true,revision:1},
@@ -58,6 +66,10 @@ async function settingsFixture() {
       state.requests.push({path:url.pathname,method:req.method,body});
       const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
       if(url.pathname==='/api/me')return json({user:{id:state.userId,name:'Alex Example',role:state.role,individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.productMode});
+      if(url.pathname==='/api/gateway/defaults'){
+        if(state.gatewayDefaultsGate)await state.gatewayDefaultsGate;
+        return json(state.gatewayDefaults);
+      }
       if(url.pathname==='/api/history/sessions')return json({sessions:[],ancestors:[],has_more:false});
       if(['/api/session-folders','/api/sessions'].includes(url.pathname))return json([]);
       if(url.pathname==='/api/connections'){
@@ -66,6 +78,7 @@ async function settingsFixture() {
           if(state.connectionSaveError)return json({detail:state.connectionSaveError},422);
           const {credential,clear_credential,...metadata}=body;
           const row=mcpConnection({...metadata,id:randomUUID(),owner_id:state.userId,policy:{allowed_tools:null,require_approval:true,product:null,mcp:null,...body.policy}});
+          if(row.kind==='litellm')row.policy.gateway_discovery=state.gatewayDiscovery;
           state.connections.push(row);return json(row);
         }
         return json(state.connections);
@@ -80,9 +93,12 @@ async function settingsFixture() {
           return json(state.connectionCheck);
         }
         if(req.method==='PUT'){
+          if(state.connectionSaveGate)await state.connectionSaveGate;
           if(state.connectionSaveError)return json({detail:state.connectionSaveError},422);
           const {credential,clear_credential,...metadata}=body;
-          Object.assign(row,metadata,{revision:row.revision+1});return json(row);
+          Object.assign(row,metadata,{revision:row.revision+1});
+          if(row.kind==='litellm'&&row.enabled)row.policy.gateway_discovery=state.gatewayDiscovery;
+          return json(row);
         }
       }
       if(url.pathname==='/api/settings/performance')return json(report());
@@ -113,5 +129,5 @@ async function settingsFixture() {
   await server.listen();fixture.base=`http://127.0.0.1:${server.httpServer.address().port}`;
   fixture.close=async()=>{await server.close();await fs.rm(cache,{recursive:true,force:true});};return fixture;
 }
-module.exports={settingsFixture,personalPath,mcpConnection};
+module.exports={settingsFixture,personalPath,mcpConnection,gatewayConnection};
 if(require.main===module)settingsFixture().then(fixture=>console.log(fixture.base));

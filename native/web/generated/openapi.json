@@ -5454,7 +5454,8 @@
               "linear",
               "notion",
               "slack",
-              "mcp"
+              "mcp",
+              "litellm"
             ],
             "title": "Kind",
             "type": "string"
@@ -5505,6 +5506,26 @@
             ],
             "title": "Allowed Tools"
           },
+          "gateway": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GatewayConfig-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gateway_discovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GatewayDiscovery-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "mcp": {
             "anyOf": [
               {
@@ -5552,6 +5573,26 @@
             ],
             "title": "Allowed Tools"
           },
+          "gateway": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GatewayConfig-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gateway_discovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GatewayDiscovery-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "mcp": {
             "anyOf": [
               {
@@ -5586,7 +5627,9 @@
           "allowed_tools",
           "require_approval",
           "product",
-          "mcp"
+          "mcp",
+          "gateway",
+          "gateway_discovery"
         ],
         "title": "ConnectionPolicyView",
         "type": "object"
@@ -5633,7 +5676,8 @@
               "linear",
               "notion",
               "slack",
-              "mcp"
+              "mcp",
+              "litellm"
             ],
             "title": "Kind",
             "type": "string"
@@ -7094,6 +7138,271 @@
           "name"
         ],
         "title": "FolderName",
+        "type": "object"
+      },
+      "GatewayCapability-Input": {
+        "properties": {
+          "count": {
+            "default": 0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "disabled",
+              "unauthorized",
+              "unavailable",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "GatewayCapability",
+        "type": "object"
+      },
+      "GatewayCapability-Output": {
+        "properties": {
+          "count": {
+            "default": 0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "disabled",
+              "unauthorized",
+              "unavailable",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "count",
+          "message"
+        ],
+        "title": "GatewayCapability",
+        "type": "object"
+      },
+      "GatewayConfig-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "mcp": {
+            "default": true,
+            "title": "Mcp",
+            "type": "boolean"
+          },
+          "skills": {
+            "default": true,
+            "title": "Skills",
+            "type": "boolean"
+          },
+          "url": {
+            "maxLength": 2048,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "GatewayConfig",
+        "type": "object"
+      },
+      "GatewayConfig-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "mcp": {
+            "default": true,
+            "title": "Mcp",
+            "type": "boolean"
+          },
+          "skills": {
+            "default": true,
+            "title": "Skills",
+            "type": "boolean"
+          },
+          "url": {
+            "maxLength": 2048,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "skills",
+          "mcp"
+        ],
+        "title": "GatewayConfig",
+        "type": "object"
+      },
+      "GatewayDefaults": {
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "GatewayDefaults",
+        "type": "object"
+      },
+      "GatewayDiscovery-Input": {
+        "properties": {
+          "mcp": {
+            "$ref": "#/components/schemas/GatewayCapability-Input"
+          },
+          "skill_catalog": {
+            "items": {
+              "$ref": "#/components/schemas/GatewaySkill-Input"
+            },
+            "maxItems": 1000,
+            "title": "Skill Catalog",
+            "type": "array"
+          },
+          "skills": {
+            "$ref": "#/components/schemas/GatewayCapability-Input"
+          }
+        },
+        "required": [
+          "skills",
+          "mcp"
+        ],
+        "title": "GatewayDiscovery",
+        "type": "object"
+      },
+      "GatewayDiscovery-Output": {
+        "properties": {
+          "mcp": {
+            "$ref": "#/components/schemas/GatewayCapability-Output"
+          },
+          "skill_catalog": {
+            "items": {
+              "$ref": "#/components/schemas/GatewaySkill-Output"
+            },
+            "maxItems": 1000,
+            "title": "Skill Catalog",
+            "type": "array"
+          },
+          "skills": {
+            "$ref": "#/components/schemas/GatewayCapability-Output"
+          }
+        },
+        "required": [
+          "skills",
+          "mcp",
+          "skill_catalog"
+        ],
+        "title": "GatewayDiscovery",
+        "type": "object"
+      },
+      "GatewaySkill-Input": {
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 1024,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "GatewaySkill",
+        "type": "object"
+      },
+      "GatewaySkill-Output": {
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 1024,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "version",
+          "updated_at"
+        ],
+        "title": "GatewaySkill",
         "type": "object"
       },
       "GeneralPreferences-Input": {
@@ -21233,6 +21542,24 @@
           }
         },
         "summary": "Download"
+      }
+    },
+    "/api/gateway/defaults": {
+      "get": {
+        "operationId": "getGatewayDefaults",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayDefaults"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Gateway Defaults"
       }
     },
     "/api/history/search": {
