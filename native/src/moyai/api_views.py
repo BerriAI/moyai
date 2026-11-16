@@ -11,6 +11,7 @@ from pydantic import MISSING, BaseModel, ConfigDict, Field, JsonValue, RootModel
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai_harness.ask_user import AskUserRequest
 
+from .gateway_config import GatewayConfig, GatewayDiscovery
 from .general_preferences import GeneralPreferences
 from .mcp_remote import RemoteMCPConfig
 from .product_history import absent
@@ -512,12 +513,14 @@ class ConnectionPolicyView(ApiView):
     require_approval: bool = True
     product: dict[str, JsonValue] | None = None
     mcp: RemoteMCPConfig | None = None
+    gateway: GatewayConfig | None = None
+    gateway_discovery: GatewayDiscovery | None = None
 
 
 class ConnectionView(ApiView):
     id: str
     name: str
-    kind: Literal["github", "gitlab", "linear", "notion", "slack", "mcp"]
+    kind: Literal["github", "gitlab", "linear", "notion", "slack", "mcp", "litellm"]
     owner_id: str
     shared: bool
     read_only: bool

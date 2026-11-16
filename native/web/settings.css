@@ -83,6 +83,11 @@
 .native-settings .ns-mcp-connections { margin-top: 40px; }
 .native-settings .ns-mcp-connections > h2 { margin-bottom: 8px; }
 .native-settings .ns-connection-url { font-size: 12px; overflow-wrap: anywhere; }
+.native-settings .ns-gateway-capabilities { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 12px 0; }
+.native-settings .ns-gateway-capabilities > div { flex: 1 1 180px; min-width: 0; }
+.native-settings .ns-gateway-capabilities dt { font-weight: 600; }
+.native-settings .ns-gateway-capabilities dd { margin: 3px 0 0; }
+.native-settings .ns-gateway-capabilities .ns-help { margin-top: 4px; color: var(--ui-foreground); }
 .native-settings-dialog .ns-tool-preview { min-width: 0; overflow-wrap: anywhere; }
 .native-settings-dialog .ns-tool-preview ul { max-height: 320px; overflow-y: auto; }
 .native-settings-dialog .ns-tool-preview li > p { margin-top: 4px; color: var(--ui-muted); }

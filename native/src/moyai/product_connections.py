@@ -214,11 +214,11 @@ class ProductConnections:
         if candidates:
             async def native_selection(transaction: AsyncSession) -> list[Grant]:
                 identities = list(await transaction.scalars(select(Connection.id).where(
-                    Connection.id.in_(candidates), Connection.kind == "mcp",
+                    Connection.id.in_(candidates), Connection.kind.in_(["mcp", "litellm"]),
                 )))
                 return await self.database.native_grants(
                     transaction, actor_id, identities, shared_session=shared_session,
-                    kinds=frozenset({"mcp"}),
+                    kinds=frozenset({"mcp", "litellm"}),
                 )
 
             if db is not None:

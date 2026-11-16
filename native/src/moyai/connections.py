@@ -56,7 +56,7 @@ def selected_connections(scope: RunScope) -> tuple[SelectedConnection, ...]:
     )
     if any(
         item.grant.kind not in SERVICES
-        and item.grant.kind != "mcp"
+        and item.grant.kind not in {"mcp", "litellm"}
         and not (item.grant.kind == "gitlab" and item.policy.product is not None)
         for item in selected
     ):
@@ -148,7 +148,14 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
 
     def scoped(ctx: RunContext[RunScope], connection: SelectedConnection) -> AbstractToolset[RunScope]:
         grant, policy = connection.grant, connection.policy
-        if grant.kind == "mcp":
+        if grant.kind == "litellm":
+            from .gateway_tools import gateway_toolset
+            from .runtime import current
+
+            native = gateway_toolset(current().database, ctx.deps, grant).filtered(
+                lambda _ctx, tool: not grant.read_only or read_only_tool(tool),
+            )
+        elif grant.kind == "mcp":
             from .mcp_remote import remote_mcp_toolset
             from .runtime import current
 
@@ -241,7 +248,7 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
                 catalog, ctx, lambda name: build(ctx, name), reconstruct=lambda tool: reconstruct(ctx, tool),
             )
         catalog_type = (
-            MCPConnectionCatalogToolset if any(grant.kind == "mcp" for grant in ctx.deps.grants)
+            MCPConnectionCatalogToolset if any(grant.kind in {"mcp", "litellm"} for grant in ctx.deps.grants)
             else CatalogToolset
         )
         return catalog_type(

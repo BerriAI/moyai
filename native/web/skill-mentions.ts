@@ -1,6 +1,6 @@
 export type SkillReference = { reference: string; name: string; icon?: string }
 export type InlineSkill = SkillReference & { start: number; end: number }
-export const skillReferencePattern = /^(?:personal|org|shared|bundled):[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/
+export const skillReferencePattern = /^(?:personal|org|shared|bundled|gateway-[0-9a-f-]{36}):[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/
 const markerPattern = /^\[\/([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\]\(moyai-skill:([A-Za-z0-9%_.~-]+)\?icon=([A-Za-z0-9%_.~-]*)\)/
 
 export function skillMarker(skill: SkillReference): string {

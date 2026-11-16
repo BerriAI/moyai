@@ -7,7 +7,7 @@ const {spawnSync}=require('node:child_process');
 const ts=require('typescript');
 const React=require('react');
 const {renderToStaticMarkup}=require('react-dom/server');
-const {mcpConnection}=require('./fixtures/settings.cjs');
+const {mcpConnection,gatewayConnection}=require('./fixtures/settings.cjs');
 const root=path.resolve(__dirname,'..'),nativeId='12345678-1234-1234-1234-123456789abc',legacyId='a'.repeat(32);
 let server,ui,homeSubmission;
 test.before(async()=>{
@@ -63,7 +63,7 @@ test('account metadata preserves canonical provider identity and member-only vie
   assert.match(html,/Organization GitHub App/);assert.match(html,/Paused/);assert.match(html,/Read-only policy/);assert.match(html,/View access/);assert.doesNotMatch(html,/>Manage</);
 });
 
-const connectionDraft=(row=mcpConnection(),patch={})=>({name:row.name,kind:row.kind,url:row.policy.mcp?.url||'',credential:'',clear_credential:false,shared:row.shared,read_only:row.read_only,enabled:row.enabled,...patch});
+const connectionDraft=(row=mcpConnection(),patch={})=>({name:row.name,kind:row.kind,url:row.policy.gateway?.url??row.policy.mcp?.url??'',credential:'',clear_credential:false,shared:row.shared,read_only:row.read_only,enabled:row.enabled,...patch});
 test('remote MCP bodies support no token and bearer tokens with the typed Streamable HTTP policy',()=>{
   for(const credential of ['','synthetic-bearer']){
     const body=ui.connectionInput(connectionDraft(undefined,{credential}),{require_approval:true});
@@ -88,6 +88,36 @@ test('remote MCP updates preserve policies and require replacement or explicit c
   assert.equal(cleared.credential,'');assert.equal(cleared.clear_credential,true);assert.equal(cleared.policy.mcp.url,changed.url);
   assert.throws(()=>ui.connectionInput({...changed,credential:'new-token',clear_credential:true},row.policy,row),/Remove the replacement token/);
   assert.deepEqual(row.policy.mcp,{url:'https://gateway.example.com/mcp',transport:'streamable_http'});
+});
+
+test('LiteLLM bodies use the entered personal key, force sharing off and preserve capability choices',()=>{
+  for(const skills of [true,false])for(const mcp of [true,false]){
+    const body=ui.connectionInput(connectionDraft(gatewayConnection(),{
+      credential:'synthetic-personal-key',url:' https://gateway.example.com/v1 ',shared:true,
+      clear_credential:true,gateway_skills:skills,gateway_mcp:mcp,
+    }),{require_approval:true});
+    assert.deepEqual(body,{name:'Personal LiteLLM',kind:'litellm',credential:'synthetic-personal-key',
+      shared:false,read_only:true,enabled:true,policy:{require_approval:true,mcp:null,
+        gateway:{url:'https://gateway.example.com/v1',skills,mcp}}});
+  }
+  assert.throws(()=>ui.connectionInput(connectionDraft(gatewayConnection(),{url:' '}),{}),/gateway URL/);
+});
+
+test('LiteLLM edits keep the saved key only at the same URL and retain approval and tool policy',()=>{
+  const row=gatewayConnection({read_only:false});
+  row.policy.allowed_tools=['lookup'];row.policy.require_approval=false;
+  const original=structuredClone(row.policy);
+  const kept=ui.connectionInput(connectionDraft(row,{url:` ${row.policy.gateway.url} `}),row.policy,row);
+  assert.equal(kept.credential,'');assert.deepEqual(kept.policy,original);assert.equal(kept.read_only,false);
+  for(const url of ['https://replacement.example.com','https://gateway.example.com/other']){
+    const changed=connectionDraft(row,{url,clear_credential:true});
+    assert.throws(()=>ui.connectionInput(changed,row.policy,row),/requires a replacement key/);
+    const rotated=ui.connectionInput({...changed,credential:'replacement-personal-key'},row.policy,row);
+    assert.equal(rotated.credential,'replacement-personal-key');assert.equal(rotated.clear_credential,undefined);
+    assert.deepEqual(rotated.policy,{...original,gateway:{...original.gateway,url}});
+    assert.equal(rotated.shared,false);
+  }
+  assert.deepEqual(row.policy,original);
 });
 
 test('native service payloads retain blank-token update semantics without MCP-only fields',()=>{
@@ -147,12 +177,16 @@ test('Home first message includes only eligible selected account IDs and stable 
 });
 
 const python=path.join(root,'.venv/bin/python');
-test('MCP form create, rotation and clear payloads validate against the Python connection schema',{skip:!fs.existsSync(python)&&'Native Python environment not installed'},()=>{
+test('MCP and LiteLLM form payloads validate against the Python connection schema',{skip:!fs.existsSync(python)&&'Native Python environment not installed'},()=>{
   const row=mcpConnection();
+  const gateway=gatewayConnection();
   const payloads=[
     ui.connectionInput(connectionDraft(),{require_approval:true}),
     ui.connectionInput(connectionDraft(row,{url:'https://replacement.example.com/mcp',credential:'synthetic-token'}),row.policy,row),
     ui.connectionInput(connectionDraft(row,{url:'https://public.example.com/mcp',clear_credential:true}),row.policy,row),
+    ui.connectionInput(connectionDraft(gateway,{credential:'personal-key',shared:true}),{require_approval:true}),
+    ui.connectionInput(connectionDraft(gateway),gateway.policy,gateway),
+    ui.connectionInput(connectionDraft(gateway,{url:'https://replacement.example.com',credential:'replacement-key'}),gateway.policy,gateway),
   ];
   const result=spawnSync(python,['-c','import json,sys; from moyai.api import ConnectionInput; [ConnectionInput.model_validate(v) for v in json.load(sys.stdin)]; print("validated")'],{cwd:root,input:JSON.stringify(payloads),encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'validated');
