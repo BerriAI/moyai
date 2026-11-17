@@ -6,6 +6,20 @@ import subprocess
 import time
 from uuid import uuid4
 
+VERIFY_PACKAGING = '''
+import importlib.util
+import pathlib
+import sysconfig
+assert importlib.util.find_spec('pip') is None, 'pip must not ship in the runtime image'
+stdlib = pathlib.Path(sysconfig.get_path('stdlib'))
+assert not (stdlib / 'ensurepip').exists(), 'the bundled pip wheel must not ship'
+site_packages = pathlib.Path(sysconfig.get_path('purelib'))
+assert not list(site_packages.glob('pip*')), 'pip metadata or vendored packages remain'
+assert not list(pathlib.Path('/usr/local/bin').glob('pip*')), 'pip executables remain'
+assert not pathlib.Path('/root/.cache/uv').exists(), 'uv build cache must not ship'
+print('PASS: no pip, vendored packages, bootstrap wheel or uv build cache')
+'''
+
 SEED = '''
 import os
 from pathlib import Path
@@ -89,6 +103,9 @@ def main():
         raise RuntimeError('Server did not become healthy: ' + docker('logs', name).stderr)
 
     try:
+        for interpreter in ('/usr/local/bin/python', python):
+            record(docker('run', '--rm', '--entrypoint', interpreter,
+                          args.image, '-c', VERIFY_PACKAGING).stdout.strip())
         volume = prefix + '-data'; volumes.append(volume)
         docker('volume', 'create', volume)
         docker('run', '--rm', '--entrypoint', python, '-v', f'{volume}:/var/data', args.image, '-c', SEED)

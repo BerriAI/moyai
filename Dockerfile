@@ -9,7 +9,7 @@ COPY native/web ./native/web
 RUN npm run build:native
 
 FROM rust:1.88-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS rust
-FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS python-base
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS python-base
 COPY --from=uv /uv /usr/local/bin/uv
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
@@ -34,6 +34,11 @@ COPY --from=native-ui /build/native/src/moyai/static ./native/src/moyai/static
 COPY native/skills ./native/skills
 COPY native/instructions.md native/desktop.py native/browser_guest.py native/browser_driver.py native/ocu_guest.py native/hatch_build.py ./native/
 RUN uv sync --frozen --no-dev --no-editable
+# Runtime uses the uv environment. Remove system pip, its bootstrap wheel, and
+# build caches so scanners do not report unused vendored dependencies.
+RUN /usr/local/bin/python -m pip uninstall --yes pip \
+    && /usr/local/bin/python -c "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)" \
+    && uv cache clean
 COPY render_start.py build_workspace_image.py docker_start.py docker_healthcheck.py ./
 ENV PYTHONPATH=/app
 RUN /app/.venv/bin/python -c "from moyai.product_deployment import check_runtime_dependencies; check_runtime_dependencies()"
