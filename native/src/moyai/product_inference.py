@@ -23,6 +23,7 @@ import httpx2 as httpx
 from sqlalchemy import Integer, String, func, select
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .inference_identity import attribute_request
 from .inference_usage import InferenceUsage
 from .models import Base, Session, Turn, User, now
 from .product_inference_transport import BrokerUpstream
@@ -246,7 +247,8 @@ class ProductInferenceService:
                 turn = await db.get(Turn, scope.turn_id)
                 if turn is None:
                     raise InferenceAdmissionError("The inference turn is no longer available.")
-                await self.database._check_product_turn(db, turn, scope.product_grant)
+                grant = await self.database._check_product_turn_binding(db, turn, scope.product_grant)
+                principal = await self.database._identity().authorize_admission(db, grant)
                 # Stop and admission serialize on the same session row.
                 session = await db.scalar(select(Session).where(
                     Session.id == scope.session_id,
@@ -293,7 +295,12 @@ class ProductInferenceService:
                     owner_pid=owner_pid, owner_started=owner_started,
                 ))
                 db.add(InferenceUsage(**capture.values))
-            # These server-owned headers carry only the allocated request ID.
+            # Derive identity from the same canonical authority that admitted
+            # this turn, never from SDK headers, prompt text or the session owner.
+            attribute_request(
+                request, actor_id=scope.actor_id, email=principal.email,
+                organization=self.settings.moyai_customer_org_alias,
+            )
             request.headers["x-litellm-call-id"] = request_id
             request.headers["x-litellm-spend-logs-metadata"] = json.dumps({"moyai_request_id": request_id})
             capture.admission = admission

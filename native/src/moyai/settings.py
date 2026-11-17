@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     administrator: str = Field(default="admin", validation_alias="MOYAI_ADMIN_USER")
     gateway_url: str = Field(default="", validation_alias="LITELLM_API_BASE")
     gateway_key: SecretStr = Field(default=SecretStr(""), validation_alias="LITELLM_API_KEY")
+    customer_org_alias: str = Field(
+        default="", max_length=200, pattern=r"^[\x20-\x7E]*$",
+        validation_alias="MOYAI_CUSTOMER_ORG_ALIAS",
+    )
     default_model: str = Field(
         default="openai/gpt-6-astra", validation_alias=AliasChoices("MOYAI_MODEL", "AGENT_MODEL")
     )

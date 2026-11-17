@@ -227,6 +227,7 @@ class Settings(BaseSettings):
     encryption_key: str = ""
     litellm_api_base: str = ""
     litellm_api_key: str = ""
+    moyai_customer_org_alias: str = Field(default="", max_length=200, pattern=r"^[\x20-\x7E]*$")
     litellm_spend_recovery_enabled: bool = True
     model_context_limits: dict[str, ModelContextLimits] = Field(default_factory=dict)
     session_titles_enabled: bool = True
