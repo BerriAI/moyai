@@ -1,8 +1,11 @@
 """Check the real image using disposable volumes and synthetic credentials only."""
 import argparse
+from fnmatch import fnmatchcase
 import json
 from pathlib import Path
 import subprocess
+import tarfile
+import tempfile
 import time
 from uuid import uuid4
 
@@ -65,6 +68,32 @@ print('PASS: login, CSRF, saved sessions, redacted connections, assets and UID 1
 '''
 
 
+def verify_image_archive(path: Path) -> int:
+    """Check every shipped layer, including files hidden by later whiteouts."""
+    forbidden = (
+        '*/site-packages/pip', '*/site-packages/pip/*',
+        '*/site-packages/pip-*.dist-info', '*/site-packages/pip-*.dist-info/*',
+        '*/ensurepip', '*/ensurepip/*', '*/pip-*.whl',
+        '*/bin/pip', '*/bin/pip3', '*/bin/pip3.*',
+        '*/.cache/uv', '*/.cache/uv/*',
+    )
+    launchers = {'t32.exe', 't64.exe', 't64-arm.exe', 'w32.exe', 'w64.exe', 'w64-arm.exe'}
+    with tarfile.open(path) as image:
+        manifests = json.load(image.extractfile('manifest.json'))
+        layers = dict.fromkeys(layer for manifest in manifests for layer in manifest['Layers'])
+        if not layers:
+            raise ValueError('Image archive contains no layers')
+        for layer in layers:
+            # Read nested archives without extracting anything onto the host.
+            with tarfile.open(fileobj=image.extractfile(layer), mode='r|*') as entries:
+                for entry in entries:
+                    name = entry.name.removeprefix('./').lstrip('/')
+                    if (any(fnmatchcase(name, pattern) for pattern in forbidden)
+                            or name.rsplit('/', 1)[-1] in launchers):
+                        raise ValueError(f'Unused tooling remains in image layer {layer}: {name}')
+    return len(layers)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('image')
@@ -103,6 +132,11 @@ def main():
         raise RuntimeError('Server did not become healthy: ' + docker('logs', name).stderr)
 
     try:
+        with tempfile.TemporaryDirectory(prefix='moyai-image-') as directory:
+            archive = Path(directory) / 'image.tar'
+            docker('image', 'save', '--output', str(archive), args.image)
+            count = verify_image_archive(archive)
+            record(f'PASS: all {count} exported layers exclude pip, bootstrap wheels, launchers and uv cache')
         for interpreter in ('/usr/local/bin/python', python):
             record(docker('run', '--rm', '--entrypoint', interpreter,
                           args.image, '-c', VERIFY_PACKAGING).stdout.strip())
