@@ -159,6 +159,23 @@ async def test_same_logical_activity_retry_never_dispatches_again(inference):
     assert len(inference.calls) == len(await requests(inference)) == 1
 
 
+async def test_billing_identity_comes_from_canonical_actor_not_client_headers(inference):
+    ctx = inference
+    ctx.service.settings.moyai_customer_org_alias = "moyai"
+    principal = await ctx.product.adapter.current(ctx.scope.actor_id)
+    await perform(ctx, headers={
+        "authorization": "Bearer synthetic-inference-key",
+        "x-litellm-customer-id": "forged-user",
+        "x-litellm-customer-member-id": "forged-member",
+        "x-litellm-customer-org-alias": "forged-org",
+        "x-litellm-customer-team-id": "forged-team",
+    })
+    assert "x-litellm-customer-id" not in ctx.calls[0]
+    assert ctx.calls[0]["x-litellm-customer-member-id"] == f"moyai:{principal.email}"
+    assert ctx.calls[0]["x-litellm-customer-org-alias"] == "moyai"
+    assert "x-litellm-customer-team-id" not in ctx.calls[0]
+
+
 async def test_workflow_retry_with_new_run_id_cannot_repeat_paid_activity(inference, monkeypatch):
     info = SimpleNamespace(
         activity_type="agent__moyai__model_request", workflow_namespace="local",

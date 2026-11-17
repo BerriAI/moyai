@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .contracts import RunScope
+from .inference_identity import attribute_request
 from .models import Base, now
 from .usage_projection import ProjectionError, UsageProjection
 
@@ -575,6 +576,10 @@ class InferenceUsageTransport(httpx.AsyncBaseTransport):
                 context.admission_error = error
                 raise
         else:
+            attribute_request(
+                request, actor_id=context.scope.actor_id,
+                organization=context.database.settings.customer_org_alias,
+            )
             await capture.persist()
         # No await between this observation and the underlying outbound attempt.
         # The broker supplies its own ingress time; never accept a client clock.

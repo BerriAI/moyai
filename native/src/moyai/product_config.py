@@ -151,6 +151,7 @@ class ProductConfig:
                 secure_cookies=urlsplit(source.public_url).scheme == "https",
                 gateway_url=source.litellm_api_base,
                 gateway_key=SecretStr(source.litellm_api_key),
+                customer_org_alias=source.moyai_customer_org_alias,
                 default_model=source.resolve_model(),
                 model_catalog=",".join(dict.fromkeys(
                     source.resolve_model(value) for value in source.allowed_models()
