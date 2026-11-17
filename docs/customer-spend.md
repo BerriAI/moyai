@@ -6,10 +6,14 @@ canonical account email, normalized to lowercase. Standalone accounts use the
 stable `moyai:<actor-id>` identifier. Shared conversations and delegated work keep
 the identity of the actor whose turn initiated the request.
 
-The server overwrites caller-supplied customer attribution after admission. It
-sends `x-litellm-customer-id` for LiteLLM's end-user spend tracking.
+The server overwrites caller-supplied customer attribution after admission.
+When a customer organization alias is configured, it sends only the two customer
+portal headers: `x-litellm-customer-org-alias` and `x-litellm-customer-member-id`.
+The legacy `x-litellm-customer-id` header is removed, including caller-supplied
+values. Without an organization alias, it sends `x-litellm-customer-id` for
+LiteLLM's end-user spend tracking instead.
 
-To also populate LiteLLM's customer portal:
+To populate LiteLLM's customer portal:
 
 1. Create a customer organization in the same gateway and select its default
    budget profile. For attribution only, leave every limit unset. Do not use a
@@ -34,9 +38,10 @@ To also populate LiteLLM's customer portal:
    and checking that the configured model names exist there.
 
 3. Roll out the configuration and send a real request from each of two accounts.
-   Moyai adds `x-litellm-customer-org-alias` and
-   `x-litellm-customer-member-id: <org-alias>:<customer-id>`. LiteLLM creates members
-   under the organization's default team. Check that each member's spend is
+   Moyai sends `x-litellm-customer-org-alias: moyai` and, for an account with
+   email `alice@example.com`, `x-litellm-customer-member-id: moyai:alice@example.com`.
+   LiteLLM creates members under the organization's default team.
+   Check that each member's spend is
    separate and that their total rolls up to the organization after accounting
    finishes.
 

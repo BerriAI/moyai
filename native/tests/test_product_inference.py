@@ -170,7 +170,7 @@ async def test_billing_identity_comes_from_canonical_actor_not_client_headers(in
         "x-litellm-customer-org-alias": "forged-org",
         "x-litellm-customer-team-id": "forged-team",
     })
-    assert ctx.calls[0]["x-litellm-customer-id"] == principal.email
+    assert "x-litellm-customer-id" not in ctx.calls[0]
     assert ctx.calls[0]["x-litellm-customer-member-id"] == f"moyai:{principal.email}"
     assert ctx.calls[0]["x-litellm-customer-org-alias"] == "moyai"
     assert "x-litellm-customer-team-id" not in ctx.calls[0]

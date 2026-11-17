@@ -15,11 +15,13 @@ def attribute_request(
     # HTTP headers are ASCII. Keep ordinary email addresses readable while
     # encoding Unicode and control characters rather than accepting header injection.
     customer = quote(customer, safe="@:+._-")
-    request.headers["x-litellm-customer-id"] = customer
     for header in (
-        "x-litellm-customer-member-id", "x-litellm-customer-org-alias", "x-litellm-customer-team-id",
+        "x-litellm-customer-id", "x-litellm-customer-member-id",
+        "x-litellm-customer-org-alias", "x-litellm-customer-team-id",
     ):
         request.headers.pop(header, None)
     if organization := organization.strip():
         request.headers["x-litellm-customer-org-alias"] = organization
         request.headers["x-litellm-customer-member-id"] = f"{organization}:{customer}"
+    else:
+        request.headers["x-litellm-customer-id"] = customer
