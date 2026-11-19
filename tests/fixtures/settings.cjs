@@ -20,6 +20,7 @@ const gatewayConnection = (patch={}) => mcpConnection({
 function defaults() {
   return {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
+    organizationConnections:[{id:'slack',connected:true,enabled:true,read_only:true,label:'Example workspace',identity:'Workspace app',tools:[],check_status:'healthy',checked_at:'2026-10-19T10:00:00Z'}],
     gatewayDefaults:{url:'https://gateway.example.com/v1'},gatewayDiscovery:gatewayConnection().policy.gateway_discovery,
     connectionCheck:{tool_count:1,tools:[{name:'lookup',description:'Search the synthetic research catalog.'}]},
     personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.'},
@@ -119,7 +120,11 @@ async function settingsFixture() {
         state.memory.runtime={...state.memory.runtime,recall:body.enabled,auto_save:body.enabled&&body.auto_save};return json(state.memory.preferences);
       }
       if(url.pathname==='/api/product/skills')return json({source:'canonical',capabilities:{read:true},note:'Internal migration note',skills:[],has_more:false,next_offset:null});
-      if(url.pathname==='/api/product/connections')return json([{id:'slack',connected:true,enabled:true,read_only:true,label:'Example workspace',identity:'Workspace app',tools:[],check_status:'healthy',checked_at:'2026-10-19T10:00:00Z'}]);
+      if(url.pathname==='/api/product/connections')return json(state.organizationConnections);
+      if(/^\/api\/connections\/(slack|linear|github)\/oauth$/.test(url.pathname)){
+        if(state.organizationOAuthError)return json({detail:state.organizationOAuthError},409);
+        return json({url:`/?fixture-provider=${url.pathname.split('/')[3]}#settings/connections`});
+      }
       if(url.pathname==='/api/credentials')return json({secrets:[],providers:[{id:'generic',name:'Other service'}],capabilities:{create:true,update:true,delete:true,native_execution:true,scopes:['personal','organization'],lifetimes:['persistent','session']},note:'Internal migration note'});
       if(url.pathname==='/api/product/automations')return json({source:'canonical_product',automations:[],next_offset:null,capabilities:{create:false},event_choices:{}});
       if(url.pathname==='/api/settings/users')return json({source:'product',users:[],capabilities:{roles:true},note:'Internal migration note'});

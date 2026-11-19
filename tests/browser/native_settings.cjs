@@ -121,6 +121,63 @@ const mcpSection=page=>page.getByRole('region',{name:'MCP connections',exact:tru
 const gatewaySection=page=>page.getByRole('region',{name:'LiteLLM gateways',exact:true});
 const connectionWrites=()=>fixture.state.requests.filter(r=>r.path.startsWith('/api/connections')&&['POST','PUT'].includes(r.method)&&!r.path.endsWith('/check'));
 
+const organizationAccount=(id,patch={})=>({
+  id,connected:false,scope:'organization',enabled:true,read_only:false,oauth_configured:true,
+  label:'',identity:'Not connected',tools:[],check_status:null,checked_at:null,app_registered:id==='github',...patch,
+});
+for(const [id,name] of [['linear','Linear'],['slack','Slack'],['github','GitHub']])test(`${name} Connect opens authorization directly without token entry`,async t=>{
+  fixture.reset();fixture.state.organizationConnections=[organizationAccount(id)];
+  const page=await open(t,'connections');
+  await page.getByRole('button',{name:`Connect ${name}`,exact:true}).click();
+  await page.waitForURL(`**/?fixture-provider=${id}#settings/connections`);
+  assert.equal(fixture.state.requests.filter(r=>r.path===`/api/connections/${id}/oauth`&&r.method==='POST').length,1);
+  assert.equal(await page.getByRole('dialog').count(),0);
+});
+test('Missing Slack app configuration explains setup and keeps manual tokens optional',async t=>{
+  fixture.reset();fixture.state.organizationConnections=[organizationAccount('slack',{oauth_configured:false})];
+  const page=await open(t,'connections',320);
+  await page.getByRole('button',{name:'Connect Slack',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Slack · Connect account'});
+  await dialog.getByRole('heading',{name:'Set up Slack for this workspace'}).waitFor();
+  assert.equal(await dialog.getByRole('textbox',{name:'Access token',exact:true}).isVisible(),false);
+  assert.match(await dialog.innerText(),/A user access token alone does not enable replies/);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(fixture.state.requests.filter(r=>r.path.endsWith('/oauth')).length,0);
+  await dialog.getByText('Advanced: connect with an access token',{exact:true}).click();
+  await dialog.getByRole('textbox',{name:'Access token',exact:true}).waitFor();
+});
+test('New GitHub connection starts manifest registration with just the organization',async t=>{
+  fixture.reset();fixture.state.organizationConnections=[organizationAccount('github',{app_registered:false})];
+  const page=await open(t,'connections');
+  await page.getByRole('button',{name:'Connect GitHub',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'GitHub · Connect account'});
+  assert.equal(await dialog.getByLabel('PEM private key',{exact:true}).isVisible(),false);
+  await dialog.getByRole('textbox',{name:'GitHub organization',exact:true}).fill('example-org');
+  await dialog.getByRole('button',{name:'Continue with GitHub',exact:true}).click();
+  await page.waitForURL('**/?fixture-provider=github#settings/connections');
+  assert.deepEqual(fixture.state.requests.find(r=>r.path==='/api/connections/github/oauth').body,{organization:'example-org'});
+});
+test('Organization authorization failure stays on the list and can be retried',async t=>{
+  fixture.reset();fixture.state.organizationConnections=[organizationAccount('linear')];
+  fixture.state.organizationOAuthError='The app configuration changed. Refresh and try again.';
+  const page=await open(t,'connections');
+  await page.getByRole('button',{name:'Connect Linear',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'The app configuration changed'}).waitFor();
+  fixture.state.organizationOAuthError=null;
+  await page.getByRole('button',{name:'Connect Linear',exact:true}).click();
+  await page.waitForURL('**/?fixture-provider=linear#settings/connections');
+});
+test('Members can inspect organization access without initiating authorization',async t=>{
+  fixture.reset();fixture.state.role='member';fixture.state.organizationConnections=[organizationAccount('slack')];
+  const page=await open(t,'connections');
+  assert.equal(await page.getByRole('button',{name:'Connect Slack',exact:true}).count(),0);
+  await page.getByRole('button',{name:'View access for Slack',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Slack · Organization access'});
+  await dialog.waitFor();
+  assert.equal(await dialog.getByRole('button',{name:'Connect Slack',exact:true}).count(),0);
+  assert.equal(fixture.state.requests.filter(r=>r.path.endsWith('/oauth')).length,0);
+});
+
 for(const mode of ['existing','standalone'])test(`LiteLLM creation in ${mode} waits for defaults and sends a personal key through the generated API`,async t=>{
   fixture.reset();fixture.state.productMode=mode;
   let release;fixture.state.gatewayDefaultsGate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
