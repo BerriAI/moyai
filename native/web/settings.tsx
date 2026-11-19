@@ -689,34 +689,74 @@ function ProductSkillsPage() {
 }
 
 const productProviders: Record<string, string> = { github: "GitHub", gitlab: "GitLab", slack: "Slack", linear: "Linear", notion: "Notion" }
+const providerSetupLinks: Record<string, string> = {
+  linear: "https://linear.app/settings/api/applications/new",
+  slack: "https://api.slack.com/apps",
+  notion: "https://www.notion.so/profile/integrations",
+}
+const providerDescriptions: Record<string, string> = {
+  linear: "Find issues and keep your team's work up to date.",
+  slack: "Connect your workspace's Slack app and shared search access.",
+  github: "Work on the repositories you choose on GitHub.",
+  gitlab: "Work on selected projects in your GitLab instance.",
+  notion: "Search and update pages shared with Moyai.",
+}
 export function productRedirect(value: string, origin: string): string {
   if (typeof value !== "string" || !value) throw new Error("The connection service did not return a destination.")
   const url = new URL(value, origin)
   if (url.username || url.password || /[\\\u0000-\u0020\u007f]/.test(value) || (url.protocol !== "https:" && url.origin !== origin)) throw new Error("The connection service returned an invalid destination.")
   return url.href
 }
-export function ProductConnectionRows({ connections, admin, onManage }: { connections: OrganizationConnection[]; admin: boolean; onManage: (connection: OrganizationConnection) => void }) {
+export function ProductConnectionRows({ connections, admin, onManage, onConnect, busy = false }: {
+  connections: OrganizationConnection[]; admin: boolean; busy?: boolean
+  onManage: (connection: OrganizationConnection) => void; onConnect?: (connection: OrganizationConnection) => void
+}) {
   return <div className="ns-records">{connections.map(connection => <article className="ns-record" key={connection.id}><Link2 className="ns-record-icon" aria-hidden="true" />
     <div className="ns-record-copy"><div className="ns-record-title"><h2>{productProviders[connection.id] || connection.id}</h2><span className="ns-badge">{connection.connected ? connection.enabled ? "Connected" : "Paused" : "Not connected"}</span><span className="ns-badge">Organization</span></div>
-      <p>{connection.label || "No account connected"}</p><small>{connection.identity || "No provider identity"} · {connection.read_only ? "Read-only policy" : "Read and write policy"}</small>
-      <small>{connection.check_status === "healthy" ? `Last checked ${dateTime(connection.checked_at)}` : connection.check_status === "needs_attention" ? "Connection needs attention" : "Not checked"}</small>
-    </div><Button size="sm" variant="outline" onClick={() => onManage(connection)}>{admin ? "Manage" : "View access"}<span className="visually-hidden"> for {productProviders[connection.id] || connection.id}</span></Button>
+      <p>{connection.label || providerDescriptions[connection.id] || "No account connected"}</p>
+      {connection.connected ? <><small>{connection.identity || "No provider identity"} · {connection.read_only ? "Read-only policy" : "Read and write policy"}</small>
+        <small>{connection.check_status === "healthy" ? `Last checked ${dateTime(connection.checked_at)}` : connection.check_status === "needs_attention" ? "Connection needs attention" : "Not checked"}</small></>
+        : <small>{!admin ? "Ask a workspace administrator to connect this service." : connection.id === "gitlab" ? "Select the projects Moyai can use." : connection.oauth_configured ? "Review and approve access on the provider's website." : "One-time app setup required."}</small>}
+    </div><div className="ns-row-actions">
+      {admin && !connection.connected && onConnect && <Button size="sm" variant="outline" disabled={busy} onClick={() => onConnect(connection)}>Connect {productProviders[connection.id] || connection.id}<ArrowRight aria-hidden="true" /></Button>}
+      <Button size="sm" variant={admin && !connection.connected ? "ghost" : "outline"} disabled={busy} onClick={() => onManage(connection)}>{admin ? "Manage" : "View access"}<span className="visually-hidden"> for {productProviders[connection.id] || connection.id}</span></Button>
+    </div>
   </article>)}</div>
 }
 function ProductConnectionsPage({ user }: { user: SettingsUser }) {
   const resource = useResource("/product/connections", signal => listOrganizationConnections({ signal }).then(({ data }) => data))
+  const mutation = useMutation()
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [selected, setSelected] = useState<{ connection: OrganizationConnection; mode: "manage" | "connect" | "repositories" } | null>(null)
   const opener = useRef<HTMLElement | null>(null)
   const open = (connection: OrganizationConnection) => { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setSelected({ connection, mode: "manage" }) }
+  const connect = (connection: OrganizationConnection) => {
+    if (user.role !== "admin") return
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!connection.oauth_configured || connection.id === "gitlab" || (connection.id === "github" && !connection.app_registered)) {
+      setSelected({ connection, mode: "connect" })
+      return
+    }
+    let destination: string | undefined
+    void mutation.run(async () => {
+      const { data } = connection.id === "github"
+        ? await startGitHubConnection()
+        : await startOrganizationConnectionOAuth({ path: { provider: connection.id } })
+      if ("url" in data) destination = productRedirect(data.url, location.origin)
+    }, () => { if (destination) window.location.assign(destination); else resource.refresh() })
+  }
+  const authorizationResult = new URLSearchParams(location.search).get("connection")
   return <>
     <section aria-label="Organization connections">
     <h2>Organization connections</h2>
+    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+    {authorizationResult === "cancelled" && <p className="ns-notice" role="status">Connection cancelled. You can try Connect again whenever you're ready.</p>}
+    {authorizationResult === "success" && <p className="ns-notice" role="status">Authorization completed. Your current connections are shown below.</p>}
     <LoadState resource={resource}>{data => {
       const rows = data.filter(row => contains(search, row.id, row.label, row.identity) && (filter === "all" || row.id === filter))
-      return <><p className="ns-help">These accounts are shared with your workspace.</p>
+      return <><p className="ns-help">Connect a service, approve Moyai's access, and return here. These accounts are shared with your workspace.</p>
         <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Connected service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...Object.entries(productProviders).map(([value, label]) => ({ value, label }))]} />} />
-        {rows.length ? <ProductConnectionRows connections={rows} admin={user.role === "admin"} onManage={open} /> : <Empty filtered={Boolean(search) || filter !== "all"} noun="organization connections" onClear={() => { setSearch(""); setFilter("all") }} />}
+        {rows.length ? <ProductConnectionRows connections={rows} admin={user.role === "admin"} busy={mutation.busy} onManage={open} onConnect={connect} /> : <Empty filtered={Boolean(search) || filter !== "all"} noun="organization connections" onClear={() => { setSearch(""); setFilter("all") }} />}
         {selected && <ProductConnectionDialog connection={selected.connection} mode={selected.mode} admin={user.role === "admin"} opener={opener}
           onMode={mode => setSelected(current => current ? { ...current, mode } : null)} onClose={() => setSelected(null)}
           onUpdated={() => { resource.refresh(); setSelected(null) }} />}
@@ -797,8 +837,14 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
   }
   return <div className="ns-fields">
     {connection.id === "github" ? <>
-      <p>Connect the organization’s GitHub App. Its installation controls which repositories can be selected.</p>
+      <p>Choose which repositories Moyai can access on GitHub. GitHub will ask you to approve the installation.</p>
       {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect(() => startGitHubConnection().then(({ data }) => data))}>Continue with GitHub</Button> : <>
+        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect(() => startGitHubConnection({ body: { organization: organization.trim() } }).then(({ data }) => data)) }}>
+          <div className="ns-field"><label>GitHub organization<Input required autoFocus maxLength={39} pattern="[A-Za-z0-9][A-Za-z0-9-]{0,38}" placeholder="your-organization" disabled={mutation.busy} value={organization} onChange={event => setOrganization(event.target.value)} /></label>
+            <p className="ns-field-hint">An organization owner creates the Moyai app on GitHub, then chooses repositories. No token or key file to copy.</p></div>
+          <Button type="submit" disabled={mutation.busy}>Continue with GitHub<ArrowRight aria-hidden="true" /></Button>
+        </form>
+        <details><summary>Advanced: use an existing GitHub App</summary>
         <form className="ns-fields" onSubmit={event => { event.preventDefault(); let destination: string; void mutation.run(async () => {
           const selected = file.current?.files?.[0]
           if (!selected || selected.size > 20_000) throw new Error("Choose a PEM private key file under 20 KB.")
@@ -806,23 +852,24 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
           if (file.current) file.current.value = ""
           destination = productRedirect(result.url, location.origin)
         }, () => window.location.assign(destination)) }}>
-          <h3>Use an existing GitHub App</h3>
           <div className="ns-field"><label>GitHub App ID<Input type="number" min={1} required disabled={mutation.busy} value={appId} onChange={event => setAppId(event.target.value)} /></label></div>
           <div className="ns-field"><label>PEM private key<Input ref={file} type="file" accept=".pem" required disabled={mutation.busy} /></label><p className="ns-field-hint">Choose the key from GitHub App settings. It is never displayed here or placed in chat.</p></div>
           <Button type="submit" disabled={mutation.busy}>Verify app and continue</Button>
-        </form>
-        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect(() => startGitHubConnection({ body: { organization: organization.trim() } }).then(({ data }) => data)) }}>
-          <h3>Register an organization App</h3><div className="ns-field"><label>GitHub organization<Input required maxLength={39} pattern="[A-Za-z0-9][A-Za-z0-9-]{0,38}" disabled={mutation.busy} value={organization} onChange={event => setOrganization(event.target.value)} /></label></div>
-          <Button type="submit" variant="outline" disabled={mutation.busy}>Continue to GitHub registration</Button>
-        </form>
+        </form></details>
       </>}
     </> : <>
-      {connection.oauth_configured ? <Button disabled={mutation.busy} onClick={() => void redirect(() => startOrganizationConnectionOAuth({ path: { provider: connection.id } }).then(({ data }) => data))}>Continue with {name}</Button>
-        : <p>OAuth is not configured for this provider. An administrator can connect using a supported access token.</p>}
+      {connection.oauth_configured ? <><p>Review and approve Moyai's access on {name}. You'll return here when it's connected.</p>
+        <Button disabled={mutation.busy} onClick={() => void redirect(() => startOrganizationConnectionOAuth({ path: { provider: connection.id } }).then(({ data }) => data))}>Continue with {name}<ArrowRight aria-hidden="true" /></Button></>
+        : <div className="ns-fields"><h3>Set up {name} for this workspace</h3>
+          <p>Your deployment administrator needs to register a Moyai app with {name} and configure its client credentials. This is a one-time setup; afterwards, Connect opens {name}'s approval page.</p>
+          {providerSetupLinks[connection.id] && <a className="ns-link" href={providerSetupLinks[connection.id]} target="_blank" rel="noreferrer">Open {name} app settings<ArrowRight aria-hidden="true" /></a>}
+        </div>}
+      {connection.id === "slack" && <p className="ns-field-hint">To use @Moyai in channels, your administrator must also enable the Slack bot and event delivery, then invite the bot to the channel. A user access token alone does not enable replies.</p>}
+      <details><summary>Advanced: connect with an access token</summary>
       <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(() => connectOrganizationConnection({ path: { provider: connection.id }, body: { token } }), () => { setToken(""); onDone() }) }}>
         <div className="ns-field"><label>Access token<Input type="password" autoComplete="off" required minLength={1} maxLength={100000} disabled={mutation.busy} value={token} onChange={event => setToken(event.target.value)} /></label><p className="ns-field-hint">The provider validates the token. It is stored encrypted and is never returned to this page.</p></div>
         <Button type="submit" disabled={mutation.busy}>Connect {name} using token</Button>
-      </form>
+      </form></details>
     </>}
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
     <Button variant="outline" disabled={mutation.busy} onClick={onBack}>Back to account</Button>
