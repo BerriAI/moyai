@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -24,6 +25,8 @@ from sqlalchemy import select
 
 from .failure_diagnostics import FAILURE_KIND, safe_failure_metadata
 from .history_handoff import is_turn_run, latest_turn_snapshot
+from .message_authors import author_name
+from .message_sources import public_messages
 from .models import Event, Message, Turn, User
 from .presentation import private_tool
 from .runtime import Runtime
@@ -79,9 +82,16 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
             select(Message).where(Message.session_id == session_id).order_by(Message.id)
         ))
 
-        from .message_sources import public_message
-        public = {row.id: (await public_message(runtime.database, db, row))[0] for row in messages}
-        own = {turn.actor_id: await runtime.database.same_person(db, user, turn.actor_id) for turn in turns}
+        projected = await public_messages(runtime.database, db, messages)
+        authors = {author.id: author for author in await db.scalars(select(User).where(
+            User.id.in_({row.author_id for row in messages if row.author_id}),
+        ))}
+        public = {row.id: {
+            "id": row.id, "role": row.role, "content": projected[row.id][0],
+            "author_id": row.author_id, "author_name": author_name(authors.get(row.author_id or "")),
+        } for row in messages}
+        own = {identity: await runtime.database.same_person(db, user, identity)
+               for identity in {turn.actor_id for turn in turns} | authors.keys()}
         failure_records = list(await db.scalars(select(Event).where(
             Event.session_id == session_id, Event.kind == FAILURE_KIND,
         ).order_by(Event.id)))
@@ -92,9 +102,34 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
             if row.turn_id in own_turns
         }
 
+    # Reuse the transcript's verified Slack profile cache, releasing the database
+    # connection before provider work and rechecking access before export.
+    if runtime.database.slack_mentions is not None and await runtime.database.slack_mentions(
+        list(public.values()), {key: value[1] for key, value in projected.items()},
+    ):
+        fresh = await runtime.database.user(user.id)
+        if fresh.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        await runtime.database.session(user, session_id)
+
     messages_by_turn: dict[str, list[Message]] = {}
     for message in messages:
         messages_by_turn.setdefault(message.turn_id, []).append(message)
+
+    authored_inputs = {row.turn_id: row for row in messages if row.role == "user"}
+
+    def author_details(message: Message | None) -> dict[str, Any]:
+        if message is None:
+            return {"author": "Unknown sender", "author_id": None, "author_relationship": "unknown"}
+        details = {
+            "author": public[message.id]["author_name"] or "Unknown sender",
+            "author_id": message.author_id,
+            "author_relationship": "requester" if own.get(message.author_id or "", False) else "teammate",
+        }
+        source = projected[message.id][1]
+        if source is not None:
+            details["message_source"] = source["kind"]
+        return details
 
     steps: list[dict[str, Any]] = []
     last_instructions: str | None = None
@@ -132,11 +167,11 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                 "step_id": len(steps) + 1,
                 "timestamp": user_message.created_at,
                 "source": "user",
-                "message": public[user_message.id],
+                "message": public[user_message.id]["content"],
                 "extra": {
                     "turn_id": turn.id,
                     "turn_status": turn.status,
-                    "author": "requester" if own.get(user_message.author_id or "", False) else "teammate",
+                    **author_details(user_message),
                 },
             }
             steps.append(user_step)
@@ -172,7 +207,10 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                                         "timestamp": _timestamp(part.timestamp),
                                         "source": "user",
                                         "message": text,
-                                        "extra": {"kind": "steering", **({"input_turn_id": input_id} if input_id else {})},
+                                        "extra": {
+                                            "kind": "steering", **({"input_turn_id": input_id} if input_id else {}),
+                                            **author_details(authored_inputs.get(input_id) if isinstance(input_id, str) else None),
+                                        },
                                     })
                             elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
                                 call_id = part.tool_call_id

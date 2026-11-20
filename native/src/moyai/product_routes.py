@@ -25,6 +25,7 @@ from sqlalchemy.orm import aliased
 
 from .database import SESSION_METADATA
 from .delegation_models import DelegatedSession
+from .message_authors import author_name
 from .models import Message, Session, SessionPreference, SessionRead, Turn, User
 from .product_files import routes as file_routes
 from .product_history import (
@@ -703,7 +704,7 @@ class ProductReadService:
                         origins[row.id] = origin
                         author = await db.get(User, row.author_id) if row.author_id else None
                         item.update(content=decoded[:MAX_MESSAGE_CHARS], content_truncated=len(decoded) > MAX_MESSAGE_CHARS,
-                                    author_name=author.display_name if author else None,
+                                    author_name=author_name(author),
                                     is_self=await self.runtime.database.same_person(db, reader.user, row.author_id),
                                     **source_view(origin, session_id=run_id, message_id=row.id))
                     except (InvalidToken, ValueError, UnicodeError):
