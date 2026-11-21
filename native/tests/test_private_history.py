@@ -371,3 +371,84 @@ async def test_message_and_chat_search_budgets_are_reported_and_enforced(history
     result = await service.search(ctx, "Cobalt")
     assert result["matches"] == []
     assert result["limits"]["recent_chats"] == MAX_CHATS
+
+
+async def test_history_tools_execute_in_real_temporal_and_replay(history, tmp_path):
+    """Controlled model integration; the separate actual-app proof uses the real gateway."""
+    import asyncio
+
+    from pydantic_ai.capabilities import LocalWorkspace
+    from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolReturnPart
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer
+    from test_bundled_skills_startup import scripted_model
+
+    from moyai.product_identity import ProductIdentityAdapter
+    from moyai.runtime import Runtime
+    from moyai.storage import encrypted_converter
+    from moyai.stores import NativeStores
+    from moyai.worker import make_worker
+    from moyai.worker_capacity import ActivityCapacity
+    from moyai.workflow import TurnWorkflow
+
+    product, _service, ctx, (sid, mid, _) = history
+    settings = product.settings.model_copy(update={"product_mode": "standalone"})
+    provision = NativeStores(settings)
+    try:
+        await provision.start(provision=True)
+    finally:
+        await provision.close()
+    runtime = Runtime(settings)
+    runtime.product_identity = ProductIdentityAdapter(
+        product.adapter.settings, product.source, schema="moyai", native_engine=runtime.database.engine,
+    )
+    runtime.database.product_identity = runtime.product_identity
+    workspace = tmp_path / "computer"
+    (workspace / "skills").mkdir(parents=True)
+    calls = []
+
+    def respond(messages, _info):
+        results = {part.tool_name: part for message in messages for part in message.parts
+                   if isinstance(part, ToolReturnPart)}
+        if "private_history_search" not in results:
+            calls.append("search")
+            return ModelResponse(parts=[ToolCallPart(
+                "private_history_search", {"query": "Cobalt"}, tool_call_id="history-search",
+            )])
+        search = results["private_history_search"]
+        assert search.outcome == "success" and search.content["matches"][0]["message_id"] == mid
+        if "private_history_read" not in results:
+            calls.append("read")
+            return ModelResponse(parts=[ToolCallPart(
+                "private_history_read", {"chat_id": sid, "message_id": mid}, tool_call_id="history-read",
+            )])
+        read = results["private_history_read"]
+        assert read.outcome == "success" and "Juniper Pier" in read.content["source"]["excerpt"]
+        return ModelResponse(parts=[TextPart(f"Juniper Pier, source /#{sid}, message {mid}.")])
+
+    try:
+        await runtime.start(
+            models={"test": scripted_model(respond)}, workspace=LocalWorkspace(workspace),
+            skills_directory="skills",
+        )
+        converter = encrypted_converter(runtime.security, runtime.objects)
+        async with await WorkflowEnvironment.start_local(
+            plugins=[PydanticAIPlugin()], data_converter=converter,
+        ) as environment:
+            runtime.client = environment.client
+            async with make_worker(runtime):
+                handle = await runtime.client.start_workflow(
+                    TurnWorkflow.run, ctx.deps.turn_id, id=f"moyai-turn-{ctx.deps.turn_id}",
+                    task_queue=settings.temporal_queue,
+                )
+                assert (await asyncio.wait_for(handle.result(), 45))["status"] == "completed"
+                recorded = await handle.fetch_history()
+            assert calls == ["search", "read"]
+            await Replayer(
+                interceptors=[ActivityCapacity()], workflows=[TurnWorkflow],
+                plugins=[PydanticAIPlugin()], data_converter=converter,
+            ).replay_workflow(recorded)
+            assert calls == ["search", "read"]  # Replay never dispatches a new tool/model action.
+    finally:
+        await runtime.close()
