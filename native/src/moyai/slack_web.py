@@ -115,8 +115,12 @@ class SlackWeb:
         return sender
 
     async def current(self, db, link: SlackWebLink, *, sender: User | None = None) -> User:
+        settings = self.slack.settings
+        if not (settings.slack_bot_enabled and settings.slack_identity_linking_enabled
+                and settings.slack_dm_enabled and settings.slack_thread_chat_enabled):
+            raise HTTPException(403, "Slack continuation is disabled.")
         installed = await self.slack.installation_in(db)
-        if installed["authority"] != link.connection_authority or not self.slack.settings.slack_dm_enabled:
+        if installed["authority"] != link.connection_authority:
             raise HTTPException(403, "The linked Slack installation changed.")
         owner = await self.identity.authorize_admission(db, ProductGrant(link.owner_id, link.owner_authority))
         if sender is not None:

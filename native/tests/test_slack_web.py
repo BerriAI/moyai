@@ -187,7 +187,10 @@ async def test_slack_reply_uses_same_private_session_and_preserves_signed_grant(
             await product.database._saved_product_grant(db, turn)
 
 
-@pytest.mark.parametrize("change", ["email", "conflict", "installation", "owner"])
+@pytest.mark.parametrize("change", [
+    "email", "conflict", "installation", "owner",
+    "slack_bot_enabled", "slack_identity_linking_enabled", "slack_dm_enabled", "slack_thread_chat_enabled",
+])
 async def test_changed_identity_cannot_continue_or_receive_private_session(linked, change):
     product = linked
     await product.service.web.connect(product.actor, product.session.id)
@@ -196,6 +199,8 @@ async def test_changed_identity_cannot_continue_or_receive_private_session(linke
     elif change == "owner":
         async with product.database.sessions.begin() as db:
             await db.execute(update(User).where(User.id == product.actor.id).values(enabled=False))
+    elif change.startswith("slack_"):
+        setattr(product.service.settings, change, False)
     else:
         async with product.source.begin() as db:
             if change == "email":
