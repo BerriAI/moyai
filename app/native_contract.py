@@ -9,9 +9,9 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Maintenance continuations require snapshot-aware workers and coordinated owners.
-# An older worker cannot interpret the new continuation envelope or activities.
-NATIVE_PROTOCOL_REVISION = 6
+# Private-memory readers must agree across all native roles. Older workers
+# would treat newly captured private notes as ordinary cross-chat memories.
+NATIVE_PROTOCOL_REVISION = 7
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

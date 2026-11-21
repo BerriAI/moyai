@@ -40,7 +40,7 @@ admitted_product = memory_fixtures.admitted_product
 memory_product = memory_fixtures.memory_product
 
 
-async def memory_execution(product, *, private=False, surface="web"):
+async def memory_execution(product, *, private=False, surface="web", connections=()):
     session = await product.database.create_session(
         product.actor, NewSession(visibility="private" if private else "shared"),
     )
@@ -61,6 +61,7 @@ async def memory_execution(product, *, private=False, surface="web"):
     else:
         turn = await product.database.submit(product.actor, session.id, NewMessage(
             prompt="Please remember: Prefer pytest for focused backend tests.", request_key="memory-input",
+            connections=list(connections),
         ))
     assert (await product.database.claim_next()).id == turn.id
     prepared = await product.database.prepare(turn.id)
@@ -78,10 +79,11 @@ def captured_note(message_id, **changes):
     })
 
 
-async def test_real_harness_recall_and_capture_reuse_canonical_rows_and_preserve_original_scope(memory_product):
+@pytest.mark.parametrize("private", [False, True])
+async def test_real_harness_recall_and_capture_reuse_canonical_rows_and_preserve_original_scope(memory_product, private):
     product = memory_product
     await product.memory.save(product.principal.grant, memory_fixtures.note())
-    _, turn, scope, message_id = await memory_execution(product)
+    _, turn, scope, message_id = await memory_execution(product, private=private)
     seen = []
 
     def respond(messages, info):
@@ -109,6 +111,7 @@ async def test_real_harness_recall_and_capture_reuse_canonical_rows_and_preserve
     assert saved["source"]["native_message_id"] == message_id
     assert saved["source"]["native_turn_id"] == turn.id
     assert saved["source"]["engine"] == "native"
+    assert saved["source"]["visibility"] == ("private" if private else "shared")
     assert "run_id" not in saved["source"] and "message_id" not in saved["source"]
     assert view["runtime"]["recall"] and view["runtime"]["auto_save"]
     assert not view["runtime"]["background_review"]
@@ -217,20 +220,96 @@ async def test_untrusted_evidence_paths_and_nonhuman_mutations_fail_closed(memor
         assert await db.scalar(text("SELECT count(*) FROM moyai.personal_memories")) == 0
 
 
-async def test_private_execution_and_disabled_memory_do_not_recall_canonical_body(memory_product):
+@pytest.mark.parametrize("private", [False, True])
+async def test_disabled_memory_does_not_recall_canonical_body(memory_product, private):
     product = memory_product
     await product.memory.save(product.principal.grant, memory_fixtures.note())
-    session, turn, scope, _ = await memory_execution(product, private=True)
+    _, turn, scope, _ = await memory_execution(product, private=private)
     store = ProductMemoryStore(product.memory, scope, turn.id)
     main = await store.read(store.prefix + "MEMORY.md", max_chars=10000)
-    assert "Use the existing formatter." not in main.content
-    assert await store.read(store.prefix + "personal-editor-preference.md", max_chars=10000) is None
-    await product.database.stop(product.actor, session.id)
-    await product.database.stopped(turn.id)
-    _, turn, scope, _ = await memory_execution(product)
-    store = ProductMemoryStore(product.memory, scope, turn.id)
+    assert "Use the existing formatter." in main.content
     await product.memory.preferences(product.principal.grant, Preferences(enabled=False, revision=0))
     assert "Use the existing formatter." not in (await store.read(store.prefix + "MEMORY.md", max_chars=10000)).content
+    assert await store.read(store.prefix + "personal-editor-preference.md", max_chars=10000) is None
+
+
+async def test_private_note_survives_new_private_chat_but_never_enters_shared_tools(memory_product):
+    product = memory_product
+    _, turn, scope, message_id = await memory_execution(product, private=True)
+    private_store = ProductMemoryStore(product.memory, scope, turn.id)
+    written = await private_store.write(
+        private_store.prefix + "personal-backend-testing.md", captured_note(message_id),
+        expected_version=None, operation=MemoryOperation("private-capture", "a" * 64),
+    )
+    _, later, later_scope, _ = await memory_execution(product, private=True)
+    later_store = ProductMemoryStore(product.memory, later_scope, later.id)
+    assert "Prefer pytest" in (await later_store.read(later_store.prefix + "MEMORY.md", max_chars=10000)).content
+    assert (await later_store.read(later_store.prefix + "personal-backend-testing.md", max_chars=10000)).version == written.version
+
+    _, shared, shared_scope, shared_message = await memory_execution(product)
+    store = ProductMemoryStore(product.memory, shared_scope, shared.id)
+    path = store.prefix + "personal-backend-testing.md"
+    main, paths = await store.snapshot(max_chars=10000, path_limit=100)
+    assert "Prefer pytest" not in main.content and path not in paths
+    assert path not in await store.list_paths(store.prefix, limit=100)
+    assert await store.read(path, max_chars=10000) is None
+    assert await store.read(store.prefix + "part-backend-testing-00000.md", max_chars=10000) is None
+    assert not (await store.search(
+        store.prefix, "pytest", limit=10, max_files=100, max_chars=10000, max_file_chars=10000,
+    )).matches
+    # Even a guessed key, revision and opaque version cannot mutate a private note.
+    with pytest.raises(ToolFailed, match="unavailable"):
+        await store.write(
+            path, captured_note(shared_message, revision=1), expected_version=written.version,
+            operation=MemoryOperation("shared-overwrite", "b" * 64),
+        )
+    with pytest.raises(ToolFailed, match="unavailable"):
+        await store.delete(path, expected_version=written.version,
+                           operation=MemoryOperation("shared-delete", "c" * 64))
+
+
+async def test_private_update_and_manual_edit_keep_the_note_private(memory_product):
+    product = memory_product
+    first = await product.memory.save(product.principal.grant, memory_fixtures.note(key="backend-testing"))
+    _, turn, scope, message_id = await memory_execution(product, private=True)
+    store = ProductMemoryStore(product.memory, scope, turn.id)
+    path = store.prefix + "personal-backend-testing.md"
+    original = await store.read(path, max_chars=10000)
+    await store.write(path, captured_note(message_id, revision=1), expected_version=original.version,
+                      operation=MemoryOperation("private-update", "d" * 64))
+    await product.memory.save(product.principal.grant, memory_fixtures.note(
+        key="backend-testing", content="An owner-reviewed testing preference.", revision=2,
+        request_id="manual-private-edit",
+    ), note_id=first["id"])
+    saved = (await product.memory.listing(product.principal.grant))["memories"][0]
+    assert saved["source"] == {"type": "manual", "visibility": "private"}
+    _, shared, shared_scope, _ = await memory_execution(product)
+    shared_store = ProductMemoryStore(product.memory, shared_scope, shared.id)
+    assert await shared_store.read(shared_store.prefix + "personal-backend-testing.md", max_chars=10000) is None
+
+
+async def test_private_memory_cannot_be_rebound_to_another_owner(memory_product):
+    from moyai.models import Session
+
+    product = memory_product
+    await product.memory.save(product.principal.grant, memory_fixtures.note())
+    session, turn, scope, message_id = await memory_execution(product, private=True)
+    async with product.database.sessions.begin() as db:
+        db.add(User(id="another-owner", username="another-owner", display_name="Another owner", password="", role="member"))
+        await db.flush()
+        (await db.get(Session, session.id)).owner_id = "another-owner"
+    store = ProductMemoryStore(product.memory, scope, turn.id)
+    with pytest.raises((HTTPException, ToolFailed)):
+        await store.write(
+            store.prefix + "personal-backend-testing.md", captured_note(message_id),
+            expected_version=None, operation=MemoryOperation("wrong-owner", "e" * 64),
+        )
+    # Access may be refused by the account boundary before memory's own fence.
+    try:
+        result = await store.read(store.prefix + "MEMORY.md", max_chars=10000)
+    except (HTTPException, ToolFailed):
+        return
+    assert "Use the existing formatter." not in result.content
 
 
 async def test_manual_edit_barrier_and_stop_prevent_late_capture(memory_product):
@@ -556,13 +635,13 @@ async def test_batched_snapshot_matches_harness_bounds_with_half_the_live_views(
         assert "personal-other-repo.md" in actual[1]
 
 
-@pytest.mark.parametrize("change", ["forget", "disable", "private", "revoke", "stop"])
+@pytest.mark.parametrize("change", ["forget", "disable", "private", "shared", "revoke", "stop"])
 async def test_batched_snapshot_rechecks_mutations_during_native_read(memory_product, change):
     from moyai.models import Session, Turn
 
     product = memory_product
     saved = await product.memory.save(product.principal.grant, memory_fixtures.note())
-    session, turn, scope, _ = await memory_execution(product)
+    session, turn, scope, _ = await memory_execution(product, private=change == "shared")
     prefix = scope.memory_namespace + "/main/"
 
     class ChangingNativeStore(InMemoryStore):
@@ -574,8 +653,8 @@ async def test_batched_snapshot_rechecks_mutations_during_native_read(memory_pro
                 await product.memory.preferences(product.principal.grant, Preferences(enabled=False, revision=0))
             else:
                 async with product.database.sessions.begin() as db:
-                    if change == "private":
-                        (await db.get(Session, session.id)).visibility = "private"
+                    if change in {"private", "shared"}:
+                        (await db.get(Session, session.id)).visibility = change
                     elif change == "revoke":
                         (await db.get(User, scope.actor_id)).auth_version += 1
                     else:

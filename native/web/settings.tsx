@@ -544,10 +544,11 @@ export function ProductMemoryNotes({ notes, capabilities, onEdit, onRemove }: {
     const sourceLink = productMemorySourceLink(note.source)
     return <article className="ns-record" key={note.id}><div className="ns-record-copy">
       <div className="ns-record-title"><h2>{note.title}</h2><span className="ns-badge">{productMemoryKinds.find(kind => kind.value === note.kind)?.label ?? note.kind}</span>
+        {note.source?.visibility === "private" && <span className="ns-badge">Private chats only</span>}
         {Number.isFinite(expires) && expires <= Date.now() && <span className="ns-badge">Expired</span>}</div>
       {note.review_required && <p className="ns-notice">This note’s source needs review. It is excluded from automatic recall. Review and save it to confirm the content, or delete it.</p>}
       <details><summary>View memory</summary><pre>{note.content}</pre></details>
-      <p>{note.repo_url || "Across your sessions"}</p><small>Updated {dateTime(note.updated_at)}{note.expires_at ? ` · Expires ${dateTime(note.expires_at)}` : ""}</small>
+      <p>{note.repo_url || (note.source?.visibility === "private" ? "Across your private chats" : "Across your sessions")}</p><small>Updated {dateTime(note.updated_at)}{note.expires_at ? ` · Expires ${dateTime(note.expires_at)}` : ""}</small>
       {(note.source?.quote || note.source?.evidence || sourceLink) && <details><summary>Why this was saved</summary>{(note.source?.quote || note.source?.evidence) && <pre>{note.source.quote || note.source.evidence}</pre>}{note.source?.scope && <p>{note.source.scope}</p>}{sourceLink && <a className="ns-link" href={sourceLink}>Open original session</a>}</details>}
       {note.truncated && <p>The preview is incomplete. Editing is unavailable to protect unseen content.</p>}
     </div><div className="ns-row-actions">
@@ -595,6 +596,7 @@ function ProductMemoryPage() {
       {prefs.enabled && !data.runtime ? <p className="ns-notice" role="status">Memory availability could not be checked. Your saved notes are shown below.</p>
         : unavailable && unavailable.length > 0 && <p className="ns-notice" role="status">Currently unavailable: {unavailable.join(", ")}. Your saved notes are kept.</p>}
       <section className="ns-record"><div className="ns-record-copy"><h2>Memory preferences</h2><p>{!prefs.enabled ? "Memory is paused. Your saved notes are kept." : data.runtime?.recall ? "Moyai can use these notes in future chats." : "Choose how memories are saved."}</p>
+        <p>Notes learned in private chats are used only in your private chats.</p>
         {data.review?.latest && <small>Last review: {data.review.latest.status} · {dateTime(data.review.latest.updated_at)}</small>}
       </div><div className="ns-memory-controls">
         <Choice label="How new memories are saved" value={prefs.auto_save ? "auto" : "manual"} disabled={!data.capabilities.preferences || mutation.busy || !prefs.enabled}
@@ -604,7 +606,7 @@ function ProductMemoryPage() {
       {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} action={data.capabilities.create && <Button onClick={() => setEditor({ requestId: crypto.randomUUID() })}><Plus />Add memory</Button>} />
       {rows.length ? <ProductMemoryNotes notes={rows} capabilities={data.capabilities} onEdit={note => setEditor({ note, requestId: crypto.randomUUID() })} onRemove={setRemove} /> : <Empty filtered={Boolean(search)} noun="memories" onClear={() => setSearch("")} />}
-      {editor && (editor.note ? data.capabilities.update && !editor.note.truncated : data.capabilities.create) && <Editor title={editor.note ? "Edit memory" : "Add memory"} description="Keep one useful idea per note."
+      {editor && (editor.note ? data.capabilities.update && !editor.note.truncated : data.capabilities.create) && <Editor title={editor.note ? "Edit memory" : "Add memory"} description={editor.note?.source?.visibility === "private" ? "This note is used only in your private chats. Editing keeps it private." : "Keep one useful idea per note."}
         initial={{ title: editor.note?.title ?? "", content: editor.note?.content ?? "", kind: editor.note?.kind ?? "preference", repo_url: editor.note?.repo_url ?? "" }}
         fields={[{ name: "title", label: "Title", required: true, minLength: 3, maxLength: 120 }, { name: "kind", label: "Type", type: "select", options: productMemoryKinds },
           { name: "content", label: "What should Moyai remember?", type: "textarea", required: true, minLength: 3 },

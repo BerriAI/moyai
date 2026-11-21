@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from pydantic import Field
 
 from .db import now
-from .memory import Form, KINDS, Note, check_content, fingerprint, search_terms
+from .memory import Form, KINDS, Note, check_content, fingerprint, private_note, search_terms
 from .spend import UsageCapture
 from .model_selection import gateway_model
 
@@ -195,7 +195,8 @@ class MemoryReview:
         return sources
 
     def notes(self, owner, repo, sources):
-        notes = [n for n in self.memory.listing(owner) if not n['repo_url'] or n['repo_url'] == repo]
+        notes = [n for n in self.memory.listing(owner)
+                 if not private_note(n) and (not n['repo_url'] or n['repo_url'] == repo)]
         terms = search_terms(' '.join(s['content'] for s in sources))
         notes.sort(key=lambda n: (len(terms & search_terms(n['title']+' '+n['content'])), n['updated_at']), reverse=True)
         detailed = []
@@ -318,7 +319,7 @@ class MemoryReview:
                 raise ValueError('Memory source changed')
             repo = Note.repository(source['repo_url']) if source['repo_url'] else ''
             current = {(n['id'], n['revision']) for n in self.memory.listing(job['owner_id'], conn)
-                       if not n['repo_url'] or n['repo_url'] == repo}
+                       if not private_note(n) and (not n['repo_url'] or n['repo_url'] == repo)}
             if current != {(n['id'], n['revision']) for n in notes}:
                 raise ValueError('Memory library changed during review')
             saved, seen = 0, set()

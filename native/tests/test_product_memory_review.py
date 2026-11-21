@@ -1,15 +1,19 @@
 """Native review policy/Temporal qualification; not actual-app provider proof."""
 
 import asyncio
+import json
 import os
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx2
 import pytest
 import pytest_asyncio
 import test_product_memory as memory_fixtures
+from app.db import Store
 from app.memory_review import Proposal, Review
+from app.security import Security
 from fastapi import HTTPException
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -18,10 +22,12 @@ from pydantic_ai.profiles import ModelProfile
 from sqlalchemy import text, update
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
+from test_product_identity import settings_for
 from test_product_memory_store import memory_execution
 
 from moyai.inference_usage import InferenceActivity
 from moyai.models import Session, Turn, User
+from moyai.product_connections import ProductConnections
 from moyai.product_drain_models import ProductDrainState
 from moyai.product_memory import Preferences
 from moyai.product_memory_review import (
@@ -73,8 +79,25 @@ async def review_product(memory_product, monkeypatch):
     return product
 
 
-async def completed_review(product, *, private=False, surface="web"):
-    session, turn, scope, message_id = await memory_execution(product, private=private, surface=surface)
+@pytest.fixture
+def personal_connections(review_product, tmp_path):
+    settings = settings_for(tmp_path)
+    store = Store(settings.data_dir, settings.agent_model)
+    review_product.database.product_connections = ProductConnections(
+        SimpleNamespace(
+            store_proxy=store, security=Security(settings), settings=settings,
+            identity=review_product.adapter,
+        ),
+        review_product.database,
+    )
+    yield
+    store.close()
+
+
+async def completed_review(product, *, private=False, surface="web", connections=()):
+    session, turn, scope, message_id = await memory_execution(
+        product, private=private, surface=surface, connections=connections,
+    )
     assert await product.database.save_result(
         scope, conversation='{"messages":[]}', output="Original task completed successfully.",
         workspace=None, usage={},
@@ -123,9 +146,10 @@ async def test_failed_answer_transaction_cannot_leave_an_admitted_review(review_
         assert (await db.get(Turn, turn.id)).result_fingerprint is None
 
 
-async def test_review_applies_exact_evidence_atomically_with_canonical_policy_and_replays_once(review_product):
+@pytest.mark.parametrize("private", [False, True])
+async def test_review_applies_exact_evidence_atomically_with_canonical_policy_and_replays_once(review_product, private):
     product = review_product
-    _, turn, scope, message_id, admitted = await completed_review(product)
+    _, turn, scope, message_id, admitted = await completed_review(product, private=private)
     assert admitted and not product.memory.background_review_available
     prepared = await product.review.prepare(turn.id)
     assert prepared.scope.product_grant == scope.product_grant
@@ -157,8 +181,8 @@ async def test_review_applies_exact_evidence_atomically_with_canonical_policy_an
         )
 
 
-@pytest.mark.parametrize("private,surface", [(True, "web"), (False, "automation"), (False, "continued")])
-async def test_review_does_not_admit_private_or_automated_sources(review_product, private, surface):
+@pytest.mark.parametrize("private,surface", [(False, "automation"), (False, "continued"), (True, "automation")])
+async def test_review_does_not_admit_automated_sources(review_product, private, surface):
     product = review_product
     _, turn, _, _, admitted = await completed_review(product, private=private, surface=surface)
     assert not admitted
@@ -166,7 +190,7 @@ async def test_review_does_not_admit_private_or_automated_sources(review_product
         assert await db.get(ProductMemoryReview, turn.id) is None
 
 
-@pytest.mark.parametrize("change", ["preferences", "forget", "manual_edit", "revoke", "deleted", "drain"])
+@pytest.mark.parametrize("change", ["preferences", "forget", "manual_edit", "revoke", "deleted", "drain", "visibility"])
 async def test_review_cannot_apply_stale_results_after_model_await(review_product, change):
     product = review_product
     saved = await product.memory.save(product.principal.grant, memory_fixtures.note())
@@ -186,6 +210,8 @@ async def test_review_cannot_apply_stale_results_after_model_await(review_produc
                 await db.execute(update(User).where(User.id == product.user_id).values(auth_version=2))
             elif change == "deleted":
                 await db.execute(update(Session).where(Session.id == session.id).values(deleted=True))
+            elif change == "visibility":
+                await db.execute(update(Session).where(Session.id == session.id).values(visibility="private"))
             else:
                 await db.execute(update(ProductDrainState).where(ProductDrainState.id == 1).values(paused=True))
     with pytest.raises((HTTPException, PermissionError)):
@@ -194,6 +220,66 @@ async def test_review_cannot_apply_stale_results_after_model_await(review_produc
         assert await db.scalar(text("SELECT count(*) FROM moyai.personal_memories")) == 1
     async with product.database.sessions() as db:
         assert (await db.get(Turn, turn.id)).status == "completed"
+
+
+async def test_private_background_notes_are_excluded_from_shared_review_prompts(review_product):
+    product = review_product
+    _, turn, _, message_id, admitted = await completed_review(product, private=True)
+    assert admitted
+    prepared = await product.review.prepare(turn.id)
+    assert await product.review.apply(prepared, [Review(memories=[proposal(message_id)])]) == 1
+    saved = (await product.memory.listing(product.principal.grant))["memories"][0]
+    assert saved["source"]["visibility"] == "private"
+    _, shared_turn, _, _, _ = await completed_review(product)
+    shared_review = await product.review.prepare(shared_turn.id)
+    for prompt in shared_review.prompts:
+        data = json.loads(prompt)
+        assert data["existing_memories"] == [] and data["memory_index"] == []
+
+
+async def test_private_review_accepts_personal_connections_and_rechecks_revocation(review_product, personal_connections):
+    from moyai.models import Connection
+
+    product = review_product
+    async with product.database.sessions.begin() as db:
+        db.add(Connection(
+            id="personal-mcp", owner_id=product.actor.id, name="Personal tools", kind="mcp",
+            credential=product.database.security.seal("synthetic-personal-token"), shared=False,
+        ))
+    _, turn, _, message_id, admitted = await completed_review(
+        product, private=True, connections=["personal-mcp"],
+    )
+    assert admitted
+    prepared = await product.review.prepare(turn.id)
+    assert [grant.id for grant in prepared.scope.grants] == ["personal-mcp"]
+    assert prepared.scope.grants[0].credential == ""
+    async with product.database.sessions.begin() as db:
+        (await db.get(Connection, "personal-mcp")).enabled = False
+    with pytest.raises((HTTPException, PermissionError)):
+        await product.review.apply(prepared, [Review(memories=[proposal(message_id)])])
+    assert (await product.memory.listing(product.principal.grant))["memories"] == []
+
+
+async def test_completed_private_history_is_not_backfilled(review_product, monkeypatch):
+    product = review_product
+    _, turn, scope, _ = await memory_execution(product, private=True)
+    assert await product.database.save_result(
+        scope, conversation='{"messages":[]}', output="Completed before private memory was available.",
+        workspace=None, usage={},
+    )
+    await product.database.settle(turn.id)
+    product.review.settings.memory_review_backfill_limit = 100
+
+    async def ready(_runtime):
+        return True
+
+    monkeypatch.setattr(product.review, "worker_ready", ready)
+    client = SimpleNamespace(start_workflow=AsyncMock())
+    runtime = SimpleNamespace(connect=AsyncMock(return_value=client))
+    assert await product.review.dispatch_pending(runtime) == 0
+    client.start_workflow.assert_not_called()
+    async with product.database.sessions() as db:
+        assert await db.get(ProductMemoryReview, turn.id) is None
 
 
 async def test_review_rejects_forged_sources_and_duplicate_proposals_without_partial_saves(review_product):

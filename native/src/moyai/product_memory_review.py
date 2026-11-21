@@ -27,7 +27,7 @@ from typing import Any
 
 from app.context_budget import ContextBudget
 from app.library_views import fit_context
-from app.memory import Note, check_content, search_terms
+from app.memory import Note, check_content, private_note, search_terms
 from app.memory_review import INSTRUCTIONS, Review, review_pages
 from fastapi import HTTPException
 from pydantic import TypeAdapter
@@ -193,7 +193,9 @@ class ProductMemoryReviewService:
         if (
             not self.settings.memory_review_enabled or turn.status not in {"saving", "completed"}
             or turn.result_accepted is not True or turn.parent_turn is not None
-            or session.deleted or session.visibility != "shared" or session.surface not in {"web", "slack"}
+            or session.deleted or session.visibility not in {"private", "shared"}
+            or session.surface not in {"web", "slack"}
+            or (session.visibility == "private" and session.owner_id != turn.actor_id)
             or not turn.preparation or await db.get(ProductMemoryReview, turn.id) is not None
             or await db.get(ProductAutomationTurn, turn.id) is not None
         ):
@@ -250,7 +252,8 @@ class ProductMemoryReviewService:
         ).with_for_update(read=True))
         job = await db.get(ProductMemoryReview, turn_id, with_for_update=True)
         if (
-            session is None or session.deleted or session.visibility != "shared"
+            session is None or session.deleted or session.visibility not in {"private", "shared"}
+            or (session.visibility == "private" and session.owner_id != turn.actor_id)
             or session.surface not in {"web", "slack"} or turn.status != "completed"
             or turn.parent_turn is not None or turn.result_accepted is not True or not turn.preparation
             or job is None or job.session_id != turn.session_id or job.actor_id != turn.actor_id
@@ -269,8 +272,8 @@ class ProductMemoryReviewService:
         ):
             raise PermissionError("Current memory preferences, owner guidance or source inputs superseded the review.")
         prepared = TypeAdapter(PreparedTurn).validate_json(self.database.security.unseal(turn.preparation))
-        if prepared.scope.visibility != "shared" or prepared.scope.surface not in {"web", "slack"}:
-            raise PermissionError("The original task did not permit personal-memory export.")
+        if prepared.scope.visibility != session.visibility or prepared.scope.surface not in {"web", "slack"}:
+            raise PermissionError("The original task's memory visibility changed.")
         expected = replace(
             prepared.scope, model=job.model, surface="memory_review",
             grants=[replace(item, credential="", policy={}) for item in prepared.scope.grants],
@@ -281,7 +284,8 @@ class ProductMemoryReviewService:
         ):
             raise PermissionError("A memory review scope cannot replace the admitted requester.")
         grants = await self.database.resolve_grants(
-            db, actor.id, [item.id for item in expected.grants], shared_session=True, surface=session.surface,
+            db, actor.id, [item.id for item in expected.grants],
+            shared_session=session.visibility == "shared", surface=session.surface,
         )
         if [(item.id, item.revision) for item in grants] != [(item.id, item.revision) for item in expected.grants]:
             raise PermissionError("Connection authority changed before memory review.")
@@ -293,13 +297,18 @@ class ProductMemoryReviewService:
         idle = session.active_turn is None and active is None and drain is not None and not drain.paused
         return job, expected, sources, idle
 
-    async def _notes(self, db: AsyncSession, owner: str, repository: str) -> list[dict[str, Any]]:
+    async def _notes(
+        self, db: AsyncSession, owner: str, repository: str, *, visibility: str,
+    ) -> list[dict[str, Any]]:
         rows = (await db.execute(text(
             f"SELECT * FROM {self.memory._table('personal_memories')} "
             "WHERE owner_id=:owner AND deleted=0 ORDER BY updated_at DESC,id"
         ), {"owner": owner})).mappings()
         notes = [self.memory._unpack(dict(row)) for row in rows]
-        return [note for note in notes if not note["repo_url"] or note["repo_url"] == repository]
+        return [
+            note for note in notes if (visibility == "private" or not private_note(note))
+            and (not note["repo_url"] or note["repo_url"] == repository)
+        ]
 
     async def _repository(self, scope: RunScope) -> str:
         return await ProductMemoryStore(
@@ -335,7 +344,7 @@ class ProductMemoryReviewService:
             job, scope, sources, idle = await self._state(db, turn_id, scope=scope)
             if not idle:
                 return ReviewInput(wait_seconds=30)
-            notes = await self._notes(db, job.owner_id, repository)
+            notes = await self._notes(db, job.owner_id, repository, visibility=scope.visibility)
             if job.snapshot:
                 snapshot = self._snapshot(job)
                 if (
@@ -403,7 +412,9 @@ class ProductMemoryReviewService:
         snapshot = self._snapshot(job)
         if (
             snapshot["input_fingerprint"] != fingerprint(sources)
-            or snapshot["notes_fingerprint"] != fingerprint(await self._notes(db, job.owner_id, snapshot["repository"]))
+            or snapshot["notes_fingerprint"] != fingerprint(await self._notes(
+                db, job.owner_id, snapshot["repository"], visibility=scope.visibility,
+            ))
         ):
             raise PermissionError("The memory review input or library changed before inference.")
 
@@ -443,7 +454,7 @@ class ProductMemoryReviewService:
             if job.status != "running" or job.owner_id != owner:
                 raise PermissionError("The memory review was superseded before applying its result.")
             snapshot = self._snapshot(job)
-            notes = await self._notes(db, owner, repository)
+            notes = await self._notes(db, owner, repository, visibility=scope.visibility)
             if (
                 prepared.snapshot_fingerprint != job.snapshot_fingerprint
                 or snapshot["input_fingerprint"] != fingerprint(sources)
@@ -482,6 +493,7 @@ class ProductMemoryReviewService:
                     "type": "chat", "capture": "background", "core": "pydantic-v1",
                     "native_session_id": scope.session_id, "native_turn_id": scope.turn_id,
                     "native_message_id": item.source_message_id, "quote": item.source_quote,
+                    "visibility": scope.visibility,
                 })
                 saved += 1
             job.status, job.saved_count, job.updated_at = "completed", saved, now()
@@ -509,7 +521,9 @@ class ProductMemoryReviewService:
                 ).order_by(Turn.created_at.desc()).limit(self.settings.memory_review_backfill_limit))
                 for turn in candidates:
                     session = await db.get(Session, turn.session_id)
-                    if session is not None:
+                    # Previously completed private chats never consented to
+                    # cross-chat capture. Only new completions enqueue them.
+                    if session is not None and session.visibility == "shared":
                         await self.enqueue_in(db, turn, session)
                 self.backfilled = True
             jobs = list(await db.scalars(select(ProductMemoryReview).join(

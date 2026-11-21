@@ -12623,6 +12623,21 @@
               }
             ],
             "title": "Url"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "enum": [
+                  "private",
+                  "shared"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
           }
         },
         "required": [
@@ -12633,7 +12648,8 @@
           "run_id",
           "session_id",
           "engine",
-          "url"
+          "url",
+          "visibility"
         ],
         "title": "ProductMemorySource",
         "type": "object"
