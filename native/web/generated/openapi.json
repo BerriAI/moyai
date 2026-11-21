@@ -2630,6 +2630,16 @@
       "AutomationDefinition": {
         "additionalProperties": false,
         "properties": {
+          "connection_ids": {
+            "description": "Exact authorized connection IDs for new-chat runs. Existing-chat runs retain that chat\u2019s selected accounts.",
+            "items": {
+              "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Connection Ids",
+            "type": "array"
+          },
           "environment_id": {
             "default": "auto",
             "description": "Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.",
@@ -2758,7 +2768,7 @@
                 "type": "null"
               }
             ],
-            "description": "Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.",
+            "description": "Continue an owned chat with matching visibility on every run, retaining its history and computer. Omit for a new chat each run.",
             "title": "Session Id"
           },
           "triggers": {
@@ -2770,6 +2780,16 @@
             "minItems": 1,
             "title": "Triggers",
             "type": "array"
+          },
+          "visibility": {
+            "default": "shared",
+            "description": "Private definitions and runs are visible only to their owner. Fixed after creation.",
+            "enum": [
+              "private",
+              "shared"
+            ],
+            "title": "Visibility",
+            "type": "string"
           }
         },
         "required": [
@@ -10501,6 +10521,16 @@
         "additionalProperties": false,
         "description": "A saved canonical definition as returned to the editor.",
         "properties": {
+          "connection_ids": {
+            "description": "Exact authorized connection IDs for new-chat runs. Existing-chat runs retain that chat\u2019s selected accounts.",
+            "items": {
+              "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Connection Ids",
+            "type": "array"
+          },
           "environment_id": {
             "default": "auto",
             "description": "Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.",
@@ -10628,7 +10658,7 @@
                 "type": "null"
               }
             ],
-            "description": "Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.",
+            "description": "Continue an owned chat with matching visibility on every run, retaining its history and computer. Omit for a new chat each run.",
             "title": "Session Id"
           },
           "triggers": {
@@ -10638,11 +10668,23 @@
             "minItems": 1,
             "title": "Triggers",
             "type": "array"
+          },
+          "visibility": {
+            "default": "shared",
+            "description": "Private definitions and runs are visible only to their owner. Fixed after creation.",
+            "enum": [
+              "private",
+              "shared"
+            ],
+            "title": "Visibility",
+            "type": "string"
           }
         },
         "required": [
           "name",
           "prompt",
+          "visibility",
+          "connection_ids",
           "session_id",
           "triggers",
           "max_runs_per_hour",
@@ -10989,6 +11031,10 @@
             "$ref": "#/components/schemas/ProductAutomationDefinition"
           },
           "execution_visibility": {
+            "enum": [
+              "private",
+              "shared"
+            ],
             "title": "Execution Visibility",
             "type": "string"
           },
@@ -11147,6 +11193,14 @@
             },
             "title": "Triggers",
             "type": "array"
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "shared"
+            ],
+            "title": "Visibility",
+            "type": "string"
           }
         },
         "required": [
@@ -11155,6 +11209,7 @@
           "name",
           "owner_id",
           "owned",
+          "visibility",
           "legacy_paused",
           "triggers",
           "native"

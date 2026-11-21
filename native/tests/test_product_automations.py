@@ -512,7 +512,7 @@ async def reserved_call(ctx, run_ctx, name, body):
     return native_tools, tool, identity
 
 
-@pytest.mark.parametrize("reason", ["private", "delegate", "wrong_turn", "revision", "blocker", "shared_password"])
+@pytest.mark.parametrize("reason", ["delegate", "wrong_turn", "revision", "blocker", "shared_password"])
 async def test_trusted_tool_refusals_settle_only_the_current_unstarted_attempt(automations, reason):
     ctx = automations
     actor = None
@@ -525,7 +525,7 @@ async def test_trusted_tool_refusals_settle_only_the_current_unstarted_attempt(a
         async with ctx.product.database.sessions.begin() as db:
             actor = await ctx.product.adapter.project_native_user(db, principal)
     run_ctx = await tool_context(
-        ctx, visibility="private" if reason == "private" else "shared", actor=actor, delegate=reason == "delegate",
+        ctx, actor=actor, delegate=reason == "delegate",
     )
     name = "automation_create"
     body = CreateRequest(

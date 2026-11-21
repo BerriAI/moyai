@@ -50,15 +50,16 @@ def test_old_definitions_keep_their_enabled_digest():
 
 
 @pytest.mark.parametrize("continued", [False, True])
-async def test_repeated_runs_deliver_real_previous_messages_only_in_continued_chat(automations, continued):
+@pytest.mark.parametrize("visibility", ["shared", "private"])
+async def test_repeated_runs_deliver_real_previous_messages_only_in_continued_chat(automations, continued, visibility):
     ctx, seen = automations, []
     database = ctx.product.database
-    session = await database.create_session(ctx.product.actor, NewSession(visibility="shared"))
+    session = await database.create_session(ctx.product.actor, NewSession(visibility=visibility))
     marker = "Context marker " + uuid4().hex
     human = await database.submit(ctx.product.actor, session.id, NewMessage(prompt=marker, request_key="human"))
     workspace = {"provider": "local", "id": "/tmp/synthetic-chat-computer"}
     await run_turn(ctx, human.id, lambda *_: ModelResponse(parts=[TextPart("Original chat answer")]), workspace=workspace)
-    row, binding = await fixtures.activate(ctx, session_id=session.id if continued else None)
+    row, binding = await fixtures.activate(ctx, session_id=session.id if continued else None, visibility=visibility)
 
     def observe(messages, _):
         text = [part.content for message in messages for part in message.parts
@@ -78,6 +79,7 @@ async def test_repeated_runs_deliver_real_previous_messages_only_in_continued_ch
     assert prepared.scope.authority.surface == second_prepared.scope.authority.surface == "automation"
     async with database.sessions() as db:
         saved = await db.get(Session, first["session_id"])
+        assert saved.visibility == prepared.scope.authority.visibility == visibility
         assert saved.surface == ("web" if continued else "automation")
         message = await db.scalar(select(Message).where(Message.turn_id == first["turn_id"], Message.role != "assistant"))
         assert message.role == "system" and message.author_id is None
@@ -91,29 +93,32 @@ async def test_repeated_runs_deliver_real_previous_messages_only_in_continued_ch
 
 
 @pytest.mark.parametrize("destination", [None, "new_chat"])
-async def test_chat_tool_defaults_to_current_chat_with_explicit_standalone_choice(automations, destination):
+@pytest.mark.parametrize("visibility", ["shared", "private"])
+async def test_chat_tool_defaults_to_current_chat_with_explicit_standalone_choice(automations, destination, visibility):
     ctx = automations
-    run = await fixtures.tool_context(ctx)
+    run = await fixtures.tool_context(ctx, visibility=visibility)
     request = CreateRequest(revision=0, request_key="tool-create", turn_id=run.deps.turn_id,
                             definition=fixtures.definition(), **({"destination": destination} if destination else {}))
     result = await invoke(ctx, run, "automation_create", request)
     preview = await ctx.service.preview(ctx.grant, result["id"])
     assert preview["definition"]["session_id"] == (None if destination else run.deps.session_id)
+    assert preview["definition"]["visibility"] == visibility
 
 
-@pytest.mark.parametrize("change", ["private", "archived", "deleted", "owner"])
-async def test_destination_changes_block_admission_and_already_queued_execution(automations, change):
+@pytest.mark.parametrize("change", ["visibility", "archived", "deleted", "owner"])
+@pytest.mark.parametrize("visibility", ["shared", "private"])
+async def test_destination_changes_block_admission_and_already_queued_execution(automations, change, visibility):
     ctx = automations
     database = ctx.product.database
-    session = await database.create_session(ctx.product.actor, NewSession(visibility="shared"))
-    row, binding = await fixtures.activate(ctx, session_id=session.id)
+    session = await database.create_session(ctx.product.actor, NewSession(visibility=visibility))
+    row, binding = await fixtures.activate(ctx, session_id=session.id, visibility=visibility)
     first = await fixtures.occurrence(ctx, row, binding)
     # A real different native owner is needed to preserve the FK.
     if change == "owner":
         from moyai.models import User
         async with database.sessions.begin() as db:
             db.add(User(id="different-owner", username="different-owner", display_name="Other", password="unusable"))
-    values = {"visibility": "private"} if change == "private" else {"owner_id": "different-owner"} if change == "owner" else {change: True}
+    values = {"visibility": "private" if visibility == "shared" else "shared"} if change == "visibility" else {"owner_id": "different-owner"} if change == "owner" else {change: True}
     async with database.sessions.begin() as db:
         await db.execute(update(Session).where(Session.id == session.id).values(**values))
     next_run = await fixtures.occurrence(ctx, row, binding)
@@ -145,11 +150,12 @@ async def test_queued_run_waits_for_human_and_cannot_join_an_active_goal(automat
 
 
 @pytest.mark.parametrize("question", [False, True])
-async def test_resumed_run_keeps_automation_authority_and_occurrence_identity(automations, question):
+@pytest.mark.parametrize("visibility", ["shared", "private"])
+async def test_resumed_run_keeps_automation_authority_and_occurrence_identity(automations, question, visibility):
     ctx = automations
     database = ctx.product.database
-    session = await database.create_session(ctx.product.actor, NewSession(visibility="shared"))
-    row, binding = await fixtures.activate(ctx, session_id=session.id, self_management={"instructions": True})
+    session = await database.create_session(ctx.product.actor, NewSession(visibility=visibility))
+    row, binding = await fixtures.activate(ctx, session_id=session.id, self_management={"instructions": True}, visibility=visibility)
     first = await fixtures.occurrence(ctx, row, binding)
     await database.claim_next()
     scope = (await database.prepare(first["turn_id"])).scope
@@ -169,12 +175,14 @@ async def test_resumed_run_keeps_automation_authority_and_occurrence_identity(au
     await database.claim_next()
     resumed_scope = (await database.prepare(resumed.id)).scope
     assert resumed_scope.authority.surface == "automation"
+    assert resumed_scope.authority.visibility == visibility
     with pytest.raises(HTTPException):
         await ctx.service.authorize_tool(resumed_scope, resumed_scope.turn_id)
     async with database.sessions() as db:
         _, source = await ctx.service.access.source(db, resumed_scope)
         assert source.turn_id == first["turn_id"] and source.automation_id == row["id"]
         assert (await db.get(ProductAutomationTurn, resumed.id)).origin_turn_id == scope.turn_id
+        assert (await db.get(ProductAutomationTurn, resumed.id)).visibility == visibility
         assert await db.get(GoalTurn, resumed.id) is None
     history = await ctx.service.history(ctx.grant, row["id"])
     assert history["history"][0]["status"] == "running"

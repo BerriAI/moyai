@@ -7,18 +7,18 @@ for the current human turn. No legacy run or executor is created.
 
 ## Chat history and recurring work
 
-In a shared web chat, `automation_create` defaults to continuing that chat on
+In a private or shared web chat, `automation_create` defaults to continuing that chat on
 future runs. Each run sees the chat's earlier messages and answers and reuses
 its computer and selected accounts. Choose `destination="new_chat"` when each
 run should start independently. Scheduling from Slack requires `new_chat`.
 
 In **Settings → Automations**, **Run in** defaults to **New chat each run**.
-Select a recent shared chat you own to keep context between runs. Existing
+Select a recent chat you own with matching visibility to keep context between runs. Existing
 automations keep their fresh-chat behavior unless you change this selection.
 Save the definition paused, review it, then enable it.
 
 Runs that continue a chat wait while it is busy or waiting for input. Archiving,
-deleting, or making the chat private prevents scheduled execution. If its
+deleting, or changing the chat's visibility prevents scheduled execution. If its
 selected accounts or project change, review and enable the automation again.
 The selected chat supplies its project and connections; the standalone project
 settings apply only to new-chat runs.
@@ -33,6 +33,35 @@ The definition stores an optional native `session_id`; absence means a fresh
 chat per run. The additive `2026-10-19-automation-chats-v23` migration records
 per-turn automation provenance without changing earlier schema receipts or
 existing enabled definitions' digests.
+
+## Private schedules
+
+The definition's `visibility` is fixed at creation. Existing definitions and
+Settings-created definitions default to `shared`; choose **Private** in Settings
+for a personal schedule. Agent creation takes its visibility from the current
+persisted chat, regardless of the model's requested default. Private definitions,
+previews, history and resulting chats are visible only to their owner, including
+when another viewer is an administrator. Agent reads and mutations require the
+chat and definition to have matching visibility.
+
+Private automations support calendar triggers. Event sources and webhooks remain
+shared-only. A private run can recall its owner's private memory, but cannot
+write personal memory or gain general automation-management authority.
+
+For new-chat runs, private schedules store exact `connection_ids`. Agent creation
+captures the source chat's selected accounts; Settings lets the owner select
+authorized accounts explicitly. Personal Slack reads and personal MCP connections
+are supported, with current authorization checked again on execution and resume.
+Provider-name `plugins` are rejected for private definitions. Existing-chat runs
+use that chat's selected accounts and require review after a selection changes.
+
+Provision `2026-11-21-private-automations-v24` before starting this version. The
+additive nullable column records each scheduled turn's original visibility;
+old NULL rows retain shared authority. Historical schema receipts and unchanged
+shared-definition digests remain intact. Native protocol revision 8 requires
+coordinated adoption by the API, worker, broker and coordinator. Older runtimes
+do not enforce private automation access: do not downgrade or serve these rows
+through an older runtime while private definitions or turns remain.
 
 ## Assembly
 
@@ -70,7 +99,7 @@ The fixed EffectReceipts mutation allowlist must contain:
 }
 ```
 
-The direct tools require a current individual requester, a persisted shared
+The direct tools require a current individual requester, a persisted matching-visibility
 direct chat and the trusted root run identity. Shared-password authentication
 does not authorize these tools. The original explicit local-preview exception
 is retained. Scoped tools recheck the persisted occurrence or human-turn grant;
@@ -81,7 +110,7 @@ Verified mapped Slack direct chats use
 management interactions. The raw Slack scope, original turn authority and effect
 identity remain intact. Operation ownership and explicit enable/migrate capture
 the canonical individual owner. Scheduled admissions never call that resolver.
-Freshness, ambiguity, disabled owners, delegated work and persisted private
+Freshness, ambiguity, disabled owners, delegated work and persisted chat
 visibility are checked before mutation and again after asynchronous work.
 
 Native credential/approval resumptions have no new user Message. Management and
@@ -111,14 +140,14 @@ canonical product Origin and `X-CSRF-Token` checks.
 
 | Route | Request or result |
 | --- | --- |
-| `GET /` | `automations`, `next_offset`, `event_choices`, `source`, `migration`, `capabilities`; shared library rows include `owner_id` and `owned` |
+| `GET /` | `automations`, `next_offset`, `event_choices`, `source`, `migration`, `capabilities`; visible library rows include `owner_id`, `owned` and `visibility`; private rows are owner-only |
 | `GET /{id}/preview` | Full canonical `definition`, revision, native generation/sync state, blockers and per-action capabilities |
 | `POST /` | `{revision: 0, request_key, definition}`; saves paused |
 | `PUT /{id}` | `{revision, request_key, definition}`; saves paused |
 | `POST /{id}/migrate` | `{revision, request_key, activate: false}`; explicit opt-in |
 | `POST /{id}/enable`, `/pause`, `/retire` | `{revision, request_key}` |
 | `POST /{id}/run` | `{revision, request_key}`; 202 with native session/turn IDs; does not enable recurring execution |
-| `GET /{id}/history` | `history`, `next_cursor`, `untrusted_reference`; actual native/source status with private/deleted sessions excluded |
+| `GET /{id}/history` | `history`, `next_cursor`, `untrusted_reference`; actual native/source status, including the owner's private scheduled chats; deleted or unauthorized sessions excluded |
 | `GET /{id}/webhook` | Receiver readiness, provider URLs/examples and actual delivery metadata; no secrets |
 | `POST /{id}/webhook` | `{revision, request_key, provider, secret?}`; configures canonical receiver, increments revision and pauses |
 | `POST /{id}/test-event` | `{provider, event_header?, payload}`; returns match/context and `started: false` |

@@ -40,6 +40,7 @@ PROTOCOL = "moyai-native-online-v1"
 FROM_VERSION = "2026-10-18-message-sources-v21"
 TO_VERSION = "2026-10-17-goals-v22"
 AUTOMATION_CHAT_VERSION = "2026-10-19-automation-chats-v23"
+PRIVATE_AUTOMATION_VERSION = "2026-11-21-private-automations-v24"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -135,10 +136,18 @@ def _automation_chat_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _private_automation_columns(metadata: MetaData, schema: str) -> None:
+    metadata.tables[f"{schema}.moyai_product_automation_turns"].append_column(
+        Column("visibility", String(20), nullable=True),
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
               _automation_chat_tables),
+    Expansion(AUTOMATION_CHAT_VERSION, PRIVATE_AUTOMATION_VERSION, frozenset(),
+              (("moyai_product_automation_turns", "visibility"),), _private_automation_columns),
 )
 
 

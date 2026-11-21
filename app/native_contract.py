@@ -9,9 +9,9 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Private-memory readers must agree across all native roles. Older workers
-# would treat newly captured private notes as ordinary cross-chat memories.
-NATIVE_PROTOCOL_REVISION = 7
+# Every role must preserve private automation definitions and admitted visibility.
+# Older readers assume that all definitions and scheduled executions are shared.
+NATIVE_PROTOCOL_REVISION = 8
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

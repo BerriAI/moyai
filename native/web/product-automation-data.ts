@@ -95,7 +95,7 @@ export function automationSamplePayload(value: string): Record<string, unknown> 
   return parsed as Record<string, unknown>
 }
 const blockerMessages: Record<string, string> = {
-  scheduled_chat_unavailable: "Choose an active shared chat you own, or start a new chat each run.",
+  scheduled_chat_unavailable: "Choose an active chat you own with the automation’s visibility, or start a new chat each run.",
   execution_mode_not_supported: "This execution mode is not supported by the new runtime.",
   too_many_triggers: "The new runtime supports at most 16 triggers.",
   event_trigger_adapter_required: "Event triggers are not supported by this migration yet.",
@@ -141,6 +141,8 @@ export function onceUtcInstant(value: string): string {
   return instant.toISOString()
 }
 export function validateAutomation(definition: AutomationDefinition, now = Date.now(), requireFuture = true): void {
+  if (definition.visibility === "private" && definition.triggers.some(trigger => trigger.event)) throw new Error("Private automations support calendar schedules.")
+  if (definition.connection_ids.length > 30) throw new Error("Select at most 30 connections.")
   if (definition.name.trim().length < 2 || definition.name.trim().length > 100) throw new Error("Use an automation name between 2 and 100 characters.")
   if (definition.prompt.trim().length < 3 || definition.prompt.trim().length > 500_000) throw new Error("Instructions must contain 3 to 500,000 characters.")
   if (definition.triggers.length < 1 || definition.triggers.length > 16) throw new Error("Use between 1 and 16 triggers.")

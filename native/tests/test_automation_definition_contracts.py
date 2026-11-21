@@ -54,6 +54,10 @@ def test_json_schema_matches_original_public_contract(name):
         assert destination["default"] is None
         assert "session_id" not in definition.get("required", [])
         assert definition["properties"].pop("gitlab_project_id")["default"] is None
+        visibility = definition["properties"].pop("visibility")
+        assert visibility["enum"] == ["private", "shared"] and visibility["default"] == "shared"
+        assert definition["properties"].pop("connection_ids")["maxItems"] == 30
+        assert "connection_ids" not in definition.get("required", [])
         plugins = definition["properties"]["plugins"]
         assert "gitlab" in plugins["items"]["enum"]
         plugins["items"]["enum"].remove("gitlab")
@@ -97,7 +101,7 @@ def test_legacy_draft_upgrade_keeps_defaults_and_shared_definition_semantics():
     assert draft.triggers[0].schedule.frequency == "daily"
     assert draft.harness == "hermes" and draft.mode == "modal"
     assert draft.max_runs_per_hour == 50 and not draft.queue_events
-    assert "visibility" not in draft.model_dump()
+    assert draft.visibility == "shared" and draft.connection_ids == []
     assert draft.self_management.allowed() == []
     assert definitions.Definition.model_validate_json(draft.model_dump_json()) == draft
     event = definitions.Definition.model_validate({
@@ -131,7 +135,9 @@ def test_optional_gitlab_fields_preserve_old_automation_digest():
             "provider": "github", "event": "issues", "repository": "team/project", "repository_id": 42,
         }}],
     )
-    old_payload = definition.model_dump(mode="json", exclude={"session_id", "gitlab_project_id"})
+    old_payload = definition.model_dump(
+        mode="json", exclude={"session_id", "gitlab_project_id", "visibility", "connection_ids"},
+    )
     old_payload["triggers"][0]["event"].pop("gitlab_origin")
     assert definition_payload(definition) == old_payload
     assert definition_digest(definition) == _digest(old_payload)
@@ -165,7 +171,7 @@ def test_gitlab_events_match_permanent_project_and_origin_but_keep_legacy_path_f
     ("Timing", {"frequency": "once", "run_at": "2027-02-01T18:37:00"}),
     ("Trigger", {"id": "both", "schedule": {}, "event": {"provider": "slack", "event": "message.posted"}}),
     ("Trigger", {"id": "neither"}),
-    ("Definition", {"name": "Task", "prompt": "Work", "visibility": "private"}),
+    ("Definition", {"name": "Task", "prompt": "Work", "visibility": "public"}),
     ("Definition", {"name": "Task", "prompt": "Work", "metadata": {"": "invalid"}}),
     ("Definition", {"name": "Task", "prompt": "Work", "repo_url": "https://attacker.invalid/repo"}),
     ("Launch", {"revision": 1, "client_id": "arbitrary:key"}),

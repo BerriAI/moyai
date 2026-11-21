@@ -1471,6 +1471,12 @@ export type AuthConfig = {
  */
 export type AutomationDefinition = {
     /**
+     * Connection Ids
+     *
+     * Exact authorized connection IDs for new-chat runs. Existing-chat runs retain that chat’s selected accounts.
+     */
+    connection_ids?: Array<string>;
+    /**
      * Environment Id
      *
      * Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.
@@ -1533,7 +1539,7 @@ export type AutomationDefinition = {
     /**
      * Session Id
      *
-     * Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.
+     * Continue an owned chat with matching visibility on every run, retaining its history and computer. Omit for a new chat each run.
      */
     session_id?: string | null;
     /**
@@ -1542,6 +1548,12 @@ export type AutomationDefinition = {
      * Every trigger must supply a stable id; do not generate different IDs on retries.
      */
     triggers: Array<TriggerInput>;
+    /**
+     * Visibility
+     *
+     * Private definitions and runs are visible only to their owner. Fixed after creation.
+     */
+    visibility?: 'private' | 'shared';
 };
 
 /**
@@ -5875,6 +5887,12 @@ export type ProductAutomationCapabilities = {
  */
 export type ProductAutomationDefinition = {
     /**
+     * Connection Ids
+     *
+     * Exact authorized connection IDs for new-chat runs. Existing-chat runs retain that chat’s selected accounts.
+     */
+    connection_ids: Array<string>;
+    /**
      * Environment Id
      *
      * Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.
@@ -5937,13 +5955,19 @@ export type ProductAutomationDefinition = {
     /**
      * Session Id
      *
-     * Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.
+     * Continue an owned chat with matching visibility on every run, retaining its history and computer. Omit for a new chat each run.
      */
     session_id: string | null;
     /**
      * Triggers
      */
     triggers: Array<TriggerOutput>;
+    /**
+     * Visibility
+     *
+     * Private definitions and runs are visible only to their owner. Fixed after creation.
+     */
+    visibility: 'private' | 'shared';
 };
 
 /**
@@ -6159,7 +6183,7 @@ export type ProductAutomationPreview = {
     /**
      * Execution Visibility
      */
-    execution_visibility: string;
+    execution_visibility: 'private' | 'shared';
     /**
      * Id
      */
@@ -6254,6 +6278,10 @@ export type ProductAutomationSummary = {
      * Triggers
      */
     triggers: Array<ProductAutomationTrigger>;
+    /**
+     * Visibility
+     */
+    visibility: 'private' | 'shared';
 };
 
 /**

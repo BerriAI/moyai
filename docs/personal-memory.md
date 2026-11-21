@@ -28,16 +28,18 @@ Changing a conversation's visibility invalidates an in-flight memory review.
 The retained legacy runtime excludes private notes from its shared-chat memory
 tools and background review.
 
-Private scheduling is separate work: this change does not alter the hosted
-automation library's shared ownership and execution rules.
+Private calendar schedules can recall these notes under their owner's original
+private execution authority. Scheduled turns and their resumptions cannot write
+personal memory. See [private schedules](pydantic-automations.md#private-schedules)
+for audience, account-selection and deployment requirements.
 
 ## Deployment
 
-Native protocol revision 7 changes the API, worker, broker and coordinator
-fingerprints so workers without private-note filtering cannot silently coexist
-with this version. Use the reviewed contract-adoption process and upgrade all
-native roles together. The encrypted note format is additive; schema manifests
-and existing unmarked notes do not change.
+Native protocol revision 7 introduced private-note filtering; revision 8 also
+binds private scheduled turns to their original visibility. Use the reviewed
+contract-adoption process and upgrade the API, worker, broker and coordinator
+together. The encrypted note format is additive and existing unmarked notes do
+not change. Private scheduling separately requires schema v24.
 
 Do not downgrade to an older memory reader with private notes present: that
 reader does not enforce their visibility. A reviewed rollback must first keep

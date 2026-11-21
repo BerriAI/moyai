@@ -28,6 +28,7 @@ from moyai.native_online_schema import (
 )
 from moyai.product_schema import (
     AUTOMATION_CHAT_SCHEMA_VERSION,
+    PRIVATE_AUTOMATION_SCHEMA_VERSION,
     _manifest,
     application_metadata,
     migrate_product_schema,
@@ -76,7 +77,7 @@ def test_frozen_expansion_matches_the_real_v22_tables_and_indexes():
 async def test_automation_chat_expansion_preserves_history_and_matches_offline_schema(product_database, before):
     product = product_database
     await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai", version=before)
-    value = plan("moyai", product.schema, "native-online-test", from_version=before)
+    value = plan("moyai", product.schema, "native-online-test", from_version=before, to_version=AUTOMATION_CHAT_SCHEMA_VERSION)
     assert value["to_version"] == AUTOMATION_CHAT_SCHEMA_VERSION
     frozen = _metadata(product.schema, version=AUTOMATION_CHAT_SCHEMA_VERSION)
     actual = application_metadata(product.schema, version=AUTOMATION_CHAT_SCHEMA_VERSION)
@@ -106,6 +107,51 @@ async def test_automation_chat_expansion_preserves_history_and_matches_offline_s
         )).fetchone() == (0,)
     await verify_product_schema(product.source, schema=product.schema, version=before)
     await verify_product_schema(product.source, schema=product.schema, version=AUTOMATION_CHAT_SCHEMA_VERSION)
+
+
+async def test_private_automation_expansion_preserves_existing_shared_turns_and_receipts(product_database):
+    from sqlalchemy import text
+
+    from moyai.models import Session, Turn, User
+    from moyai.product_automation_models import ProductAutomationTurn
+
+    product = product_database
+    await migrate_product_schema(
+        product.source, schema=product.schema, source_schema="moyai", version=AUTOMATION_CHAT_SCHEMA_VERSION,
+    )
+    async with product.database.sessions.begin() as db:
+        user = User(username="schedule-owner", display_name="Owner", password="synthetic")
+        db.add(user)
+        await db.flush()
+        session = Session(owner_id=user.id, model="test")
+        db.add(session)
+        await db.flush()
+        turn = Turn(session_id=session.id, actor_id=user.id, request_key="before-private",
+                    request_fingerprint="a" * 64, prompt="Old shared schedule", model="test",
+                    workflow_id="old-shared-schedule")
+        db.add(turn)
+        await db.flush()
+        turn_id = turn.id
+        await db.execute(text(
+            f'INSERT INTO "{product.schema}".moyai_product_automation_turns (turn_id,origin_turn_id) VALUES (:id,:id)'
+        ), {"id": turn_id})
+    value = plan("moyai", product.schema, "private-automation-test", from_version=AUTOMATION_CHAT_SCHEMA_VERSION)
+    assert value["to_version"] == PRIVATE_AUTOMATION_SCHEMA_VERSION
+    with psycopg.connect(product.settings.postgres_url, autocommit=True) as connection:
+        receipts = sql.Identifier(product.schema, "moyai_app_schema_versions")
+        original = connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall()
+        assert apply(connection, value, guard=lambda _: None)["status"] == "applied"
+        assert apply(connection, value, guard=lambda _: None)["status"] == "already_applied"
+        assert set(original) <= set(connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall())
+    await verify_product_schema(product.source, schema=product.schema)
+    async with product.database.sessions() as db:
+        provenance = await db.get(ProductAutomationTurn, turn_id)
+        assert provenance.visibility is None and provenance.origin_turn_id == turn_id
+        context = await product.database.execution_context(db, await db.get(Session, session.id), turn_id=turn_id)
+        assert context.visibility == "shared" and context.surface == "automation"
+    assert _manifest(_metadata(product.schema, version=PRIVATE_AUTOMATION_SCHEMA_VERSION)) == _manifest(
+        application_metadata(product.schema),
+    )
 
 
 @pytest.mark.parametrize("change", ["sql", "digest", "prefix", "schema", "queue", "extra"])

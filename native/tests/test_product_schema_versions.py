@@ -29,6 +29,7 @@ from moyai.product_schema import (
     INFERENCE_SCHEMA_VERSION,
     MEMORY_REVIEW_SCHEMA_VERSION,
     MESSAGE_SOURCE_SCHEMA_VERSION,
+    PRIVATE_AUTOMATION_SCHEMA_VERSION,
     SLACK_ACTIVITY_SCHEMA_VERSION,
     SLACK_TURN_SOURCE_SCHEMA_VERSION,
     SWARM_SCHEMA_VERSION,
@@ -170,6 +171,7 @@ async def test_additive_versions_preserve_every_earlier_receipt(product_database
         BILLING_STORAGE_SCHEMA_VERSION, SWARM_SCHEMA_VERSION, GITHUB_WORKFLOW_SCHEMA_VERSION,
         DELEGATION_SCHEMA_VERSION, SLACK_ACTIVITY_SCHEMA_VERSION, SLACK_TURN_SOURCE_SCHEMA_VERSION,
         MESSAGE_SOURCE_SCHEMA_VERSION, GOAL_SCHEMA_VERSION, AUTOMATION_CHAT_SCHEMA_VERSION,
+        PRIVATE_AUTOMATION_SCHEMA_VERSION,
     ):
         await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai", version=version)
         current = await receipts(product)
@@ -228,10 +230,12 @@ async def test_automation_chat_provenance_is_additive_to_all_published_receipts(
     product = product_database
     await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai", version=GOAL_SCHEMA_VERSION)
     old = await receipts(product)
-    await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai")
+    await migrate_product_schema(
+        product.source, schema=product.schema, source_schema="moyai", version=AUTOMATION_CHAT_SCHEMA_VERSION,
+    )
     current = await receipts(product)
     assert set(current) == {*old, AUTOMATION_CHAT_SCHEMA_VERSION}
     assert all(current[key] == value for key, value in old.items())
-    await verify_product_schema(product.source, schema=product.schema)
+    await verify_product_schema(product.source, schema=product.schema, version=AUTOMATION_CHAT_SCHEMA_VERSION)
     async with product.source.connect() as db:
         assert await db.scalar(text(f'SELECT count(*) FROM "{product.schema}".moyai_product_automation_turns')) == 0
