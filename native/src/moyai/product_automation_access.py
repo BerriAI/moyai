@@ -41,11 +41,12 @@ class ProductAutomationAccess:
         session = await db.scalar(select(Session).where(Session.id == scope.session_id).with_for_update())
         turn = await db.get(Turn, scope.turn_id)
         if (
-            session is None or session.deleted or session.visibility != "shared"
+            session is None or session.deleted or session.visibility != scope.authority.visibility
+            or (session.visibility == "private" and session.owner_id != scope.actor_id)
             or session.active_turn != scope.turn_id or turn is None or turn.actor_id != scope.actor_id
             or turn.status != "running" or turn.session_id != session.id or turn.parent_turn is not None
         ):
-            raise HTTPException(403, "Scoped controls require the current shared execution.")
+            raise HTTPException(403, "Scoped controls require the original owner and execution visibility.")
         if individual:
             principal = await service.management_principal(db, scope)
         generated = await db.get(ProductAutomationTurn, scope.turn_id)
@@ -67,7 +68,7 @@ class ProductAutomationAccess:
         result: dict[str, set[str]] = {}
         if occurrence:
             row = await self.service._row(db, occurrence.automation_id)
-            if row["owner_id"] == principal.id:
+            if row["owner_id"] == principal.id and _definition(row).visibility == scope.authority.visibility:
                 result[row["id"]] = set(_definition(row).self_management.allowed())
         else:
             origin = await self.service.human_origin(db, scope)
@@ -75,7 +76,7 @@ class ProductAutomationAccess:
                 ChatGrant.turn_id == origin, ChatGrant.owner_id == principal.id,
             )):
                 row = await self.service._row(db, grant.automation_id)
-                if row["owner_id"] == principal.id:
+                if row["owner_id"] == principal.id and _definition(row).visibility == scope.authority.visibility:
                     result[grant.automation_id] = set(json.loads(grant.permissions))
         return {key: value for key, value in result.items() if value}
 
@@ -105,7 +106,9 @@ class ProductAutomationAccess:
                 targets = await self.targets(db, scope)
                 if identity not in targets and (occurrence is None or occurrence.automation_id != identity):
                     raise HTTPException(403, "Read history only for this execution's automation targets.")
-            self.service._owner(await self.service._row(db, identity), principal)
+            row = await self.service._row(db, identity)
+            self.service._owner(row, principal)
+            self.service._readable(row, principal, visibility=scope.authority.visibility)
         return principal.grant
 
     async def history(self, scope: RunScope, run_id: str | None, identity: str, *, cursor: str, limit: int) -> dict:
@@ -118,7 +121,9 @@ class ProductAutomationAccess:
                     raise HTTPException(422, "Select one automation from the current execution's targets.")
                 identity = next(iter(targets))
         grant = await self.authorize_history(scope, run_id, identity)
-        result = await self.service.history(grant, identity, limit=limit, cursor=cursor)
+        result = await self.service.history(
+            grant, identity, limit=limit, cursor=cursor, visibility=scope.authority.visibility,
+        )
         if await self.authorize_history(scope, run_id, identity) != grant:
             raise HTTPException(403, "The verified automation owner changed.")
         return {"turn_id": scope.turn_id, "automation_id": identity, **result}
@@ -139,6 +144,7 @@ class ProductAutomationAccess:
             identity = request.automation_id
             row = await service._row(db, identity)
             service._owner(row, principal)
+            service._tool_target(scope, _definition(row))
             if action == "grant":
                 # No automated/delegated call may create owner authority.
                 await service.authorize_tool(scope, run_id, db=db)
@@ -241,7 +247,11 @@ class ProductAutomationAccess:
             same_run = (original["turn_id"] == source.turn_id if "turn_id" in original
                         else original["session_id"] == scope.session_id)
             result = {"claimed": same_run, "engine": CORE_IDENTITY,
-                      "session_id": session.id if session and not session.deleted and session.visibility == "shared" else None}
+                      "session_id": session.id if session and not session.deleted and (
+                          session.visibility == "shared" or (
+                              scope.authority.visibility == "private" and session.owner_id == scope.actor_id
+                          )
+                      ) else None}
         else:
             result = {"claimed": True, "engine": CORE_IDENTITY, "session_id": scope.session_id, "turn_id": source.turn_id}
             db.add(Operation(

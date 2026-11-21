@@ -67,7 +67,8 @@ SLACK_TURN_SOURCE_SCHEMA_VERSION = "2026-10-17-slack-turn-source-v20"
 MESSAGE_SOURCE_SCHEMA_VERSION = "2026-10-18-message-sources-v21"
 GOAL_SCHEMA_VERSION = "2026-10-17-goals-v22"
 AUTOMATION_CHAT_SCHEMA_VERSION = "2026-10-19-automation-chats-v23"
-PRODUCT_SCHEMA_VERSION = AUTOMATION_CHAT_SCHEMA_VERSION
+PRIVATE_AUTOMATION_SCHEMA_VERSION = "2026-11-21-private-automations-v24"
+PRODUCT_SCHEMA_VERSION = PRIVATE_AUTOMATION_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -148,13 +149,16 @@ MIGRATIONS = (
     (MESSAGE_SOURCE_SCHEMA_VERSION, frozenset({"moyai_message_sources", "moyai_delivery_schedule"})),
     (GOAL_SCHEMA_VERSION, frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})),
     (AUTOMATION_CHAT_SCHEMA_VERSION, frozenset({"moyai_product_automation_turns"})),
+    (PRIVATE_AUTOMATION_SCHEMA_VERSION, frozenset()),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing
 # their historical manifests. Register each (table, column) at its first
 # migration version, alongside a frozen online expansion. No entries are
 # needed for columns introduced with their table.
-COLUMN_MIGRATIONS: dict[str, frozenset[tuple[str, str]]] = {}
+COLUMN_MIGRATIONS: dict[str, frozenset[tuple[str, str]]] = {
+    PRIVATE_AUTOMATION_SCHEMA_VERSION: frozenset({("moyai_product_automation_turns", "visibility")}),
+}
 
 
 class ProductSchemaError(RuntimeError):

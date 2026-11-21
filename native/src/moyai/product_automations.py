@@ -137,6 +137,7 @@ class ProductAutomationSummary(BaseModel):
     name: str
     owner_id: str
     owned: bool
+    visibility: Literal["private", "shared"]
     legacy_paused: bool
     triggers: list[ProductAutomationTrigger]
     native: ProductAutomationNativeState | None
@@ -184,7 +185,7 @@ class ProductAutomationPreview(BaseModel):
     target_core: str
     overlap: str
     catchup_seconds: int
-    execution_visibility: str
+    execution_visibility: Literal["private", "shared"]
     sharing_notice: str
     legacy_fence: str
     migration_changes: list[str]
@@ -239,6 +240,10 @@ def definition_payload(definition: Definition) -> dict[str, Any]:
     for field in ("session_id", "gitlab_project_id"):
         if payload[field] is None:
             payload.pop(field)
+    if payload["visibility"] == "shared":
+        payload.pop("visibility")
+    if not payload["connection_ids"]:
+        payload.pop("connection_ids")
     for trigger in payload["triggers"]:
         event = trigger.get("event")
         if event is not None and not event.get("gitlab_origin"):
@@ -332,8 +337,27 @@ class ProductAutomationService:
 
     @staticmethod
     def _owner(row: dict[str, Any], principal: Any, *, pausing: bool = False) -> None:
+        if _definition(row).visibility == "private" and row["owner_id"] != principal.id:
+            raise HTTPException(404, "Automation not found.")
         if row["owner_id"] != principal.id and not (pausing and principal.role == "admin"):
             raise HTTPException(403, "Only the owner may manage this automation. Administrators may pause it.")
+
+    @staticmethod
+    def _readable(
+        row: dict[str, Any], principal: Any, *, visibility: str | None = None,
+    ) -> Definition:
+        definition = _definition(row)
+        if (
+            definition.visibility == "private" and row["owner_id"] != principal.id
+            or visibility is not None and definition.visibility != visibility
+        ):
+            raise HTTPException(404, "Automation not found.")
+        return definition
+
+    @staticmethod
+    def _tool_target(scope: RunScope, definition: Definition) -> None:
+        if definition.visibility != scope.authority.visibility:
+            raise HTTPException(403, "Manage this automation from a chat with matching visibility.")
 
     async def _old_active(self, db: AsyncSession, identity: str) -> bool:
         return bool(await db.scalar(text(
@@ -351,7 +375,9 @@ class ProductAutomationService:
         project_grants = []
         if definition.session_id:
             try:
-                await self.database.automation_session(db, row["owner_id"], definition.session_id)
+                await self.database.automation_session(
+                    db, row["owner_id"], definition.session_id, visibility=definition.visibility,
+                )
             except HTTPException:
                 result.append("scheduled_chat_unavailable")
         if definition.mode != "modal":
@@ -363,13 +389,14 @@ class ProductAutomationService:
                 result.append("event_trigger_adapter_required")
             else:
                 result.extend(await self.events.blockers(db, row, definition))
-        if definition.plugins and not definition.session_id:
+        if (definition.plugins or definition.connection_ids) and not definition.session_id:
             if self.connections is None:
                 result.append("connection_mapping_required")
             else:
                 try:
                     project_grants = await self.connections.resolve_grants(
-                        row["owner_id"], definition.plugins, shared_session=True, surface="automation", db=db,
+                        row["owner_id"], definition.connection_ids or definition.plugins,
+                        shared_session=definition.visibility == "shared", surface="automation", db=db,
                     )
                 except (HTTPException, ValueError):
                     result.append("selected_connections_require_onboarding_or_authorization")
@@ -418,10 +445,13 @@ class ProductAutomationService:
 
     def normalize_definition(self, definition: Definition, previous: Definition | None = None) -> Definition:
         """Preserve the canonical save contract without the old harness selector."""
+        if previous is not None and definition.visibility != previous.visibility:
+            raise HTTPException(409, "Automation visibility is fixed. Create a separate automation for another audience.")
         try:
             result = definition.model_copy(update={
                 "model": self.settings.resolve_model(definition.model or None),
                 "plugins": sorted(set(definition.plugins)),
+                "connection_ids": sorted(set(definition.connection_ids)),
             })
         except ValueError:
             raise HTTPException(422, "Choose an enabled product model.") from None
@@ -450,8 +480,10 @@ class ProductAutomationService:
         identity = workspace.get("repository_id")
         return not workspace.get("repo_url") or (type(identity) is int and identity > 0)
 
-    async def _chat_context(self, db: AsyncSession, owner: str, session_id: str) -> tuple[list[str], dict]:
-        session = await self.database.automation_session(db, owner, session_id)
+    async def _chat_context(
+        self, db: AsyncSession, owner: str, session_id: str, *, visibility: str = "shared",
+    ) -> tuple[list[str], dict]:
+        session = await self.database.automation_session(db, owner, session_id, visibility=visibility)
         latest = await db.scalar(select(Turn).where(Turn.session_id == session.id).order_by(
             Turn.created_at.desc(), Turn.id.desc(),
         ).limit(1))
@@ -478,14 +510,17 @@ class ProductAutomationService:
             connections = []
             grants = []
             if definition.session_id:
-                connections, workspace = await self._chat_context(db, binding.owner_id, definition.session_id)
+                connections, workspace = await self._chat_context(
+                    db, binding.owner_id, definition.session_id, visibility=definition.visibility,
+                )
                 grants = await self.database.resolve_grants(
-                    db, binding.owner_id, connections, shared_session=True, surface="automation",
+                    db, binding.owner_id, connections, shared_session=definition.visibility == "shared", surface="automation",
                 )
             else:
-                if definition.plugins:
+                if definition.plugins or definition.connection_ids:
                     grants = await self.connections.resolve_grants(
-                        binding.owner_id, definition.plugins, shared_session=True, surface="automation", db=db,
+                        binding.owner_id, definition.connection_ids or definition.plugins,
+                        shared_session=definition.visibility == "shared", surface="automation", db=db,
                     )
                     connections = sorted({grant.id for grant in grants})
                 workspace = await self.workspace.capture_workspace_context(db, principal, {
@@ -540,11 +575,13 @@ class ProductAutomationService:
                 raise HTTPException(409, "The canonical event adapter is unavailable.")
             await self.events.validate_authority(db, binding, definition, event_authority)
         if definition.session_id:
-            selected, current_workspace = await self._chat_context(db, binding.owner_id, definition.session_id)
+            selected, current_workspace = await self._chat_context(
+                db, binding.owner_id, definition.session_id, visibility=definition.visibility,
+            )
             if selected != connections or current_workspace != workspace:
                 raise HTTPException(409, "The chat's accounts or project changed. Review and enable the schedule again.")
             await self.database.resolve_grants(
-                db, binding.owner_id, connections, shared_session=True, surface="automation",
+                db, binding.owner_id, connections, shared_session=definition.visibility == "shared", surface="automation",
             )
             return connections, workspace
         current = []
@@ -552,7 +589,7 @@ class ProductAutomationService:
             if self.connections is None:
                 raise HTTPException(409, "The canonical connection adapter is unavailable.")
             current = await self.connections.resolve_grants(
-                binding.owner_id, connections, shared_session=True, surface="automation", db=db,
+                binding.owner_id, connections, shared_session=definition.visibility == "shared", surface="automation", db=db,
             )
             if sorted({grant.id for grant in current}) != connections:
                 raise HTTPException(409, "Selected connection authority changed.")
@@ -577,14 +614,17 @@ class ProductAutomationService:
             "source_revision": binding.source_revision, "last_error": binding.last_error,
         }
 
-    async def preview(self, grant: ProductGrant, identity: str, *, shared_library: bool = False) -> dict[str, Any]:
+    async def preview(
+        self, grant: ProductGrant, identity: str, *, shared_library: bool = False,
+        visibility: str | None = None,
+    ) -> dict[str, Any]:
         principal = await self.identity.require_current(grant)
         async with self.database.sessions() as db:
             row = await self._row(db, identity)
+            definition = self._readable(row, principal, visibility=visibility)
             owner = row["owner_id"] == principal.id
             if not shared_library:
                 self._owner(row, principal)
-            definition = _definition(row)
             binding = await db.get(Binding, identity)
             blockers = await self.blockers(db, row, definition, principal=principal) if owner else ["owner_action_required"]
             result = {
@@ -593,8 +633,12 @@ class ProductAutomationService:
                 "native": self._binding_view(binding), "blockers": blockers,
                 "supported": not blockers, "activation": "explicit_owner_action_required",
                 "target_core": CORE_IDENTITY, "overlap": "ALLOW_ALL", "catchup_seconds": 900,
-                "execution_visibility": "shared",
-                "sharing_notice": "Canonical definitions and scheduled sessions are shared product resources.",
+                "execution_visibility": definition.visibility,
+                "sharing_notice": (
+                    "Only you can view this automation and its private chats."
+                    if definition.visibility == "private" else
+                    "This automation and its scheduled chats are shared with your workspace."
+                ),
                 "legacy_fence": "pause_and_revision_plus_native_harness_marker",
                 "migration_changes": ["pause_legacy", "set_native_harness", "capture_current_owner_grant"],
                 "capabilities": {
@@ -608,7 +652,8 @@ class ProductAutomationService:
                     "retire": owner and binding is not None and binding.state != "deleted",
                     "run": owner and binding is not None and binding.state != "deleted"
                     and binding.sync_state == "ready" and binding.source_revision == row["revision"],
-                    "webhook": owner, "test_event": owner,
+                    "webhook": owner and definition.visibility == "shared",
+                    "test_event": owner and definition.visibility == "shared",
                 },
             }
         await self.identity.require_current(grant)
@@ -616,21 +661,26 @@ class ProductAutomationService:
 
     async def listing(
         self, grant: ProductGrant, *, limit: int = 50, offset: int = 0, shared_library: bool = False,
+        visibility: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 50 or offset < 0:
             raise HTTPException(422, "Choose a bounded page.")
         principal = await self.identity.require_current(grant)
         async with self.database.sessions() as db:
             rows = (await db.execute(text(
-                f"SELECT * FROM {self._table('automations')} WHERE (:shared OR owner_id=:owner) "
+                f"SELECT * FROM {self._table('automations')} "
+                "WHERE (owner_id=:owner OR (:shared AND COALESCE(definition::jsonb->>'visibility','shared')='shared')) "
+                "AND (CAST(:visibility AS text) IS NULL OR COALESCE(definition::jsonb->>'visibility','shared')=:visibility) "
                 "ORDER BY updated_at DESC,id LIMIT :limit OFFSET :offset"
-            ), {"owner": principal.id, "shared": shared_library, "limit": limit + 1, "offset": offset})).mappings().all()
+            ), {"owner": principal.id, "shared": shared_library, "visibility": visibility,
+                "limit": limit + 1, "offset": offset})).mappings().all()
             values = []
             for row in rows[:limit]:
                 definition = _definition(dict(row))
                 values.append({
                     "id": row["id"], "revision": row["revision"], "name": definition.name,
                     "owner_id": row["owner_id"], "owned": row["owner_id"] == principal.id,
+                    "visibility": definition.visibility,
                     "legacy_paused": bool(row["paused"]),
                     "triggers": [trigger.model_dump(mode="json") for trigger in definition.triggers],
                     "native": self._binding_view(await db.get(Binding, row["id"])),
@@ -782,15 +832,16 @@ class ProductAutomationService:
         session = await db.scalar(query.with_for_update() if lock else query)
         turn = await db.get(Turn, scope.turn_id)
         if (
-            session is None or session.deleted or session.visibility != "shared"
+            session is None or session.deleted or session.visibility != scope.authority.visibility
+            or (session.visibility == "private" and (session.owner_id != scope.actor_id or session.surface != "web"))
             or session.surface not in {"web", "slack"} or session.surface != scope.surface
             or session.active_turn != scope.turn_id
             or turn is None or turn.status != "running" or turn.actor_id != scope.actor_id
             or turn.parent_turn is not None
         ):
-            raise HTTPException(403, "Private, delegated and automated work cannot export into shared automations.")
+            raise HTTPException(403, "Automation management requires the original direct chat and its visibility.")
         if scope.authority.surface == "automation" or await self.automated_session(db, session.id) or await self.human_origin(db, scope) is None:
-            raise HTTPException(403, "Private, delegated and automated work cannot export into shared automations.")
+            raise HTTPException(403, "Delegated and automated work cannot create automation authority.")
 
     async def automated_session(self, db: AsyncSession, session_id: str) -> bool:
         session = await db.get(Session, session_id)
@@ -848,6 +899,15 @@ class ProductAutomationService:
                 definition = old
             else:
                 raise HTTPException(422, "Select an automation.")
+            if scope is not None:
+                self._tool_target(scope, definition)
+            selected_providers = set(definition.plugins)
+            if definition.connection_ids:
+                selected_grants = await self.connections.resolve_grants(
+                    principal.id, definition.connection_ids, shared_session=definition.visibility == "shared",
+                    surface="automation", db=db,
+                )
+                selected_providers.update(item.kind for item in selected_grants)
         required: set[str] = set()
 
         async def resolve(
@@ -893,7 +953,7 @@ class ProductAutomationService:
 
         if not definition.session_id and (definition.repo_url or definition.github_repository_id or definition.gitlab_project_id):
             if repository_provider(definition.repo_url) == "gitlab":
-                if "gitlab" not in definition.plugins:
+                if "gitlab" not in selected_providers:
                     raise HTTPException(422, "Select the GitLab connection for this automation's project.")
                 value = await resolve(
                     definition.repo_url, definition.gitlab_project_id, selected=True,
@@ -902,7 +962,7 @@ class ProductAutomationService:
                 definition.repo_url, definition.gitlab_project_id = value["repo_url"], value["repository_id"]
             else:
                 repository = definition.repo_url.removeprefix("https://github.com/").removesuffix(".git")
-                value = await resolve(repository, definition.github_repository_id, selected="github" in definition.plugins)
+                value = await resolve(repository, definition.github_repository_id, selected="github" in selected_providers)
                 definition.repo_url, definition.github_repository_id = value["repo_url"], value["repository_id"]
         for trigger in definition.triggers:
             if trigger.event and trigger.event.provider == "github":
@@ -917,6 +977,8 @@ class ProductAutomationService:
                 )
                 event.repository, event.repository_id = value["repository"], value["repository_id"]
                 event.gitlab_origin = value["repository_origin"]
+        if definition.connection_ids and not required.issubset(set(definition.connection_ids)):
+            raise HTTPException(403, "Select the exact verified repository connection before saving.")
         await self.identity.require_current(grant)
         if scope is not None:
             await self.check_tool_caller(scope, scope.turn_id, grant)
@@ -951,6 +1013,8 @@ class ProductAutomationService:
                     raise HTTPException(409, "This request key belongs to a different action.")
                 row = await self._row(db, prior.automation_id)
                 self._owner(row, principal, pausing=action == "pause" and scope is None)
+                if scope is not None:
+                    self._tool_target(scope, _definition(row))
                 if row["revision"] != prior.source_revision:
                     raise HTTPException(409, "This action succeeded earlier but the automation has since changed.")
                 result = json.loads(prior.result)
@@ -960,7 +1024,8 @@ class ProductAutomationService:
             else:
                 if repository_grants:
                     current_grants = await self.connections.resolve_grants(
-                        principal.id, sorted(repository_grants), shared_session=True, surface="automation", db=db,
+                        principal.id, sorted(repository_grants),
+                        shared_session=identified is None or identified.visibility == "shared", surface="automation", db=db,
                     )
                     if not repository_grants.issubset({item.id for item in current_grants}):
                         raise HTTPException(409, "The selected repository authority changed before the automation was saved.")
@@ -969,6 +1034,10 @@ class ProductAutomationService:
                         raise HTTPException(409, "Creation requires a definition at revision zero.")
                     identity = uuid4().hex
                     definition = identified or self.normalize_definition(Definition.model_validate(body.definition.model_dump()))
+                    if scope is not None:
+                        self._tool_target(scope, definition)
+                    if definition.visibility == "private" and not principal.individual:
+                        raise HTTPException(403, "Private automations require an individual account.")
                     stamp = now()
                     await db.execute(text(
                         f"INSERT INTO {self._table('automations')} "
@@ -984,6 +1053,8 @@ class ProductAutomationService:
                     if row["revision"] != body.revision:
                         raise HTTPException(409, "The automation changed. Read its current revision.")
                     definition = identified or _definition(row)
+                    if scope is not None:
+                        self._tool_target(scope, _definition(row))
                 assert identity is not None
                 binding = await db.get(Binding, identity)
                 previous_harness = _definition(row).harness
@@ -991,6 +1062,8 @@ class ProductAutomationService:
                     if not isinstance(body, Save):
                         raise HTTPException(422, "An update requires a complete definition.")
                     definition = identified or self.normalize_definition(Definition.model_validate(body.definition.model_dump()), definition)
+                    if scope is not None:
+                        self._tool_target(scope, definition)
                     definition.harness = CORE_IDENTITY if binding else previous_harness
                     if self.events is not None:
                         await self.events.remove_receivers(db, identity, definition)
@@ -1015,7 +1088,9 @@ class ProductAutomationService:
                         db.add(binding)
                     binding.authority_version = grant.authority_version
                 if action in {"create", "update"} and definition.session_id:
-                    await self.database.automation_session(db, principal.id, definition.session_id)
+                    await self.database.automation_session(
+                        db, principal.id, definition.session_id, visibility=definition.visibility,
+                    )
                 revision = row["revision"] + (action != "create")
                 if action != "create":
                     await db.execute(text(
@@ -1333,6 +1408,7 @@ class ProductAutomationService:
                 prompt=definition.prompt, model=self.settings.resolve_model(definition.model or None),
                 request_key="automation-" + hashlib.sha256(key.encode()).hexdigest(),
                 connections=connections, session_id=definition.session_id,
+                visibility=definition.visibility,
             )
             if self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
@@ -1377,6 +1453,7 @@ class ProductAutomationService:
                 model=self.settings.resolve_model(definition.model or None),
                 request_key="automation-" + hashlib.sha256(key.encode()).hexdigest(), connections=connections,
                 session_id=definition.session_id,
+                visibility=definition.visibility,
             )
             if self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
@@ -1390,6 +1467,7 @@ class ProductAutomationService:
     async def history(
         self, grant: ProductGrant, identity: str, *, limit: int = 20, cursor: str = "",
         shared_library: bool = False,
+        visibility: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 100 or len(cursor) > 2048:
             raise HTTPException(422, "Choose a bounded history page.")
@@ -1407,6 +1485,7 @@ class ProductAutomationService:
                 raise HTTPException(422, "Use a cursor returned for this automation.") from None
         async with self.database.sessions() as db:
             row = await self._row(db, identity)
+            definition = self._readable(row, principal, visibility=visibility)
             if not shared_library:
                 self._owner(row, principal)
             rows = (await db.execute(text(
@@ -1427,7 +1506,10 @@ class ProductAutomationService:
                         Turn.created_at.desc(), Turn.id.desc(),
                     ).limit(1)) or turn
                 session = await db.get(Session, link.session_id) if link and link.session_id else None
-                if session and (session.visibility == "private" or session.deleted):
+                if session and (session.deleted or (
+                    session.visibility == "private"
+                    and (session.owner_id != principal.id or definition.visibility != "private" or visibility == "shared")
+                )):
                     continue
                 values.append({
                     "occurrence": row["occurrence"], "revision": row["revision"], "outcome": row["outcome"],

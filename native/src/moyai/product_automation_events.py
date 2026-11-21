@@ -385,6 +385,7 @@ class ProductAutomationEvents:
             row = await service._row(db, request.automation_id)
             service._owner(row, principal)
             definition = _definition(row)
+            service._tool_target(scope, definition)
             providers = {t.event.provider for t in definition.triggers if t.event} - {"slack", "session"}
             if request.provider not in providers:
                 raise HTTPException(422, "Choose a receiver provider configured in this automation.")

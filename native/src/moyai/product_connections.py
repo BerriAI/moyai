@@ -136,7 +136,7 @@ class ProductConnections:
             if personal_row and personal_row["encrypted"] is not None:
                 # Personal selection is authoritative. Its absence from this
                 # surface never exposes the organization's search account.
-                if not shared_session and surface == "web" and owner == actor_id:
+                if not shared_session and surface in {"web", "automation"} and owner == actor_id:
                     selected.append((personal_row, owner, "personal_reads"))
                 if rows:
                     organization = json.loads(self.security.decrypt(rows[0]["encrypted"]))

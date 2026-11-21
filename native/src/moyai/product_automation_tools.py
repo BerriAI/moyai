@@ -41,7 +41,7 @@ class DefinitionRequest(Save):
 class CreateRequest(DefinitionRequest):
     destination: Literal["current_chat", "new_chat"] = Field(
         default="current_chat",
-        description="Continue this shared web chat by default. Choose new_chat for independent runs or when scheduling from Slack.",
+        description="Continue this web chat with its current visibility by default. Choose new_chat for independent runs or Slack.",
     )
 
 
@@ -85,7 +85,7 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
             except (HTTPException, PermissionError) as error:
                 raise ToolFailed(
                     "This automation reference is unavailable for the current requester and execution. "
-                    "Use an authorized shared direct chat or an existing scoped owner grant."
+                    "Use an authorized direct chat with matching visibility or an existing scoped owner grant."
                 ) from error
         return wrapped
 
@@ -130,7 +130,7 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
             if outcome == "not_dispatched":
                 raise ToolFailed(
                     "The automation change was refused before dispatch. Check the current requester, "
-                    "shared execution, owner-granted permissions, revision and migration preview before trying again."
+                    "execution visibility, owner-granted permissions, revision and migration preview before trying again."
                 ) from error
             raise ToolFailed("The automation outcome needs inspection. Its pending receipt was preserved.") from error
 
@@ -139,6 +139,12 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
         if action == "create":
             request = request.model_copy(update={"definition": request.definition.model_copy(update={
                 "session_id": ctx.deps.session_id if request.destination == "current_chat" else None,
+                "visibility": ctx.deps.authority.visibility,
+                **({
+                    "plugins": [],
+                    "connection_ids": sorted(grant.id for grant in ctx.deps.grants)
+                    if request.destination == "new_chat" else [],
+                } if ctx.deps.authority.visibility == "private" else {}),
             })})
         body = (
             Save(revision=request.revision, request_key=request.request_key, definition=request.definition)
@@ -157,7 +163,9 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
     async def automation_list(ctx: RunContext[RunScope], offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """List the current individual requester's canonical automations before creating or changing one."""
         grant = await caller(ctx)
-        value = await service.listing(grant, limit=min(50, max(1, limit)), offset=max(0, offset))
+        value = await service.listing(
+            grant, limit=min(50, max(1, limit)), offset=max(0, offset), visibility=ctx.deps.authority.visibility,
+        )
         await service.check_tool_caller(ctx.deps, ctx.run_id, grant)
         return {"turn_id": ctx.deps.turn_id, **value}
 
@@ -166,7 +174,7 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
     async def automation_preview(ctx: RunContext[RunScope], automation_id: str) -> dict[str, Any]:
         """Read the complete definition, revision and migration blockers. This never enables or converts it."""
         grant = await caller(ctx)
-        value = await service.preview(grant, automation_id)
+        value = await service.preview(grant, automation_id, visibility=ctx.deps.authority.visibility)
         await service.check_tool_caller(ctx.deps, ctx.run_id, grant)
         return {"turn_id": ctx.deps.turn_id, **value}
 
@@ -219,6 +227,7 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
         grant = await caller(ctx)
         if service.events is None:
             raise HTTPException(503, "The canonical event adapter is unavailable.")
+        await service.preview(grant, automation_id, visibility=ctx.deps.authority.visibility)
         result = await service.events.info(grant, automation_id)
         await service.check_tool_caller(ctx.deps, ctx.run_id, grant)
         return result
@@ -269,13 +278,15 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
 
     @tools.tool(metadata=WRITE, sequential=True)
     async def automation_create(ctx: RunContext[RunScope], request: CreateRequest) -> dict[str, Any]:
-        """Save a shared canonical automation paused, only on the user's request.
+        """Save an automation with this chat's visibility, paused, on the user's request.
 
         List first to avoid duplicates. Supply stable trigger IDs and request_key.
         By default, scheduled runs continue this chat with its existing history,
         computer and accounts. Use destination=new_chat only for independent runs
         or when creating from Slack. No global transcript is shared between chats.
-        No private-chat content may be exported. Preview and explicitly migrate
+        Private schedules and their results remain owner-only. Private schedules
+        support calendar triggers; new-chat runs retain this chat's selected accounts.
+        Preview and explicitly migrate
         before enabling native execution; saved/pending is not scheduler readiness.
         """
         return await mutate(ctx, "create", request)

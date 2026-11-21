@@ -66,3 +66,5 @@ class ProductAutomationTurn(Base):
     __tablename__ = "moyai_product_automation_turns"
     turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_turns.id"), primary_key=True)
     origin_turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_turns.id"), index=True)
+    # NULL preserves shared authority for turns admitted before private scheduling.
+    visibility: Mapped[str | None] = mapped_column(String(20), nullable=True)

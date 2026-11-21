@@ -92,9 +92,16 @@ class Definition(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=2, max_length=100)
     prompt: str = Field(min_length=3)
+    visibility: Literal['private', 'shared'] = Field(
+        default='shared', description='Private definitions and runs are visible only to their owner. Fixed after creation.',
+    )
+    connection_ids: list[Annotated[str, Field(pattern=r'^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$')]] = Field(
+        default_factory=list, max_length=30,
+        description='Exact authorized connection IDs for new-chat runs. Existing-chat runs retain that chat’s selected accounts.',
+    )
     session_id: str | None = Field(
         default=None, pattern=r'^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$',
-        description='Continue this existing shared chat on every run, retaining its history and computer. Omit for a new chat each run.',
+        description='Continue an owned chat with matching visibility on every run, retaining its history and computer. Omit for a new chat each run.',
     )
     triggers: list[Trigger] = Field(min_length=1)
     max_runs_per_hour: int | None = Field(default=50, ge=1)
@@ -139,6 +146,10 @@ class Definition(BaseModel):
     def distinct_triggers(self):
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
+        if self.visibility == 'private' and any(t.event for t in self.triggers):
+            raise ValueError('Private automations support calendar schedules. Event sources require a shared automation.')
+        if self.visibility == 'private' and self.plugins:
+            raise ValueError('Private automations require exact connection_ids or the selected chat’s accounts.')
         if self.gitlab_project_id is not None and (
             not self.repo_url or repository_provider(self.repo_url) != 'gitlab'
             or self.github_repository_id is not None

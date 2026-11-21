@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
@@ -568,7 +568,7 @@ class Database:
                 raise HTTPException(422, "Choose an enabled model.")
             context = delegated_authority.context if delegated_authority else await self.execution_context(transaction, session)
             if automation_generated:
-                context = ExecutionContext("shared", "automation")
+                context = ExecutionContext(cast(Literal["private", "shared"], session.visibility), "automation")
             if context.surface == "slack" and body.connections and self.product_connections is None:
                 raise HTTPException(
                     403, "Use a private web conversation for connected accounts. "
@@ -644,7 +644,9 @@ class Database:
             transaction.add(turn)
             await transaction.flush()
             if automation_generated:
-                transaction.add(ProductAutomationTurn(turn_id=turn.id, origin_turn_id=turn.id))
+                transaction.add(ProductAutomationTurn(
+                    turn_id=turn.id, origin_turn_id=turn.id, visibility=session.visibility,
+                ))
             if turn.status == "steering":
                 await self._record_guidance(transaction, turn, session.revision)
             from .performance import admission
@@ -685,6 +687,7 @@ class Database:
     async def admit_automation(
         self, db: AsyncSession, *, grant: ProductGrant, title: str, prompt: str,
         model: str, request_key: str, connections: list[str] | None = None, session_id: str | None = None,
+        visibility: Literal["private", "shared"] = "shared",
     ) -> tuple[Session, Turn]:
         """Admit using the original owner grant in the caller's occurrence transaction.
 
@@ -713,10 +716,10 @@ class Database:
                 raise HTTPException(401, "The automation owner must be enrolled before enabling it.")
             cast(Any, actor).product_grant = grant
             if session_id:
-                session = await self.automation_session(db, actor.id, session_id)
+                session = await self.automation_session(db, actor.id, session_id, visibility=visibility)
             else:
                 session = await self.create_session(actor, NewSession(
-                    title=title, model=model, visibility="shared",
+                    title=title, model=model, visibility=visibility,
                 ), db=db)
                 session.surface = "automation"
             turn = await self.submit(actor, session.id, NewMessage(
@@ -725,15 +728,17 @@ class Database:
             await db.flush()
             return session, turn
 
-    async def automation_session(self, db: AsyncSession, owner_id: str, session_id: str) -> Session:
+    async def automation_session(
+        self, db: AsyncSession, owner_id: str, session_id: str, *, visibility: str = "shared",
+    ) -> Session:
         session = await db.scalar(select(Session).where(Session.id == session_id).with_for_update())
         if (
             session is None or session.deleted or session.archived or session.owner_id != owner_id
-            or session.visibility != "shared" or session.surface != "web"
+            or visibility not in {"private", "shared"} or session.visibility != visibility or session.surface != "web"
             or await db.get(DelegatedSession, session_id) is not None
             or await db.get(SwarmMember, session_id) is not None
         ):
-            raise HTTPException(409, "Choose an active shared chat you own. Private, Slack and delegated chats cannot receive scheduled runs.")
+            raise HTTPException(409, "Choose an active web chat you own with the automation's visibility.")
         return session
 
     async def resolve_grants(
@@ -771,15 +776,18 @@ class Database:
         return grants
 
     async def execution_context(self, db: AsyncSession, session: Session, *, turn_id: str | None = None) -> ExecutionContext:
-        if turn_id and await db.get(ProductAutomationTurn, turn_id) is not None:
+        automated = await db.get(ProductAutomationTurn, turn_id) if turn_id else None
+        if automated is not None:
             turn = await db.get(Turn, turn_id)
+            visibility = automated.visibility or "shared"
             if (
-                session.deleted or session.archived or session.visibility != "shared"
+                session.deleted or session.archived or session.visibility != visibility
+                or visibility not in {"private", "shared"}
                 or turn is None or session.owner_id != turn.actor_id
                 or session.surface not in {"web", "automation"}
             ):
-                raise PermissionError("Scheduled work requires its original shared chat.")
-            return ExecutionContext("shared", "automation")
+                raise PermissionError("Scheduled work requires its original chat visibility and owner.")
+            return ExecutionContext(cast(Literal["private", "shared"], visibility), "automation")
         return await session_context(self, db, session)
 
     async def human_origin(self, db: AsyncSession, scope: RunScope) -> str | None:
@@ -1479,6 +1487,8 @@ class Database:
                 ]
                 await bind_background_resume(self, db, previous, turn, original.scope)
             if automated is not None:
-                db.add(ProductAutomationTurn(turn_id=turn.id, origin_turn_id=automated.origin_turn_id))
+                db.add(ProductAutomationTurn(
+                    turn_id=turn.id, origin_turn_id=automated.origin_turn_id, visibility=automated.visibility,
+                ))
             previous.status = "resumed"
             return turn

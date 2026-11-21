@@ -18,7 +18,7 @@ test.before(async()=>{
 });
 test.after(async()=>{await server?.close();});
 const timing=(changes={})=>({frequency:'weekdays',time:'09:00',weekday:1,timezone:'America/Los_Angeles',cron:'',run_at:null,...changes});
-const definition=(changes={})=>({name:'Weekly review',prompt:'Review the shared project notes.',model:'enabled-model',mode:'modal',harness:'hermes',repo_url:'',github_repository_id:null,environment_id:'none',plugins:[],metadata:{},queue_events:false,max_runs_per_hour:50,self_management:{instructions:false,schedule:false},triggers:[{id:'original-trigger',schedule:timing()}],...changes});
+const definition=(changes={})=>({name:'Weekly review',prompt:'Review the shared project notes.',model:'enabled-model',mode:'modal',harness:'hermes',repo_url:'',github_repository_id:null,environment_id:'none',visibility:'shared',connection_ids:[],plugins:[],metadata:{},queue_events:false,max_runs_per_hour:50,self_management:{instructions:false,schedule:false},triggers:[{id:'original-trigger',schedule:timing()}],...changes});
 const binding=(changes={})=>({core:'pydantic-v1',generation:2,state:'paused',sync_state:'ready',synced_generation:2,source_revision:7,last_error:'',...changes});
 const preview=(changes={})=>({id:'a'.repeat(32),owner_id:'viewer',revision:7,definition:definition(),legacy_paused:true,native:binding(),blockers:[],supported:true,activation:'explicit_owner_action_required',execution_visibility:'shared',sharing_notice:'Shared workspace resources.',overlap:'ALLOW_ALL',catchup_seconds:900,capabilities:{update:true,migrate:false,enable:true,pause:false},...changes});
 const render=(Component,props)=>renderToStaticMarkup(React.createElement(Component,props));
