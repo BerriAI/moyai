@@ -61,6 +61,7 @@ from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
 from .input_identity import DELEGATED_INPUT, input_identity
 from .live_events import root_event_stream
+from .private_history import PrivateHistoryRecall
 from .request_limits import UnlimitedModelRequests
 from .settings import Settings
 from .settings_runtime import settings_capability
@@ -75,7 +76,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent / "resources"
 if not PACKAGE_ROOT.is_dir():
     PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 READ_TOOLS = ["read_file", "list_files", "grep", "read_memory", "search_memory", "read_plan",
-              "search_conversation_history"]
+              "search_conversation_history", "private_history_search", "private_history_read"]
 PLAN_TOOLS = {
     "write_plan", "read_plan", "add_task", "update_task_status", "update_task_statuses",
     "remove_task", "add_subtask", "set_dependency", "get_available_tasks",
@@ -431,6 +432,7 @@ def make_agent(
             ),
             StepPersistence(store=stores.steps, capture_frontier=True),
             DurableConversationSearch(SnapshotHistorySource(stores.steps), scope="conversation"),
+            PrivateHistoryRecall(database),
             SummarizingCompaction(max_fraction=0.75, keep_messages=20, receipts=True),
             DurableQuestions(answerer=None, id="ask_user"),
             SetToolMetadata(tools=READ_TOOLS, temporal={
