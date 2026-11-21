@@ -246,3 +246,26 @@ async def test_saved_catalog_preserves_existing_provider_labels_and_eligibility(
     for provider in ("linear", "notion", "slack"):
         save(bridge, provider)
     assert await bridge.catalog("google:owner", refresh_metadata=False) == await bridge.catalog("google:owner")
+
+
+async def test_visibility_changes_during_final_candidate_resolution(runtime, actor, active, monkeypatch):
+    row = await connection(runtime, actor)
+    scope = active[2].scope
+    original = runtime.database.resolve_grants
+    changed = False
+
+    async def resolving(db, actor_id, ids, **kwargs):
+        nonlocal changed
+        current = await original(db, actor_id, ids, **kwargs)
+        if ids == [row.id]:
+            # SQLite deliberately does not enforce PostgreSQL's shared row
+            # lock: exercise the final reload itself, independently of locks.
+            async with runtime.database.sessions.begin() as writer:
+                (await writer.get(Session, scope.session_id)).visibility = "shared"
+            changed = True
+        return current
+
+    monkeypatch.setattr(runtime.database, "resolve_grants", resolving)
+    result = await ConnectionGuide(runtime.database).read(scope, scope.root_run_id)
+    assert changed
+    assert result.status == "private_chat_required" and result.connections == []

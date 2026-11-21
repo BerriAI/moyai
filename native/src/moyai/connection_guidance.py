@@ -49,6 +49,14 @@ class ConnectionGuide:
     def __init__(self, database: Database):
         self.database = database
 
+    @staticmethod
+    def private_session(session: Session | None, scope: RunScope) -> bool:
+        return bool(
+            session is not None and not session.deleted and not session.archived
+            and session.owner_id == scope.actor_id
+            and session.visibility == "private" and session.surface == "web"
+        )
+
     async def private_caller(
         self, scope: RunScope, run_id: str | None, candidates: dict[str, int] | None = None,
     ) -> bool:
@@ -66,9 +74,7 @@ class ConnectionGuide:
                 and scope.swarm_id is None and scope.goal_generation is None
                 and scope.visibility == scope.authority.visibility == "private"
                 and scope.surface == scope.authority.surface == "web"
-                and session is not None and not session.deleted and not session.archived
-                and session.owner_id == scope.actor_id
-                and session.visibility == "private" and session.surface == "web"
+                and self.private_session(session, scope)
                 and await self.database.human_origin(db, scope) is not None
             )
             if not direct:
@@ -108,9 +114,12 @@ class ConnectionGuide:
                     raise ToolFailed(
                         "Available accounts changed during discovery. Refresh Settings > Connections and ask again."
                     )
-                db.expire_all()
-                await self.database.authorize_scope(scope, db=db)
-            return True
+            # No catalog/principal I/O follows this final check. Expire the ORM
+            # identity map as authorize_scope alone need not reject a private
+            # session that became shared when no connection was selected.
+            db.expire_all()
+            await self.database.authorize_scope(scope, db=db)
+            return self.private_session(await db.get(Session, scope.session_id), scope)
 
     @staticmethod
     def restricted() -> ConnectionGuidance:
