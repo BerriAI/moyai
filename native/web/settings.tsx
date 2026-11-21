@@ -941,20 +941,39 @@ function ProductPersonalSlack({ individual, onStartPrivateChat }: { individual: 
   }}</LoadState>
 }
 
-function GeneralPage({ onPreferences }: { onPreferences: (preferences: GeneralPreferences) => void }) {
+function GeneralPage({ individual, onPreferences }: { individual: boolean; onPreferences: (preferences: GeneralPreferences) => void }) {
   const resource = useResource("/settings/general", signal => getSettingsGeneral({ signal }).then(({ data }) => data))
-  return <LoadState resource={resource}>{data => <GeneralForm initial={data} onPreferences={onPreferences} />}</LoadState>
+  return <LoadState resource={resource}>{data => <GeneralForm initial={data} individual={individual} onPreferences={onPreferences} />}</LoadState>
 }
 
-function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; onPreferences: (preferences: GeneralPreferences) => void }) {
+function GeneralForm({ initial, individual, onPreferences }: { initial: GeneralPreferences; individual: boolean; onPreferences: (preferences: GeneralPreferences) => void }) {
   const [preferences, setPreferences] = useState(initial)
+  const [savedInstructions, setSavedInstructions] = useState(initial)
+  const [instructions, setInstructions] = useState(initial.personal_instructions)
+  const [instructionStatus, setInstructionStatus] = useState("")
+  const instructionsId = useId()
   const mutation = useMutation()
   const custom = preferences.connection_ids !== null
   const accounts = useResource(custom ? "/connections" : null, loadConnections)
   const save = (patch: Partial<GeneralPreferences>) => {
+    setInstructionStatus("")
     let updated: GeneralPreferences
     void mutation.run(async () => { updated = (await updateSettingsGeneral({ body: patch })).data }, () => {
       setPreferences(updated); onPreferences(updated)
+      if (patch.personal_instructions !== undefined) {
+        setSavedInstructions(updated); setInstructions(updated.personal_instructions)
+        setInstructionStatus(updated.personal_instructions ? "Personal instructions saved." : "Personal instructions cleared.")
+      }
+    })
+  }
+  const saveInstructions = (text: string) => save({
+    personal_instructions: text, personal_instructions_revision: savedInstructions.personal_instructions_revision,
+  })
+  const reloadInstructions = () => {
+    let updated: GeneralPreferences
+    void mutation.run(async () => { updated = (await getSettingsGeneral()).data }, () => {
+      setPreferences(updated); onPreferences(updated); setSavedInstructions(updated)
+      setInstructions(updated.personal_instructions); setInstructionStatus("Saved instructions loaded.")
     })
   }
   return <>
@@ -977,6 +996,22 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
       }}</LoadState>}
     </div>
     <p className="ns-help ns-footer-help">Only connections available to the chat are used. Personal connections are limited to private chats. <a className="ns-link" href="#settings/connections">Manage connections</a></p>
+    <section className="ns-personal-instructions" aria-labelledby={`${instructionsId}-heading`}>
+      <h2 id={`${instructionsId}-heading`}><label htmlFor={instructionsId}>Personal instructions</label></h2>
+      {individual ? <>
+        <p id={`${instructionsId}-help`}>Tell Moyai how you prefer responses, such as writing style or detail level. Saved instructions apply to your direct private chats, including new chats. Shared chats, Slack, schedules, and delegated tasks do not use them.</p>
+        <Textarea id={instructionsId} value={instructions} maxLength={4000} rows={5} disabled={mutation.busy}
+          aria-describedby={`${instructionsId}-help ${instructionsId}-limit`} placeholder="For example: Keep answers concise and use metric units."
+          onChange={event => { setInstructions(event.target.value); setInstructionStatus("") }} />
+        <p className="ns-field-hint" id={`${instructionsId}-limit`}>{instructions.length.toLocaleString()} / 4,000 characters. These preferences do not grant permissions or replace required approvals.</p>
+        <div className="ns-row-actions">
+          <Button disabled={mutation.busy || instructions === savedInstructions.personal_instructions} onClick={() => saveInstructions(instructions)}>Save instructions</Button>
+          <Button variant="outline" disabled={mutation.busy || (!instructions && !savedInstructions.personal_instructions)} onClick={() => saveInstructions("")}>Clear instructions</Button>
+          {mutation.error && <Button variant="ghost" disabled={mutation.busy} onClick={reloadInstructions}>Reload saved instructions</Button>}
+        </div>
+        {instructionStatus && <p className="ns-muted" role="status">{instructionStatus}</p>}
+      </> : <p>Sign in with your individual work account to save personal instructions.</p>}
+    </section>
     {mutation.busy && <p className="ns-muted" role="status">Saving…</p>}
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
   </>
@@ -1274,7 +1309,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
             : destination?.admin && user.role !== "admin" ? <div className="ns-empty" role="alert"><Shield size={24} /><h2>Administrator access required</h2><p>This page is available to workspace administrators.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview</Button></div>
             : current === "overview" ? <OverviewPage user={user} navigate={navigate} productMode={productMode} />
               : current === "sign-in" ? <SignInPage />
-              : current === "general" ? <GeneralPage onPreferences={onPreferences} />
+              : current === "general" ? <GeneralPage key={`${user.id}:${user.individual !== false}:${csrfToken()}`} individual={user.individual !== false} onPreferences={onPreferences} />
               : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />

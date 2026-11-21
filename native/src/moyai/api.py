@@ -70,7 +70,6 @@ from .failed_action_attempts import failed_action_attempt
 from .failure_diagnostics import failure_details
 from .file_preview import routes as file_preview_routes
 from .gateway_config import GatewayConfig, GatewayDefaults, GatewayDiscovery
-from .general_preferences import GeneralPreferences, general_preferences
 from .history_handoff import is_turn_run
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
@@ -91,6 +90,7 @@ from .models import (
     now,
 )
 from .presentation import public_event, redact
+from .private_instructions import preferences_for_user
 from .product_identity import ProductAuthorityBusy
 from .product_requester import answer_actor, can_answer
 from .public_path import PublicPathMiddleware
@@ -551,7 +551,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             ),
             csrf=csrf, models=runtime.settings.models,
             default_model=runtime.settings.default_model,
-            preferences=GeneralPreferences.model_validate(general_preferences(user.preferences)),
+            preferences=await preferences_for_user(runtime.database, user),
             product_mode="existing" if runtime.product_identity is not None else "standalone",
         )
 

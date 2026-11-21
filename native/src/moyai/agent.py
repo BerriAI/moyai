@@ -61,6 +61,7 @@ from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
 from .input_identity import DELEGATED_INPUT, input_identity
 from .live_events import root_event_stream
+from .private_instructions import PrivateInstructions
 from .request_limits import UnlimitedModelRequests
 from .settings import Settings
 from .settings_runtime import settings_capability
@@ -393,6 +394,7 @@ def make_agent(
             UnlimitedModelRequests(),
             workspace,
             authority,
+            PrivateInstructions(database),
             InteractiveDelegation(database),
             SwarmCapability(database.swarms),
             GoalCapability(database.goals),

@@ -4077,6 +4077,14 @@ export type GeneralPreferencesInput = {
      * Delivery Mode
      */
     delivery_mode?: 'when_idle' | 'asap';
+    /**
+     * Personal Instructions
+     */
+    personal_instructions?: string;
+    /**
+     * Personal Instructions Revision
+     */
+    personal_instructions_revision?: number;
 };
 
 /**
@@ -4091,6 +4099,14 @@ export type GeneralPreferencesOutput = {
      * Delivery Mode
      */
     delivery_mode: 'when_idle' | 'asap';
+    /**
+     * Personal Instructions
+     */
+    personal_instructions: string;
+    /**
+     * Personal Instructions Revision
+     */
+    personal_instructions_revision: number;
 };
 
 /**

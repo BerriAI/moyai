@@ -25,8 +25,14 @@ from temporalio.service import RPCError
 
 from .analytics_service import report as analytics_report
 from .contracts import PreparedTurn, RunScope
-from .general_preferences import GeneralPreferences, general_preferences, preference_document
+from .general_preferences import (
+    GeneralPreferences,
+    general_preferences,
+    instruction_revision,
+    preference_document,
+)
 from .models import Connection, Turn, User, now
+from .private_instructions import individual, preferences_for_user
 from .product_auth import ProductUserDirectory, user_directory
 from .product_secrets import CredentialInventory
 from .pull_requests import PullRequestService
@@ -340,21 +346,43 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
 
     @router.get("/general", operation_id="getSettingsGeneral")
     async def general(user: User = Depends(actor)) -> GeneralPreferences:
-        return GeneralPreferences.model_validate(general_preferences(user.preferences))
+        return await preferences_for_user(runtime.database, user)
 
     @router.patch("/general", operation_id="updateSettingsGeneral")
     async def update_general(body: GeneralPreferences, user: User = Depends(actor)) -> GeneralPreferences:
         async with runtime.database.sessions.begin() as db:
+            allowed = await individual(runtime.database, db, user)
             await lock_actor(db, user)
             row = await db.get(User, user.id)
             document = preference_document(row.preferences)
+            patch = body.model_dump(exclude_unset=True)
+            if "personal_instructions" in patch:
+                if not allowed:
+                    raise HTTPException(403, "Personal instructions require an individual sign-in.")
+                if "personal_instructions_revision" not in patch:
+                    raise HTTPException(422, "Include the saved personal instructions revision.")
+                revision = instruction_revision(row.preferences)
+                if body.personal_instructions_revision != revision:
+                    raise HTTPException(409, "Personal instructions changed elsewhere. Reload saved instructions before saving.")
+                text = body.personal_instructions.strip()
+                document["private_instructions"] = {
+                    "revision": revision + 1,
+                    "sealed": runtime.security.seal({"owner_id": row.id, "text": text}) if text else "",
+                }
+            elif "personal_instructions_revision" in patch:
+                raise HTTPException(422, "A revision requires personal instructions.")
+            patch.pop("personal_instructions", None)
+            patch.pop("personal_instructions_revision", None)
             current = document.get("general", {})
             document["general"] = {
                 **(current if isinstance(current, dict) else {}),
-                **body.model_dump(exclude_unset=True),
+                **patch,
             }
             row.preferences = json.dumps(document)
-            return GeneralPreferences.model_validate(general_preferences(row.preferences))
+            return GeneralPreferences.model_validate(general_preferences(
+                row.preferences, security=runtime.security if allowed else None,
+                owner_id=row.id if allowed else None,
+            ))
 
     def capabilities(user: User) -> dict[str, Any]:
         return {

@@ -156,6 +156,10 @@
 .native-settings-dialog .ns-check { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 10px; }
 .native-settings-dialog .ns-check .ns-field-hint { grid-column: 2; }
 .native-settings .ns-field-hint, .native-settings-dialog .ns-field-hint { color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
+.native-settings .ns-personal-instructions { display: grid; gap: 12px; max-width: 760px; padding-block: 24px; }
+.native-settings .ns-personal-instructions h2 { font-size: 16px; font-weight: 500; }
+.native-settings .ns-personal-instructions p { line-height: 1.6; }
+.native-settings .ns-personal-instructions textarea { min-width: 0; min-height: 144px; max-height: 400px; resize: vertical; }
 .native-settings-dialog .ns-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
 @media (max-width: 1250px) {
   .native-settings { grid-template-columns: 230px minmax(0, 1fr); }
