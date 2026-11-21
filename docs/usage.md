@@ -522,6 +522,8 @@ not implemented by this adapter.
   An approval cannot restore a revoked account grant.
 - Native working-history search and memory are scoped independently of the
   shared product conversation. Private and shared memory namespaces differ.
+  Hosted [personal memory](personal-memory.md) can recall existing preferences
+  in private chats; notes learned there remain limited to private chats.
 - A possibly dispatched shell or connected-service write retains an unresolved
   receipt. Another write is blocked even if the model changes the call ID.
   The requester can record inspected evidence using

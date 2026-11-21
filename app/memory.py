@@ -26,6 +26,11 @@ from .repository_identity import (
 KINDS = Literal['preference', 'feedback', 'project', 'reference']
 
 
+def private_note(note):
+    """Missing visibility retains the original cross-chat recall policy."""
+    return note.get('source', {}).get('visibility', 'shared') != 'shared'
+
+
 class Form(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
 
@@ -273,8 +278,19 @@ class Memory:
             body = body.model_copy(update={'repo_url': chosen['url']})
         payload = {k: getattr(body, k) for k in ('key', 'title', 'content', 'kind', 'repo_url')}
         check_content(json.dumps(payload) + json.dumps(source or {}))
-        payload['source'] = source or {'type': 'manual'}
+        payload['source'] = dict(source or {'type': 'manual'})
         key_hash = fingerprint(body.key)
+        old = conn.execute('SELECT * FROM personal_memories WHERE owner_id=? AND key_hash=?', (owner, key_hash)).fetchone()
+        if note_id:
+            old = self.get(conn, owner, note_id)
+            if old['key_hash'] != key_hash:
+                raise HTTPException(409, 'A memory’s key cannot change; edit its title or content instead.')
+        if old and not old['deleted'] and private_note(self.unpack(old)):
+            if source is not None and not private_note({'source': source}):
+                raise HTTPException(403, 'This memory is available only in private chats.')
+            # Editing from Settings changes provenance to manual without
+            # publishing facts originally learned in a private conversation.
+            payload['source']['visibility'] = 'private'
         digest = fingerprint({'note': payload, 'revision': body.revision, 'id': note_id})
         operation = fingerprint([run['id'], run['active_message_id'], body.request_id]) if run else body.request_id
         if run:
@@ -294,11 +310,6 @@ class Memory:
             if prior['fingerprint'] != digest or prior['revision'] != row['revision']:
                 raise HTTPException(409, 'This save was already used or the memory changed. Review it before retrying.')
             return {'saved': True, 'id': row['id'], 'revision': row['revision']}
-        old = conn.execute('SELECT * FROM personal_memories WHERE owner_id=? AND key_hash=?', (owner, key_hash)).fetchone()
-        if note_id:
-            old = self.get(conn, owner, note_id)
-            if old['key_hash'] != key_hash:
-                raise HTTPException(409, 'A memory’s key cannot change; edit its title or content instead.')
         if old and old['deleted']:
             raise HTTPException(409, 'This memory was forgotten. Do not recreate it automatically.')
         if (old['revision'] if old else 0) != body.revision:
@@ -327,6 +338,8 @@ class Memory:
                 if self.recall_only(current, connection=conn):
                     raise HTTPException(403, 'Subagents and automations may recall memory but cannot change personal memories.')
             row = self.get(conn, owner, note_id)
+            if run is not None and private_note(self.unpack(row)):
+                raise HTTPException(404, 'Memory not found.')
             if row['revision'] != revision:
                 raise HTTPException(409, 'This memory changed. Review it before deleting.')
             # Keep only an opaque tombstone and operation references so a retry
@@ -342,6 +355,8 @@ class Memory:
             raise HTTPException(422, 'Search with specific words or leave query empty to enumerate notes.')
         ranked = []
         for note in self.listing(owner):
+            if private_note(note):
+                continue
             if note['expires_at'] and note['expires_at'] <= now():
                 continue
             if repo_url is not None and note['repo_url'] and note['repo_url'] != Note.repository(repo_url):
@@ -370,6 +385,8 @@ class Memory:
             self.require_current_in(conn, run, owner)
             row = self.get(conn, owner, args.id)
             note = self.unpack(row)
+            if private_note(note):
+                raise HTTPException(404, 'Memory not found.')
             if row['revision'] != args.revision:
                 raise HTTPException(409, 'This memory changed. Search again for its current revision.')
             if row['expires_at'] and row['expires_at'] <= now():
@@ -425,6 +442,8 @@ class Memory:
         for row in self.store.rows('''SELECT * FROM personal_memories WHERE owner_id=? AND deleted=0
                 AND (expires_at='' OR expires_at>?)''', (owner, now())):
             note = self.unpack(row)
+            if private_note(note):
+                continue
             if note['repo_url'] and note['repo_url'] != repo:
                 continue
             score = len(terms & search_terms(' '.join(note[k] for k in ('title', 'content', 'key'))))
@@ -450,6 +469,8 @@ class Memory:
         repo = self.selected_repository(run)
         for row in rows:
             note = self.unpack(row)
+            if private_note(note):
+                continue
             if row['read_length'] is not None:
                 size = len(note['content'])
                 end = row['read_offset'] + row['read_length']
@@ -460,7 +481,7 @@ class Memory:
         notes.extend(note for note in self.automatic_notes(run, owner, messages) if note['id'] not in selected_ids)
         listed = {note['id'] for note in notes}
         available = [{k: note[k] for k in ('id', 'revision', 'title', 'kind', 'repo_url')}
-                     for note in self.listing(owner) if note['id'] not in listed
+                     for note in self.listing(owner) if not private_note(note) and note['id'] not in listed
                      and (not note['expires_at'] or note['expires_at'] > now())]
         if notes or available:
             from .native_sessions import mark_private_context

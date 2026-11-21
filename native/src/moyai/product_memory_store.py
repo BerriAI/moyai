@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from app.memory import Note, Observation, search_terms
+from app.memory import Note, Observation, private_note, search_terms
 from app.repository_identity import canonical_origin, repository_origin, repository_provider
 from fastapi import HTTPException
 from pydantic import Field, ValidationError, model_validator
@@ -67,8 +67,9 @@ including them. New notes use revision 0. General preferences use empty repo_url
 Repository notes require the verified repository context, never a guessed URL.
 Observations cannot replace manual or user-backed notes. Secrets are not memory.
 Never recreate forgotten notes. Delete only when the owner asks. Automation and
-subagent runs may recall but cannot mutate. Private conversations do not export
-personal context. Check actual tool results before claiming anything was saved."""
+subagent runs may recall but cannot mutate. Notes captured in private chats are
+available only in private chats; memory tools cannot broaden their visibility.
+Check actual tool results before claiming anything was saved."""
 
 
 class NativeNote(Note):
@@ -204,10 +205,13 @@ class ProductMemoryStore:
             # _connections validates a child's saved execution context. Ordinary
             # chats must still honor a live change of their own privacy setting.
             visibility = self.scope.execution_context.visibility if self.scope.execution_context else session.visibility
-            if visibility != "shared":
+            if (
+                visibility not in {"private", "shared"} or visibility != self.scope.authority.visibility
+                or (visibility == "private" and session.owner_id != self.scope.actor_id)
+            ):
                 return {
                     "enabled": False, "auto_save": False,
-                    "reason": "Private conversations do not export personal context.",
+                    "reason": "The conversation's memory access changed. Start a new turn.",
                 }, [], [], ""
             try:
                 owner = await self.service.owner_in(db, principal)
@@ -224,7 +228,9 @@ class ProductMemoryStore:
                 for row in rows:
                     if row["expires_at"] and row["expires_at"] <= now():
                         continue
-                    candidates.append(self.service._unpack(dict(row)))
+                    note = self.service._unpack(dict(row))
+                    if visibility == "private" or not private_note(note):
+                        candidates.append(note)
                 valid = await valid_memory_sources(self.service.database, db, candidates)
                 for note, supported in zip(candidates, valid, strict=True):
                     if not supported:
@@ -518,16 +524,19 @@ class ProductMemoryStore:
             raise ToolFailed("Automations and delegated runs may recall personal memory but cannot mutate it.")
         locked = await db.scalar(update(Session).where(
             Session.id == self.scope.session_id, Session.active_turn == self.scope.turn_id,
-            Session.deleted.is_(False), Session.visibility == "shared", Session.status == "running",
+            Session.deleted.is_(False), Session.visibility == self.scope.authority.visibility,
+            Session.status == "running",
         ).values(revision=Session.revision).returning(Session.id))
         if locked is None:
-            raise ToolFailed("This memory execution is stopped, private, or no longer current.")
+            raise ToolFailed("This memory execution is stopped or its conversation access changed.")
         turn = await db.get(Turn, self.scope.turn_id)
         if turn is None or turn.status != "running" or turn.actor_id != self.scope.actor_id:
             raise ToolFailed("The memory requester changed.")
         await self.service.database._check_product_turn(db, turn, self.grant)
         session = await db.get(Session, self.scope.session_id)
         assert session is not None
+        if session.visibility == "private" and session.owner_id != self.scope.actor_id:
+            raise ToolFailed("Only the private conversation's owner can change personal memory.")
         await self._connections(db, session)
         input_id = self.scope.turn_id
         if self.context is not None:
@@ -580,6 +589,8 @@ class ProductMemoryStore:
             if old and old["deleted"]:
                 raise ToolFailed("This memory was forgotten; it cannot be recreated automatically.")
             old_note = self.service._unpack(dict(old)) if old else None
+            if old_note and private_note(old_note) and self.scope.authority.visibility != "private":
+                raise ToolFailed("This memory is unavailable in the current conversation.")
             current_version = self._version(old_note) if old_note else None
             if current_version != expected_version:
                 raise MemoryConflictError("The canonical note changed before this write.")
@@ -592,6 +603,7 @@ class ProductMemoryStore:
             source: dict[str, Any] = {
                 "type": "observation" if body.observation else "chat", "core": "pydantic-v1",
                 "native_session_id": self.scope.session_id, "native_turn_id": self.scope.turn_id,
+                "visibility": self.scope.authority.visibility,
             }
             if body.observation:
                 source.update(body.observation.model_dump())
@@ -640,6 +652,8 @@ class ProductMemoryStore:
                 "WHERE owner_id=:owner AND key_hash=:key AND deleted=0"
             ), {"owner": owner, "key": hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode()).hexdigest()}
             )).mappings().first()
+            if row and private_note(self.service._unpack(dict(row))) and self.scope.authority.visibility != "private":
+                raise ToolFailed("This memory is unavailable in the current conversation.")
             if row is None or self._version(self.service._unpack(dict(row))) != expected_version:
                 raise MemoryConflictError("Read the current note before forgetting it.")
             await self.service.forget_in(db, owner, row["id"], row["revision"])

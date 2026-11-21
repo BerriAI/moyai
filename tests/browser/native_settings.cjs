@@ -85,6 +85,17 @@ test('Memory reports unavailable enabled features but manual saving is not an er
   fixture.state.memory.runtime.recall=false;await page.reload();
   await page.locator('.ns-notice').filter({hasText:'Currently unavailable: Using saved memories.'}).waitFor();
 });
+for(const width of [1440,768,320])test(`Private memory explains its audience and preserves it when editing at ${width}px`,async t=>{
+  fixture.reset();fixture.state.memory.memories[0].source={type:'chat',visibility:'private'};
+  const page=await open(t,'memory',width);
+  await page.getByText('Private chats only',{exact:true}).waitFor();
+  assert.equal(await page.getByText('Across your private chats',{exact:true}).isVisible(),true);
+  await page.getByRole('button',{name:'Review & edit Keep project updates concise'}).click();
+  const dialog=page.getByRole('dialog',{name:'Edit memory'});await dialog.waitFor();
+  assert.equal(await dialog.getByText('This note is used only in your private chats. Editing keeps it private.').isVisible(),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});
+});
 test('Other settings keep useful guidance without internal migration banners',async t=>{
   fixture.reset();const page=await open(t,'skills');
   for(const route of ['skills','connections','secrets','automations','users']){

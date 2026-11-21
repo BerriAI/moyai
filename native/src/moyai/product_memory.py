@@ -54,6 +54,7 @@ class ProductMemorySource(ProductMemoryResponse):
     session_id: str | None = None
     engine: str | None = None
     url: str | None = None
+    visibility: Literal["private", "shared"] | None = None
 
 
 class ProductMemoryNote(ProductMemoryResponse):

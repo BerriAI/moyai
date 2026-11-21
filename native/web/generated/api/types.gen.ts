@@ -7171,6 +7171,10 @@ export type ProductMemorySource = {
      * Url
      */
     url: string | null;
+    /**
+     * Visibility
+     */
+    visibility: 'private' | 'shared' | null;
     [key: string]: unknown;
 };
 
