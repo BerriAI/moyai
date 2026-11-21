@@ -51,6 +51,7 @@ from .coding_image import with_node
 from .commentary import Commentary
 from .computer_startup import OnDemandDurability, on_demand_coder
 from .connection_catalog import ConnectionToolSearch, connection_search
+from .connection_guidance import connection_guidance
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
@@ -400,6 +401,7 @@ def make_agent(
             EffectReceipts(database),
             *product_capabilities,
             connection_tools(database.security),
+            connection_guidance(database),
             ConnectionToolSearch(
                 strategy=connection_search, max_results=6,
                 tool_description=(

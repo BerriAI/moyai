@@ -115,6 +115,7 @@ class ProductConnections:
     def _grants(
         self, actor_id: str, *, shared_session: bool, surface: str,
         source_store: Any = None, source_connectors: Any = None, selected_ids: Sequence[str] = (),
+        limit: int | None = None,
     ) -> list[Grant]:
         from app.connection_authority import authority
         from app.connector_errors import ConnectorError
@@ -201,6 +202,8 @@ class ProductConnections:
                             **({"base_url": origin} if provider == "gitlab" else {}),
                         }},
                     ))
+                    if limit is not None and len(result) >= limit:
+                        return result
         return result
 
     async def resolve_grants(
@@ -405,11 +408,15 @@ class ProductConnections:
 
     async def catalog(
         self, actor_id: str, *, shared_session: bool = False, surface: str = "web",
+        refresh_metadata: bool = True, limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        metadata = {row["id"]: row for row in await self.accounts()}
+        # Agent guidance must not trigger the legacy GitHub migration/provider
+        # check in accounts(). Saved metadata uses the same catalog/eligibility.
+        metadata = {row["id"]: row for row in await self.accounts()} if refresh_metadata else {}
         grants = await source_database(
-            self._grants, actor_id, shared_session=shared_session, surface=surface,
+            self._grants, actor_id, shared_session=shared_session, surface=surface, limit=limit,
         )
+        saved_labels = await source_database(self._saved_catalog_labels, grants) if not refresh_metadata else {}
         result = []
         for grant in grants:
             ref = grant.policy["product"]
@@ -420,6 +427,7 @@ class ProductConnections:
                     repository["full_name"] for repository in account.get("repositories", [])
                     if repository["id"] == ref["repository_id"]
                 ), f"Repository {ref['repository_id']}")
+            name = saved_labels.get((grant.kind, ref["repository_id"]), name)
             if ref["personal_owner"]:
                 name = "Personal Slack"
             elif ref.get("access") == "bot":
@@ -431,6 +439,33 @@ class ProductConnections:
                 "policy": grant.policy, "source": "product",
             })
         return result
+
+    def _saved_catalog_labels(self, grants: Sequence[Grant]) -> dict[tuple[str, int | None], str]:
+        """Bound saved repository-name queries to the requested catalog window."""
+        labels: dict[tuple[str, int | None], str] = {
+            (row["provider"], None): str(row["label"] or row["provider"].title())
+            for row in self.store.rows("SELECT provider,label FROM connections")
+        }
+        github_ids = [
+            grant.policy["product"]["repository_id"] for grant in grants if grant.kind == "github"
+        ]
+        if github_ids:
+            saved = self.connectors.github.saved_credentials()
+            marks = ",".join("?" for _ in github_ids)
+            for row in self.store.rows(
+                f"SELECT repository_id,full_name FROM github_repositories "
+                f"WHERE installation_id=? AND repository_id IN ({marks}) LIMIT ?",
+                (saved.get("installation_id", 0), *github_ids, len(github_ids)),
+            ):
+                labels[("github", row["repository_id"])] = row["full_name"]
+        gitlab_ids = {grant.policy["product"]["repository_id"] for grant in grants if grant.kind == "gitlab"}
+        if gitlab_ids:
+            # GitLab names live inside one encrypted saved connection document.
+            saved = self.connectors.gitlab.saved_credentials()
+            for row in saved.get("repositories", []):
+                if row["id"] in gitlab_ids:
+                    labels[("gitlab", row["id"])] = row["full_name"]
+        return labels
 
     async def accounts(self) -> list[dict[str, Any]]:
         from app.connector_errors import ConnectorError
