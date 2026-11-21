@@ -96,7 +96,9 @@ class SlackConversations:
             raise HTTPException(403, "This thread belongs to a changed Slack installation.")
         if Decimal(origin["message_ts"]) < Decimal(binding.started_ts):
             return None
-        if origin["channel_id"].startswith("D") and binding.requester_id != actor.id:
+        raw = getattr(actor, "slack_web_grant", None)
+        requester = raw.user_id if raw is not None else actor.id
+        if origin["channel_id"].startswith("D") and binding.requester_id != requester:
             raise HTTPException(403, "This DM belongs to a different Slack participant.")
         if binding.paused and not mentioned and command not in {"wake", "status"}:
             return None

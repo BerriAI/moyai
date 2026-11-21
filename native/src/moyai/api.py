@@ -299,6 +299,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 user, [session_id], deleted=request.url.path.endswith("/restore"),
             )
 
+    if runtime.product_slack is not None:
+        app.include_router(runtime.product_slack.web.routes(actor))
+
     # UUID matching keeps this route distinct from the canonical provider check
     # registered below, while OpenAPI retains the ordinary connection_id path.
     @app.post("/api/connections/{connection_id:uuid}/check", operation_id="checkConnection")

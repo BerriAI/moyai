@@ -1,6 +1,6 @@
 import { appPath } from "./api"
 import React, { createContext, useContext, useEffect, useRef, useState } from "react"
-import { Archive, Check, ChevronRight, Copy, Download, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
+import { Archive, Check, ChevronRight, Copy, Download, Folder, FolderPlus, History, Mail, MessageSquare, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -10,6 +10,7 @@ import { deleteSession, restoreSession, updateSession, type SessionEdit } from "
 import { sessionUpdatePatch, type SessionUpdates } from "./session-updates"
 import { downloadDebugTrace } from "./debug-trace"
 import { ApiError } from "./api"
+import { SlackSessionDialog } from "./slack-session-dialog"
 
 export type SidebarSession = {
   id: string; title: string; owner_id: string; status: string; archived: boolean; deleted?: boolean
@@ -34,6 +35,7 @@ type Actions = {
   copy: (row: SidebarSession) => void
   openComputer: (id: string) => void
   newSession: () => void
+  continueInSlack?: (row: SidebarSession) => void
 }
 const ActionsContext = createContext<Actions | null>(null)
 export function useSessionActions() {
@@ -95,6 +97,8 @@ export function SessionMenu({ session, header = false, onOpenSideChat }: {
         <ActionItem disabled={actions.busy} onClick={() => editor("move")}><Folder />Folder<ChevronRight className="trailing" /></ActionItem>
         <ActionItem disabled={!owner || actions.busy} onClick={() => editor("rename")}><Pencil />Rename</ActionItem>
         <ActionItem onClick={() => { close(); actions.copy(row) }}><Copy />Copy session link</ActionItem>
+        {actions.continueInSlack && row.owner_id === actions.userId && row.surface === "web" && !row.parent_session_id &&
+          <ActionItem onClick={() => { close(); actions.continueInSlack?.(row) }}><MessageSquare />Continue in Slack</ActionItem>}
         <ActionItem onClick={() => { close(); actions.openComputer(row.id) }}><Monitor />Open computer</ActionItem>
         <ActionItem disabled={actions.busy} onClick={() => { close(); void actions.edit(row, { unread: !row.unread }, row.unread ? "Marked read." : "Marked unread.") }}><Mail />{row.unread ? "Mark read" : "Mark unread"}</ActionItem>
         <ActionItem disabled={actions.busy} onClick={() => { close(); void actions.edit(row, { pinned: !row.pinned }, row.pinned ? "Session unpinned." : "Session pinned.") }}><Pin />{row.pinned ? "Unpin" : "Pin"}</ActionItem>
@@ -106,12 +110,25 @@ export function SessionMenu({ session, header = false, onOpenSideChat }: {
   }}</ActionMenu>
 }
 
-export function SessionActionsProvider({ userId, folders, refresh, updates, optimisticSession, onOpenComputer, onNewSession, onDeleted, children }: {
+export function SessionActionsProvider({ userId, folders, refresh, updates, optimisticSession, onOpenComputer, onNewSession, onDeleted, children, productMode }: {
   userId: string; folders: SessionFolder[]; refresh: () => Promise<void>
   updates: SessionUpdates; optimisticSession: <T extends SidebarSession>(row: T) => T
   onOpenComputer: (id: string) => void; onNewSession: () => void; onDeleted: (id: string) => void
   children: React.ReactNode
+  productMode?: "existing" | "standalone"
 }) {
+  const [slackSession, setSlackSession] = useState<string | null>(null)
+  useEffect(() => {
+    const clear = () => setSlackSession(null)
+    window.addEventListener("hashchange", clear)
+    window.addEventListener("moyai:access-changed", clear)
+    window.addEventListener("moyai:signed-out", clear)
+    return () => {
+      window.removeEventListener("hashchange", clear)
+      window.removeEventListener("moyai:access-changed", clear)
+      window.removeEventListener("moyai:signed-out", clear)
+    }
+  }, [])
   const [editor, setEditor] = useState<Editor | null>(null)
   const [name, setName] = useState("")
   const [busy, setBusy] = useState(false)
@@ -172,12 +189,14 @@ export function SessionActionsProvider({ userId, folders, refresh, updates, opti
   const named = editor && ["rename", "folder-create", "folder-rename"].includes(editor.action)
   return <ActionsContext.Provider value={{
     userId, busy, updates, optimisticSession, openEditor, edit, openComputer: onOpenComputer, newSession: onNewSession,
+    continueInSlack: productMode === "existing" ? row => setSlackSession(row.id) : undefined,
     copy: row => { void navigator.clipboard.writeText(`${location.origin}${appPath("/")}#${sessionHash(row)}`).then(
       () => setNotice("Session link copied."),
       () => setError("Could not copy the link. Open the session and copy its address."),
     ) },
   }}>
     {children}
+    {slackSession && <SlackSessionDialog key={slackSession} sessionId={slackSession} onClose={() => setSlackSession(null)} />}
     {(notice || (error && !editor)) && <div className={`action-toast ${error && !editor ? "error" : ""}`} role={error && !editor ? "alert" : "status"}>{error && !editor ? error : notice}
       {error && !editor && renameRetry && <Button type="button" variant="ghost" size="sm" onClick={() => void edit(renameRetry.row, { title: renameRetry.title }, "Session renamed.")}>Retry rename</Button>}
       <Button type="button" size="icon-sm" variant="ghost" aria-label="Dismiss notification" onClick={() => { setNotice(""); setError(""); setRenameRetry(null) }}><X size={14} /></Button></div>}

@@ -79,6 +79,7 @@ class ProductResources:
             # must leave the owner/pool reachable by Runtime.start's cleanup.
             self.store = Store(
                 settings.data_dir, settings.agent_model,
+                auto_link_identities=settings.slack_identity_linking_enabled,
                 object_storage=self.objects, database_url=settings.moyai_database_url,
                 database_schema=settings.moyai_database_schema, schema_mode="verify",
                 database_pool_size=settings.moyai_database_pool_size,

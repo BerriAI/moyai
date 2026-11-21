@@ -19,6 +19,7 @@ from moyai.product_routes import ProductReadService, Reader
 from moyai.product_slack_models import ProductSlackBinding
 from moyai.slack_audience import can_read, prefetch_sessions
 from moyai.slack_audience_reads import AUDIENCE_TTL, SlackAudienceReads
+from moyai.slack_web import SlackWeb
 
 pytestmark = pytest.mark.skipif(not os.getenv('MOYAI_TEST_POSTGRES'), reason='Requires local PostgreSQL')
 product_database = identities.product_database
@@ -46,10 +47,12 @@ async def audience(slack_admission):
     async def installation_in(db):
         return {'team_id': 'TLOCAL001', 'authority': state['authority']}
     slack = SimpleNamespace(runtime=SimpleNamespace(database=product.database),
+        product=SimpleNamespace(identity=product.adapter),
         installation=lambda: {'team_id': 'TLOCAL001', 'authority': state['authority']},
         installation_in=installation_in,
         connectors=SimpleNamespace(slack_bot_token=token, request=request),
         audience_reads=SlackAudienceReads(clock=lambda: state['clock']))
+    slack.web = SlackWeb(slack)
     product.database.slack_access = lambda db, session, actor: can_read(slack, db, session, actor)
     product.database.slack_prefetch = lambda actor, ids, deleted=False: prefetch_sessions(
         slack, actor, ids, deleted=deleted,
@@ -402,7 +405,8 @@ async def test_slack_execution_still_rejects_saved_authority_changes(connected_a
     assert product.state['calls'] == []
 
 
-async def test_idle_native_sender_refresh_restores_verified_self_without_new_message(audience):
+@pytest.mark.parametrize("unlinked", [False, True])
+async def test_idle_native_sender_refresh_restores_verified_self_without_new_message(audience, unlinked):
     import asyncio
     from datetime import UTC, datetime, timedelta
 
@@ -411,17 +415,22 @@ async def test_idle_native_sender_refresh_restores_verified_self_without_new_mes
     async with product.source.begin() as db:
         await db.execute(text('ALTER TABLE moyai.users ADD COLUMN profile_next_check INTEGER NOT NULL DEFAULT 0'))
         await db.execute(text("UPDATE moyai.users SET profile_checked_at=:stamp,profile_next_check=:future WHERE kind='slack'"), {
-            'stamp': (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            'stamp': (datetime.now(UTC) - timedelta(hours=0 if unlinked else 2)).isoformat(),
             # Older releases used a daily timer; last successful verification
             # must still trigger refresh before the one-hour trust window ends.
             'future': int((datetime.now(UTC) + timedelta(hours=8)).timestamp()),
         })
+        if unlinked:
+            await db.execute(text(
+                "UPDATE moyai.users SET linked_user_id=NULL,link_status='pending_profile' WHERE kind='slack'"
+            ))
         await db.execute(text("INSERT INTO moyai.users(id,kind,email,name,created_at,updated_at) "
                               "VALUES('slack:TLOCAL001:UUNUSED01','slack','','Unrelated participant','c','u')"))
     await product.source.dispose()
     await product.database.engine.dispose()
-    with pytest.raises(HTTPException):
-        await product.database.messages(product.actor, product.session_id)
+    if not unlinked:
+        with pytest.raises(HTTPException):
+            await product.database.messages(product.actor, product.session_id)
     refreshed = asyncio.Event()
     calls = []
     async def refresh(team, user, *, refresh_profile=False):
@@ -449,6 +458,36 @@ async def test_idle_native_sender_refresh_restores_verified_self_without_new_mes
     assert calls == [('TLOCAL001', 'UACTUAL01', True)]
     messages = await product.database.messages(product.actor, product.session_id)
     assert len(messages) == 1 and messages[0]['is_self'] and messages[0]['author_name'] == 'Current sender'
+
+
+async def test_personal_sidebar_includes_linked_native_owner_and_participant(audience):
+    product = audience
+    listing = await product.reads.listing(product.reader, source='native', scope='mine')
+    assert [row['id'] for row in listing['sessions']] == [product.session_id]
+    assert listing['sessions'][0]['created_by_me']
+    assert not listing['sessions'][0]['participated']
+
+    # The same Slack turn is participation when another individual started the chat.
+    async with product.database.sessions.begin() as db:
+        db.add(User(id='other', username='other', display_name='Other person', password='unused'))
+        await db.flush()
+        await db.execute(update(Session).where(Session.id == product.session_id).values(owner_id='other'))
+    listing = await product.reads.listing(product.reader, source='native', scope='mine', query='Private')
+    assert [row['id'] for row in listing['sessions']] == [product.session_id]
+    assert not listing['sessions'][0]['created_by_me']
+    assert listing['sessions'][0]['participated']
+
+    # Navigation attribution must never bypass the current Slack audience.
+    product.state['members'] = []
+    product.state['clock'] += AUDIENCE_TTL
+    assert not (await product.reads.listing(product.reader, source='native', scope='mine'))['sessions']
+
+
+async def test_unlinked_native_slack_session_is_not_attributed_to_web_account(audience):
+    product = audience
+    async with product.source.begin() as db:
+        await db.execute(text("UPDATE moyai.users SET linked_user_id=NULL WHERE kind='slack'"))
+    assert not (await product.reads.listing(product.reader, source='native', scope='mine'))['sessions']
 
 
 async def test_historical_reads_use_native_controls_and_preserve_verified_attribution(audience):
