@@ -8,6 +8,7 @@ import re
 from typing import Any, cast
 
 from agentchat.channels.slack.host import SlackHost
+from fastapi import HTTPException
 from sqlalchemy import select, update
 
 from .models import Message, MessageSource, Session, Turn, now
@@ -75,6 +76,13 @@ async def receive_update(events, payload: dict, installed: dict) -> bool:
             if deleted:
                 turn.status, turn.finished_at = "stopped", now()
             else:
+                from .skill_invocations import gateway_connection_ids
+                from .skill_mentions import mentions
+                session = await db.get(Session, turn.session_id)
+                authored = await slack.runtime.skill_invocations.normalize_slack(authored, actor, session)
+                if set(gateway_connection_ids(authored)) - set(json.loads(turn.connections)):
+                    raise HTTPException(403, "Send a new message to select a different gateway skill.")
+                metadata["skill_references"] = [mention.reference for mention in mentions(authored)]
                 turn.prompt = database.security.seal(authored + frozen[len(old):])
         old_files = {item.get("id") for item in original.get("files", []) if isinstance(item, dict)}
         new_files = {item.get("id") for item in current.get("files", []) if isinstance(item, dict)}

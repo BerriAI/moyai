@@ -15,13 +15,14 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from .contracts import NewMessage
+from .contracts import ExecutionContext, NewMessage
 from .inbound_events import InboundEvent
 from .models import Session, SlackThread, Turn, User
 from .product_identity import ProductPrincipal
 from .product_slack_controls import answer
 from .product_slack_conversations import SlackConversation, SlackConversations
 from .product_slack_models import SlackTurnSource
+from .skill_mentions import mentions
 
 if TYPE_CHECKING:
     from .product_slack import ProductSlack
@@ -168,8 +169,13 @@ class SlackEvents:
             await automation.receive_verified(payload)
 
     async def _prepare(
-        self, message: SlackMessage, actor: User, principal: ProductPrincipal,
+        self, message: SlackMessage, actor: User, principal: ProductPrincipal, thread: SlackThread | None,
     ) -> SlackSubmission:
+        admission: Session | ExecutionContext = ExecutionContext("shared", "slack")
+        if thread is not None:
+            async with self.slack.runtime.database.sessions() as db:
+                admission = await self.slack.runtime.database.allowed_session(db, thread.session_id, actor)
+        prompt = await self.slack.runtime.skill_invocations.normalize_slack(message.prompt, actor, admission)
         attachments = {"uploads": [], "images": [], "context": ""}
         if message.event.get("files"):
             attachments = await self.slack.files.prepare(actor, principal, message.event, message.origin)
@@ -180,9 +186,12 @@ class SlackEvents:
             )]
         body = NewMessage.from_event(InboundEvent(
             source="slack", sender_id=actor.id, deduplication_key=message.key,
-            text=message.prompt, model_context=attachments["context"],
+            text=prompt, model_context=attachments["context"],
             attachments=tuple(attachments["images"]),
-            provenance={**message.origin, "files": attachments.get("files", [])},
+            provenance={
+                **message.origin, "files": attachments.get("files", []),
+                "skill_references": [mention.reference for mention in mentions(prompt)],
+            },
         ), connections=selections)
         return SlackSubmission(body, attachments["uploads"])
 
@@ -232,7 +241,21 @@ class SlackEvents:
         # computer/account context. Retain its signed sender grant separately.
         if conversation.thread is not None:
             actor = await self.slack.web.input_actor(actor, conversation.thread.session_id)
-        submission = None if message.command else await self._prepare(message, actor, principal)
+        try:
+            submission = None if message.command else await self._prepare(message, actor, principal, conversation.thread)
+        except HTTPException as error:
+            if error.status_code != 422:
+                raise
+            # Durable webhook intake is asynchronous: a rejected selection must
+            # reach the sender instead of disappearing into an inbox error.
+            thread = conversation.thread or await self.conversations.bind(
+                conversation, actor, principal, message.origin, installed, message.prompt,
+                None, wake=message.mentioned, uploads=[],
+            )
+            if thread is not None:
+                await self.slack.notice(actor, thread, "invalid-input:" + message.key, str(error.detail))
+                self.slack.delivery_wakeup.set()
+            return {"ok": True}
         thread = conversation.thread
         if thread is None:
             thread = await self.conversations.bind(
