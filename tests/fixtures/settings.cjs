@@ -20,6 +20,7 @@ const gatewayConnection = (patch={}) => mcpConnection({
 function defaults() {
   return {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
+    general: {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0},
     organizationConnections:[{id:'slack',connected:true,enabled:true,read_only:true,label:'Example workspace',identity:'Workspace app',tools:[],check_status:'healthy',checked_at:'2026-10-19T10:00:00Z'}],
     gatewayDefaults:{url:'https://gateway.example.com/v1'},gatewayDiscovery:gatewayConnection().policy.gateway_discovery,
     connectionCheck:{tool_count:1,tools:[{name:'lookup',description:'Search the synthetic research catalog.'}]},
@@ -104,7 +105,17 @@ async function settingsFixture() {
       }
       if(url.pathname==='/api/settings/performance')return json(report());
       if(url.pathname==='/api/settings/billing')return json({activity:report()});
-      if(url.pathname==='/api/settings/general')return json({delivery_mode:'when_idle',connection_ids:null});
+      if(url.pathname==='/api/settings/general'){
+        if(req.method==='PATCH'){
+          if(state.generalGate)await state.generalGate;
+          if(state.generalError)return json({detail:state.generalError},409);
+          if(body.personal_instructions!==undefined){
+            if(body.personal_instructions_revision!==state.general.personal_instructions_revision)return json({detail:'Personal instructions changed elsewhere. Reload saved instructions before saving.'},409);
+            Object.assign(state.general,body,{personal_instructions_revision:body.personal_instructions_revision+1});
+          }else Object.assign(state.general,body);
+        }
+        return json(state.general);
+      }
       if(url.pathname==='/api/pull-requests/statuses')return json({});
       if(url.pathname==='/api/skills')return json({skills:[],has_more:false});
       if(url.pathname===personalPath){

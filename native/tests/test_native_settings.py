@@ -1060,7 +1060,8 @@ async def test_general_preferences_persist_partially_and_are_user_scoped(runtime
         row = await db.get(User, actor.id)
         row.preferences = json.dumps({"unrelated": {"keep": True}, "general": {"future": "preserve"}})
     async with client_for(runtime, actor) as client:
-        defaults = {"delivery_mode": "when_idle", "connection_ids": None}
+        defaults = {"delivery_mode": "when_idle", "connection_ids": None,
+                    "personal_instructions": "", "personal_instructions_revision": 0}
         assert (await client.get("/api/settings/general")).json() == defaults
         # Concurrent partial changes must merge under the user-row lock.
         responses = await asyncio.gather(
@@ -1068,7 +1069,7 @@ async def test_general_preferences_persist_partially_and_are_user_scoped(runtime
             client.patch("/api/settings/general", json={"connection_ids": ["selected"]}),
         )
         assert all(response.status_code == 200 for response in responses)
-        saved = {"delivery_mode": "asap", "connection_ids": ["selected"]}
+        saved = {**defaults, "delivery_mode": "asap", "connection_ids": ["selected"]}
         assert (await client.get("/api/settings/general")).json() == saved
         assert (await client.get("/api/me")).json()["preferences"] == saved
         async with runtime.database.sessions() as db:

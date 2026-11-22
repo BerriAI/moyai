@@ -7453,6 +7453,18 @@
             ],
             "title": "Delivery Mode",
             "type": "string"
+          },
+          "personal_instructions": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Personal Instructions",
+            "type": "string"
+          },
+          "personal_instructions_revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Personal Instructions Revision",
+            "type": "integer"
           }
         },
         "title": "GeneralPreferences",
@@ -7486,11 +7498,25 @@
             ],
             "title": "Delivery Mode",
             "type": "string"
+          },
+          "personal_instructions": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Personal Instructions",
+            "type": "string"
+          },
+          "personal_instructions_revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Personal Instructions Revision",
+            "type": "integer"
           }
         },
         "required": [
           "delivery_mode",
-          "connection_ids"
+          "connection_ids",
+          "personal_instructions",
+          "personal_instructions_revision"
         ],
         "title": "GeneralPreferences",
         "type": "object"

@@ -14,6 +14,7 @@ function reset(overrides={}) {
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect this repository.'}], requests:[], streams:[], ...overrides};
 }
 function session(id=sessionId) {return {id,title:'Current native work',owner_id:state.ownerId??'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{}),...(state.sessionOverrides?.[id]||{}),...(state.titles?.[id]===undefined?{}:{title:state.titles[id]})};}
+function generalPreferences() {return {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0,...state.preferences};}
 function pendingView(pending) {
   return pending && {...pending,questions:pending.calls.filter(call=>call.tool_name==='ask_user_question').map(call=>({
     id:call.tool_call_id,questions:(typeof call.args==='string'?JSON.parse(call.args):call.args).questions.map(question=>({
@@ -40,7 +41,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/auth/google/start')return json({url:'https://accounts.google.com/fixture'});
   if(url.pathname==='/api/logout'){state.signedIn=false;return json({signed_out:true});}
   if(!state.signedIn)return json({detail:'Sign in.'},401);
-  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:state.viewerName||'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:state.defaultModel||'test-model',product_mode:state.mode,preferences:state.preferences||{delivery_mode:'when_idle',connection_ids:null}});
+  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:state.viewerName||'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:state.defaultModel||'test-model',product_mode:state.mode,preferences:generalPreferences()});
   if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;const id='c'.repeat(32);state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],model:data.model||'test-model'}};return json(session(id));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections') {
@@ -82,9 +83,9 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/settings/general') {
     if(req.method==='PATCH') {
       if(state.preferenceError)return json({detail:'Could not save preferences. Try again.'},503);
-      state.preferences={delivery_mode:'when_idle',connection_ids:null,...state.preferences,...data};
+      state.preferences={...generalPreferences(),...data};
     }
-    return json(state.preferences||{delivery_mode:'when_idle',connection_ids:null});
+    return json(generalPreferences());
   }
   if(url.pathname==='/api/settings/overview')return json({counts:{},capabilities:{}});
   if(url.pathname==='/api/skills') {

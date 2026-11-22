@@ -43,6 +43,7 @@ from pydantic_ai_harness.planning import PlanItem
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from . import private_instructions
 from .artifacts import artifact_capability
 from .browser import browser_capability
 from .browser_login import BrowserLogin
@@ -394,6 +395,7 @@ def make_agent(
             UnlimitedModelRequests(),
             workspace,
             authority,
+            private_instructions.PrivateInstructions(database),
             InteractiveDelegation(database),
             SwarmCapability(database.swarms),
             GoalCapability(database.goals),
