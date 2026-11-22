@@ -42,14 +42,20 @@ async def individual(
 
 async def preferences_for_user(database: Database, user: User) -> GeneralPreferences:
     async with database.sessions.begin() as db:
-        allowed = await individual(database, db, user)
         row = await db.get(User, user.id)
         if row is None or not row.enabled or row.auth_version != user.auth_version:
             raise HTTPException(401, "This account is no longer authorized.")
-        return GeneralPreferences.model_validate(general_preferences(
-            row.preferences, security=database.security if allowed else None,
-            owner_id=row.id if allowed else None,
-        ))
+        stored, owner_id = row.preferences, row.id
+    allowed = True
+    if database.product_identity is not None:
+        # Release the native connection before revalidation (including
+        # one-slot pools). Read-only checks do not take the admission gate.
+        principal = await database.product_identity.require_current(getattr(user, "product_grant", None))
+        allowed = principal.individual and principal.id == user.id
+    return GeneralPreferences.model_validate(general_preferences(
+        stored, security=database.security if allowed else None,
+        owner_id=owner_id if allowed else None,
+    ))
 
 
 class PrivateInstructions(AbstractCapability[RunScope]):

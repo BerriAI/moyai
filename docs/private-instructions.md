@@ -25,6 +25,8 @@ under the user-row lock and preserves unrelated keys. Instruction writes additio
 require `personal_instructions_revision`; stale writes return 409 atomically.
 The editor preserves the draft on failure and offers an explicit reload.
 Pydantic owns both new fields and the generated OpenAPI/TypeScript types.
+Preference reads revalidate the canonical grant without taking the admission
+gate, releasing the native connection first so one-slot pools remain usable.
 
 ## Scope and durable execution
 

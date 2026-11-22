@@ -1,5 +1,6 @@
 """Canonical individual/shared identity and live PostgreSQL scope fences."""
 
+import asyncio
 import json
 import os
 from types import SimpleNamespace
@@ -27,6 +28,17 @@ async def store(product, actor):
                 "owner_id": actor.id, "text": "PRIVATE_CANONICAL_TEST",
             })},
         })
+
+
+async def test_preference_read_does_not_take_canonical_admission_gate(admitted_product):
+    product = admitted_product
+    await store(product, product.actor)
+    async with product.source.begin() as writer:
+        await writer.execute(text(
+            "SELECT pg_advisory_xact_lock(726941,'moyai'::regnamespace::oid::int)",
+        ))
+        result = await asyncio.wait_for(preferences_for_user(product.database, product.actor), timeout=3)
+        assert result.personal_instructions == "PRIVATE_CANONICAL_TEST"
 
 
 async def test_canonical_shared_principal_cannot_read_or_write_instructions(admitted_product):
