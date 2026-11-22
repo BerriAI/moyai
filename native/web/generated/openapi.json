@@ -9095,6 +9095,108 @@
         "type": "object"
       },
       "JsonValue": {},
+      "LearningPreference": {
+        "properties": {
+          "can_manage": {
+            "default": false,
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "last_saved_count": {
+            "default": 0,
+            "title": "Last Saved Count",
+            "type": "integer"
+          },
+          "last_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "skipped"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Status"
+          },
+          "learned": {
+            "default": 0,
+            "title": "Learned",
+            "type": "integer"
+          },
+          "pending": {
+            "default": 0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "revision",
+          "can_manage",
+          "pending",
+          "learned",
+          "last_status",
+          "last_saved_count"
+        ],
+        "title": "LearningPreference",
+        "type": "object"
+      },
+      "LearningSettings": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "organization": {
+            "$ref": "#/components/schemas/LearningPreference"
+          },
+          "personal": {
+            "$ref": "#/components/schemas/LearningPreference"
+          }
+        },
+        "required": [
+          "personal",
+          "organization",
+          "available"
+        ],
+        "title": "LearningSettings",
+        "type": "object"
+      },
+      "LearningUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "revision"
+        ],
+        "title": "LearningUpdate",
+        "type": "object"
+      },
       "LinkInput": {
         "properties": {
           "kind": {
@@ -23584,6 +23686,77 @@
           }
         },
         "summary": "Listing"
+      }
+    },
+    "/api/product/skill-learning": {
+      "get": {
+        "operationId": "getSkillLearning",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSettings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Listing"
+      }
+    },
+    "/api/product/skill-learning/{scope}": {
+      "put": {
+        "operationId": "updateSkillLearning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "enum": [
+                "personal",
+                "organization"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LearningUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSettings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update"
       }
     },
     "/api/product/skills": {

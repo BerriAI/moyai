@@ -27,6 +27,7 @@ import {
   checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
   disconnectOrganizationConnection, getProductSkill, listCredentials, listOrganizationConnections, listProductMemories,
   listProductSkills, revokeCredential, startOrganizationConnectionOAuth, updateCredential, updateOrganizationConnectionPolicy,
+  getSkillLearning, updateSkillLearning,
   updateProductMemory, updateProductMemoryPreferences,
   type CredentialInventory, type CredentialProvider, type CredentialSecretMetadata, type Note as ProductMemoryWriteBody,
   type OrganizationConnection, type ProductMemoryNote as ProductMemoryNoteData, type ProductSaveSecretWritable,
@@ -646,6 +647,35 @@ function ProductSkillDialog({ skill, onClose }: { skill: ProductSkillSummary; on
     <Button variant="outline" onClick={onClose}>Close</Button>
   </DialogContent></Dialog>
 }
+function SkillLearningControls() {
+  const resource = useResource("/product/skill-learning", signal => getSkillLearning({ signal }).then(({ data }) => data))
+  const mutation = useMutation()
+  return <section aria-label="Automatic skill learning">
+    <div className="ns-section-heading"><h2>Automatic skill learning</h2><Button variant="ghost" size="sm" onClick={resource.refresh} disabled={resource.loading}>Refresh learning status</Button></div>
+    <p className="ns-help">Save useful procedures from completed web chats and reuse relevant lessons in later chats. Manually edited skills stay under your control.</p>
+    <LoadState resource={resource}>{data => <>
+      {!data.available && <p className="ns-notice" role="status">Learning is temporarily unavailable. Your preferences and saved skills are kept.</p>}
+      {(["personal", "organization"] as const).map(kind => {
+        const preference = data[kind]
+        return <div className="ns-record" key={kind}><div className="ns-record-copy">
+          <label className="check-label"><Checkbox
+            checked={preference.enabled}
+            disabled={!preference.can_manage || mutation.busy || resource.loading}
+            onCheckedChange={value => void mutation.run(
+              () => updateSkillLearning({ path: { scope: kind }, body: { enabled: value === true, revision: preference.revision } }),
+              resource.refresh,
+            )}
+          />{kind === "personal" ? "Learn personal skills" : "Learn shared organization skills"}</label>
+          <p>{kind === "personal" ? "Learn from your private web chats. Lessons remain personal." : "Learn from administrators’ shared web chats. Private chats and Slack channels are excluded."}</p>
+          <small>{preference.learned} learned · {preference.pending} pending{preference.last_status ? ` · Last review: ${preference.last_status}${preference.last_status === "completed" ? ` (${preference.last_saved_count} saved)` : ""}` : ""}</small>
+          {!preference.can_manage && <small>{kind === "organization" ? "An administrator can change this setting." : "Sign in with an individual account to enable personal learning."}</small>}
+        </div></div>
+      })}
+    </>}</LoadState>
+    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+  </section>
+}
+
 function ProductSkillsPage() {
   const [archived, setArchived] = useState(false), [search, setSearch] = useState(""), [scope, setScope] = useState("all")
   const [pages, setPages] = useState(1), [revision, setRevision] = useState(0)
@@ -679,7 +709,7 @@ function ProductSkillsPage() {
   return <LoadState resource={resource}>{data => {
     if (data.capabilities?.read !== true) return <div className="ns-empty" role="status"><h2>Skills unavailable</h2><p>{data.note || "Your skills could not be loaded."}</p><Button variant="outline" onClick={resource.refresh}>Retry</Button></div>
     const rows = data.skills.filter(row => contains(search, row.name, row.description, row.reference) && (scope === "all" || row.scope === scope))
-    return <><p className="ns-help">Type <kbd>/</kbd> in a chat to choose a skill.</p>
+    return <><SkillLearningControls /><p className="ns-help">Type <kbd>/</kbd> in a chat to choose a skill.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
         filter={<Choice label="Skill scope" value={scope} onChange={setScope} options={[{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "organization", label: "Organization" }]} />} />
       <label className="check-label"><Checkbox checked={archived} onCheckedChange={value => { setArchived(value === true); setPages(1); setSelected(null) }} />Include archived skills</label>

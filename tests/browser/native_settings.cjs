@@ -106,6 +106,32 @@ test('Other settings keep useful guidance without internal migration banners',as
   }
 });
 
+for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Skill learning controls preserve scope and revision at ${width}px in ${theme}`,async t=>{
+  fixture.reset();const page=await open(t,'skills',width,theme);
+  const personal=page.getByRole('checkbox',{name:'Learn personal skills',exact:true});
+  const organization=page.getByRole('checkbox',{name:'Learn shared organization skills',exact:true});
+  await personal.waitFor();assert.equal(await personal.isChecked(),false);assert.equal(await organization.isChecked(),false);
+  await organization.check();
+  await page.waitForFunction(()=>document.querySelector('[aria-label="Automatic skill learning"] [role="checkbox"][data-state="checked"]'));
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="Automatic skill learning"] [role="checkbox"][disabled]'));
+  const write=fixture.state.requests.find(r=>r.method==='PUT'&&r.path.endsWith('/skill-learning/organization'));
+  assert.deepEqual(write.body,{enabled:true,revision:0});assert.equal(await personal.isChecked(),false);
+  await page.reload();await organization.waitFor();assert.equal(await organization.isChecked(),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(await page.locator('.ns-content').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  await organization.focus();assert.equal(await organization.evaluate(el=>el===document.activeElement),true);
+  if(process.env.MOYAI_UI_CAPTURE_DIR){await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`skill-learning-${width}-${theme}.png`)});}
+});
+test('Skill learning respects permissions and recovers from unavailable settings',async t=>{
+  fixture.reset();fixture.state.learning.organization.can_manage=false;
+  const page=await open(t,'skills');const organization=page.getByRole('checkbox',{name:'Learn shared organization skills'});
+  await organization.waitFor();assert.equal(await organization.isEnabled(),false);
+  fixture.state.learningError=true;await page.getByRole('button',{name:'Refresh learning status'}).click();
+  await page.getByRole('alert').filter({hasText:'Learning settings changed'}).waitFor();
+  fixture.state.learningError=false;await page.getByRole('button',{name:'Try again',exact:true}).click();
+  await organization.waitFor();assert.equal(await organization.isEnabled(),false);
+});
+
 test('Start private chat selects private visibility and normal navigation keeps its public default',async t=>{
   fixture.reset();const page=await open(t);
   await page.getByRole('button',{name:'Start private chat',exact:true}).click();

@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from .product_drain import ProductDrainService
     from .product_inference import ProductInferenceService
     from .product_memory_review import ProductMemoryReviewService
+    from .product_skill_learning import SkillLearningService
 
 
 def grant_fingerprint(grants: list[Grant]) -> str:
@@ -104,6 +105,7 @@ class Database:
         self.product_drain: ProductDrainService | None = None
         self.product_inference: ProductInferenceService | None = None
         self.product_memory_review: ProductMemoryReviewService | None = None
+        self.product_skill_learning: SkillLearningService | None = None
         self.product_mode = getattr(settings, "product_mode", "standalone")
         self.execution_schema = getattr(settings, "database_schema", None)
         self.native_schema_mode = getattr(settings, "native_schema_mode", "auto")

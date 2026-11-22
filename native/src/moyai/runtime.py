@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from .product_resources import ProductResources
     from .product_secrets import ProductSecrets
     from .product_skill_catalog import ProductSkillCatalog
+    from .product_skill_learning import SkillLearningService
     from .product_slack import ProductSlack
 
 
@@ -75,6 +76,7 @@ class Runtime:
         self.product_memory: ProductMemoryService | None = None
         self.product_memory_review: ProductMemoryReviewService | None = None
         self.product_skill_catalog: ProductSkillCatalog | None = None
+        self.product_skill_learning: SkillLearningService | None = None
         self.product_secrets: ProductSecrets | None = None
         self.product_automation_events = None
         self.product_workspace: ProductWorkspaceCompatibility | None = None
@@ -101,6 +103,11 @@ class Runtime:
             self.product_slack = ProductSlack(self)
             self.product_memory = ProductMemoryService(self.database, self.product.identity)
             self.product_skill_catalog = ProductSkillCatalog(self.product.identity)
+            from .product_skill_learning import SkillLearningService
+            self.product_skill_learning = SkillLearningService(self)
+            self.database.product_skill_learning = self.product_skill_learning
+            if self.product_inference is not None:
+                self.product_inference.skill_learning = self.product_skill_learning
             self.product_secrets = ProductSecrets(self)
             self.product_billing = ProductBillingService.from_runtime(self)
             self.product_automations = ProductAutomationService.from_runtime(self)
@@ -155,6 +162,8 @@ class Runtime:
             self.models = models or inference_models(self.settings)
             self._models_owned = not models
             product_capabilities: list[AbstractCapability[RunScope]] = []
+            if self.product_skill_learning is not None:
+                self.product_skill_learning.configure(self.models)
             memory = None
             if self.product_memory is not None:
                 from .product_memory_review import ProductMemoryReviewService
@@ -194,6 +203,9 @@ class Runtime:
                     GitHubRepositories(make_repository_names(self.product_connections)),
                     GitLabProjects(self.product_connections),
                 ]
+                if self.product_skill_learning is not None:
+                    from .context.learned_skills import LearnedSkills
+                    sources.append(LearnedSkills(self.product_skill_learning))
                 if self.product_slack is not None:
                     sources.append(SlackThread(make_slack_thread_reader(self.product_slack)))
                 product_capabilities.append(SessionContext(sources=sources))

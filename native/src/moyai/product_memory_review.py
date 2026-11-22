@@ -23,7 +23,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.context_budget import ContextBudget
 from app.library_views import fit_context
@@ -59,6 +59,9 @@ from .product_memory import ProductMemoryService
 from .product_memory_models import ProductMemoryBarrier
 from .product_memory_review_models import ProductMemoryReview
 from .product_memory_store import ProductMemoryStore, RepositoryScope
+
+if TYPE_CHECKING:
+    from .product_skill_learning import SkillLearningService
 
 WORKFLOW_PREFIX = "moyai-memory-review-v1:"
 AGENT_NAME = "moyai_memory_review"
@@ -617,21 +620,25 @@ class MemoryReviewWorkflow(PydanticAIWorkflow):
 
 
 class ReviewActivity(ActivityInboundInterceptor):
-    def __init__(self, next: ActivityInboundInterceptor, service: ProductMemoryReviewService):
+    def __init__(
+        self, next: ActivityInboundInterceptor,
+        service: ProductMemoryReviewService | SkillLearningService, agent_name: str = AGENT_NAME,
+    ):
         super().__init__(next)
         self.service = service
+        self.agent_name = agent_name
 
     async def execute_activity(self, input: ExecuteActivityInput) -> Any:
         info = activity.info()
-        if not info.activity_type.startswith(f"agent__{AGENT_NAME}__"):
+        if not info.activity_type.startswith(f"agent__{self.agent_name}__"):
             return await self.next.execute_activity(input)
         scope = next((item for item in input.args if isinstance(item, RunScope)), None)
         if scope is None:
-            raise ApplicationError("Memory-review activity lacks original authority.", non_retryable=True)
+            raise ApplicationError("Background-review activity lacks original authority.", non_retryable=True)
         try:
             await self.service.authorize_scope(scope)
         except (HTTPException, PermissionError):
-            raise ApplicationError("Memory-review authority was superseded.", non_retryable=True) from None
+            raise ApplicationError("Background-review authority was superseded.", non_retryable=True) from None
         usage = InferenceActivity(
             self.service.database, scope,
             f"{info.workflow_namespace}/{info.workflow_id}/{info.workflow_run_id}/{info.activity_id}/{info.attempt}",
@@ -647,7 +654,7 @@ class ReviewActivity(ActivityInboundInterceptor):
             except Exception as error:
                 if usage.admission_error is not None:
                     raise ApplicationError(
-                        "Product admission refused this memory review.", non_retryable=True,
+                        "Product admission refused this background review.", non_retryable=True,
                     ) from error
                 raise
             finally:
@@ -661,11 +668,12 @@ class ReviewActivity(ActivityInboundInterceptor):
 
 
 class ReviewAuthority(Interceptor):
-    def __init__(self, service: ProductMemoryReviewService):
+    def __init__(self, service: ProductMemoryReviewService | SkillLearningService, agent_name: str = AGENT_NAME):
         self.service = service
+        self.agent_name = agent_name
 
     def intercept_activity(self, next: ActivityInboundInterceptor) -> ActivityInboundInterceptor:
-        return ReviewActivity(next, self.service)
+        return ReviewActivity(next, self.service, self.agent_name)
 
 
 MEMORY_REVIEW_WORKFLOWS = [MemoryReviewWorkflow]

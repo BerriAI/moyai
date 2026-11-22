@@ -585,7 +585,7 @@ class InferenceUsageTransport(httpx.AsyncBaseTransport):
         # The broker supplies its own ingress time; never accept a client clock.
         dispatch_at = now()
         if (
-            context.foreground and context.scope.surface != "memory_review"
+            context.foreground and context.scope.surface not in {"memory_review", "skill_learning"}
             and not request.url.path.rstrip("/").endswith("/responses/compact")
         ):
             from .performance import evidence, record_dispatch

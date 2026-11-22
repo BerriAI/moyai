@@ -69,7 +69,8 @@ GOAL_SCHEMA_VERSION = "2026-10-17-goals-v22"
 AUTOMATION_CHAT_SCHEMA_VERSION = "2026-10-19-automation-chats-v23"
 PRIVATE_AUTOMATION_SCHEMA_VERSION = "2026-11-21-private-automations-v24"
 SLACK_WEB_SCHEMA_VERSION = "2026-11-21-slack-web-v25"
-PRODUCT_SCHEMA_VERSION = SLACK_WEB_SCHEMA_VERSION
+SKILL_LEARNING_SCHEMA_VERSION = "2026-11-21-skill-learning-v26"
+PRODUCT_SCHEMA_VERSION = SKILL_LEARNING_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -152,6 +153,9 @@ MIGRATIONS = (
     (AUTOMATION_CHAT_SCHEMA_VERSION, frozenset({"moyai_product_automation_turns"})),
     (PRIVATE_AUTOMATION_SCHEMA_VERSION, frozenset()),
     (SLACK_WEB_SCHEMA_VERSION, frozenset({"moyai_slack_web_links", "moyai_slack_web_turns"})),
+    (SKILL_LEARNING_SCHEMA_VERSION, frozenset({
+        "moyai_skill_learning_preferences", "moyai_skill_learning_jobs", "moyai_learned_skills",
+    })),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing
@@ -233,6 +237,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "product_automation_access_models",
         "product_credential_models",
         "product_memory_review_models",
+        "product_skill_learning_models",
         "product_drain_models",
         "product_github_models",
         "billing_storage_models",
