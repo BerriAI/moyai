@@ -111,7 +111,7 @@ for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Skil
   const personal=page.getByRole('checkbox',{name:'Learn personal skills',exact:true});
   const organization=page.getByRole('checkbox',{name:'Learn shared organization skills',exact:true});
   await personal.waitFor();assert.equal(await personal.isChecked(),false);assert.equal(await organization.isChecked(),false);
-  await organization.check();
+  await organization.click();
   await page.waitForFunction(()=>document.querySelector('[aria-label="Automatic skill learning"] [role="checkbox"][data-state="checked"]'));
   await page.waitForFunction(()=>!document.querySelector('[aria-label="Automatic skill learning"] [role="checkbox"][disabled]'));
   const write=fixture.state.requests.find(r=>r.method==='PUT'&&r.path.endsWith('/skill-learning/organization'));
