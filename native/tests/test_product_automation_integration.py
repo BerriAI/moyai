@@ -177,8 +177,9 @@ async def test_native_runtime_api_tools_and_worker_replay(
                 "automations", "next_offset", "source", "migration", "event_choices", "capabilities",
             }
             assert set(listing.json()["automations"][0]) == {
-                "id", "revision", "name", "owner_id", "owned", "legacy_paused", "triggers", "native",
+                "id", "revision", "name", "owner_id", "owned", "legacy_paused", "triggers", "native", "visibility",
             }
+            assert listing.json()["automations"][0]["visibility"] == preview.json()["execution_visibility"]
 
         session = await runtime.database.create_session(ctx.product.actor, NewSession(visibility=visibility))
         turn = await runtime.database.submit(
@@ -207,12 +208,18 @@ async def test_native_runtime_api_tools_and_worker_replay(
             receipt = await db.scalar(select(Effect).where(Effect.turn_id == turn.id))
             if operation == "automation_create":
                 assert receipt is not None
-                confirmed = visibility == "shared" and not interceptor_refusal
+                confirmed = not interceptor_refusal
                 assert receipt.state == ("confirmed" if confirmed else "not_dispatched")
+                if confirmed:
+                    definition = await db.scalar(text(
+                        "SELECT definition FROM moyai.automations WHERE id != :http_created"
+                    ), {"http_created": saved.json()["id"]})
+                    assert definition is not None
+                    assert json.loads(definition).get("visibility", "shared") == visibility
             else:
                 assert receipt is None
             assert await db.scalar(text("SELECT count(*) FROM moyai.automations")) == (
-                2 if visibility == "shared" and not interceptor_refusal else 1
+                2 if operation == "automation_create" and not interceptor_refusal else 1
             )
         assert calls == 2  # Replay did not invoke the model or mutation again.
         assert TOOLSET_ID in json.dumps(history.to_json_dict())
