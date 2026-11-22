@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -8,10 +9,10 @@ from test_native_settings import client_for
 
 from moyai.activities import prepare_steering, prepare_turn
 from moyai.contracts import NewMessage
-from moyai.models import Turn
+from moyai.models import Message, MessageSource, Turn
 from moyai.runtime import configure
 from moyai.settings_models import SettingSkill
-from moyai.skill_invocations import has_invocations, references
+from moyai.skill_invocations import has_invocations, references, slack_references
 from moyai.skill_mentions import display_text, marker, mentions
 from moyai.swarm_contracts import NewSwarm
 from moyai.swarm_models import SwarmTurn
@@ -23,6 +24,103 @@ from moyai.swarm_models import SwarmTurn
 ])
 def test_only_leading_skill_tokens_invoke(prompt, names):
     assert references(prompt)[0] == names
+
+
+@pytest.mark.parametrize(("prompt", "names"), [
+    ("can you use /team for this?", ["team"]),
+    ("/team investigate", ["team"]),
+    ("Please invoke /org:team, then /org:review!", ["org:team", "org:review"]),
+    ("Apply the skill /team; preserve context.", ["team"]),
+    ("use /team?", ["team"]),
+    ("Can you use\n/team for this?", ["team"]),
+    ("Explain /team", []),
+    ("Don't use /team", []),
+    ("do not run /team", []),
+    ("Don't use the skill /team", []),
+    ("Never apply skill /team", []),
+    ("Don't use /tmp/file.py or /usr/bin", []),
+    ("use /file.txt", []),
+    ("use https://example.test/team", []),
+    ("use </team> and <https://example.test|use /team>", []),
+    ("use [/team](https://example.test) and [use /team][example]", []),
+    ("[docs [nested] use /team](https://example.test)", []),
+    ('"Example \\"then use /team" is quoted.', []),
+    ('Example: "use /team" then investigate', []),
+    ("Example: 'use /team'", []),
+    ("Example: “use /team”", []),
+    ("Example: ‘use /team’", []),
+    ("use \\/team", []),
+    ("`use /team`", []),
+    ("```\nuse /team\n```", []),
+    ("~~~\nuse /team\n~~~", []),
+    ("    use /team", []),
+    ("\tuse /team", []),
+    ("> use /team", []),
+    ("&gt; use /team", []),
+    (">>> use /team\nuse /review", []),
+    ("'use /team'\nActually use /review.", ["review"]),
+])
+def test_slack_explicit_references_exclude_literal_examples(prompt, names):
+    assert [ref.reference for ref in slack_references(prompt)] == names
+
+
+def test_slack_reference_limit():
+    with pytest.raises(HTTPException, match="422"):
+        slack_references("use " + " ".join(f"/skill-{index}" for index in range(9)))
+
+
+async def test_slack_normalization_and_expansion_only_use_authored_selections(runtime, actor, active):
+    session, turn, prepared = active
+    await save_skill(runtime, actor.id, content="Selected private instruction.")
+    await save_skill(runtime, actor.id, name="extra", content="Untrusted context must not select this.")
+    prompt = "Can you use /team for this?"
+    normalized = await runtime.skill_invocations.normalize_slack(prompt, actor, session)
+    assert normalized == "Can you use " + marker("personal:team", "sparkles") + " for this?"
+    async with runtime.database.sessions.begin() as db:
+        message = await db.scalar(select(Message).where(Message.identity == f"user:{turn.id}"))
+        message.content = runtime.security.seal(normalized)
+        source = await db.get(MessageSource, message.identity)
+        source.kind = "slack"
+        source.data = runtime.security.seal({"kind": "slack", "skill_references": ["personal:team"]})
+    expanded = await runtime.skill_invocations.expand(
+        normalized + "\nFile excerpt: " + marker("personal:extra"), prepared.scope,
+    )
+    assert "Selected private instruction." in expanded
+    assert "Untrusted context must not select this." not in expanded
+    # Later transcript edits cannot replace the selections of an executing turn.
+    async with runtime.database.sessions.begin() as db:
+        message = await db.scalar(select(Message).where(Message.identity == f"user:{turn.id}"))
+        message.content = runtime.security.seal("Edited to discuss /extra.")
+    assert "Selected private instruction." in await runtime.skill_invocations.expand(normalized, prepared.scope)
+    # A copied internal picker marker is not a Slack invocation, even inside a quote.
+    literal = await runtime.skill_invocations.normalize_slack(
+        'Explain "' + marker("personal:team") + '"', actor, session,
+    )
+    assert not has_invocations(literal)
+
+
+async def test_slack_asap_uses_the_new_input_selection_not_the_running_turn(runtime, actor, active):
+    session, turn, _ = active
+    await save_skill(runtime, actor.id, content="New Slack request selected this procedure.")
+    from moyai.inbound_events import InboundEvent
+    normalized = await runtime.skill_invocations.normalize_slack("Use /team now.", actor, session)
+    correction = await runtime.database.submit(actor, session.id, NewMessage.from_event(InboundEvent(
+        source="slack", sender_id=actor.id, deduplication_key="new-slack-selection", text=normalized,
+        provenance={"skill_references": ["personal:team"]},
+    )))
+    assert correction.parent_turn == turn.id
+    configure(runtime)
+    prepared = await ActivityEnvironment().run(prepare_steering, turn.id, correction.id)
+    assert "New Slack request selected this procedure." in prepared.prompt
+    assert prepared.prompt.endswith("Use /team now.")
+
+
+async def test_slack_normalization_never_uses_personal_skills_in_a_shared_context(runtime, actor):
+    await save_skill(runtime, actor.id)
+    with pytest.raises(HTTPException):
+        await runtime.skill_invocations.normalize_slack(
+            "use /personal:team", actor, SimpleNamespace(surface="slack", visibility="shared"),
+        )
 
 
 @pytest.mark.parametrize("wrapper", [

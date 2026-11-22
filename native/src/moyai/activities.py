@@ -127,7 +127,7 @@ async def prepare_steering(parent_id: str, turn_id: str) -> SteeringInput:
     if has_invocations(prepared.prompt):
         try:
             parent = await runtime.database.prepare(parent_id)
-            prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, parent.scope)
+            prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, parent.scope, input_turn_id=turn_id)
         except HTTPException as error:
             raise ApplicationError(str(error.detail), type="SkillUnavailable", non_retryable=True) from error
     return prepared
