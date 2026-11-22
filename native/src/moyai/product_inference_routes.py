@@ -23,6 +23,7 @@ from .contracts import RunScope
 from .inference_usage import INFERENCE_ACTIVITY, InferenceActivity
 from .models import now
 from .product_inference import InferenceAdmissionError, drain
+from .tracing import trace_headers
 
 if TYPE_CHECKING:
     from .inference_usage import UsageCapture
@@ -63,6 +64,7 @@ def broker_request(
         "Authorization": "Bearer " + envelope, "Content-Type": "application/json",
         "Accept": request.headers.get("accept", "application/json"),
         "Accept-Encoding": "identity",
+        **trace_headers(request.headers),
     }
     if service.settings.cloudflare_access_client_id:
         headers.update({
@@ -218,6 +220,7 @@ def product_inference_routes(service: ProductInferenceService) -> APIRouter:
                 content=bytes(content), headers={
                     "Authorization": "Bearer " + service.settings.litellm_api_key,
                     "Content-Type": "application/json", "Accept-Encoding": "identity",
+                    **trace_headers(request.headers),
                 },
             ), stream=True)
         except asyncio.CancelledError:

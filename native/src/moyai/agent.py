@@ -15,12 +15,13 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from opentelemetry.trace import get_tracer
 from pydantic import Field, TypeAdapter
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
-from pydantic_ai.capabilities import AbstractCapability, SetToolMetadata, durable_operation
+from pydantic_ai.capabilities import AbstractCapability, Instrumentation, SetToolMetadata, durable_operation
 from pydantic_ai.capabilities.abstract import WrapToolExecuteHandler
 from pydantic_ai.durable_exec.temporal import TemporalDurability, TemporalRunContext
 from pydantic_ai.exceptions import CallDeferred, ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.litellm import LiteLLMProvider
@@ -354,6 +355,7 @@ def make_agent(
     skills_directory: str = "/opt/moyai/skills",
     product_capabilities: Sequence[AbstractCapability[RunScope]] = (),
     memory: AbstractCapability[RunScope] | None = None,
+    instrumentation: InstrumentationSettings | None = None,
 ) -> tuple[Agent[RunScope, str | DeferredToolRequests], TemporalDurability[RunScope]]:
     models = models or inference_models(settings)
     if workspace is None:
@@ -389,7 +391,12 @@ def make_agent(
         output_type=[str, DeferredToolRequests],
         retries=2,
         instructions=(PACKAGE_ROOT / "instructions.md").read_text(),
+        metadata=(lambda ctx: {
+            "moyai_session_id": ctx.deps.session_id,
+            "moyai_turn_id": ctx.deps.turn_id,
+        }) if instrumentation else None,
         capabilities=[
+            *([Instrumentation(settings=instrumentation)] if instrumentation else []),
             UnlimitedModelRequests(),
             workspace,
             authority,

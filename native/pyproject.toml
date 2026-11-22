@@ -8,6 +8,8 @@ dependencies = [
     "pydantic-ai[temporal]==2.55.0",
     "fastmcp-slim[client]>=4.1,<5",
     "openai==3.29.0",
+    "logfire>=5.2,<6",
+    "opentelemetry-exporter-otlp-proto-http>=1.45,<2",
     "pydantic-ai-harness[coder,modal,skills,github,linear,notion,slack,temporal,playwright,code-mode]==0.55.0",
     # Harness 0.55 references FilesystemExecutionError, removed by Modal 1.6.
     "modal>=1.5.5,<1.6",

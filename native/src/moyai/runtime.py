@@ -8,7 +8,7 @@ from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurability
 from pydantic_ai.models import Model
-from temporalio.client import Client
+from temporalio.client import Client, Plugin
 
 from .agent import inference_models, make_agent
 from .contracts import RunScope
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from .product_secrets import ProductSecrets
     from .product_skill_catalog import ProductSkillCatalog
     from .product_slack import ProductSlack
+    from .tracing import LensTracing
 
 
 class Runtime:
@@ -120,6 +121,7 @@ class Runtime:
         self.durability: TemporalDurability[RunScope]
         self.models: dict[str, Model] = {}
         self._models_owned = False
+        self.tracing: LensTracing | None = None
 
     async def start(
         self, *, models: dict[str, Model] | None = None,
@@ -127,6 +129,9 @@ class Runtime:
         skills_directory: str = "/opt/moyai/skills",
     ) -> None:
         try:
+            if self.settings.trace_endpoint:
+                from .tracing import LensTracing
+                self.tracing = LensTracing(self.settings)
             if self.product is not None:
                 await self.product.start()
             await self.database.start()
@@ -200,6 +205,7 @@ class Runtime:
             self.agent, self.durability = make_agent(
                 self.settings, self.database, self.stores, self.objects, models=self.models, workspace=workspace,
                 skills_directory=skills_directory, product_capabilities=product_capabilities, memory=memory,
+                instrumentation=self.tracing.instrumentation if self.tracing else None,
             )
         except BaseException:
             await self.close()
@@ -216,10 +222,13 @@ class Runtime:
                 namespace=self.settings.temporal_namespace,
                 tls=self.settings.temporal_tls,
                 api_key=self.settings.temporal_api_key.get_secret_value() or None,
-                plugins=[PydanticAIPlugin()],
+                plugins=self.temporal_plugins(),
                 data_converter=encrypted_converter(self.security, self.objects),
             )
         return self.client
+
+    def temporal_plugins(self) -> list[Plugin]:
+        return [PydanticAIPlugin(), *([self.tracing.plugin] if self.tracing else [])]
 
     async def close(self) -> None:
         self.work_progress.clear()
@@ -246,8 +255,13 @@ class Runtime:
                     try:
                         await self.database.close()
                     finally:
-                        if self.product is not None:
-                            await self.product.close()
+                        try:
+                            if self.product is not None:
+                                await self.product.close()
+                        finally:
+                            if self.tracing is not None:
+                                tracing, self.tracing = self.tracing, None
+                                await tracing.close()
 
 
 _runtime: Runtime | None = None

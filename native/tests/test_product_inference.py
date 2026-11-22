@@ -58,6 +58,7 @@ ACCESS_HEADERS = {
     "CF-Access-Client-Id": "synthetic-broker.access",
     "CF-Access-Client-Secret": "synthetic-access-secret",
 }
+TRACE_PARENT = "00-12345678901234567890123456789012-1234567890123456-01"
 
 
 @pytest_asyncio.fixture
@@ -669,6 +670,8 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
     calls = []
     async def upstream(request):
         assert request.headers["authorization"] == "Bearer synthetic-inference-key"
+        assert request.headers["traceparent"] == TRACE_PARENT
+        assert "baggage" not in request.headers
         assert all(name not in request.headers for name in ACCESS_HEADERS)
         if image:
             assert len(request.content) > 8 * 1024 * 1024
@@ -719,6 +722,7 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
                         sdk = AsyncOpenAI(
                             base_url="https://gateway.invalid/v1", api_key="not-configured",
                             max_retries=0, http_client=client,
+                            default_headers={"traceparent": TRACE_PARENT, "baggage": "private=secret"},
                         )
                         model = OpenAIResponsesModel("test", provider=LiteLLMProvider(openai_client=sdk))
                         result = await model.request(
@@ -778,6 +782,7 @@ async def test_broker_request_uses_only_configured_access_credentials(inference,
         "POST", "https://gateway.invalid/v1/" + route, json={"model": "test"},
         headers={
             "Authorization": "Bearer synthetic-inference-key", "Accept": "text/event-stream",
+            "traceparent": TRACE_PARENT, "baggage": "private=secret",
             **dict.fromkeys(ACCESS_HEADERS, "untrusted-incoming-value"),
         },
     )
@@ -786,6 +791,8 @@ async def test_broker_request_uses_only_configured_access_credentials(inference,
     assert signed.content == original.content and signed.headers["accept"] == "text/event-stream"
     assert signed.headers["accept-encoding"] == "identity"
     assert signed.headers["authorization"] != original.headers["authorization"]
+    assert signed.headers["traceparent"] == TRACE_PARENT
+    assert "baggage" not in signed.headers
     for name, value in ACCESS_HEADERS.items():
         assert signed.headers.get(name) == (value if protected else None)
         assert original.headers[name] == "untrusted-incoming-value"

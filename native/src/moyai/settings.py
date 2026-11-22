@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     administrator: str = Field(default="admin", validation_alias="MOYAI_ADMIN_USER")
     gateway_url: str = Field(default="", validation_alias="LITELLM_API_BASE")
     gateway_key: SecretStr = Field(default=SecretStr(""), validation_alias="LITELLM_API_KEY")
+    trace_endpoint: str = Field(default="", validation_alias="LITELLM_TRACE_ENDPOINT")
+    trace_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="LITELLM_TRACE_API_KEY")
     customer_org_alias: str = Field(
         default="", max_length=200, pattern=r"^[\x20-\x7E]*$",
         validation_alias="MOYAI_CUSTOMER_ORG_ALIAS",
@@ -149,6 +151,28 @@ class Settings(BaseSettings):
             # Accessing port also rejects malformed and out-of-range ports.
             _ = parsed.port
         return values
+
+    @model_validator(mode="after")
+    def tracing_configuration(self) -> Settings:
+        if bool(self.trace_endpoint) != bool(self.trace_api_key.get_secret_value()):
+            raise ValueError("Set both LITELLM_TRACE_ENDPOINT and LITELLM_TRACE_API_KEY.")
+        if self.trace_endpoint:
+            parsed = urlsplit(self.trace_endpoint)
+            if (
+                parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or not parsed.path.endswith("/v1/traces")
+                or "\\" in self.trace_endpoint
+                or any(ord(char) <= 32 or ord(char) == 127 for char in self.trace_endpoint)
+            ):
+                raise ValueError("Use an HTTP(S) trace endpoint ending in /v1/traces, without URL credentials.")
+            _ = parsed.port
+            if parsed.scheme == "http" and not (
+                parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+                or parsed.hostname.endswith((".svc", ".svc.cluster.local"))
+            ):
+                raise ValueError("Trace endpoints require HTTPS outside loopback or cluster service addresses.")
+        return self
 
     @model_validator(mode="after")
     def worker_version_is_complete(self) -> Settings:
