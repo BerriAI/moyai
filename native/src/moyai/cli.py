@@ -9,7 +9,6 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from sqlalchemy import select
 from temporalio.testing import WorkflowEnvironment
 
@@ -79,7 +78,7 @@ async def run(args: argparse.Namespace) -> None:
                 ip="127.0.0.1",
                 namespace=settings.temporal_namespace,
                 dev_server_database_filename=str(settings.data_dir.resolve() / "temporal.db"),
-                plugins=[PydanticAIPlugin()],
+                plugins=runtime.temporal_plugins(),
                 data_converter=encrypted_converter(runtime.security, runtime.objects),
             )
             async with environment:

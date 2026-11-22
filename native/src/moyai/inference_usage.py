@@ -542,6 +542,8 @@ class InferenceUsageTransport(httpx.AsyncBaseTransport):
                     context.admission_error = error
                 raise error
             return await self.transport.handle_async_request(request)
+        from .tracing import inject_traceparent
+        inject_traceparent(request.headers)
         if context is None:
             if self.require_admission:
                 from .product_inference import InferenceAdmissionError

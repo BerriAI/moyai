@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -482,8 +482,10 @@ async def test_cli_dev_uses_effective_native_settings_and_creates_only_its_local
     monkeypatch.setattr(cli, "Settings", lambda: Settings(_env_file=None))
     config = configured(environment)
     native = Settings(_env_file=None, **config.native_overrides())
+    plugins = [object()]
     runtime = SimpleNamespace(
         settings=native, start=AsyncMock(), close=AsyncMock(), security=object(), objects=object(),
+        temporal_plugins=Mock(return_value=plugins),
     )
 
     def construct(settings, *, product_config):
@@ -505,6 +507,7 @@ async def test_cli_dev_uses_effective_native_settings_and_creates_only_its_local
         assert native.data_dir.stat().st_mode & 0o777 == 0o700
         assert kwargs["dev_server_database_filename"] == str(native.data_dir / "temporal.db")
         assert kwargs["namespace"] == config.legacy_settings().temporal_namespace
+        assert kwargs["plugins"] is plugins
         return LocalEnvironment()
 
     @asynccontextmanager
@@ -524,6 +527,7 @@ async def test_cli_dev_uses_effective_native_settings_and_creates_only_its_local
     await cli.run(Namespace(command="dev", data_dir=None, host="127.0.0.1", port=8807))
     runtime.start.assert_awaited_once()
     runtime.close.assert_awaited_once()
+    runtime.temporal_plugins.assert_called_once_with()
     serve.assert_awaited_once()
     assert sorted(item.name for item in Path(environment["DATA_DIR"]).iterdir()) == ["pydantic"]
 

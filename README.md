@@ -156,6 +156,8 @@ development. Preserve `.data` and its generated encryption key across restarts.
   member computers, and durable Pause/Resume/time controls on Pydantic AI.
 - [Architecture](docs/architecture.md): how requests move through the system and
   which data belongs to each service.
+- [Lens tracing](docs/tracing.md): export native runs and join them to gateway
+  model calls, with replay-safe context propagation.
 - [Full Linux computers](docs/modal-runtime.md): select Modal's VM runtime for
   Chromium/WebRTC and other workloads that need a full Linux kernel.
 - [Docker installation](deploy/docker/README.md): self-hosted installation and upgrades.
