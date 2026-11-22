@@ -279,6 +279,26 @@ async def test_members_cannot_enable_organization_learning(learning):
     assert not view.organization.can_manage and not view.organization.enabled
 
 
+async def test_shared_password_admin_cannot_enable_or_publish_learned_skills(learning):
+    product = learning
+    async with product.source.begin() as db:
+        await db.execute(text(
+            "INSERT INTO moyai.users VALUES ('shared:password:admin','shared','','Shared',NULL,'c','u')"
+        ))
+    principal = await product.adapter.current("shared:password:admin")
+    async with product.database.sessions.begin() as db:
+        await product.adapter.project_native_user(db, principal)
+    assert principal.role == "admin" and not principal.individual
+    view = await product.learning.settings_view(principal.grant)
+    assert not view.personal.can_manage and not view.organization.can_manage
+    for kind in ("personal", "organization"):
+        with pytest.raises(HTTPException) as error:
+            await product.learning.update(principal.grant, kind, LearningUpdate(enabled=True, revision=0))
+        assert error.value.status_code == 403
+    assert product.learning._scope(principal, Session(surface="web", visibility="shared")) is None
+    assert product.learning._scope(principal, Session(surface="web", visibility="private", owner_id=principal.id)) is None
+
+
 async def test_slack_continuation_of_web_chat_is_not_a_learning_source(learning):
     product = learning
     await enable(product, "personal")

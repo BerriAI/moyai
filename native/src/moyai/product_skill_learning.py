@@ -117,13 +117,19 @@ class SkillLearningService:
     async def _preference(self, db: AsyncSession, key: str) -> SkillLearningPreference | None:
         return await db.get(SkillLearningPreference, key, with_for_update={"read": True})
 
+    def _individual(self, principal: ProductPrincipal) -> bool:
+        return (
+            principal.individual and self.settings.person_login_enabled()
+            and principal.email.rpartition("@")[2] in self.settings.identity_domains()
+        )
+
     async def settings_view(self, grant: ProductGrant) -> LearningSettings:
         principal = await self.identity.require_current(grant)
         values = {}
         async with self.database.sessions() as db:
             for label, key, allowed in (
-                ("personal", principal.id, principal.individual),
-                ("organization", "organization", principal.role == "admin"),
+                ("personal", principal.id, self._individual(principal)),
+                ("organization", "organization", self._individual(principal) and principal.role == "admin"),
             ):
                 pref = await db.get(SkillLearningPreference, key)
                 pending = await db.scalar(select(func.count()).select_from(SkillLearningJob).where(
@@ -151,9 +157,7 @@ class SkillLearningService:
             principal = await self.identity.authorize_admission(db, grant)
             if kind not in {"personal", "organization"}:
                 raise HTTPException(404, "Unknown learning scope.")
-            if (kind == "organization" and principal.role != "admin") or (
-                kind == "personal" and not principal.individual
-            ):
+            if not self._individual(principal) or (kind == "organization" and principal.role != "admin"):
                 raise HTTPException(403, "This account cannot manage this learning scope.")
             key = "organization" if kind == "organization" else principal.id
             await db.execute(insert(SkillLearningPreference).values(scope_key=key).on_conflict_do_nothing())
@@ -163,11 +167,10 @@ class SkillLearningService:
             pref.enabled, pref.revision, pref.updated_at = body.enabled, pref.revision + 1, now()
         return await self.settings_view(grant)
 
-    @staticmethod
-    def _scope(principal: ProductPrincipal, session: Session) -> str | None:
+    def _scope(self, principal: ProductPrincipal, session: Session) -> str | None:
         # Slack channels can have narrower audiences than the organization.
         # Sharing their content requires a separate audience-preserving design.
-        if session.surface != "web":
+        if session.surface != "web" or not self._individual(principal):
             return None
         if session.visibility == "private" and session.owner_id == principal.id and principal.individual:
             return principal.id

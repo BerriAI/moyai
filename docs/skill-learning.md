@@ -4,8 +4,10 @@ Hosted Moyai can learn reusable procedures after successful web-chat turns.
 Enable **Learn personal skills** or **Learn shared organization skills** in
 **Settings → Skills → Automatic skill learning**. Both start disabled.
 
-Personal learning reads only the signed-in owner's private web chats and saves
-personal skills. Organization learning reads only administrators' shared web
+Both scopes require an eligible individual sign-in; shared-password accounts
+cannot enable learning or publish lessons. Personal learning reads only the
+signed-in owner's private web chats and saves personal skills. Organization
+learning reads only individual administrators' shared web
 chats and saves organization skills. Members can use organization skills but
 cannot enable organization learning or publish lessons through it. Slack channels,
 automations, delegated turns, failed answers and previously completed turns are
