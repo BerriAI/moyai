@@ -193,10 +193,11 @@ def product_inference_routes(service: ProductInferenceService) -> APIRouter:
             scope, identity, logical, ordinal, foreground = _verify(
                 service, authorization, route, bytes(content),
             )
-            if scope.surface == "memory_review":
-                if service.memory_review is None:
-                    raise InferenceAdmissionError("Native memory review is not configured.")
-                await service.memory_review.authorize_scope(scope)
+            if scope.surface in {"memory_review", "skill_learning"}:
+                reviewer = service.skill_learning if scope.surface == "skill_learning" else service.memory_review
+                if reviewer is None:
+                    raise InferenceAdmissionError("Native background review is not configured.")
+                await reviewer.authorize_scope(scope)
             else:
                 await service.database.authorize_scope(scope)
         except (InferenceAdmissionError, PermissionError, HTTPException):
@@ -205,7 +206,7 @@ def product_inference_routes(service: ProductInferenceService) -> APIRouter:
             service.database, scope, identity, requests=ordinal - 1, logical_identity=logical,
             foreground=foreground, broker_received_at=received_at,
         )
-        if scope.surface == "memory_review":
+        if scope.surface in {"memory_review", "skill_learning"}:
             return await _maintenance_response(service, activity, route, bytes(content))
         try:
             client = service.upstream_client()

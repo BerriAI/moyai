@@ -25,6 +25,9 @@ function defaults() {
     gatewayDefaults:{url:'https://gateway.example.com/v1'},gatewayDiscovery:gatewayConnection().policy.gateway_discovery,
     connectionCheck:{tool_count:1,tools:[{name:'lookup',description:'Search the synthetic research catalog.'}]},
     personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.'},
+    learning:{available:true,
+      personal:{enabled:false,revision:0,can_manage:true,pending:0,learned:0,last_status:null,last_saved_count:0},
+      organization:{enabled:false,revision:0,can_manage:true,pending:0,learned:0,last_status:null,last_saved_count:0}},
     memory: {source:'canonical',scope:{kind:'personal',owner_id:'viewer'},preferences:{enabled:true,auto_save:true,revision:1},
       capabilities:{read:true,create:true,update:true,delete:true,preferences:true},
       runtime:{recall:true,auto_save:true,background_review:true,note:'Saved preferences are separate from native pipeline availability.'},
@@ -131,6 +134,15 @@ async function settingsFixture() {
         state.memory.runtime={...state.memory.runtime,recall:body.enabled,auto_save:body.enabled&&body.auto_save};return json(state.memory.preferences);
       }
       if(url.pathname==='/api/product/skills')return json({source:'canonical',capabilities:{read:true},note:'Internal migration note',skills:[],has_more:false,next_offset:null});
+      if(url.pathname.startsWith('/api/product/skill-learning')){
+        if(state.learningError)return json({detail:'Learning settings changed. Refresh and try again.'},409);
+        if(req.method==='PUT'){
+          const scope=url.pathname.split('/').at(-1);
+          if(!state.learning[scope]?.can_manage)return json({detail:'Learning access changed.'},403);
+          state.learning[scope]={...state.learning[scope],enabled:body.enabled,revision:body.revision+1};
+        }
+        return json(state.learning);
+      }
       if(url.pathname==='/api/product/connections')return json(state.organizationConnections);
       if(/^\/api\/connections\/(slack|linear|github)\/oauth$/.test(url.pathname)){
         if(state.organizationOAuthError)return json({detail:state.organizationOAuthError},409);

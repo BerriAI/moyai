@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from .database import Database
     from .inference_usage import UsageCapture
     from .product_memory_review import ProductMemoryReviewService
+    from .product_skill_learning import SkillLearningService
 
 log = logging.getLogger(__name__)
 UNSENT_CLEANUP_TIMEOUT_SECONDS = 10.0
@@ -121,6 +122,7 @@ class ProductInferenceService:
         self.started = False
         self.active: set[asyncio.Task[Any]] = set()
         self.memory_review: ProductMemoryReviewService | None = None
+        self.skill_learning: SkillLearningService | None = None
         self.upstream: BrokerUpstream | None = None
 
     @property
@@ -216,8 +218,8 @@ class ProductInferenceService:
             raise InferenceAdmissionError("The native inference request is invalid.") from None
         if not isinstance(selected, str) or selected != capture.values["model"] or selected not in allowed:
             raise InferenceAdmissionError("The requested inference model is not currently allowed.")
-        if capture.activity.scope.surface == "memory_review" and (body.get("tools") or body.get("stream")):
-            raise InferenceAdmissionError("Memory review accepts only tool-free, non-streaming model requests.")
+        if capture.activity.scope.surface in {"memory_review", "skill_learning"} and (body.get("tools") or body.get("stream")):
+            raise InferenceAdmissionError("Background review accepts only tool-free, non-streaming model requests.")
         return self.scope()
 
     async def admit(self, request: httpx.Request, capture: UsageCapture) -> Admission:
@@ -236,13 +238,14 @@ class ProductInferenceService:
         try:
             owner_pid, owner_started = await asyncio.to_thread(self.slots.ownership)
             async with self.database.sessions.begin() as db:
-                maintenance = scope.surface == "memory_review"
+                maintenance = scope.surface in {"memory_review", "skill_learning"}
                 if maintenance:
-                    if self.memory_review is None:
-                        raise InferenceAdmissionError("Native memory-review admission is not configured.")
+                    reviewer = self.skill_learning if scope.surface == "skill_learning" else self.memory_review
+                    if reviewer is None:
+                        raise InferenceAdmissionError("Native background-review admission is not configured.")
                     # The maintenance authorizer starts with the source lock
                     # and preserves the job's original completed-turn grant.
-                    await self.memory_review.authorize_inference(db, capture)
+                    await reviewer.authorize_inference(db, capture)
                 # Reuse canonical account/role fencing in this exact transaction.
                 turn = await db.get(Turn, scope.turn_id)
                 if turn is None:

@@ -5075,6 +5075,66 @@ export type InvocableSkillPage = {
 export type JsonValue = unknown;
 
 /**
+ * LearningPreference
+ */
+export type LearningPreference = {
+    /**
+     * Can Manage
+     */
+    can_manage: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Last Saved Count
+     */
+    last_saved_count: number;
+    /**
+     * Last Status
+     */
+    last_status: 'completed' | 'failed' | 'skipped' | null;
+    /**
+     * Learned
+     */
+    learned: number;
+    /**
+     * Pending
+     */
+    pending: number;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
+ * LearningSettings
+ */
+export type LearningSettings = {
+    /**
+     * Available
+     */
+    available: boolean;
+    organization: LearningPreference;
+    personal: LearningPreference;
+};
+
+/**
+ * LearningUpdate
+ */
+export type LearningUpdate = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
  * LinkInput
  */
 export type LinkInput = {
@@ -13944,6 +14004,52 @@ export type ListProductSessionWorkspaceResponses = {
 };
 
 export type ListProductSessionWorkspaceResponse = ListProductSessionWorkspaceResponses[keyof ListProductSessionWorkspaceResponses];
+
+export type GetSkillLearningData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/product/skill-learning';
+};
+
+export type GetSkillLearningResponses = {
+    /**
+     * Successful Response
+     */
+    200: LearningSettings;
+};
+
+export type GetSkillLearningResponse = GetSkillLearningResponses[keyof GetSkillLearningResponses];
+
+export type UpdateSkillLearningData = {
+    body: LearningUpdate;
+    path: {
+        /**
+         * Scope
+         */
+        scope: 'personal' | 'organization';
+    };
+    query?: never;
+    url: '/api/product/skill-learning/{scope}';
+};
+
+export type UpdateSkillLearningErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateSkillLearningError = UpdateSkillLearningErrors[keyof UpdateSkillLearningErrors];
+
+export type UpdateSkillLearningResponses = {
+    /**
+     * Successful Response
+     */
+    200: LearningSettings;
+};
+
+export type UpdateSkillLearningResponse = UpdateSkillLearningResponses[keyof UpdateSkillLearningResponses];
 
 export type ListProductSkillsData = {
     body?: never;

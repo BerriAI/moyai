@@ -294,6 +294,11 @@ or the connected product's account services when running in a hosted workspace.
   a fresh read and preserve supporting files when omitted. Delete archives a
   skill and removes it from the picker; ask to restore it to make it available
   again. Changes apply to subsequent invocations. Bundled skills remain unchanged.
+  **Automatic skill learning** can save reusable procedures from completed web
+  chats: private chats produce personal skills, and administrators' shared chats
+  can produce organization skills. Both settings start disabled. Learned skills
+  include source evidence and can be reused in later relevant web chats; manual
+  edits and archived skills are never overwritten. See [skill learning](skill-learning.md).
 - **Memory:** inspect and edit the Harness memory store in your authorized
   namespaces. Version checks reject conflicting edits. Other users' personal
   memory is not available to administrators.

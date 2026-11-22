@@ -61,6 +61,22 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         interceptors.append(ReviewAuthority(review))
         agent_plugins.append(AgentPlugin(review.agent))
         identity += "-memory-review-v1-"
+    learning = getattr(runtime, "product_skill_learning", None)
+    if learning is not None:
+        from .product_memory_review import ReviewAuthority
+        from .product_skill_learning import AGENT_NAME as LEARNING_AGENT
+        from .product_skill_learning import WORKER_MARKER
+        from .skill_learning_workflow import (
+            SKILL_LEARNING_ACTIVITIES,
+            SKILL_LEARNING_WORKFLOWS,
+            SkillLearningWorkflow,
+        )
+        SkillLearningWorkflow.__pydantic_ai_agents__ = [learning.agent]
+        product_workflows.extend(SKILL_LEARNING_WORKFLOWS)
+        product_activities.extend(SKILL_LEARNING_ACTIVITIES)
+        interceptors.append(ReviewAuthority(learning, LEARNING_AGENT))
+        agent_plugins.append(AgentPlugin(learning.agent))
+        identity += WORKER_MARKER
     drain = getattr(runtime, "product_drain", None)
     activities = [*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities, *SWARM_ACTIVITIES]
     activity_pools = ("control", "model", "tools")
@@ -232,6 +248,15 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
             raise
         except Exception:  # noqa: BLE001 - background review cannot fail manual dispatch
             logger.warning("Memory-review synchronization remains pending.")
+    learning = getattr(runtime, "product_skill_learning", None)
+    if learning is not None:
+        try:
+            async with asyncio.timeout(3):
+                await learning.dispatch_pending(runtime, limit=5)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - learning cannot delay ordinary dispatch
+            logger.warning("Skill-learning synchronization remains pending.")
     return dispatched
 
 
