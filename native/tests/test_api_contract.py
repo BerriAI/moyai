@@ -85,7 +85,7 @@ def test_one_handler_per_operation():
 def test_frontend_calls_the_generated_client():
     legacy = re.compile(r"\bapi(?:Request)?(?:<[^>()]*>)?\(")
     callers = {
-        str(path.relative_to(ROOT)) for path in (ROOT / "native/web").glob("*.ts*")
+        str(path.relative_to(ROOT)) for path in (ROOT / "native/web").rglob("*.ts*")
         if legacy.search(path.read_text())
     }
     assert callers - LEGACY_CALLERS == set(), "Call the generated SDK in native/web/generated/api instead"

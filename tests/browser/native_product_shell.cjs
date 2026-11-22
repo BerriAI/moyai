@@ -52,6 +52,12 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/pull-requests/statuses')return json(state.prStatuses||{});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
     if(url.pathname==='/api/history/sessions'&&state.inventoryError)return json({detail:'Inventory temporarily unavailable.'},503);
+    if(url.pathname==='/api/history/sessions'&&state.inventoryByView) {
+      const view=url.searchParams.get('archived')==='true'?'archived':url.searchParams.get('deleted')==='true'?'deleted':'active';
+      const result=state.inventoryByView[view];
+      if(state.inventoryHolds?.[view])await state.inventoryHolds[view];
+      return json(result);
+    }
     if(url.pathname==='/api/history/sessions'&&state.inventoryRows)return json({sessions:state.inventoryRows,ancestors:state.inventoryAncestors||[],has_more:false});
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
       {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId}];
@@ -640,6 +646,64 @@ test('an empty sidebar shows initial loading but remains settled during later ba
   await waitFor(()=>state.requests.filter(r=>r.path==='/api/history/sessions').length>count);
   assert.equal(await page.getByText('Loading sessions…',{exact:true}).count(),0);
   assert.equal(await recent.getByText('No sessions here yet.',{exact:true}).isVisible(),true);
+});
+
+test('changing inventory views rejects a late previous-view read and resets pagination',async t=>{
+  reset({status:'idle'});
+  const active={...session(),source:'native',title:'Active inventory'};
+  const archived={...session('archived'),source:'native',title:'Archived inventory',archived:true};
+  state.inventoryByView={
+    active:{sessions:[active],has_more:false},
+    archived:{sessions:[archived],has_more:false},
+  };
+  const page=await pageFor(t,'#'),rail=page.getByRole('navigation',{name:'Conversations',exact:true});
+  await rail.getByRole('link',{name:/Active inventory/}).waitFor();
+  let release;state.inventoryHolds={active:new Promise(resolve=>{release=resolve;})};t.after(()=>release());
+  const reads=()=>state.requests.filter(row=>row.path==='/api/history/sessions');
+  const before=reads().length;
+  const pendingRead=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/history/sessions');
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  const previousRead=await pendingRead;
+  await waitFor(()=>reads().length>before,'hold the previous active-view read');
+  await page.getByRole('button',{name:'Show archived conversations',exact:true}).click();
+  await rail.getByRole('link',{name:/Archived inventory/}).waitFor();
+  release();state.inventoryHolds={};
+  await previousRead.response();
+  assert.equal(await rail.getByRole('link',{name:/Archived inventory/}).isVisible(),true);
+  assert.equal(await rail.getByRole('link',{name:/Active inventory/}).count(),0,'a late active read cannot replace the archived view');
+  await page.getByRole('button',{name:'Show active conversations',exact:true}).click();
+  await rail.getByRole('link',{name:/Active inventory/}).waitFor();
+  assert.equal(await rail.getByRole('link',{name:/Archived inventory/}).count(),0);
+  assert.equal(reads().length,before+3,'one interrupted read and one read per view change');
+  for(const request of reads().slice(before+1)) {
+    const query=new URLSearchParams(request.query);
+    assert.equal(query.get('limit'),'20');
+    assert.equal(query.has('cursor'),false,'each view begins at its first page');
+  }
+});
+
+test('sign-out clears a held inventory before the next authenticated inventory arrives',async t=>{
+  reset({status:'idle'});
+  state.inventoryByView={active:{sessions:[{...session(),source:'native',title:'Previous account inventory'}],has_more:false}};
+  const page=await pageFor(t,'#');
+  await page.getByRole('navigation',{name:'Conversations',exact:true}).getByRole('link',{name:/Previous account inventory/}).waitFor();
+  let releaseOld;state.inventoryHolds={active:new Promise(resolve=>{releaseOld=resolve;})};t.after(()=>releaseOld());
+  const count=state.requests.filter(row=>row.path==='/api/history/sessions').length;
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await waitFor(()=>state.requests.filter(row=>row.path==='/api/history/sessions').length>count);
+  await page.getByRole('button',{name:'Sign out',exact:true}).click();
+  await page.getByRole('heading',{name:'Welcome to Moyai',exact:true}).waitFor();
+  let releaseNew;state.inventoryHolds={active:new Promise(resolve=>{releaseNew=resolve;})};t.after(()=>releaseNew());
+  state.inventoryByView={active:{sessions:[{...session('new-account'),source:'native',title:'Current account inventory'}],has_more:false}};
+  releaseOld();
+  await page.getByLabel('Workspace password',{exact:true}).fill('fixture-only');
+  await page.getByRole('button',{name:'Sign in',exact:true}).click();
+  const rail=page.getByRole('navigation',{name:'Conversations',exact:true});
+  await rail.getByText('Loading sessions…',{exact:true}).first().waitFor();
+  assert.equal(await rail.getByRole('link',{name:/Previous account inventory/}).count(),0);
+  releaseNew();state.inventoryHolds={};
+  await rail.getByRole('link',{name:/Current account inventory/}).waitFor();
+  assert.equal(await rail.getByRole('link',{name:/Previous account inventory/}).count(),0);
 });
 
 test('sidebar pin and unpin render before a held save without blocking other actions or refreshing catalogs',async t=>{

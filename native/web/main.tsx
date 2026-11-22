@@ -16,9 +16,9 @@ import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
 import { ApiError, csrfToken, setCsrf } from "./api"
-import { getMe, listPullRequestStatuses, startGoogleSignIn, startOktaSignIn, listSessionFolders, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
+import { getMe, listPullRequestStatuses, startGoogleSignIn, startOktaSignIn, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
 import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, getSessionActivity, getSessionPlan, listConnections, listSessionMessages, listSessions, loginWithPassword, logout, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending, type PlanStep, type SessionDetail } from "./generated/api"
-import { listHistorySessions, searchHistory, type HistorySessionList, type SourcedHistorySession } from "./generated/api"
+import { listHistorySessions, searchHistory } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
 import { FailureBanner } from "./failure-banner"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
@@ -29,11 +29,12 @@ import { initializeAppearance } from "./appearance"
 import { AppearanceToggle } from "./appearance-toggle"
 import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
-import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
+import { SessionSidebar } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { SessionTitle } from "./session-title"
 import { sessionCreatedByMe } from "./sidebar-drag"
 import { useSessionUpdates } from "./use-session-updates"
+import { useSessionInventory } from "./use-session-inventory"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
@@ -97,10 +98,6 @@ const searchSessions: PaletteSearchAdapter = async (query, { signal, limit }) =>
     : await listHistorySessions({ query: { source: "all", limit }, signal })
   return { sessions: data.sessions, has_more: data.has_more, notice: data.notice ?? undefined }
 }
-/** History rows have no live workspace or save warning; the sidebar keeps its browser-local unread state. */
-function historyRow(row: SourcedHistorySession): Session {
-  return { ...row, unread: row.unread ?? undefined, workspace: undefined, save_warning: undefined }
-}
 type SessionReference = Pick<PaletteSession, "id" | "source" | "url"> & { source_session_id?: string | null }
 export function sessionReferenceHash(session: SessionReference): string {
   const original = session.url?.match(/^\/#run=([a-f0-9]{32})$/)?.[1]
@@ -126,23 +123,11 @@ function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState("")
-  const [refreshError, setRefreshError] = useState("")
-  const [folders, setFolders] = useState<SessionFolder[]>([])
-  const refreshVersion = useRef(0)
-  const [sessions, setSessions] = useState<Session[]>([])
-  const sessionsNow = useRef(sessions)
-  sessionsNow.current = sessions
-  const [sessionPageCount, setSessionPageCount] = useState(1)
-  const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, loaded: false, notice: "" })
   const [selected, setSelected] = useState(currentRoute)
   const [startPrivate, setStartPrivate] = useState(false)
   const [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceRequest | null>(null)
   const [prStates, setPrStates] = useState<Record<string, PullRequestStatus[]>>({})
   const [prRefresh, setPrRefresh] = useState(0)
-  const [connections, setConnections] = useState<Connection[]>([])
-  const [listView, setListView] = useState<SessionListView>("active")
-  const listViewRef = useRef(listView)
-  listViewRef.current = listView
   const [mobileNav, setMobileNav] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [sidebarHidden, setSidebarHidden] = useState(false)
@@ -159,11 +144,10 @@ function App() {
   const historical = selected.startsWith("run=")
   const scopeKey = `${me?.user.id}:${me?.user.role}:${me?.user.individual}:${me?.csrf}`
   const sessionUpdates = useSessionUpdates(scopeKey)
-  const latestRows = new Map(sessions.filter(row => !sessionIsReadOnly(row)).map(row => [row.id, row]))
-  const optimisticSession = <T extends SidebarSession,>(row: T): T => {
-    const latest = latestRows.get(row.id)
-    return sessionUpdates.apply(sessionIsReadOnly(row) || !latest ? row : { ...row, pinned: latest.pinned, folder: latest.folder })
-  }
+  const {
+    sessions, folders, connections, view: listView, state: inventoryState, error: refreshError,
+    refresh, loadMore, changeView, optimisticSession, dismissError: dismissRefreshError,
+  } = useSessionInventory(me, sessionUpdates)
   const routeScope = `${scopeKey}:${routeRevision}`, routeKey = `${routeScope}:${selected}`
   const originalId = historical ? decodeRoute(selected.slice(4)) : ""
   const acceptedStart = (initialConversation?.scope === scopeKey && initialConversation.value.session.id === selected)
@@ -206,80 +190,12 @@ function App() {
     void refresh()
   }
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
-  // Shared inventory refreshes own their errors here and resolve after handling
-  // them. Consumers must not recast an inventory failure as a send/history error.
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    const version = ++refreshVersion.current
-    const updateCheckpoint = sessionUpdates.checkpoint()
-    // Background polling keeps the existing list and pagination control quiet.
-    // Explicit pagination sets loading before starting its new refresh.
-    setInventoryState(previous => previous.loaded ? previous : { ...previous, loading: true })
-    const inventory = async () => {
-      const rows = new Map<string, Session>(), notices = new Set<string>()
-      let cursor: string | null = null, hasMore = false
-      for (let page = 0; page < sessionPageCount; page++) {
-        const { data: next }: { data: HistorySessionList } = await listHistorySessions({ query: {
-          source: "all", scope: "mine", limit: 20, archived: listView === "archived", deleted: listView === "deleted", cursor: cursor ?? undefined,
-        }, signal })
-        if (signal?.aborted || version !== refreshVersion.current || listViewRef.current !== listView) return null
-        for (const row of next.sessions.map(item => historyRow(item))) {
-          let unread = row.unread
-          if (row.source === "legacy" && row.read_marker_key && row.completion_marker) {
-            try { unread = localStorage.getItem(row.read_marker_key) !== row.completion_marker } catch { unread = false }
-          }
-          rows.set(sessionKey(row), { ...row, unread })
-        }
-        for (const row of next.ancestors.map(item => historyRow(item))) {
-          if (!rows.has(sessionKey(row))) rows.set(sessionKey(row), row)
-        }
-        if (next.notice) notices.add(next.notice)
-        hasMore = Boolean(next.has_more && next.next_cursor)
-        if (!hasMore || next.next_cursor === cursor) break
-        cursor = next.next_cursor!
-      }
-      return { rows: [...rows.values()], hasMore, notice: [...notices].join(" ") }
-    }
-    try {
-      const current = () => !signal?.aborted && version === refreshVersion.current && listViewRef.current === listView
-      // Publish the list independently; a slow account catalog must not leave
-      // the rail empty after its authenticated inventory has arrived.
-      const results = await Promise.allSettled([
-        inventory().then(result => {
-          if (result && current()) {
-            sessionUpdates.acceptRead(updateCheckpoint, result.rows)
-            setSessions(result.rows)
-            setInventoryState({ loading: false, loaded: true, hasMore: result.hasMore, notice: result.notice })
-          }
-        }).catch(reason => {
-          if (current() && reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
-          throw reason
-        }),
-        listConnections({ signal }).then(({ data: accounts }) => { if (current()) setConnections(accounts) }),
-        listSessionFolders({ signal }).then(({ data: groups }) => { if (current()) setFolders(groups) }),
-      ])
-      if (!current()) return
-      const failure = results.find(result => result.status === "rejected")
-      if (failure?.status === "rejected") throw failure.reason
-      setRefreshError("")
-    } catch (reason) {
-      if (signal?.aborted || version !== refreshVersion.current) return
-      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
-      // Every caller shares this catalog. A successful send, rename or new
-      // conversation must not inherit its refresh failure as an action error.
-      setRefreshError(String(reason))
-    } finally {
-      if (version === refreshVersion.current) setInventoryState(previous => ({ ...previous, loading: false }))
-    }
-  }, [listView, sessionPageCount, sessionUpdates])
-
   useEffect(() => {
     getMe().then(({ data: value }) => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
-    const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" }); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
+    const signedOut = () => { lastConversation.current = ""; setCsrf(""); setMe(null); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
     const accessChanged = () => {
       const requestCsrf = csrfToken()
-      ++refreshVersion.current
-      setSessions([]); setConnections([]); setFolders([]); setPrStates({}); setPrRefresh(value => value + 1); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false)
-      setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" })
+      setPrStates({}); setPrRefresh(value => value + 1); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false)
       setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1)
       void getMe().then(({ data: value }) => { if (csrfToken() === requestCsrf) { setCsrf(value.csrf); setMe(value) } }, () => {})
     }
@@ -310,12 +226,6 @@ function App() {
     window.addEventListener("keydown", shortcut)
     return () => { window.removeEventListener("moyai:access-changed", accessChanged); window.removeEventListener("moyai:signed-out", signedOut); window.removeEventListener("hashchange", navigate); window.removeEventListener("keydown", shortcut) }
   }, [])
-  useEffect(() => {
-    if (!me) return
-    const stop = pollVisible(refresh, () => sessionsNow.current.some(row => activeSession(row.status)) ? 4000 : 15000, reason => setRefreshError(String(reason)))
-    return () => { stop(); ++refreshVersion.current }
-  }, [me, refresh])
-
   const prSessionIds = [...new Set([...sessions.filter(row => !row.deleted && !sessionIsReadOnly(row)).map(row => row.id), ...(nativeSelected ? [nativeSelected] : [])])].sort().join(",")
   const connectionVersion = JSON.stringify(connections.map(item => [item.id, item.enabled, item.shared, item.revision]))
   useEffect(() => {
@@ -332,7 +242,7 @@ function App() {
   }, [me?.user.id, prSessionIds, connectionVersion, prRefresh])
 
   if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
-  if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError(""); setRefreshError("") }} />
+  if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError(""); dismissRefreshError() }} />
   const newSession = () => { setStartPrivate(false); location.hash = ""; setMobileNav(false); setWorkspaceRequest(null); setSidebarReset(value => value + 1) }
   const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
   const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
@@ -350,12 +260,8 @@ function App() {
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
       <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...sessionUpdates.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
-        hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => {
-          ++refreshVersion.current
-          setInventoryState(previous => ({ ...previous, loading: true }))
-          setSessionPageCount(value => value + 1)
-        }}
-        onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" }); setListView(value) }}
+        hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={loadMore}
+        onViewChange={changeView}
         onOpenSideChat={row => {
           const host = nativeSelected && nativeSelected !== row.id ? nativeSelected : row.parent_session_id
           if (!host) return
@@ -371,7 +277,7 @@ function App() {
     </aside>}
     <main className="main">
       {!settingsOpen && <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>}
-      {(error || refreshError) && <div className="error global-error" role="alert">{error || refreshError}<Button variant="ghost" onClick={() => error ? setError("") : setRefreshError("")}>Dismiss</Button></div>}
+      {(error || refreshError) && <div className="error global-error" role="alert">{error || refreshError}<Button variant="ghost" onClick={() => error ? setError("") : dismissRefreshError()}>Dismiss</Button></div>}
       {settingsOpen
         ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage onStartPrivateChat={() => { newSession(); setStartPrivate(true) }} user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} sidebarCollapsed={sidebarHidden} onToggleSidebar={toggleSidebar} onPreferences={preferences => setMe(current => current?.user.id === me.user.id && current.csrf === me.csrf ? { ...current, preferences } : current)} /></React.Suspense>
         : historical && !nativeSelected
