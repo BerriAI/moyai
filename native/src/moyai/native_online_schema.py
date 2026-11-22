@@ -41,6 +41,7 @@ FROM_VERSION = "2026-10-18-message-sources-v21"
 TO_VERSION = "2026-10-17-goals-v22"
 AUTOMATION_CHAT_VERSION = "2026-10-19-automation-chats-v23"
 PRIVATE_AUTOMATION_VERSION = "2026-11-21-private-automations-v24"
+SLACK_WEB_VERSION = "2026-11-21-slack-web-v25"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -142,12 +143,37 @@ def _private_automation_columns(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _slack_web_tables(metadata: MetaData, schema: str) -> None:
+    # Frozen v25 send receipts and signed input authority.
+    Table(
+        "moyai_slack_web_links", metadata,
+        Column("session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), primary_key=True),
+        Column("owner_id", String(512), nullable=False),
+        Column("owner_authority", String(64), nullable=False),
+        Column("requester_id", String(512), nullable=False),
+        Column("team_id", String(100), nullable=False),
+        Column("channel_id", String(100), nullable=False),
+        Column("connection_authority", String(64), nullable=False),
+        Column("status", String(30), nullable=False),
+        Column("thread_ts", String(50), nullable=True),
+        Column("created_at", String(40), nullable=False), schema=schema,
+    )
+    Table(
+        "moyai_slack_web_turns", metadata,
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_turns.id"), primary_key=True),
+        Column("requester_id", String(512), nullable=False),
+        Column("authority_version", String(64), nullable=False), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
               _automation_chat_tables),
     Expansion(AUTOMATION_CHAT_VERSION, PRIVATE_AUTOMATION_VERSION, frozenset(),
               (("moyai_product_automation_turns", "visibility"),), _private_automation_columns),
+    Expansion(PRIVATE_AUTOMATION_VERSION, SLACK_WEB_VERSION,
+              frozenset({"moyai_slack_web_links", "moyai_slack_web_turns"}), (), _slack_web_tables),
 )
 
 

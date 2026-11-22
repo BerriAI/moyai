@@ -173,6 +173,17 @@ class ProductReadService:
         if current.auth_version != reader.user.auth_version:
             raise HTTPException(401, "Your session expired.")
 
+    def my_identity(self, reader: Reader, value):
+        """Navigation attribution only; every result still passes its live audience check."""
+        matches = value == reader.user.id
+        schema = getattr(self.identity, "schema", None)
+        if schema and reader.principal is not None and reader.principal.individual:
+            users = table("users", column("id"), column("kind"), column("linked_user_id"), schema=schema)
+            matches = or_(matches, value.in_(select(users.c.id).where(
+                users.c.kind == "slack", users.c.linked_user_id == reader.user.id,
+            )))
+        return matches
+
     def private_candidate(self, reader: Reader, session=Session):
         """SQL candidates only; native_recheck validates the live identity link/audience."""
         private = reader.principal is None or reader.principal.individual
@@ -206,8 +217,9 @@ class ProductReadService:
     def native_query(self, reader: Reader):
         preference = and_(SessionPreference.session_id == Session.id, SessionPreference.user_id == reader.user.id)
         read = and_(SessionRead.session_id == Session.id, SessionRead.user_id == reader.user.id)
+        owned = self.my_identity(reader, Session.owner_id)
         participated = select(Turn.id).where(
-            Turn.session_id == Session.id, Turn.actor_id == reader.user.id,
+            Turn.session_id == Session.id, self.my_identity(reader, Turn.actor_id),
         ).exists()
         unread = select(Message.id).where(
             Message.session_id == Session.id, Message.id > SessionRead.message_id,
@@ -222,8 +234,8 @@ class ProductReadService:
             Session.status, Session.active_turn, Session.archived, Session.deleted, Session.created_at,
             Session.updated_at, SessionPreference.pinned, SessionPreference.folder,
             SessionRead.unread.label("marked_unread"), unread.label("new_messages"),
-            or_(Session.owner_id == reader.user.id, self.private_candidate(reader)).label("created_by_me"),
-            (and_(Session.owner_id != reader.user.id, participated)).label("participated"),
+            owned.label("created_by_me"),
+            and_(~owned, participated).label("participated"),
             parent.id.label("parent_session_id"),
         ).outerjoin(SessionPreference, preference).outerjoin(SessionRead, read).outerjoin(
             DelegatedSession, DelegatedSession.session_id == Session.id,
@@ -258,7 +270,6 @@ class ProductReadService:
                                   memberships.c.owner_id == folders.c.owner_id),
             ).where(memberships.c.run_id == original, memberships.c.owner_id == reader.user.id).limit(1).scalar_subquery()
             linked = select(users.c.id).where(users.c.kind == "slack", users.c.linked_user_id == reader.user.id)
-            owned = or_(Session.owner_id == reader.user.id, Session.owner_id.in_(linked))
             old_participation = select(old_messages.c.run_id).join(
                 roots, roots.c.run_id == old_messages.c.run_id,
             ).where(

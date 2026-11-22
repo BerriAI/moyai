@@ -10087,6 +10087,28 @@ export type SlackDeliveryStatus = {
 };
 
 /**
+ * SlackWebStatus
+ */
+export type SlackWebStatus = {
+    /**
+     * Context
+     */
+    context: string;
+    /**
+     * Status
+     */
+    status: 'available' | 'linked' | 'pending';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Url
+     */
+    url: string | null;
+};
+
+/**
  * SourcedHistorySession
  *
  * A /api/history row: stored IDs are kept; ``key`` is the source-qualified UI identity.
@@ -15167,6 +15189,66 @@ export type RestoreSessionResponses = {
 };
 
 export type RestoreSessionResponse = RestoreSessionResponses[keyof RestoreSessionResponses];
+
+export type GetSessionSlackData = {
+    body?: never;
+    path: {
+        /**
+         * Session Id
+         */
+        session_id: string;
+    };
+    query?: never;
+    url: '/api/sessions/{session_id}/slack';
+};
+
+export type GetSessionSlackErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSessionSlackError = GetSessionSlackErrors[keyof GetSessionSlackErrors];
+
+export type GetSessionSlackResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackWebStatus;
+};
+
+export type GetSessionSlackResponse = GetSessionSlackResponses[keyof GetSessionSlackResponses];
+
+export type ConnectSessionSlackData = {
+    body?: never;
+    path: {
+        /**
+         * Session Id
+         */
+        session_id: string;
+    };
+    query?: never;
+    url: '/api/sessions/{session_id}/slack';
+};
+
+export type ConnectSessionSlackErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConnectSessionSlackError = ConnectSessionSlackErrors[keyof ConnectSessionSlackErrors];
+
+export type ConnectSessionSlackResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackWebStatus;
+};
+
+export type ConnectSessionSlackResponse = ConnectSessionSlackResponses[keyof ConnectSessionSlackResponses];
 
 export type RetrySlackDeliveryData = {
     body?: never;

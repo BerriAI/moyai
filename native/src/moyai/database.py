@@ -213,6 +213,8 @@ class Database:
         binding = await db.get(ProductTurnAuthority, turn.id)
         if binding is None or binding.actor_id != turn.actor_id:
             raise PermissionError("This task has no admitted product authority; submit a new authorized request.")
+        from .slack_web import check_turn
+        await check_turn(self, db, turn)
         return ProductGrant(binding.actor_id, binding.authority_version)
 
     async def _check_product_turn(
@@ -655,6 +657,13 @@ class Database:
                 source="http" if received_at else "admission", surface=session.surface,
             )
             self._bind_product_grant(transaction, turn, product_grant)
+            raw = getattr(actor, "slack_web_grant", None)
+            if raw is not None:
+                from .product_slack_models import SlackWebTurn
+                await self._identity().authorize_admission(transaction, raw)
+                transaction.add(SlackWebTurn(
+                    turn_id=turn.id, requester_id=raw.user_id, authority_version=raw.authority_version,
+                ))
             await self.swarms.bind(transaction, mission, turn, generated=swarm_generated)
             if not automation_generated:
                 await self.goals.bind(transaction, turn)
@@ -1463,6 +1472,17 @@ class Database:
                 source="http" if received_at else "admission", surface=session.surface,
             )
             self._bind_product_grant(db, turn, product_grant)
+            if self.product_authority_enabled:
+                from .product_slack_models import SlackWebTurn
+                source = await db.get(SlackWebTurn, previous.id)
+                raw = getattr(actor, "slack_web_grant", None)
+                if raw is None and source is not None:
+                    raw = ProductGrant(source.requester_id, source.authority_version)
+                if raw is not None:
+                    await self._identity().authorize_admission(db, raw)
+                    db.add(SlackWebTurn(
+                        turn_id=turn.id, requester_id=raw.user_id, authority_version=raw.authority_version,
+                    ))
             if reply is not None:
                 db.add(Message(
                     session_id=session.id, turn_id=turn.id, author_id=actor.id,
