@@ -15,13 +15,14 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from .contracts import NewMessage
+from .contracts import ExecutionContext, NewMessage
 from .inbound_events import InboundEvent
 from .models import Session, SlackThread, Turn, User
 from .product_identity import ProductPrincipal
 from .product_slack_controls import answer
 from .product_slack_conversations import SlackConversation, SlackConversations
 from .product_slack_models import SlackTurnSource
+from .skill_mentions import mentions
 
 if TYPE_CHECKING:
     from .product_slack import ProductSlack
@@ -168,19 +169,29 @@ class SlackEvents:
             await automation.receive_verified(payload)
 
     async def _prepare(
-        self, message: SlackMessage, actor: User, principal: ProductPrincipal,
+        self, message: SlackMessage, actor: User, principal: ProductPrincipal, thread: SlackThread | None,
     ) -> SlackSubmission:
+        admission: Session | ExecutionContext = ExecutionContext("shared", "slack")
+        if thread is not None:
+            async with self.slack.runtime.database.sessions() as db:
+                admission = await self.slack.runtime.database.allowed_session(db, thread.session_id, actor)
+        prompt = await self.slack.runtime.skill_invocations.normalize_slack(message.prompt, actor, admission)
         attachments = {"uploads": [], "images": [], "context": ""}
         if message.event.get("files"):
             attachments = await self.slack.files.prepare(actor, principal, message.event, message.origin)
-        selections = [grant["id"] for grant in await self.slack.connections.catalog(
-            actor.id, shared_session=True, surface="slack",
-        )]
+        selections = []
+        if getattr(actor, "slack_web_grant", None) is None:
+            selections = [grant["id"] for grant in await self.slack.connections.catalog(
+                actor.id, shared_session=True, surface="slack",
+            )]
         body = NewMessage.from_event(InboundEvent(
             source="slack", sender_id=actor.id, deduplication_key=message.key,
-            text=message.prompt, model_context=attachments["context"],
+            text=prompt, model_context=attachments["context"],
             attachments=tuple(attachments["images"]),
-            provenance={**message.origin, "files": attachments.get("files", [])},
+            provenance={
+                **message.origin, "files": attachments.get("files", []),
+                "skill_references": [mention.reference for mention in mentions(prompt)],
+            },
         ), connections=selections)
         return SlackSubmission(body, attachments["uploads"])
 
@@ -193,12 +204,12 @@ class SlackEvents:
                 # Continue the computer's existing account selection, including
                 # older bot-only threads. Admission still checks every grant
                 # against this sender's current authority and workspace scope.
-                saved = await db.scalar(select(Turn.connections).join(
-                    Session, Session.id == Turn.session_id,
-                ).where(
-                    Turn.session_id == thread.session_id, Turn.preparation.is_not(None),
-                    Session.workspace.is_not(None),
-                ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
+                query = select(Turn.connections).join(Session, Session.id == Turn.session_id).where(
+                    Turn.session_id == thread.session_id,
+                )
+                if getattr(actor, "slack_web_grant", None) is None:
+                    query = query.where(Turn.preparation.is_not(None), Session.workspace.is_not(None))
+                saved = await db.scalar(query.order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
                 submission = body.model_copy(update={"connections": json.loads(saved)}) if saved is not None else body
                 turn = await self.slack.runtime.database.submit(
                     actor, thread.session_id, submission, db=db,
@@ -226,7 +237,25 @@ class SlackEvents:
         self, message: SlackMessage, conversation: SlackConversation, actor: User,
         principal: ProductPrincipal, installed: dict,
     ) -> dict[str, Any]:
-        submission = None if message.command else await self._prepare(message, actor, principal)
+        # A verified reply to the owner's explicitly linked DM keeps the web
+        # computer/account context. Retain its signed sender grant separately.
+        if conversation.thread is not None:
+            actor = await self.slack.web.input_actor(actor, conversation.thread.session_id)
+        try:
+            submission = None if message.command else await self._prepare(message, actor, principal, conversation.thread)
+        except HTTPException as error:
+            if error.status_code != 422:
+                raise
+            # Durable webhook intake is asynchronous: a rejected selection must
+            # reach the sender instead of disappearing into an inbox error.
+            thread = conversation.thread or await self.conversations.bind(
+                conversation, actor, principal, message.origin, installed, message.prompt,
+                None, wake=message.mentioned, uploads=[],
+            )
+            if thread is not None:
+                await self.slack.notice(actor, thread, "invalid-input:" + message.key, str(error.detail))
+                self.slack.delivery_wakeup.set()
+            return {"ok": True}
         thread = conversation.thread
         if thread is None:
             thread = await self.conversations.bind(

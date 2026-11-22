@@ -82,21 +82,26 @@ class ProductSkillTools:
     async def caller(self, db: AsyncSession, scope: RunScope, run_id: str | None) -> ProductPrincipal:
         # Reuse the product's existing persisted human-origin and execution fences.
         # Scope, owner and role are server-authored; none is a model-selected identity.
-        if run_id != scope.root_run_id or scope.delegation_generated or scope.surface != "web" or scope.product_grant is None:
-            raise HTTPException(403, "Manage skills from an authenticated direct web conversation.")
+        if (
+            run_id != scope.root_run_id or scope.delegation_generated
+            or scope.surface not in {"web", "slack"} or scope.product_grant is None
+        ):
+            raise HTTPException(403, "Manage skills from an authenticated direct web or Slack conversation.")
         # Keep canonical/native lock ordering identical for reads and mutations.
         await self.authority._writer(db)
         await self.authority.authorize_scope_in(db, scope)
         principal = await self.authority.management_principal(db, scope)
         session = await db.scalar(select(Session).where(Session.id == scope.session_id).with_for_update())
         if (
-            session is None or session.deleted or session.surface != "web"
+            session is None or session.deleted or session.surface != scope.surface
             or session.visibility != scope.visibility
             or scope.authority.visibility != session.visibility or scope.authority.surface != session.surface
+            or (session.surface == "slack" and session.visibility != "shared")
+            or (session.visibility == "private" and session.owner_id != principal.id)
             or await self.authority.automated_session(db, session.id)
             or await self.authority.human_origin(db, scope) is None
         ):
-            raise HTTPException(403, "Skill management requires a current human web conversation.")
+            raise HTTPException(403, "Skill management requires a current human conversation with its original visibility.")
         return principal
 
     @staticmethod

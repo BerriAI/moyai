@@ -12,6 +12,7 @@ from app.identities import PROFILE_REFRESH_SECONDS
 from sqlalchemy import column, or_, select, table
 
 from .models import Message
+from .product_slack_models import SlackWebLink
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ async def refresh_due(slack, *, after: str = "") -> str:
     # candidate query therefore misses their senders entirely.
     users = table("users", *(column(key) for key in (
         "id", "kind", "profile_next_check", "profile_eligible", "profile_checked_at",
+        "linked_user_id", "link_status",
     )), schema=slack.product.identity.schema)
     before = datetime.fromtimestamp(time.time() - PROFILE_REFRESH_SECONDS, UTC).isoformat()
     async with slack.runtime.database.sessions() as db:
@@ -31,8 +33,14 @@ async def refresh_due(slack, *, after: str = "") -> str:
             users.c.kind == "slack", users.c.id.startswith("slack:" + installed["team_id"] + ":"),
             users.c.id > after,
             or_(users.c.profile_next_check <= int(time.time()),
-                (users.c.profile_eligible == 1) & (users.c.profile_checked_at <= before)),
-            select(Message.id).where(Message.author_id == users.c.id).exists(),
+                (users.c.profile_eligible == 1) & (users.c.profile_checked_at <= before),
+                # Older native startups left accounting/sidebar linking disabled.
+                # Reverify those existing senders now, without waiting for a new
+                # message or changing a manual/ambiguous account relationship.
+                (users.c.profile_eligible == 1) & users.c.linked_user_id.is_(None)
+                & (users.c.link_status == "pending_profile")),
+            or_(select(Message.id).where(Message.author_id == users.c.id).exists(),
+                select(SlackWebLink.session_id).where(SlackWebLink.requester_id == users.c.id).exists()),
         ).order_by(users.c.id).limit(10)))
     # Release the read before the canonical profile writer takes its lock.
     # actor() refreshes through users.info and projects the current display name;

@@ -27,6 +27,7 @@ import {
   checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
   disconnectOrganizationConnection, getProductSkill, listCredentials, listOrganizationConnections, listProductMemories,
   listProductSkills, revokeCredential, startOrganizationConnectionOAuth, updateCredential, updateOrganizationConnectionPolicy,
+  getSkillLearning, updateSkillLearning,
   updateProductMemory, updateProductMemoryPreferences,
   type CredentialInventory, type CredentialProvider, type CredentialSecretMetadata, type Note as ProductMemoryWriteBody,
   type OrganizationConnection, type ProductMemoryNote as ProductMemoryNoteData, type ProductSaveSecretWritable,
@@ -646,6 +647,35 @@ function ProductSkillDialog({ skill, onClose }: { skill: ProductSkillSummary; on
     <Button variant="outline" onClick={onClose}>Close</Button>
   </DialogContent></Dialog>
 }
+function SkillLearningControls() {
+  const resource = useResource("/product/skill-learning", signal => getSkillLearning({ signal }).then(({ data }) => data))
+  const mutation = useMutation()
+  return <section aria-label="Automatic skill learning">
+    <div className="ns-section-heading"><h2>Automatic skill learning</h2><Button variant="ghost" size="sm" onClick={resource.refresh} disabled={resource.loading}>Refresh learning status</Button></div>
+    <p className="ns-help">Save useful procedures from completed web chats and reuse relevant lessons in later chats. Manually edited skills stay under your control.</p>
+    <LoadState resource={resource}>{data => <>
+      {!data.available && <p className="ns-notice" role="status">Learning is temporarily unavailable. Your preferences and saved skills are kept.</p>}
+      {(["personal", "organization"] as const).map(kind => {
+        const preference = data[kind]
+        return <div className="ns-record" key={kind}><div className="ns-record-copy">
+          <label className="check-label"><Checkbox
+            checked={preference.enabled}
+            disabled={!preference.can_manage || mutation.busy || resource.loading}
+            onCheckedChange={value => void mutation.run(
+              () => updateSkillLearning({ path: { scope: kind }, body: { enabled: value === true, revision: preference.revision } }),
+              resource.refresh,
+            )}
+          />{kind === "personal" ? "Learn personal skills" : "Learn shared organization skills"}</label>
+          <p>{kind === "personal" ? "Learn from your private web chats. Lessons remain personal." : "Learn from administrators’ shared web chats. Private chats and Slack channels are excluded."}</p>
+          <small>{preference.learned} learned · {preference.pending} pending{preference.last_status ? ` · Last review: ${preference.last_status}${preference.last_status === "completed" ? ` (${preference.last_saved_count} saved)` : ""}` : ""}</small>
+          {!preference.can_manage && <small>{kind === "organization" ? "An administrator can change this setting." : "Sign in with an individual account to enable personal learning."}</small>}
+        </div></div>
+      })}
+    </>}</LoadState>
+    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+  </section>
+}
+
 function ProductSkillsPage() {
   const [archived, setArchived] = useState(false), [search, setSearch] = useState(""), [scope, setScope] = useState("all")
   const [pages, setPages] = useState(1), [revision, setRevision] = useState(0)
@@ -679,7 +709,7 @@ function ProductSkillsPage() {
   return <LoadState resource={resource}>{data => {
     if (data.capabilities?.read !== true) return <div className="ns-empty" role="status"><h2>Skills unavailable</h2><p>{data.note || "Your skills could not be loaded."}</p><Button variant="outline" onClick={resource.refresh}>Retry</Button></div>
     const rows = data.skills.filter(row => contains(search, row.name, row.description, row.reference) && (scope === "all" || row.scope === scope))
-    return <><p className="ns-help">Type <kbd>/</kbd> in a chat to choose a skill.</p>
+    return <><SkillLearningControls /><p className="ns-help">Type <kbd>/</kbd> in a chat to choose a skill.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
         filter={<Choice label="Skill scope" value={scope} onChange={setScope} options={[{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "organization", label: "Organization" }]} />} />
       <label className="check-label"><Checkbox checked={archived} onCheckedChange={value => { setArchived(value === true); setPages(1); setSelected(null) }} />Include archived skills</label>
@@ -941,20 +971,39 @@ function ProductPersonalSlack({ individual, onStartPrivateChat }: { individual: 
   }}</LoadState>
 }
 
-function GeneralPage({ onPreferences }: { onPreferences: (preferences: GeneralPreferences) => void }) {
+function GeneralPage({ individual, onPreferences }: { individual: boolean; onPreferences: (preferences: GeneralPreferences) => void }) {
   const resource = useResource("/settings/general", signal => getSettingsGeneral({ signal }).then(({ data }) => data))
-  return <LoadState resource={resource}>{data => <GeneralForm initial={data} onPreferences={onPreferences} />}</LoadState>
+  return <LoadState resource={resource}>{data => <GeneralForm initial={data} individual={individual} onPreferences={onPreferences} />}</LoadState>
 }
 
-function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; onPreferences: (preferences: GeneralPreferences) => void }) {
+function GeneralForm({ initial, individual, onPreferences }: { initial: GeneralPreferences; individual: boolean; onPreferences: (preferences: GeneralPreferences) => void }) {
   const [preferences, setPreferences] = useState(initial)
+  const [savedInstructions, setSavedInstructions] = useState(initial)
+  const [instructions, setInstructions] = useState(initial.personal_instructions)
+  const [instructionStatus, setInstructionStatus] = useState("")
+  const instructionsId = useId()
   const mutation = useMutation()
   const custom = preferences.connection_ids !== null
   const accounts = useResource(custom ? "/connections" : null, loadConnections)
   const save = (patch: Partial<GeneralPreferences>) => {
+    setInstructionStatus("")
     let updated: GeneralPreferences
     void mutation.run(async () => { updated = (await updateSettingsGeneral({ body: patch })).data }, () => {
       setPreferences(updated); onPreferences(updated)
+      if (patch.personal_instructions !== undefined) {
+        setSavedInstructions(updated); setInstructions(updated.personal_instructions)
+        setInstructionStatus(updated.personal_instructions ? "Personal instructions saved." : "Personal instructions cleared.")
+      }
+    })
+  }
+  const saveInstructions = (text: string) => save({
+    personal_instructions: text, personal_instructions_revision: savedInstructions.personal_instructions_revision,
+  })
+  const reloadInstructions = () => {
+    let updated: GeneralPreferences
+    void mutation.run(async () => { updated = (await getSettingsGeneral()).data }, () => {
+      setPreferences(updated); onPreferences(updated); setSavedInstructions(updated)
+      setInstructions(updated.personal_instructions); setInstructionStatus("Saved instructions loaded.")
     })
   }
   return <>
@@ -977,6 +1026,22 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
       }}</LoadState>}
     </div>
     <p className="ns-help ns-footer-help">Only connections available to the chat are used. Personal connections are limited to private chats. <a className="ns-link" href="#settings/connections">Manage connections</a></p>
+    <section className="ns-personal-instructions" aria-labelledby={`${instructionsId}-heading`}>
+      <h2 id={`${instructionsId}-heading`}><label htmlFor={instructionsId}>Personal instructions</label></h2>
+      {individual ? <>
+        <p id={`${instructionsId}-help`}>Tell Moyai how you prefer responses, such as writing style or detail level. Saved instructions apply to your direct private chats, including new chats. Shared chats, Slack, schedules, and delegated tasks do not use them.</p>
+        <Textarea id={instructionsId} value={instructions} maxLength={4000} rows={5} disabled={mutation.busy}
+          aria-describedby={`${instructionsId}-help ${instructionsId}-limit`} placeholder="For example: Keep answers concise and use metric units."
+          onChange={event => { setInstructions(event.target.value); setInstructionStatus("") }} />
+        <p className="ns-field-hint" id={`${instructionsId}-limit`}>{instructions.length.toLocaleString()} / 4,000 characters. These preferences do not grant permissions or replace required approvals.</p>
+        <div className="ns-row-actions">
+          <Button disabled={mutation.busy || instructions === savedInstructions.personal_instructions} onClick={() => saveInstructions(instructions)}>Save instructions</Button>
+          <Button variant="outline" disabled={mutation.busy || (!instructions && !savedInstructions.personal_instructions)} onClick={() => saveInstructions("")}>Clear instructions</Button>
+          {mutation.error && <Button variant="ghost" disabled={mutation.busy} onClick={reloadInstructions}>Reload saved instructions</Button>}
+        </div>
+        {instructionStatus && <p className="ns-muted" role="status">{instructionStatus}</p>}
+      </> : <p>Sign in with your individual work account to save personal instructions.</p>}
+    </section>
     {mutation.busy && <p className="ns-muted" role="status">Saving…</p>}
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
   </>
@@ -1274,7 +1339,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
             : destination?.admin && user.role !== "admin" ? <div className="ns-empty" role="alert"><Shield size={24} /><h2>Administrator access required</h2><p>This page is available to workspace administrators.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview</Button></div>
             : current === "overview" ? <OverviewPage user={user} navigate={navigate} productMode={productMode} />
               : current === "sign-in" ? <SignInPage />
-              : current === "general" ? <GeneralPage onPreferences={onPreferences} />
+              : current === "general" ? <GeneralPage key={`${user.id}:${user.individual !== false}:${csrfToken()}`} individual={user.individual !== false} onPreferences={onPreferences} />
               : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />

@@ -14,6 +14,7 @@ function reset(overrides={}) {
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect this repository.'}], requests:[], streams:[], ...overrides};
 }
 function session(id=sessionId) {return {id,title:'Current native work',owner_id:state.ownerId??'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{}),...(state.sessionOverrides?.[id]||{}),...(state.titles?.[id]===undefined?{}:{title:state.titles[id]})};}
+function generalPreferences() {return {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0,...state.preferences};}
 function pendingView(pending) {
   return pending && {...pending,questions:pending.calls.filter(call=>call.tool_name==='ask_user_question').map(call=>({
     id:call.tool_call_id,questions:(typeof call.args==='string'?JSON.parse(call.args):call.args).questions.map(question=>({
@@ -40,7 +41,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/auth/google/start')return json({url:'https://accounts.google.com/fixture'});
   if(url.pathname==='/api/logout'){state.signedIn=false;return json({signed_out:true});}
   if(!state.signedIn)return json({detail:'Sign in.'},401);
-  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:state.viewerName||'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:state.defaultModel||'test-model',product_mode:state.mode,preferences:state.preferences||{delivery_mode:'when_idle',connection_ids:null}});
+  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:state.viewerName||'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:state.defaultModel||'test-model',product_mode:state.mode,preferences:generalPreferences()});
   if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;const id='c'.repeat(32);state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],model:data.model||'test-model'}};return json(session(id));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections') {
@@ -82,9 +83,9 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/settings/general') {
     if(req.method==='PATCH') {
       if(state.preferenceError)return json({detail:'Could not save preferences. Try again.'},503);
-      state.preferences={delivery_mode:'when_idle',connection_ids:null,...state.preferences,...data};
+      state.preferences={...generalPreferences(),...data};
     }
-    return json(state.preferences||{delivery_mode:'when_idle',connection_ids:null});
+    return json(generalPreferences());
   }
   if(url.pathname==='/api/settings/overview')return json({counts:{},capabilities:{}});
   if(url.pathname==='/api/skills') {
@@ -100,6 +101,11 @@ async function handle(req,res,next) {
   }
   if(url.pathname.startsWith('/api/sessions/')) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
+    if(url.pathname.endsWith('/slack')) {
+      if(req.method==='POST')state.slackLinked=true;
+      return json({status:state.slackLinked?'linked':'available',title:session().title,
+        context:'Review the launch checklist.',url:state.slackLinked?'https://app.slack.com/client/TLOCAL001/DLOCAL001/thread/DLOCAL001-1795300000.001':null});
+    }
     if(url.pathname.endsWith('/answers')&&req.method==='POST') {
       if(state.answerHold)await state.answerHold;
       if(state.answerError)return json({detail:'The answer could not be saved. Try again.'},503);
@@ -226,6 +232,25 @@ async function pageFor(t,route='#'+sessionId,width=1440,initialize) {
   if(initialize)await initialize(page);
   await page.goto(base+'/'+route);return page;
 }
+for(const width of [1440,768,320])test(`Continue in Slack previews and connects the same session at ${width}px`,async t=>{
+  reset({status:'idle'});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('button',{name:'Session actions',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Continue in Slack',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Continue in Slack',exact:true});
+  await dialog.getByText('Review the launch checklist.').waitFor();
+  assert.equal(state.requests.filter(row=>row.path.endsWith('/slack')&&row.method==='POST').length,0);
+  const bounds=await dialog.boundingBox();
+  assert(bounds&&bounds.x>=0&&bounds.x+bounds.width<=width);
+  await dialog.getByRole('button',{name:'Send me a DM'}).click();
+  await dialog.getByRole('link',{name:'Open Slack thread'}).waitFor();
+  const writes=state.requests.filter(row=>row.path.endsWith('/slack')&&row.method==='POST');
+  assert.equal(writes.length,1);
+  assert.equal(writes[0].path,`/api/sessions/${sessionId}/slack`);
+  assert.equal(writes[0].headers['x-csrf-token'],'fixture-csrf');
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({state:'hidden'});
+});
 for(const width of [1440,768,320])test(`ordinary question accepts a composer answer at ${width}px`,async t=>{
   reset({status:'waiting',canAnswer:true,canReply:true,questionDeadline:'2099-01-01T12:00:00Z',
     pending:{calls:[{tool_call_id:'color',tool_name:'ask_user_question',args:{questions:[{

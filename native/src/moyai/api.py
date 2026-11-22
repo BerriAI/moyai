@@ -70,7 +70,6 @@ from .failed_action_attempts import failed_action_attempt
 from .failure_diagnostics import failure_details
 from .file_preview import routes as file_preview_routes
 from .gateway_config import GatewayConfig, GatewayDefaults, GatewayDiscovery
-from .general_preferences import GeneralPreferences, general_preferences
 from .history_handoff import is_turn_run
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
@@ -91,6 +90,7 @@ from .models import (
     now,
 )
 from .presentation import public_event, redact
+from .private_instructions import preferences_for_user
 from .product_identity import ProductAuthorityBusy
 from .product_requester import answer_actor, can_answer
 from .public_path import PublicPathMiddleware
@@ -299,6 +299,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 user, [session_id], deleted=request.url.path.endswith("/restore"),
             )
 
+    if runtime.product_slack is not None:
+        app.include_router(runtime.product_slack.web.routes(actor))
+
     # UUID matching keeps this route distinct from the canonical provider check
     # registered below, while OpenAPI retains the ordinary connection_id path.
     @app.post("/api/connections/{connection_id:uuid}/check", operation_id="checkConnection")
@@ -384,6 +387,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     if runtime.product_skill_catalog is not None:
         from .product_skill_catalog import routes as product_skill_routes
         app.include_router(product_skill_routes(runtime.product_skill_catalog))
+    if runtime.product_skill_learning is not None:
+        from .product_skill_learning import routes as skill_learning_routes
+        app.include_router(skill_learning_routes(runtime.product_skill_learning))
     if runtime.product_billing is not None:
         from .product_billing_routes import routes as product_billing_routes
         app.include_router(product_billing_routes(runtime.product_billing, runtime=runtime))
@@ -551,7 +557,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             ),
             csrf=csrf, models=runtime.settings.models,
             default_model=runtime.settings.default_model,
-            preferences=GeneralPreferences.model_validate(general_preferences(user.preferences)),
+            preferences=await preferences_for_user(runtime.database, user),
             product_mode="existing" if runtime.product_identity is not None else "standalone",
         )
 

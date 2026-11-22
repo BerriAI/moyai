@@ -29,6 +29,8 @@ from moyai.native_online_schema import (
 from moyai.product_schema import (
     AUTOMATION_CHAT_SCHEMA_VERSION,
     PRIVATE_AUTOMATION_SCHEMA_VERSION,
+    SKILL_LEARNING_SCHEMA_VERSION,
+    SLACK_WEB_SCHEMA_VERSION,
     _manifest,
     application_metadata,
     migrate_product_schema,
@@ -135,7 +137,8 @@ async def test_private_automation_expansion_preserves_existing_shared_turns_and_
         await db.execute(text(
             f'INSERT INTO "{product.schema}".moyai_product_automation_turns (turn_id,origin_turn_id) VALUES (:id,:id)'
         ), {"id": turn_id})
-    value = plan("moyai", product.schema, "private-automation-test", from_version=AUTOMATION_CHAT_SCHEMA_VERSION)
+    value = plan("moyai", product.schema, "private-automation-test", from_version=AUTOMATION_CHAT_SCHEMA_VERSION,
+                 to_version=PRIVATE_AUTOMATION_SCHEMA_VERSION)
     assert value["to_version"] == PRIVATE_AUTOMATION_SCHEMA_VERSION
     with psycopg.connect(product.settings.postgres_url, autocommit=True) as connection:
         receipts = sql.Identifier(product.schema, "moyai_app_schema_versions")
@@ -143,15 +146,54 @@ async def test_private_automation_expansion_preserves_existing_shared_turns_and_
         assert apply(connection, value, guard=lambda _: None)["status"] == "applied"
         assert apply(connection, value, guard=lambda _: None)["status"] == "already_applied"
         assert set(original) <= set(connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall())
-    await verify_product_schema(product.source, schema=product.schema)
+    await verify_product_schema(product.source, schema=product.schema, version=PRIVATE_AUTOMATION_SCHEMA_VERSION)
     async with product.database.sessions() as db:
         provenance = await db.get(ProductAutomationTurn, turn_id)
         assert provenance.visibility is None and provenance.origin_turn_id == turn_id
         context = await product.database.execution_context(db, await db.get(Session, session.id), turn_id=turn_id)
         assert context.visibility == "shared" and context.surface == "automation"
     assert _manifest(_metadata(product.schema, version=PRIVATE_AUTOMATION_SCHEMA_VERSION)) == _manifest(
-        application_metadata(product.schema),
+        application_metadata(product.schema, version=PRIVATE_AUTOMATION_SCHEMA_VERSION),
     )
+
+
+async def test_slack_web_expansion_preserves_existing_receipts(product_database):
+    product = product_database
+    await migrate_product_schema(
+        product.source, schema=product.schema, source_schema="moyai", version=PRIVATE_AUTOMATION_SCHEMA_VERSION,
+    )
+    value = plan("moyai", product.schema, "native-online-test", from_version=PRIVATE_AUTOMATION_SCHEMA_VERSION,
+                 to_version=SLACK_WEB_SCHEMA_VERSION)
+    assert value["to_version"] == SLACK_WEB_SCHEMA_VERSION
+    frozen = _metadata(product.schema, version=SLACK_WEB_SCHEMA_VERSION)
+    actual = application_metadata(product.schema, version=SLACK_WEB_SCHEMA_VERSION)
+    assert _manifest(frozen) == _manifest(actual) and _indexes(frozen) == _indexes(actual)
+    with psycopg.connect(product.settings.postgres_url, autocommit=True) as connection:
+        receipts = sql.Identifier(product.schema, "moyai_app_schema_versions")
+        original = connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall()
+        assert apply(connection, value, guard=lambda _: None)["status"] == "applied"
+        assert apply(connection, value, guard=lambda _: None)["status"] == "already_applied"
+        assert set(original) <= set(connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall())
+    await verify_product_schema(product.source, schema=product.schema, version=SLACK_WEB_SCHEMA_VERSION)
+
+
+async def test_skill_learning_expansion_matches_runtime_and_preserves_v25(product_database):
+    product = product_database
+    await migrate_product_schema(
+        product.source, schema=product.schema, source_schema="moyai", version=SLACK_WEB_SCHEMA_VERSION,
+    )
+    value = plan("moyai", product.schema, "native-online-test", from_version=SLACK_WEB_SCHEMA_VERSION)
+    assert value["to_version"] == SKILL_LEARNING_SCHEMA_VERSION
+    frozen = _metadata(product.schema, version=SKILL_LEARNING_SCHEMA_VERSION)
+    actual = application_metadata(product.schema, version=SKILL_LEARNING_SCHEMA_VERSION)
+    assert _manifest(frozen) == _manifest(actual) and _indexes(frozen) == _indexes(actual)
+    with psycopg.connect(product.settings.postgres_url, autocommit=True) as connection:
+        receipts = sql.Identifier(product.schema, "moyai_app_schema_versions")
+        original = connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall()
+        assert apply(connection, value, guard=lambda _: None)["status"] == "applied"
+        assert apply(connection, value, guard=lambda _: None)["status"] == "already_applied"
+        assert set(original) <= set(connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall())
+    await verify_product_schema(product.source, schema=product.schema)
 
 
 @pytest.mark.parametrize("change", ["sql", "digest", "prefix", "schema", "queue", "extra"])

@@ -20,10 +20,14 @@ const gatewayConnection = (patch={}) => mcpConnection({
 function defaults() {
   return {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
+    general: {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0},
     organizationConnections:[{id:'slack',connected:true,enabled:true,read_only:true,label:'Example workspace',identity:'Workspace app',tools:[],check_status:'healthy',checked_at:'2026-10-19T10:00:00Z'}],
     gatewayDefaults:{url:'https://gateway.example.com/v1'},gatewayDiscovery:gatewayConnection().policy.gateway_discovery,
     connectionCheck:{tool_count:1,tools:[{name:'lookup',description:'Search the synthetic research catalog.'}]},
     personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.'},
+    learning:{available:true,
+      personal:{enabled:false,revision:0,can_manage:true,pending:0,learned:0,last_status:null,last_saved_count:0},
+      organization:{enabled:false,revision:0,can_manage:true,pending:0,learned:0,last_status:null,last_saved_count:0}},
     memory: {source:'canonical',scope:{kind:'personal',owner_id:'viewer'},preferences:{enabled:true,auto_save:true,revision:1},
       capabilities:{read:true,create:true,update:true,delete:true,preferences:true},
       runtime:{recall:true,auto_save:true,background_review:true,note:'Saved preferences are separate from native pipeline availability.'},
@@ -104,7 +108,17 @@ async function settingsFixture() {
       }
       if(url.pathname==='/api/settings/performance')return json(report());
       if(url.pathname==='/api/settings/billing')return json({activity:report()});
-      if(url.pathname==='/api/settings/general')return json({delivery_mode:'when_idle',connection_ids:null});
+      if(url.pathname==='/api/settings/general'){
+        if(req.method==='PATCH'){
+          if(state.generalGate)await state.generalGate;
+          if(state.generalError)return json({detail:state.generalError},409);
+          if(body.personal_instructions!==undefined){
+            if(body.personal_instructions_revision!==state.general.personal_instructions_revision)return json({detail:'Personal instructions changed elsewhere. Reload saved instructions before saving.'},409);
+            Object.assign(state.general,body,{personal_instructions_revision:body.personal_instructions_revision+1});
+          }else Object.assign(state.general,body);
+        }
+        return json(state.general);
+      }
       if(url.pathname==='/api/pull-requests/statuses')return json({});
       if(url.pathname==='/api/skills')return json({skills:[],has_more:false});
       if(url.pathname===personalPath){
@@ -120,6 +134,15 @@ async function settingsFixture() {
         state.memory.runtime={...state.memory.runtime,recall:body.enabled,auto_save:body.enabled&&body.auto_save};return json(state.memory.preferences);
       }
       if(url.pathname==='/api/product/skills')return json({source:'canonical',capabilities:{read:true},note:'Internal migration note',skills:[],has_more:false,next_offset:null});
+      if(url.pathname.startsWith('/api/product/skill-learning')){
+        if(state.learningError)return json({detail:'Learning settings changed. Refresh and try again.'},409);
+        if(req.method==='PUT'){
+          const scope=url.pathname.split('/').at(-1);
+          if(!state.learning[scope]?.can_manage)return json({detail:'Learning access changed.'},403);
+          state.learning[scope]={...state.learning[scope],enabled:body.enabled,revision:body.revision+1};
+        }
+        return json(state.learning);
+      }
       if(url.pathname==='/api/product/connections')return json(state.organizationConnections);
       if(/^\/api\/connections\/(slack|linear|github)\/oauth$/.test(url.pathname)){
         if(state.organizationOAuthError)return json({detail:state.organizationOAuthError},409);

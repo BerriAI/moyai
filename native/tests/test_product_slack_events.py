@@ -1,6 +1,7 @@
 """Real Slack ingress keeps control and ownership fences ahead of input preparation."""
 
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy import select
 
 from moyai.models import Delivery, Session, Turn
 from moyai.product_slack_models import ProductSlackBinding, SlackTurnSource
+from moyai.skill_mentions import marker
 
 bridge = context_tests.bridge
 slack = context_tests.slack
@@ -30,6 +32,74 @@ def followup(text: str, *, mentioned: bool = False):
 
 async def forbid_prepare(*args, **kwargs):
     pytest.fail("Controls and ineligible conversations must not prepare files or thread context.")
+
+
+async def test_inline_slack_selection_is_authorized_and_normalized_before_admission(ingress, actor, monkeypatch):
+    runtime, service = ingress.runtime, ingress.service
+    actor.product_grant = ingress.grant
+    runtime.product_identity = service.product.identity
+    selections = []
+
+    async def invocation(grant, reference, *, shared):
+        assert grant == ingress.grant and shared
+        selections.append(reference)
+        return {"reference": "org:team", "name": "team", "icon": "auto",
+                "instructions": "Real saved instructions.", "supporting_files": {}}
+
+    runtime.product_skill_catalog = SimpleNamespace(invocation=invocation)
+    message = {**context_tests.mention_message(), "text": "<@UBOT00001> can you use /team for this?"}
+    await service.receive_payload(context_tests.envelope(message))
+    async with runtime.database.sessions() as db:
+        turn = await db.scalar(select(Turn))
+        prompt = runtime.security.unseal(turn.prompt).decode()
+    assert selections == ["team"]
+    assert prompt == "can you use " + marker("org:team", "auto") + " for this?"
+    assert "Real saved instructions." not in prompt
+    from moyai.models import MessageSource
+    original = {**message, "channel": context_tests.CHANNEL}
+    for index, text, expected in [
+        (1, 'Explain "use /team"', []),
+        (2, "Please use /team.", ["org:team"]),
+    ]:
+        changed = {**original, "text": "<@UBOT00001> " + text, "edited": {"ts": f"179225590{index}.001"}}
+        payload = context_tests.envelope(original)
+        payload["event"] = {
+            "type": "message", "subtype": "message_changed", "channel": context_tests.CHANNEL,
+            "previous_message": original, "message": changed,
+        }
+        assert (await service.receive_payload(payload))["updated"]
+        async with runtime.database.sessions() as db:
+            source = await db.get(MessageSource, f"user:{turn.id}")
+            assert json.loads(runtime.security.unseal(source.data))["skill_references"] == expected
+    await runtime.database.claim_next()
+    changed["text"] = '<@UBOT00001> Explain "use /team"'
+    changed["edited"]["ts"] = "1792255903.001"
+    assert (await service.receive_payload(payload))["updated"]
+    async with runtime.database.sessions() as db:
+        source = await db.get(MessageSource, f"user:{turn.id}")
+        assert json.loads(runtime.security.unseal(source.data))["skill_references"] == ["org:team"]
+    ingress.authority["current"] = False
+    with pytest.raises(HTTPException):
+        await service.receive_payload(followup("use /team", mentioned=True))
+
+
+async def test_invalid_slack_selection_has_visible_notice_without_model_work(ingress, actor, monkeypatch):
+    runtime, service = ingress.runtime, ingress.service
+    actor.product_grant = ingress.grant
+    runtime.product_identity = service.product.identity
+
+    async def unavailable(*args, **kwargs):
+        raise HTTPException(422, "Unavailable skill")
+
+    runtime.product_skill_catalog = SimpleNamespace(invocation=unavailable)
+    message = {**context_tests.mention_message(), "text": "<@UBOT00001> use /missing"}
+    await service.receive_payload(context_tests.envelope(message))
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+        deliveries = list(await db.scalars(select(Delivery)))
+    assert len(turns) == 1 and turns[0].status == "completed"
+    assert turns[0].request_key.startswith("invalid-input:")
+    assert deliveries
 
 
 @pytest_asyncio.fixture

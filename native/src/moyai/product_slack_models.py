@@ -31,3 +31,30 @@ class SlackTurnSource(Base):
     thread_ts: Mapped[str] = mapped_column(String(50))
     message_ts: Mapped[str] = mapped_column(String(50))
     user_id: Mapped[str] = mapped_column(String(100))
+
+
+class SlackWebLink(Base):
+    """Owner-authorized DM destination and durable first-send receipt."""
+
+    __tablename__ = "moyai_slack_web_links"
+
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(512))
+    owner_authority: Mapped[str] = mapped_column(String(64))
+    requester_id: Mapped[str] = mapped_column(String(512))
+    team_id: Mapped[str] = mapped_column(String(100))
+    channel_id: Mapped[str] = mapped_column(String(100))
+    connection_authority: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30))
+    thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class SlackWebTurn(Base):
+    """Retain the signed transport authority alongside the individual's grant."""
+
+    __tablename__ = "moyai_slack_web_turns"
+
+    turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_turns.id"), primary_key=True)
+    requester_id: Mapped[str] = mapped_column(String(512))
+    authority_version: Mapped[str] = mapped_column(String(64))

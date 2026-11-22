@@ -3,6 +3,8 @@
 import asyncio
 import os
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -17,16 +19,20 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from sqlalchemy import text
 from test_product_authority import active_turn, demote
+from test_product_automation_slack import mapped_slack
 
 from moyai.effects import EffectReceipts, effect_id, requires_receipt
 from moyai.models import Effect
 from moyai.product_skill_catalog import ProductSkillCatalog
 from moyai.product_skill_tools import CreateSkill, DeleteSkill, ProductSkillTools, UpdateSkill, toolset
+from moyai.skill_invocations import SkillInvocations
+from moyai.skill_mentions import marker
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Use disposable local PostgreSQL.")
 automations = automation_fixtures.automations
 admitted_product = automation_fixtures.admitted_product
 product_database = automation_fixtures.product_database
+canonical_connections = automation_fixtures.canonical_connections
 
 
 @pytest_asyncio.fixture
@@ -189,6 +195,72 @@ async def test_member_cannot_write_organization_skills(skills):
     _, _, prepared = await active_turn(ctx.product)
     with pytest.raises(ToolFailed, match="administrator"):
         await call(ctx, "skill_create", CreateSkill(**content(), scope="organization"), scope=prepared.scope)
+
+
+async def test_verified_slack_admin_can_manage_and_invoke_organization_skill(skills, canonical_connections):
+    ctx = skills
+    caller = await mapped_slack(ctx)
+    scope = caller.deps
+    created, receipt = await call(ctx, "skill_create", CreateSkill(**content(name="team"), scope="organization"), scope=scope)
+    detail = await ctx.skills.read(scope, scope.turn_id, skill_id=created["id"])
+    assert detail["can_manage"] and detail["supporting_files"] == content()["supporting_files"]
+    service = SkillInvocations(SimpleNamespace(
+        product_identity=ctx.product.adapter, database=ctx.product.database, product_skill_catalog=ctx.catalog,
+    ))
+    actor = await ctx.product.database.user(scope.actor_id)
+    actor.product_grant = scope.product_grant
+    normalized = await service.normalize_slack(
+        "Can you use /team for this?", actor, SimpleNamespace(visibility="shared", surface="slack"),
+    )
+    assert normalized == "Can you use " + marker("org:team", "auto") + " for this?"
+    selected, _ = await service.resolve(
+        normalized, actor_id=scope.actor_id, visibility="shared", surface="slack", grant=scope.product_grant,
+    )
+    assert selected[0]["instructions"] == content()["instructions"]
+    assert selected[0]["supporting_files"] == content()["supporting_files"]
+    await call(ctx, "skill_update", UpdateSkill(
+        **content(name="team", instructions="Updated.", supporting_files=None), skill_id=created["id"], revision=1,
+    ), scope=scope)
+    deleted, _ = await call(ctx, "skill_delete", DeleteSkill(skill_id=created["id"], revision=2), scope=scope)
+    assert deleted["archived"]
+    async with ctx.product.database.sessions() as db:
+        row = await db.get(Effect, receipt)
+        assert row.state == "confirmed" and row.actor_id == scope.actor_id
+        assert await db.scalar(text("SELECT owner_id FROM moyai.skills")) == ctx.grant.user_id
+    with pytest.raises(HTTPException):
+        await service.resolve(
+            normalized, actor_id=scope.actor_id, visibility="shared", surface="slack", grant=scope.product_grant,
+        )
+
+
+@pytest.mark.parametrize("reason", ["member", "stale", "ambiguous", "private", "personal", "delegated"])
+async def test_slack_skill_management_keeps_individual_role_and_visibility_fences(skills, canonical_connections, reason):
+    ctx = skills
+    caller = await mapped_slack(ctx)
+    scope = caller.deps
+    if reason == "member":
+        await demote(ctx.product)
+    elif reason in {"stale", "ambiguous"}:
+        async with ctx.product.source.begin() as db:
+            if reason == "stale":
+                await db.execute(text("UPDATE moyai.users SET profile_checked_at=:stamp WHERE kind='slack'"), {
+                    "stamp": (datetime.now(UTC) - timedelta(days=2)).isoformat(),
+                })
+            else:
+                await db.execute(text(
+                    "INSERT INTO moyai.users(id,kind,email,name,created_at,updated_at) "
+                    "VALUES('google:ambiguous','google','admin@example.test','Duplicate','c','u')"
+                ))
+    elif reason == "private":
+        scope = replace(scope, visibility="private")
+    elif reason == "delegated":
+        scope = replace(scope, delegation_generated=True)
+    with pytest.raises((HTTPException, PermissionError, ToolFailed)):
+        await call(ctx, "skill_create", CreateSkill(
+            **content(), scope="personal" if reason == "personal" else "organization",
+        ), scope=scope)
+    async with ctx.product.source.connect() as db:
+        assert await db.scalar(text("SELECT count(*) FROM moyai.skills")) == 0
 
 
 async def test_each_mutation_is_receipted_and_read_tools_are_read_only(skills):

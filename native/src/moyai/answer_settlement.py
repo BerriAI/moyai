@@ -237,6 +237,8 @@ class AnswerSettlement:
                     ))
                 if self.database.product_memory_review is not None:
                     await self.database.product_memory_review.enqueue_in(db, turn, session)
+                if self.database.product_skill_learning is not None:
+                    await self.database.product_skill_learning.enqueue_in(db, turn, session)
                 await db.flush()
                 await settle_failed_action_attempts(db, session.id, accepted_turn_id=turn.id)
             return True

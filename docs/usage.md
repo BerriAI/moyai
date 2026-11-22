@@ -255,6 +255,13 @@ or the connected product's account services when running in a hosted workspace.
   changed or removed. Code examples and escaped references remain literal.
   A unique leading `/team` short name also works when sent directly; duplicate
   names require a scoped reference from the picker.
+  In Slack, send `/team investigate this` or `Can you use /team for this?` to
+  invoke the actual saved skill. Inline requests recognize `use`, `invoke`,
+  `run`, `apply` and `load`; merely discussing a name (`explain /team`) does not
+  invoke it. Use `/org:team` to disambiguate an organization skill.
+  Paths, links, quoted examples, block quotes, escaped references and code stay
+  literal. Only the signed sender's message selects skills; fetched thread
+  context and attachments cannot. Missing or ambiguous selections are rejected.
   Assistant replies and work updates reuse the same icon and readable name for
   skills selected in that conversation, including streamed text and saved updates
   after reload. Plain references and standalone inline-code references such as
@@ -262,7 +269,10 @@ or the connected product's account services when running in a hosted workspace.
   examples stay literal. Unknown or ambiguous short names stay unchanged.
   This display uses saved selection metadata and makes no additional library
   request or skill invocation.
-  Personal skills are limited to their owner's private web conversations.
+  Personal skills are limited to their owner's private web conversations,
+  including replies from the verified owner's explicitly linked Slack DM.
+  Ordinary Slack channels and bot DMs are shared execution contexts and can
+  invoke organization skills only; a DM alone does not grant personal access.
   Existing-product installations load the original personal/organization
   instructions and supporting-file contents at execution, without converting or
   rewriting the library. Archived, disabled, inaccessible or ambiguous skills
@@ -275,11 +285,20 @@ or the connected product's account services when running in a hosted workspace.
   delete a saved skill. Its `skill_list`, `skill_read`, `skill_create`,
   `skill_update` and `skill_delete` tools use the same canonical library.
   Personal writes require an individual requester in a private web chat;
-  organization writes require an administrator in a shared web chat. Delegated
+  organization writes require an administrator in a shared web or Slack chat.
+  Slack management requires a fresh, unambiguous link to an eligible individual
+  account; the linked account's current role is checked for every operation.
+  Personal management also works through the owner's explicitly linked private
+  web-session DM, but not in ordinary Slack-origin chats. Delegated
   and automated work cannot manage skills. Updates require the revision from
   a fresh read and preserve supporting files when omitted. Delete archives a
   skill and removes it from the picker; ask to restore it to make it available
   again. Changes apply to subsequent invocations. Bundled skills remain unchanged.
+  **Automatic skill learning** can save reusable procedures from completed web
+  chats: private chats produce personal skills, and administrators' shared chats
+  can produce organization skills. Both settings start disabled. Learned skills
+  include source evidence and can be reused in later relevant web chats; manual
+  edits and archived skills are never overwritten. See [skill learning](skill-learning.md).
 - **Memory:** inspect and edit the Harness memory store in your authorized
   namespaces. Version checks reject conflicting edits. Other users' personal
   memory is not available to administrators.

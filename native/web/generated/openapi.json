@@ -7453,6 +7453,18 @@
             ],
             "title": "Delivery Mode",
             "type": "string"
+          },
+          "personal_instructions": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Personal Instructions",
+            "type": "string"
+          },
+          "personal_instructions_revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Personal Instructions Revision",
+            "type": "integer"
           }
         },
         "title": "GeneralPreferences",
@@ -7486,11 +7498,25 @@
             ],
             "title": "Delivery Mode",
             "type": "string"
+          },
+          "personal_instructions": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Personal Instructions",
+            "type": "string"
+          },
+          "personal_instructions_revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Personal Instructions Revision",
+            "type": "integer"
           }
         },
         "required": [
           "delivery_mode",
-          "connection_ids"
+          "connection_ids",
+          "personal_instructions",
+          "personal_instructions_revision"
         ],
         "title": "GeneralPreferences",
         "type": "object"
@@ -9095,6 +9121,108 @@
         "type": "object"
       },
       "JsonValue": {},
+      "LearningPreference": {
+        "properties": {
+          "can_manage": {
+            "default": false,
+            "title": "Can Manage",
+            "type": "boolean"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "last_saved_count": {
+            "default": 0,
+            "title": "Last Saved Count",
+            "type": "integer"
+          },
+          "last_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "skipped"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Status"
+          },
+          "learned": {
+            "default": 0,
+            "title": "Learned",
+            "type": "integer"
+          },
+          "pending": {
+            "default": 0,
+            "title": "Pending",
+            "type": "integer"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "revision",
+          "can_manage",
+          "pending",
+          "learned",
+          "last_status",
+          "last_saved_count"
+        ],
+        "title": "LearningPreference",
+        "type": "object"
+      },
+      "LearningSettings": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "organization": {
+            "$ref": "#/components/schemas/LearningPreference"
+          },
+          "personal": {
+            "$ref": "#/components/schemas/LearningPreference"
+          }
+        },
+        "required": [
+          "personal",
+          "organization",
+          "available"
+        ],
+        "title": "LearningSettings",
+        "type": "object"
+      },
+      "LearningUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "revision"
+        ],
+        "title": "LearningUpdate",
+        "type": "object"
+      },
       "LinkInput": {
         "properties": {
           "kind": {
@@ -17916,6 +18044,46 @@
         "title": "SlackDeliveryStatus",
         "type": "object"
       },
+      "SlackWebStatus": {
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "linked",
+              "pending"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "status",
+          "title",
+          "context",
+          "url"
+        ],
+        "title": "SlackWebStatus",
+        "type": "object"
+      },
       "SourcedHistorySession": {
         "description": "A /api/history row: stored IDs are kept; ``key`` is the source-qualified UI identity.",
         "properties": {
@@ -23546,6 +23714,77 @@
         "summary": "Listing"
       }
     },
+    "/api/product/skill-learning": {
+      "get": {
+        "operationId": "getSkillLearning",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSettings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Listing"
+      }
+    },
+    "/api/product/skill-learning/{scope}": {
+      "put": {
+        "operationId": "updateSkillLearning",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "enum": [
+                "personal",
+                "organization"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LearningUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSettings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update"
+      }
+    },
     "/api/product/skills": {
       "get": {
         "operationId": "listProductSkills",
@@ -25475,6 +25714,82 @@
           }
         },
         "summary": "Restore Session"
+      }
+    },
+    "/api/sessions/{session_id}/slack": {
+      "get": {
+        "operationId": "getSessionSlack",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackWebStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Status"
+      },
+      "post": {
+        "operationId": "connectSessionSlack",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackWebStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Connect"
       }
     },
     "/api/sessions/{session_id}/slack-delivery/retry": {

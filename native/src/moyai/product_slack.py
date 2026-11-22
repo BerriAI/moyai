@@ -26,7 +26,7 @@ from app.db import database as source_database
 from app.slack_format import ID, STAMP
 from fastapi import APIRouter, HTTPException, Request
 from pydantic_ai import ConversationTypeAdapter
-from sqlalchemy import String, cast, func, select, text, update
+from sqlalchemy import String, cast, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from .background_stop import finish, pause
@@ -49,7 +49,7 @@ from .product_connections import ProductConnections
 from .product_identity import ProductGrant, ProductPrincipal
 from .product_slack_events import SlackEvents
 from .product_slack_files import ProductSlackFiles
-from .product_slack_models import ProductSlackBinding
+from .product_slack_models import ProductSlackBinding, SlackWebLink
 from .slack_file_delivery import SlackFileDelivery
 from .slack_messages import navigation_action, pr_cards, session_url, thread_message
 from .slack_questions import CHOICE_ACTION, SUBMIT_ACTION, SlackQuestions
@@ -161,6 +161,8 @@ class ProductSlack:
         self.connectors = self.connections.connectors
         self.files = ProductSlackFiles(self)
         self.events = SlackEvents(self)
+        from .slack_web import SlackWeb
+        self.web = SlackWeb(self)
         from .slack_mentions import SlackMentionNames
         self.mention_names = SlackMentionNames(self)
         runtime.database.slack_mentions = self.mention_names.decorate
@@ -563,7 +565,9 @@ class ProductSlack:
                 MessageSource, MessageSource.message_identity == Message.identity,
             ).join(Turn, Turn.id == Message.turn_id).join(SlackThread, SlackThread.session_id == Message.session_id).join(
                 User, User.id == Message.author_id,
-            ).where(Message.role == "user", MessageSource.mirror.is_(True), ~select(Delivery.id).where(
+            ).outerjoin(SlackWebLink, SlackWebLink.session_id == Message.session_id).where(
+                or_(SlackWebLink.session_id.is_(None), Message.created_at > SlackWebLink.created_at),
+                Message.role == "user", MessageSource.mirror.is_(True), ~select(Delivery.id).where(
                 Delivery.identity == "product-slack:" + Turn.id + ":web-input:" + Message.identity
                 + ":" + cast(MessageSource.revision, String) + ":0",
             ).exists()).order_by(Message.id).limit(100))).all()
@@ -702,6 +706,7 @@ class ProductSlack:
             approval_calls = pending.approvals if pending is not None else []
             if action in {"moyai_native_approve", "moyai_native_deny"} and not approval_calls:
                 raise HTTPException(409, "Answer the current request in Moyai.")
+        actor = await self.web.input_actor(actor, turn.session_id)
         from .product_requester import answer_actor
         from .product_slack_controls import record_replies, resume_replies, submit_choices
         if action == SUBMIT_ACTION:
@@ -723,6 +728,16 @@ class ProductSlack:
             turn = await db.get(Turn, delivery.turn_id)
             actor = await db.get(User, turn.actor_id) if turn else None
             admitted = await db.get(ProductTurnAuthority, delivery.turn_id)
+            web_allowed = False
+            if session and session.surface == "web":
+                link = await db.get(SlackWebLink, session.id)
+                if link is not None and link.status == "linked":
+                    try:
+                        await self.web.current(db, link)
+                        web_allowed = True
+                    except HTTPException as error:
+                        if error.status_code >= 500:
+                            raise
             destination = json.loads(delivery.destination)
             if destination.get("input"):
                 source = await db.get(MessageSource, destination.get("input_message", ""))
@@ -733,7 +748,7 @@ class ProductSlack:
         if (
             binding is None or binding.connection_authority != bot["authority"]
             or (binding.paused and not control) or session is None or session.deleted
-            or session.visibility != "shared" or session.surface != "slack"
+            or not (web_allowed or (session.visibility == "shared" and session.surface == "slack"))
             or actor is None or not actor.enabled or admitted is None
             or (not control and turn and turn.finished_at and turn.finished_at <= binding.delivery_after)
         ):

@@ -177,9 +177,9 @@ async def test_native_runtime_api_tools_and_worker_replay(
                 "automations", "next_offset", "source", "migration", "event_choices", "capabilities",
             }
             assert set(listing.json()["automations"][0]) == {
-                "id", "revision", "name", "owner_id", "owned", "legacy_paused", "triggers", "native", "visibility",
+                "id", "revision", "name", "owner_id", "owned", "visibility", "legacy_paused", "triggers", "native",
             }
-            assert listing.json()["automations"][0]["visibility"] == preview.json()["execution_visibility"]
+            assert listing.json()["automations"][0]["visibility"] == "shared"
 
         session = await runtime.database.create_session(ctx.product.actor, NewSession(visibility=visibility))
         turn = await runtime.database.submit(
@@ -206,21 +206,16 @@ async def test_native_runtime_api_tools_and_worker_replay(
             ).replay_workflow(history)
         async with runtime.database.sessions() as db:
             receipt = await db.scalar(select(Effect).where(Effect.turn_id == turn.id))
+            created = operation == "automation_create" and not interceptor_refusal
             if operation == "automation_create":
                 assert receipt is not None
-                confirmed = not interceptor_refusal
-                assert receipt.state == ("confirmed" if confirmed else "not_dispatched")
-                if confirmed:
-                    definition = await db.scalar(text(
-                        "SELECT definition FROM moyai.automations WHERE id != :http_created"
-                    ), {"http_created": saved.json()["id"]})
-                    assert definition is not None
-                    assert json.loads(definition).get("visibility", "shared") == visibility
+                assert receipt.state == ("confirmed" if created else "not_dispatched")
             else:
                 assert receipt is None
-            assert await db.scalar(text("SELECT count(*) FROM moyai.automations")) == (
-                2 if operation == "automation_create" and not interceptor_refusal else 1
-            )
+            assert await db.scalar(text("SELECT count(*) FROM moyai.automations")) == (2 if created else 1)
+            assert await db.scalar(text(
+                "SELECT COALESCE(definition::jsonb->>'visibility','shared') FROM moyai.automations WHERE id<>:id"
+            ), {"id": saved.json()["id"]}) == (visibility if created else None)
         assert calls == 2  # Replay did not invoke the model or mutation again.
         assert TOOLSET_ID in json.dumps(history.to_json_dict())
     finally:
