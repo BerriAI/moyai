@@ -34,7 +34,8 @@ from moyai.settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import (
-    PRIVATE_INSTRUCTIONS_ROUTING_VERSION,
+    CHAT_CONTROL_OPERATIONS,
+    CHAT_CONTROL_ROUTING_VERSION,
     ROUTING_VERSION,
     ActivityCapacity,
     CapacityOutbound,
@@ -59,11 +60,20 @@ class CapacityScenario:
         returned = any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
         if prompt == "slow" and not returned:
             if self.computer is not None:
-                return ModelResponse(parts=[ToolCallPart("shell", {
-                    "command": "touch capacity-started; while [ ! -f capacity-release ]; do sleep .05; done",
-                    "timeout": 25,
-                }, tool_call_id="one-wait")])
+                return ModelResponse(parts=[
+                    TextPart("Running the slow command."),
+                    ToolCallPart("read_plan", {}, tool_call_id="slow-plan"),
+                    ToolCallPart("shell", {
+                        "command": "touch capacity-started; while [ ! -f capacity-release ]; do sleep .05; done",
+                        "timeout": 25,
+                    }, tool_call_id="one-wait"),
+                ])
             return ModelResponse(parts=[ToolCallPart("wait_tool", {}, tool_call_id="one-wait")])
+        if prompt == "fast" and not returned and self.computer is not None:
+            return ModelResponse(parts=[
+                TextPart("Checking the plan."),
+                ToolCallPart("read_plan", {}, tool_call_id="one-plan"),
+            ])
         return ModelResponse(parts=[TextPart("Completed.")])
 
     async def stream(self, messages, info):
@@ -192,6 +202,8 @@ async def test_blocked_tool_cannot_consume_model_or_control_capacity_and_new_his
                         "agent__moyai__capability__moyai_authority__check",
                         "agent__moyai__capability__memory__load_snapshot",
                         "agent__moyai__capability__moyai_private_instructions__load",
+                        "agent__moyai__capability__moyai_commentary__save",
+                        "agent__moyai__toolset__planning__call_tool",
                     ):
                         assert scheduled[name] == runtime.settings.temporal_queue + "-control"
             finally:
@@ -203,7 +215,7 @@ async def test_blocked_tool_cannot_consume_model_or_control_capacity_and_new_his
         }
         assert routed_marker(history)
         if default_capabilities:
-            assert routed_marker(history, PRIVATE_INSTRUCTIONS_ROUTING_VERSION)
+            assert routed_marker(history, CHAT_CONTROL_ROUTING_VERSION)
         calls = scenario.model_calls
         await Replayer(
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
@@ -215,6 +227,8 @@ async def test_blocked_tool_cannot_consume_model_or_control_capacity_and_new_his
 
 def test_workspace_receipt_and_no_computer_settlement_use_control_capacity():
     assert activity_pool("agent__moyai__capability__moyai_private_instructions__load") == "control"
+    assert activity_pool("agent__moyai__capability__moyai_commentary__save") == "control"
+    assert activity_pool("agent__moyai__toolset__planning__call_tool") == "control"
     assert activity_pool("agent__moyai__capability__moyai_authority__save_workspace") == "control"
     assert activity_pool("moyai_save_computer_v1", ["turn", None]) == "control"
     assert activity_pool("moyai_save_computer_v1", ["turn", {"provider": "local"}]) == "control"
@@ -223,8 +237,8 @@ def test_workspace_receipt_and_no_computer_settlement_use_control_capacity():
 
 class PriorSplitOutbound(CapacityOutbound):
     def start_activity(self, input: StartActivityInput) -> workflow.ActivityHandle[object]:
-        if input.activity == "agent__moyai__capability__moyai_private_instructions__load":
-            # Record the pre-fix split queue, without the new patch marker.
+        if input.activity.endswith(CHAT_CONTROL_OPERATIONS):
+            # Record both pre-fix split queues, without the new patch marker.
             # Explicit queues bypass both versions of the routing decision.
             input = replace(input, task_queue=workflow.info().task_queue + "-tools")
         return super().start_activity(input)
@@ -240,7 +254,7 @@ class PriorSplitCapacity(ActivityCapacity):
         return PriorSplitInbound
 
 
-async def test_existing_split_preferences_history_replays_before_and_after_completion(
+async def test_existing_split_chat_control_history_replays_before_and_after_completion(
     runtime, actor, monkeypatch,
 ):
     scenario = CapacityScenario()
@@ -273,15 +287,18 @@ async def test_existing_split_preferences_history_replays_before_and_after_compl
             assert (await asyncio.wait_for(handle.result(), 15))["status"] == "completed"
             completed = await handle.fetch_history()
         for history in (pending, completed):
-            preferences_queues = [
+            control_queues = {
+                event.activity_task_scheduled_event_attributes.activity_type.name:
                 event.activity_task_scheduled_event_attributes.task_queue.name
                 for event in history.events if event.HasField("activity_task_scheduled_event_attributes")
-                and event.activity_task_scheduled_event_attributes.activity_type.name
-                == "agent__moyai__capability__moyai_private_instructions__load"
-            ]
-            assert preferences_queues and set(preferences_queues) == {runtime.settings.temporal_queue + "-tools"}
+                and event.activity_task_scheduled_event_attributes.activity_type.name.endswith(CHAT_CONTROL_OPERATIONS)
+            }
+            assert control_queues == {
+                "agent__moyai" + operation: runtime.settings.temporal_queue + "-tools"
+                for operation in CHAT_CONTROL_OPERATIONS
+            }
             assert routed_marker(history)
-            assert not routed_marker(history, PRIVATE_INSTRUCTIONS_ROUTING_VERSION)
+            assert not routed_marker(history, CHAT_CONTROL_ROUTING_VERSION)
         calls = scenario.model_calls
         await Replayer(
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,

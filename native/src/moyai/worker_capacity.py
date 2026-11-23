@@ -24,7 +24,12 @@ from temporalio.worker import (
 )
 
 ROUTING_VERSION = "moyai-activity-capacity-isolation-v1"
-PRIVATE_INSTRUCTIONS_ROUTING_VERSION = "moyai-private-instructions-control-v1"
+CHAT_CONTROL_ROUTING_VERSION = "moyai-chat-control-capacity-v2"
+CHAT_CONTROL_OPERATIONS = (
+    "__capability__moyai_private_instructions__load",
+    "__capability__moyai_commentary__save",
+    "__toolset__planning__call_tool",
+)
 WORKER_SHUTDOWN_VERSION = "moyai-worker-shared-drain-v1"
 DELEGATION_RETRY_VERSION = "moyai-delegation-receipt-retries-v1"
 ActivityPool = Literal["model", "tools", "control"]
@@ -55,7 +60,7 @@ def activity_pool(name: str, args: Sequence[object] = ()) -> ActivityPool:
             return "model"
         if name.endswith((
             "__event_stream_handler", "__get_tools", "__get_instructions", "__validate_args",
-            "__capability__moyai_private_instructions__load",
+            *CHAT_CONTROL_OPERATIONS,
         )) or any(
             marker in name for marker in (
                 "__capability__step_persistence__", "__capability__moyai_effects__",
@@ -94,11 +99,11 @@ class CapacityOutbound(WorkflowOutboundInterceptor):
         # remains authoritative. New histories record this decision in Temporal.
         if input.task_queue in (None, queue) and workflow.patched(ROUTING_VERSION):
             if (
-                input.activity.endswith("__capability__moyai_private_instructions__load")
-                and not workflow.patched(PRIVATE_INSTRUCTIONS_ROUTING_VERSION)
+                input.activity.endswith(CHAT_CONTROL_OPERATIONS)
+                and not workflow.patched(CHAT_CONTROL_ROUTING_VERSION)
             ):
-                # Existing split histories loaded preferences on the tool
-                # queue. Preserve those commands while new reads use control.
+                # Existing split histories used tool capacity for these local
+                # database operations. Preserve their recorded queue on replay.
                 pool = "tools"
             input = replace(input, task_queue=f"{queue}-{pool}")
         if (
