@@ -40,6 +40,20 @@ flowchart LR
 adapter, and `worker.py` registers it. `product_*` modules adapt canonical product
 services. `app/` contains those shared services and historical data formats.
 
+## Session reads
+
+`session_reads.py` owns native session detail, progress, saved activity, action
+details and failure details. Its `SessionReads` interface takes the authenticated
+request and user, then returns the existing typed response. It keeps selective
+checkpoint loading, requester-only diagnostics, delegated-action scope and
+post-read authorization together. Rechecks retain native user version, product
+grant and session audience order, after the read transaction has closed.
+
+`api.py` binds these operations to HTTP and owns authentication, middleware and
+process lifespan. `api_views.py` holds their wire models and the shared session
+and turn projections used by mutation receipts. Session inventory and paged
+history remain in `product_routes.py`; reads never admit or resume execution.
+
 ## Connector execution and answer settlement
 
 `product_connector_execution.py` owns canonical connection execution: worker

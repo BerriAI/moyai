@@ -1,11 +1,12 @@
-"""Response models for the routes defined in api.py.
+"""Response models and shared record projections for native HTTP routes.
 
 These are the source of the generated frontend types (native/web/generated/api).
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+import json
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import MISSING, BaseModel, ConfigDict, Field, JsonValue, RootModel, computed_field
 from pydantic_ai.messages import ToolCallPart
@@ -15,6 +16,9 @@ from .gateway_config import GatewayConfig, GatewayDiscovery
 from .general_preferences import GeneralPreferences
 from .mcp_remote import RemoteMCPConfig
 from .product_history import absent
+
+if TYPE_CHECKING:
+    from .models import Session, Turn
 
 
 class MeUser(BaseModel):
@@ -555,3 +559,27 @@ class PlanStep(ApiView):
     active_form: str
     parent_id: str | None
     depends_on: list[str]
+
+
+def session_view(session: Session) -> dict[str, Any]:
+    from .slack_messages import plain_slack_title
+
+    return {
+        "id": session.id, "title": plain_slack_title(session.title) if session.surface == "slack" else session.title, "owner_id": session.owner_id,
+        "visibility": session.visibility, "surface": session.surface,
+        "model": session.model, "status": session.status,
+        "active_turn": session.active_turn, "archived": session.archived, "deleted": session.deleted,
+        "workspace": json.loads(session.workspace) if session.workspace else None,
+        "save_warning": session.save_warning, "updated_at": session.updated_at,
+    }
+
+
+def turn_view(turn: Turn) -> dict[str, Any]:
+    return {
+        "id": turn.id, "session_id": turn.session_id, "actor_id": turn.actor_id,
+        "model": turn.model, "status": turn.status, "mode": turn.mode,
+        "parent_turn": turn.parent_turn, "enqueue_id": turn.enqueue_id,
+        "connections": json.loads(turn.connections),
+        "accepted_at": turn.accepted_at, "usage": json.loads(turn.usage),
+        "error": turn.error, "created_at": turn.created_at, "finished_at": turn.finished_at,
+    }

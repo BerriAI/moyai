@@ -246,7 +246,7 @@ class Goals:
             if result["goal"] is not None:
                 result["goal"]["elapsed_seconds"] = await self.elapsed_seconds(db, goal)
             if turn is not None:
-                from .api import turn_view
+                from .api_views import turn_view
                 result.update(turn_view(turn))
             db.add(GoalReceipt(
                 id=identity, session_id=session_id, fingerprint=fingerprint,

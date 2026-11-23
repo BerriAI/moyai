@@ -65,7 +65,7 @@ class SwarmStarted(BaseModel):
 
 
 def routes(runtime: Runtime, actor) -> APIRouter:
-    from .api import session_view, turn_view
+    from .api_views import session_view, turn_view
     router = APIRouter()
     service = runtime.database.swarms
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import hmac
 import json
 import logging
@@ -24,7 +23,6 @@ from pydantic_ai import ConversationTypeAdapter, DeferredToolResults
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse, ask_user_result
 from sqlalchemy import func, select, update
-from sqlalchemy.orm import load_only
 from temporalio.service import RPCError
 
 from .api_views import (
@@ -61,13 +59,14 @@ from .api_views import (
     TurnView,
     TurnWorkProgress,
     WorkActionDetail,
+    session_view,
+    turn_view,
 )
 from .computer import routes as computer_routes
 from .connection_policy import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .debug_trace import debug_trace
 from .failed_action_attempts import failed_action_attempt
-from .failure_diagnostics import failure_details
 from .file_preview import routes as file_preview_routes
 from .gateway_config import GatewayConfig, GatewayDefaults, GatewayDiscovery
 from .history_handoff import is_turn_run
@@ -79,7 +78,6 @@ from .models import (
     Artifact,
     Connection,
     Effect,
-    Event,
     Message,
     Session,
     SessionPreference,
@@ -92,11 +90,12 @@ from .models import (
 from .presentation import public_event, redact
 from .private_instructions import preferences_for_user
 from .product_identity import ProductAuthorityBusy
-from .product_requester import answer_actor, can_answer
+from .product_requester import answer_actor
 from .public_path import PublicPathMiddleware
 from .pull_requests import routes as pull_request_routes
 from .runtime import Runtime
 from .security import check_password
+from .session_reads import SessionReads
 from .settings import Settings
 from .settings_api import routes as settings_routes
 from .sidebar import folders_for, lock_sidebar
@@ -159,36 +158,11 @@ class ConnectionInput(BaseModel):
         return self
 
 
-SAVED_ACTIVITY = TypeAdapter(list[SavedActivity])
 SESSION_MESSAGES = TypeAdapter(list[SessionMessage])
 
 
 class EventStream(StreamingResponse):
     media_type = "text/event-stream"
-
-
-def session_view(session: Session) -> dict[str, Any]:
-    from .slack_messages import plain_slack_title
-
-    return {
-        "id": session.id, "title": plain_slack_title(session.title) if session.surface == "slack" else session.title, "owner_id": session.owner_id,
-        "visibility": session.visibility, "surface": session.surface,
-        "model": session.model, "status": session.status,
-        "active_turn": session.active_turn, "archived": session.archived, "deleted": session.deleted,
-        "workspace": json.loads(session.workspace) if session.workspace else None,
-        "save_warning": session.save_warning, "updated_at": session.updated_at,
-    }
-
-
-def turn_view(turn: Turn) -> dict[str, Any]:
-    return {
-        "id": turn.id, "session_id": turn.session_id, "actor_id": turn.actor_id,
-        "model": turn.model, "status": turn.status, "mode": turn.mode,
-        "parent_turn": turn.parent_turn, "enqueue_id": turn.enqueue_id,
-        "connections": json.loads(turn.connections),
-        "accepted_at": turn.accepted_at, "usage": json.loads(turn.usage),
-        "error": turn.error, "created_at": turn.created_at, "finished_at": turn.finished_at,
-    }
 
 
 def connection_view(connection: Connection) -> dict[str, Any]:
@@ -204,7 +178,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     owned = runtime is None
     runtime = runtime or Runtime(Settings())
     session_cookie = cookie_name(COOKIE, runtime.settings.public_url)
-    work_progress = runtime.work_progress
+    session_reads = SessionReads(runtime)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -224,7 +198,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            work_progress.clear()
+            runtime.work_progress.clear()
             if owned:
                 await runtime.close()
 
@@ -602,233 +576,40 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         include_messages: bool = False,
         user: User = Depends(actor),
     ) -> SessionDetail:
-        reference = None
-        if resolve and runtime.product_identity is not None:
-            from .product_routes import ProductReadService, Reader
-            # actor has just verified the product principal. The read adapter
-            # still fences source/native ACLs and canonical continuation aliases.
-            reference = (await ProductReadService(runtime).detail(
-                Reader(user, request.state.product_principal), session_id, "native",
-            ))["session"]
-        await runtime.database.prefetch_session_audiences(user, [session_id])
-        async with runtime.database.sessions() as db:
-            row = await runtime.database.allowed_session(db, session_id, user, metadata_only=True)
-            # Only a waiting conversation needs its private checkpoint to render
-            # pending questions. Ordinary reads must not transfer megabytes of it.
-            if row.status == "waiting":
-                # Keep the state and active turn aligned with this checkpoint if
-                # execution advanced while the source audience was checked.
-                await db.refresh(row, ["status", "active_turn", "conversation"])
-        turn_columns = load_only(
-            Turn.id, Turn.session_id, Turn.actor_id, Turn.model, Turn.status, Turn.mode,
-            Turn.parent_turn, Turn.enqueue_id, Turn.connections, Turn.accepted_at, Turn.usage,
-            Turn.error, Turn.created_at, Turn.finished_at,
+        return await session_reads.detail(
+            session_id, request, user, resolve=resolve, include_activity=include_activity,
+            include_messages=include_messages,
         )
-        async with runtime.database.sessions() as db:
-            turns = list((await db.scalars(select(Turn).where(
-                Turn.session_id == session_id
-            ).options(turn_columns).order_by(Turn.created_at.desc()).limit(100))).all())
-            if row.active_turn and not any(turn.id == row.active_turn for turn in turns):
-                active_turn = await db.get(Turn, row.active_turn, options=[turn_columns])
-                if active_turn is not None:
-                    turns.append(active_turn)
-            guidance = dict((await db.execute(select(Event.turn_id, Event.created_at).where(
-                Event.turn_id.in_([turn.id for turn in turns]), Event.kind == "steering_admitted",
-            ).order_by(Event.id))).all())
-            # Resolve each relationship once for this projection/transaction.
-            # A linked Slack author may own many turns; repeating its admission
-            # and identity reads per turn adds hundreds of database round trips.
-            owners = {owner: await runtime.database.same_person(db, user, owner)
-                      for owner in {row.owner_id, *(turn.actor_id for turn in turns)}}
-            result: dict[str, Any] = {
-                "session": {**session_view(row), "can_manage": owners[row.owner_id]}, "turns": [
-                    {**turn_view(turn), "guidance_at": guidance.get(turn.id),
-                     "is_self": owners[turn.actor_id]} for turn in turns
-                ],
-            }
-            if include_messages:
-                from .models import MessageSource
-                version = (await db.execute(select(
-                    func.coalesce(func.max(Message.id), 0), func.count(MessageSource.message_identity),
-                    func.coalesce(func.sum(MessageSource.revision), 0),
-                ).outerjoin(MessageSource, MessageSource.message_identity == Message.identity).where(
-                    Message.session_id == session_id,
-                ))).one()
-                authors = (await db.execute(select(User.id, User.display_name, User.auth_version).join(
-                    Message, Message.author_id == User.id,
-                ).where(Message.session_id == session_id).distinct().order_by(User.id))).all()
-                identities = [(author.id, author.display_name, author.auth_version,
-                               await runtime.database.same_person(db, user, author.id)) for author in authors]
-                identity_version = hashlib.sha256(json.dumps(identities).encode()).hexdigest()
-                result["transcript_version"] = ":".join(str(part) for part in (*version, identity_version))
-            if row.surface == "slack":
-                from .slack_delivery_status import status as delivery_status
-                result["slack_delivery"] = await delivery_status(runtime.database, db, session_id)
-            swarm_member = await runtime.database.swarms.member(db, session_id)
-            from .goal_models import Goal
-            goal = await db.get(Goal, session_id)
-            result["goal"] = runtime.database.goals.view(goal)
-            if goal is not None and result["goal"] is not None:
-                result["goal"]["elapsed_seconds"] = await runtime.database.goals.elapsed_seconds(db, goal)
-            if swarm_member is not None:
-                result["session"]["swarm_id"] = swarm_member.mission_id
-            from .delegation_models import DelegatedSession
-            delegation = await db.get(DelegatedSession, session_id)
-            if delegation is not None:
-                try:
-                    await runtime.database.allowed_session(db, delegation.parent_session_id, user, metadata_only=True)
-                except HTTPException as error:
-                    if error.status_code != 404:
-                        raise
-                else:
-                    result["session"]["parent_session_id"] = delegation.parent_session_id
-            if reference is not None:
-                result["reference"] = reference
-            preference = await db.get(SessionPreference, (user.id, session_id))
-            result["session"]["pinned"] = bool(preference and preference.pinned)
-            result["session"]["folder"] = preference.folder if preference else ""
-            read = await db.get(SessionRead, (user.id, session_id))
-            result["session"]["unread"] = bool(read and read.unread)
-            active_turn = next((turn for turn in turns if turn.id == row.active_turn), None)
-            unsettled = list((await db.scalars(select(Effect).where(
-                Effect.session_id == session_id, Effect.state == "pending",
-                ~failed_action_attempt(),
-            ))).all())
-            result["has_unsettled_effects"] = bool(unsettled)
-            result["effects"] = [{
-                "id": effect.id, "turn_id": effect.turn_id, "tool_name": effect.tool_name,
-                "arguments": json.loads(runtime.security.unseal(effect.arguments)),
-            } for effect in unsettled if await runtime.database.same_person(db, user, effect.actor_id)]
-        if include_activity and turns and turns[0].status != "running":
-            from .progress import turn_activity
-            async with runtime.database.sessions() as db:
-                latest = await db.get(Turn, turns[0].id, options=[load_only(Turn.id, Turn.preparation)])
-            if latest is not None:
-                result["activity"] = await turn_activity(runtime, latest)
-            fresh = await runtime.database.user(user.id)
-            if fresh.auth_version != user.auth_version:
-                raise HTTPException(401, "Your session expired.")
-            if runtime.product_identity is not None:
-                await runtime.product_identity.require_request_current(request)
-            await runtime.database.session(user, session_id)
-        if row.status == "waiting" and row.conversation and active_turn is not None:
-            # Requester-link checks take their own transaction. Do not hold a
-            # native connection while awaiting them (including one-slot pools).
-            result["can_answer"] = await can_answer(runtime, user, active_turn)
-            if result["can_answer"]:
-                conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(row.conversation))
-                result["pending"] = TypeAdapter(Any).dump_python(conversation.deferred_tool_requests, mode="json")
-                from .questions import can_reply_with_text
-                result["can_reply_with_text"] = can_reply_with_text(conversation.deferred_tool_requests)
-                async with runtime.database.sessions() as db:
-                    deadline = await db.scalar(select(Event).where(
-                        Event.identity == f"optional-question:{active_turn.id}",
-                    ))
-                if deadline is not None:
-                    result["question_deadline"] = json.loads(runtime.security.unseal(deadline.content))["deadline"]
-            elif runtime.product_secrets is not None and user.role == "admin":
-                # Organization access assistance does not confer permission to
-                # answer another requester's questions or approve their tools.
-                requests = await runtime.product_secrets.execution.pending(request.state.product_principal, session_id)
-                result["credential_requests"] = [
-                    {"request_id": item["request_id"]} for item in requests["requests"]
-                ]
-        if include_messages:
-            result["messages"] = await runtime.database.messages(user, session_id)
-            mention_names = [(message['id'], message.get('slack_mentions', {})) for message in result['messages']]
-            result['transcript_version'] += ':' + hashlib.sha256(
-                json.dumps(mention_names, sort_keys=True).encode(),
-            ).hexdigest()
-        return SessionDetail.model_validate(result)
 
     @app.get("/api/sessions/{session_id}/progress/{turn_id}", operation_id="getTurnProgress")
     async def progress(
         session_id: str, turn_id: str, request: Request,
         include_activity: bool = False, user: User = Depends(actor),
     ) -> TurnWorkProgress:
-        from .progress import turn_progress
-
-        await runtime.database.session(user, session_id)
-        async with runtime.database.sessions() as db:
-            turn = await db.get(Turn, turn_id)
-            if turn is None or turn.session_id != session_id:
-                raise HTTPException(404, "Turn not found.")
-        result = (
-            await work_progress.read(turn) if include_activity
-            else {"messages": await turn_progress(runtime, turn)}
+        return await session_reads.progress(
+            session_id, turn_id, request, user, include_activity=include_activity,
         )
-        fresh = await runtime.database.user(user.id)
-        if fresh.auth_version != user.auth_version:
-            raise HTTPException(401, "Your session expired.")
-        if runtime.product_identity is not None:
-            await runtime.product_identity.require_request_current(request)
-        await runtime.database.session(user, session_id)
-        return TurnWorkProgress.model_validate(result)
 
     @app.get("/api/sessions/{session_id}/progress/{turn_id}/actions/{action_id}", operation_id="getTurnAction")
     async def action_detail(
         session_id: str, turn_id: str, action_id: str, request: Request,
         agent_id: str | None = None, user: User = Depends(actor),
     ) -> WorkActionDetail:
-        await runtime.database.session(user, session_id)
-        async with runtime.database.sessions() as db:
-            turn = await db.get(Turn, turn_id)
-            if turn is None or turn.session_id != session_id:
-                raise HTTPException(404, "Turn not found.")
-        result, source_session = await work_progress.action(turn, action_id, agent_id)
-        fresh = await runtime.database.user(user.id)
-        if fresh.auth_version != user.auth_version:
-            raise HTTPException(401, "Your session expired.")
-        if runtime.product_identity is not None:
-            await runtime.product_identity.require_request_current(request)
-        await runtime.database.session(user, session_id)
-        if source_session != session_id:
-            # action() resolves only generated turns in this parent's assignment,
-            # not later private follow-ups in the delegated conversation.
-            async with runtime.database.sessions() as db:
-                source = await db.get(Session, source_session)
-                if source is None or source.deleted:
-                    raise HTTPException(404, "Action not found.")
-        return WorkActionDetail.model_validate(result)
+        return await session_reads.action(
+            session_id, turn_id, action_id, request, user, agent_id=agent_id,
+        )
 
     @app.get("/api/sessions/{session_id}/turns/{turn_id}/failure", operation_id="getTurnFailureDetails")
     async def turn_failure_details(
         session_id: str, turn_id: str, request: Request, response: Response, user: User = Depends(actor),
     ) -> TurnFailureDetails:
-        await runtime.database.session(user, session_id)
-        async with runtime.database.sessions() as db:
-            turn = await db.get(Turn, turn_id)
-            if turn is None or turn.session_id != session_id or not turn.error:
-                raise HTTPException(404, "Failure not found.")
-            if not await runtime.database.same_person(db, user, turn.actor_id):
-                raise HTTPException(403, "Failure details are visible only to the requester.")
-        details = await failure_details(runtime, turn)
-        fresh = await runtime.database.user(user.id)
-        if fresh.auth_version != user.auth_version:
-            raise HTTPException(401, "Your session expired.")
-        if runtime.product_identity is not None:
-            await runtime.product_identity.require_request_current(request)
-        await runtime.database.session(user, session_id)
+        result = await session_reads.failure(session_id, turn_id, request, user)
         response.headers["Cache-Control"] = "no-store"
-        return TurnFailureDetails.model_validate(details)
+        return result
 
     @app.get("/api/sessions/{session_id}/activity", operation_id="getSessionActivity")
     async def session_activity(session_id: str, request: Request, user: User = Depends(actor)) -> list[SavedActivity]:
-        from .progress import turn_activity
-
-        await runtime.database.session(user, session_id)
-        async with runtime.database.sessions() as db:
-            turn = await db.scalar(select(Turn).where(
-                Turn.session_id == session_id,
-            ).options(load_only(Turn.id, Turn.status, Turn.preparation)).order_by(Turn.created_at.desc()).limit(1))
-        result = await turn_activity(runtime, turn) if turn is not None and turn.status != "running" else []
-        fresh = await runtime.database.user(user.id)
-        if fresh.auth_version != user.auth_version:
-            raise HTTPException(401, "Your session expired.")
-        if runtime.product_identity is not None:
-            await runtime.product_identity.require_request_current(request)
-        await runtime.database.session(user, session_id)
-        return SAVED_ACTIVITY.validate_python(result)
+        return await session_reads.activity(session_id, request, user)
 
     @app.get("/api/sessions/{session_id}/debug-trace")
     async def session_debug_trace(session_id: str, user: User = Depends(actor)):
