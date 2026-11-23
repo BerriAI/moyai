@@ -1,22 +1,16 @@
 // Supplementary pure-route/component checks. Real application evidence is separate.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const path = require('node:path');
-const ts = require('typescript');
 const React = require('react');
 const {renderToStaticMarkup} = require('react-dom/server');
 const root = path.resolve(__dirname, '..');
 const original = 'a'.repeat(32), native = '12345678-1234-1234-1234-123456789abc';
 let helpers, server, history;
 test.before(async () => {
-  const file = ts.createSourceFile('main.tsx', fs.readFileSync(path.join(root, 'native/web/main.tsx'), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const wanted = new Set(['sessionReferenceHash', 'continuationReference']);
-  const source = file.statements.filter(node => ts.isFunctionDeclaration(node) && wanted.has(node.name?.text)).map(node => node.getText(file)).join('\n');
-  const code = ts.transpileModule(source, {compilerOptions: {module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022}}).outputText;
-  helpers = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
   const {createServer} = await import('vite');
   server = await createServer({configFile: path.join(root, 'native/web/vite.config.ts'), optimizeDeps: {noDiscovery: true, include: []}, server: {middlewareMode: true}, appType: 'custom'});
+  helpers = await server.ssrLoadModule('/session-reference.ts');
   history = await server.ssrLoadModule('/product-history.tsx');
 });
 test.after(async () => { await server?.close(); });
