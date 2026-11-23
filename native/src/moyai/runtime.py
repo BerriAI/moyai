@@ -131,15 +131,22 @@ class Runtime:
         self._models_owned = False
         self.tracing: LensTracing | None = None
 
+    def configure_tracing(self) -> LensTracing | None:
+        """Share one local provider across API middleware, agent and Temporal."""
+        if self.tracing is None and self.settings.trace_endpoint:
+            from .tracing import LensTracing
+
+            self.tracing = LensTracing(self.settings)
+            self.database.tracing = self.tracing
+        return self.tracing
+
     async def start(
         self, *, models: dict[str, Model] | None = None,
         workspace: AbstractCapability[RunScope] | None = None,
         skills_directory: str = "/opt/moyai/skills",
     ) -> None:
         try:
-            if self.settings.trace_endpoint:
-                from .tracing import LensTracing
-                self.tracing = LensTracing(self.settings)
+            self.configure_tracing()
             if self.product is not None:
                 await self.product.start()
             await self.database.start()
@@ -278,6 +285,7 @@ class Runtime:
                         finally:
                             if self.tracing is not None:
                                 tracing, self.tracing = self.tracing, None
+                                self.database.tracing = None
                                 await tracing.close()
 
 
