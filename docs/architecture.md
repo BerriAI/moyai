@@ -127,7 +127,16 @@ helpers; it retains navigation and the existing lazy entrypoint.
 The [automation module guide](../native/web/automations/README.md) documents
 these interfaces and the import rules enforced by `tests/automations`,
 including JavaScript helpers and their declarations. Shared controls and
-transport do not import automations. Consolidate other features only when their
+transport do not import automations.
+
+`native/web/history` owns historical conversation rendering, file previews,
+continuation review and original-link routing. Its route helpers derive their
+types from generated history contracts and remain separate from the lazy
+renderer. The [history module guide](../native/web/history/README.md) documents
+these interfaces and the import rules enforced by `tests/history`.
+Shared transport and presentation do not import history.
+
+Consolidate other features only when their
 interfaces are stable; this is not a requirement to relocate every flat module
 at once.
 

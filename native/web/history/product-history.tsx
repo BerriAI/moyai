@@ -1,4 +1,4 @@
-import { appPath, internalPath } from "./api"
+import { appPath, internalPath } from "../api"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -11,15 +11,15 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ApiError } from "./api"
+import { ApiError } from "../api"
 import {
   continueProductSession, getHistorySession, getMe, listConnections, getProductSessionFileContent, listProductContinuationFiles,
   listProductSessionChildren, listProductSessionFiles, listProductSessionMessages, previewProductContinuation,
   type ContinuationRecoveryFile, type HistoryAttachment, type ProductContinuationResult, type ProductFile,
-} from "./generated/api"
+} from "../generated/api"
 import "./product-history.css"
-import slackLogo from "./assets/slack-logo.svg"
-import { SlackMessage } from "./slack-content"
+import slackLogo from "../assets/slack-logo.svg"
+import { SlackMessage } from "../slack-content"
 
 export type HistorySessionRef = Pick<ProductContinuationResult, "id" | "url"> & { source: "native" | "legacy"; source_session_id?: string }
 export type ProductHistoryProps = {

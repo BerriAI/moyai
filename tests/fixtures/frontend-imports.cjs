@@ -38,10 +38,10 @@ function imports(file) {
   visit(source)
   return found.map(node => {
     assert.ok(ts.isStringLiteral(node), `${file}: use a literal module path`)
-    if (node.text.endsWith(".css")) {
-      const stylesheet = path.resolve(path.dirname(file), node.text)
-      assert.ok(fs.existsSync(stylesheet), `${file}: cannot resolve ${node.text}`)
-      return { specifier: node.text, file: stylesheet }
+    if (/\.(css|svg)$/.test(node.text)) {
+      const asset = path.resolve(path.dirname(file), node.text)
+      assert.ok(fs.existsSync(asset), `${file}: cannot resolve ${node.text}`)
+      return { specifier: node.text, file: asset }
     }
     const resolved = ts.resolveModuleName(node.text, file, config.options, ts.sys).resolvedModule
     assert.ok(resolved, `${file}: cannot resolve ${node.text}`)
