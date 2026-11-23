@@ -39,9 +39,9 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
     from sqlalchemy import or_, select, update
 
-    from .contracts import NewMessage, RunScope
-    from .database import Database
-    from .models import Turn, now
+    from ..contracts import NewMessage, RunScope
+    from ..database import Database
+    from ..models import Turn, now
     from .settings_models import SettingAutomation, SettingAutomationRun, SettingSkill
 
 SETTINGS_WORKER_PREFIX = "moyai-settings-v1-"
@@ -289,13 +289,13 @@ async def admit_automation(runtime: Any, automation_id: str, occurrence_id: str)
 
 @activity.defn(name="moyai_settings_admit")
 async def settings_admit(automation_id: str, occurrence_id: str) -> dict[str, Any]:
-    from .runtime import current
+    from ..runtime import current
     return await admit_automation(current(), automation_id, occurrence_id)
 
 
 @activity.defn(name="moyai_settings_skill_catalog")
 async def settings_skill_catalog(scope: RunScope) -> list[dict[str, Any]]:
-    from .runtime import current
+    from ..runtime import current
     return await SettingsSkills(current().database).catalog(scope)
 
 

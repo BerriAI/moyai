@@ -13,8 +13,8 @@ from moyai.contracts import Grant, GuidanceChanged, NewMessage, NewSession
 from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Connection, Session, Turn
-from moyai.settings_models import SettingSkill
-from moyai.settings_runtime import SettingsSkills
+from moyai.preferences.settings_models import SettingSkill
+from moyai.preferences.settings_runtime import SettingsSkills
 from moyai.workspace_recovery import locked_scope
 
 

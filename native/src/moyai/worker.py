@@ -23,9 +23,9 @@ from .agent_messages import MailDispatch, dispatch_mail
 from .dispatch_wakeups import DispatchWakeups
 from .execution import ExecutionAuthority
 from .models import Turn
+from .preferences.settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
 from .product_drain import ProductDrainError, drain_checkpoint
 from .runtime import Runtime, configure
-from .settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
 from .swarm_runtime import SWARM_ACTIVITIES, SwarmWorkflow, dispatch_missions
 from .worker_capacity import ActivityCapacity, WorkerPools
 from .workflow import TurnWorkflow

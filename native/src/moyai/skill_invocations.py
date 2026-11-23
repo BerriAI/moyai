@@ -16,8 +16,8 @@ from sqlalchemy import or_, select
 
 from .contracts import ExecutionContext, RunScope
 from .models import MessageSource, Turn, User
+from .preferences.settings_models import SettingSkill
 from .product_identity import ProductGrant
-from .settings_models import SettingSkill
 from .skill_mentions import display_text, marker, mentions
 
 if TYPE_CHECKING:
@@ -158,7 +158,7 @@ class SkillInvocations:
         self.runtime = runtime
 
     async def native_rows(self, actor_id: str, shared: bool) -> list[dict[str, Any]]:
-        from .settings_api import bundled_skills
+        from .preferences.settings_api import bundled_skills
 
         rows = [
             {**row, "reference": f"bundled:{row['name']}", "icon": "sparkles"}

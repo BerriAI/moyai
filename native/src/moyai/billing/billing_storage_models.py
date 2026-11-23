@@ -13,7 +13,7 @@ from sqlalchemy import JSON, BigInteger, Boolean, CheckConstraint, Index, Intege
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .models import Base
+from ..models import Base
 
 
 class BillingRecord(Base):

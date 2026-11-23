@@ -11,9 +11,9 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from ..models import Event
+from ..performance import KINDS, PREFIX
 from .analytics import ReportRange, percentile, utc
-from .models import Event
-from .performance import KINDS, PREFIX
 
 
 def elapsed(start: str | None, end: str | None) -> float | None:

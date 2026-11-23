@@ -28,9 +28,9 @@ from moyai.activities import ACTIVITIES
 from moyai.agent import HarnessActivityContext, make_agent
 from moyai.contracts import NewMessage, NewSession, RunScope
 from moyai.execution import ExecutionAuthority
+from moyai.preferences.settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS
 from moyai.product_drain import drain_checkpoint
 from moyai.runtime import configure
-from moyai.settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import (

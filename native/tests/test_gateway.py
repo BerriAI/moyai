@@ -32,9 +32,9 @@ from moyai.gateway_config import (
 )
 from moyai.gateway_tools import gateway_toolset
 from moyai.models import Connection, User
+from moyai.preferences.settings_models import SettingAutomation
+from moyai.preferences.settings_runtime import admit_automation
 from moyai.runtime import Runtime, configure
-from moyai.settings_models import SettingAutomation
-from moyai.settings_runtime import admit_automation
 from moyai.skill_mentions import marker
 
 

@@ -17,6 +17,7 @@ from sqlalchemy import delete, text, update
 from moyai.contracts import ExecutionContext
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Message, MessageSource, Session, Turn, User
+from moyai.preferences.settings_models import SettingAutomation, SettingAutomationRun
 from moyai.private_history import (
     MAX_CHATS,
     MAX_MESSAGES,
@@ -28,7 +29,6 @@ from moyai.private_history import (
     PrivateHistoryRecall,
 )
 from moyai.product_automation_models import ProductAutomationTurn
-from moyai.settings_models import SettingAutomation, SettingAutomationRun
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 admitted_product = authority.admitted_product

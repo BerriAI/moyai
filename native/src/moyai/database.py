@@ -60,11 +60,11 @@ from .models import (
     now,
 )
 from .postgres import create_engine
+from .preferences.settings_models import SettingAutomationRun
 from .product_automation_models import ProductAutomationTurn
 from .product_identity import ProductGrant, ProductIdentityAdapter
 from .security import Security, password_hash
 from .settings import Settings
-from .settings_models import SettingAutomationRun
 from .swarm_models import SwarmMember
 from .swarm_service import SwarmService, dispatchable
 from .turn_admission import TurnAdmission

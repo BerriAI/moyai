@@ -10,8 +10,8 @@ from test_native_settings import client_for
 from moyai.activities import prepare_steering, prepare_turn
 from moyai.contracts import NewMessage
 from moyai.models import Message, MessageSource, Turn
+from moyai.preferences.settings_models import SettingSkill
 from moyai.runtime import configure
-from moyai.settings_models import SettingSkill
 from moyai.skill_invocations import has_invocations, references, slack_references
 from moyai.skill_mentions import display_text, marker, mentions
 from moyai.swarm_contracts import NewSwarm

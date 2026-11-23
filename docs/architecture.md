@@ -93,7 +93,21 @@ existing locks. `Database` and Temporal activities forward settlement calls;
 `workspace_recovery.py` owns checkpoint formats, validation and cold restoration.
 Activity identities, ordering and historical snapshot formats remain compatible.
 
-## Roles and data
+## Backend feature ownership
+
+`moyai.preferences` owns user-facing Settings, its wire and persistence models,
+composer defaults and standalone automation integration. Root `settings.py`
+continues to own process configuration. `moyai.reporting` owns analytics and
+timing projections; `moyai.billing` owns canonical accounting and ledger
+maintenance. Their package initializers perform no imports or I/O, and callers
+import individual interfaces. The existing billing maintenance command remains
+available as `python -m moyai.billing_storage`.
+
+The feature guides map responsibilities to existing test suites.
+`test_feature_packages.py` prevents eager package initialization and keeps
+arithmetic and model modules independent of command composition.
+
+## Runtime roles and data
 
 Production retains API, coordinator, broker and worker roles. They use the same
 image and environment installation, but own different leases and responsibilities.

@@ -20,8 +20,8 @@ from .storage import ObjectStore, encrypted_converter
 from .stores import NativeStores
 
 if TYPE_CHECKING:
+    from .billing.product_billing_routes import ProductBillingService
     from .product_automations import ProductAutomationService
-    from .product_billing_routes import ProductBillingService
     from .product_config import ProductConfig
     from .product_connections import ProductConnections
     from .product_continuation import ProductContinuationService
@@ -85,8 +85,8 @@ class Runtime:
         self.product_continuations: ProductContinuationService | None = None
         self.product_drain: ProductDrainService | None = None
         if self.product is not None:
+            from .billing.product_billing_routes import ProductBillingService
             from .product_automations import ProductAutomationService
-            from .product_billing_routes import ProductBillingService
             from .product_connections import ProductConnections
             from .product_continuation import ProductContinuationService
             from .product_continuation_workspace import ProductWorkspaceCompatibility

@@ -30,6 +30,7 @@ from moyai.contracts import NewMessage, NewSession, PreparedTurn
 from moyai.database import Database
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Message, ProductTurnAuthority, Session, Turn, User
+from moyai.preferences.settings_runtime import SettingsSkills
 from moyai.product_identity import ProductIdentityAdapter
 from moyai.product_schema import (
     AUTHORITY_SCHEMA_VERSION,
@@ -42,7 +43,6 @@ from moyai.product_schema import (
     verify_product_schema,
 )
 from moyai.runtime import Runtime
-from moyai.settings_runtime import SettingsSkills
 from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker

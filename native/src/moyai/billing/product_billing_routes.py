@@ -30,8 +30,9 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .analytics import ReportRange, csv_export, report_range
-from .analytics_identity import ReportIdentities, report_identities
+from ..preferences.settings_views import AnalyticsReport
+from ..reporting.analytics import ReportRange, csv_export, report_range
+from ..reporting.analytics_identity import ReportIdentities, report_identities
 from .product_billing import (
     LOOKUP_CHUNK,
     MAX_RECORDS,
@@ -48,7 +49,6 @@ from .product_billing import (
     exact_sum,
     read_product_billing,
 )
-from .settings_views import AnalyticsReport
 
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 log = logging.getLogger(__name__)
@@ -808,7 +808,7 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
         try:
             identities = await report_identities(runtime) if runtime is not None else None
             if identities is not None and not personal:
-                from .analytics_billing import selected_user
+                from ..reporting.analytics_billing import selected_user
 
                 user_id = selected_user(service, identities, user_id)
             value = await service.report(
@@ -827,7 +827,7 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
                     native_user = await runtime.product_identity.read_native_user(db, principal)
                 if native_user is None:
                     raise HTTPException(401, "Sign in to Moyai to view usage activity.")
-                from .analytics_service import report as activity_report
+                from ..reporting.analytics_service import report as activity_report
 
                 activity = await activity_report(
                     runtime, native_user, value["start_at"], value["end_before"], root_model,

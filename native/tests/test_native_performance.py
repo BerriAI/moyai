@@ -13,13 +13,13 @@ from starlette.responses import JSONResponse
 from temporalio.worker import ExecuteActivityInput
 from test_native_settings import client_for, member
 
-from moyai.analytics import report_range
 from moyai.contracts import NewMessage, NewSession
 from moyai.execution import AuthorizedActivity
 from moyai.inference_usage import INFERENCE_ACTIVITY, InferenceActivity, InferenceUsageTransport
 from moyai.models import Event, Turn
 from moyai.performance import PREFIX, computer_timing, evidence, record
-from moyai.performance_report import cards, metrics, observations, summarize, timing_view
+from moyai.reporting.analytics import report_range
+from moyai.reporting.performance_report import cards, metrics, observations, summarize, timing_view
 
 
 def stamp(seconds: int) -> str:

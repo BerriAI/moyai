@@ -25,9 +25,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from test_product_identity import google_cookie, settings_for
 from test_product_identity import product as product_fixture
 
-from moyai.analytics import report_range
-from moyai.inference_usage import InferenceUsage
-from moyai.product_billing import (
+from moyai.billing.product_billing import (
     BillingProjection,
     BillingReader,
     BillingReadError,
@@ -45,7 +43,9 @@ from moyai.product_billing import (
     read_product_billing,
     reconcile,
 )
-from moyai.product_billing_routes import ProductBillingService, routes
+from moyai.billing.product_billing_routes import ProductBillingService, routes
+from moyai.inference_usage import InferenceUsage
+from moyai.reporting.analytics import report_range
 
 GATEWAY = hashlib.sha256(b"https://gateway.invalid").hexdigest()
 KEY = hashlib.sha256(b"synthetic-key-hash-input").hexdigest()
@@ -461,7 +461,7 @@ async def test_report_exceeds_old_record_ceiling_without_losing_totals_or_detail
 
 
 async def test_report_has_no_internal_deadline_and_caller_cancellation_releases_readers(billing_product, monkeypatch):
-    import moyai.product_billing_routes as billing_routes
+    import moyai.billing.product_billing_routes as billing_routes
 
     context = billing_product
     started, cancelled = asyncio.Event(), asyncio.Event()
@@ -499,7 +499,7 @@ async def test_report_has_no_internal_deadline_and_caller_cancellation_releases_
 
 
 async def test_accounting_failure_logs_phase_without_database_details(billing_product, monkeypatch, caplog):
-    import moyai.product_billing_routes as billing_routes
+    import moyai.billing.product_billing_routes as billing_routes
 
     async def failed_read(*args, **kwargs):
         raise SQLAlchemyError("PRIVATE_CONNECTION_DETAIL")
@@ -551,7 +551,7 @@ async def test_billing_route_classifies_driver_failures_without_leaking_details(
 
 
 def test_reconciliation_population_is_not_limited_by_fetch_bounds(rules, monkeypatch):
-    import moyai.product_billing as billing
+    import moyai.billing.product_billing as billing
 
     monkeypatch.setattr(billing, "MAX_RECORDS", 2)
     observations = [

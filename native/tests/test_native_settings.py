@@ -32,11 +32,9 @@ from moyai.agent import make_agent
 from moyai.api import COOKIE, create_app
 from moyai.contracts import NewMessage, NewSession
 from moyai.models import Connection, Turn, User, new_id
-from moyai.runtime import configure
-from moyai.security import check_password, password_hash
-from moyai.settings_api import routes
-from moyai.settings_models import SettingAutomation, SettingAutomationRun, SettingSecret
-from moyai.settings_runtime import (
+from moyai.preferences.settings_api import routes
+from moyai.preferences.settings_models import SettingAutomation, SettingAutomationRun, SettingSecret
+from moyai.preferences.settings_runtime import (
     SETTINGS_ACTIVITIES,
     SETTINGS_WORKFLOWS,
     SettingsAutomationWorkflow,
@@ -47,6 +45,8 @@ from moyai.settings_runtime import (
     schedule_id,
     settings_worker_identity,
 )
+from moyai.runtime import configure
+from moyai.security import check_password, password_hash
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
@@ -783,7 +783,7 @@ async def test_automation_revocation_between_owner_lookup_and_native_submit_deni
 async def test_automation_mutation_does_not_return_prompt_after_revocation_during_rpc(
     runtime, actor, monkeypatch, create,
 ):
-    from moyai import settings_api
+    from moyai.preferences import settings_api
 
     owner = await member(runtime)
     row = await automation(runtime, owner)
@@ -915,7 +915,7 @@ async def test_long_read_rechecks_revoked_actor_before_returning(runtime, actor,
 
 
 async def test_memory_write_rechecks_authorization_after_namespace_lookup(runtime, actor, monkeypatch):
-    from moyai import settings_api
+    from moyai.preferences import settings_api
     entered, release = asyncio.Event(), asyncio.Event()
     original = settings_api.memory_path
 

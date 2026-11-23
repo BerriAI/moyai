@@ -64,10 +64,10 @@ from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
 from .input_identity import DELEGATED_INPUT, input_identity
 from .live_events import root_event_stream
+from .preferences.settings_runtime import settings_capability
 from .private_history import PrivateHistoryRecall
 from .request_limits import UnlimitedModelRequests
 from .settings import Settings
-from .settings_runtime import settings_capability
 from .storage import ObjectStore
 from .stores import NativeStores
 from .swarm_tools import SwarmCapability

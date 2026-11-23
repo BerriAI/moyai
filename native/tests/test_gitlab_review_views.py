@@ -17,7 +17,6 @@ from pydantic_ai.tools import ToolDefinition
 from sqlalchemy import func, select
 from test_pull_requests import client_for
 
-from moyai.analytics_service import unique_publications
 from moyai.contracts import Grant, NewMessage, NewSession, RunScope
 from moyai.effects import EffectReceipts, effect_id
 from moyai.links import LinkInput, save_link
@@ -36,6 +35,7 @@ from moyai.product_gitlab_publication import Publications
 from moyai.product_gitlab_workflows import Workflows
 from moyai.product_identity import ProductGrant
 from moyai.pull_requests import PullRequestService, parse_pr_url
+from moyai.reporting.analytics_service import unique_publications
 from moyai.slack_messages import pr_cards, without_pr_references
 
 ORIGIN = "https://gitlab.example"

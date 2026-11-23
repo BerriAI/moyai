@@ -11,8 +11,8 @@ from pydantic_ai import Agent
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurability
 from temporalio.testing import WorkflowEnvironment
 
+from moyai.preferences.settings_runtime import SETTINGS_WORKER_PREFIX
 from moyai.product_memory_review import MemoryReviewWorkflow
-from moyai.settings_runtime import SETTINGS_WORKER_PREFIX
 from moyai.storage import encrypted_converter
 from moyai.worker import dispatch_once, make_worker
 

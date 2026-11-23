@@ -13,8 +13,8 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai_harness.ask_user import AskUserRequest
 
 from .gateway_config import GatewayConfig, GatewayDiscovery
-from .general_preferences import GeneralPreferences
 from .mcp_remote import RemoteMCPConfig
+from .preferences.general_preferences import GeneralPreferences
 from .product_history import absent
 
 if TYPE_CHECKING:

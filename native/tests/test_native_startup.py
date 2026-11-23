@@ -22,7 +22,7 @@ from temporalio.testing import WorkflowEnvironment
 from moyai.agent import make_agent
 from moyai.contracts import NewMessage, NewSession, RunScope
 from moyai.models import Effect, Turn, User
-from moyai.settings_runtime import SETTINGS_ACTIVITIES, SettingsSkills, settings_skill_catalog
+from moyai.preferences.settings_runtime import SETTINGS_ACTIVITIES, SettingsSkills, settings_skill_catalog
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow

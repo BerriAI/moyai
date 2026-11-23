@@ -13,8 +13,8 @@ from sqlalchemy import text
 from test_product_authority import active_turn, demote
 
 from moyai.models import Session, User
+from moyai.preferences.settings_api import routes
 from moyai.private_instructions import PrivateInstructions, preferences_for_user
-from moyai.settings_api import routes
 
 admitted_product = authority_fixtures.admitted_product
 

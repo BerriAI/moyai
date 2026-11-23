@@ -23,9 +23,9 @@ from test_native_settings import automation, client_for, member
 from moyai.agent import make_agent
 from moyai.contracts import ExecutionContext
 from moyai.models import Message, Session, SlackThread, Turn, User
+from moyai.preferences.settings_models import SettingAutomationRun
 from moyai.private_instructions import PrivateInstructions
 from moyai.product_automation_models import ProductAutomationTurn
-from moyai.settings_models import SettingAutomationRun
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity

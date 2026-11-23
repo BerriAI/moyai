@@ -15,7 +15,7 @@ from moyai.contracts import NewMessage, NewSession
 from moyai.inference_usage import INFERENCE_ACTIVITY, InferenceActivity, InferenceUsageTransport
 from moyai.models import Event, Session, Turn
 from moyai.performance import PREFIX, evidence, record_dispatch
-from moyai.performance_report import cards, timing_view, turn_timing
+from moyai.reporting.performance_report import cards, timing_view, turn_timing
 
 
 @pytest.mark.parametrize("surface", ["web", "slack", "automation"])
