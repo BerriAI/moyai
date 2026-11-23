@@ -17,8 +17,8 @@ const fixture = `
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button } from '@/components/ui/button';
-import { WorkspaceOverlay, WorkspaceOverlayTrigger, WorkspaceOverlayContent } from '../native/web/workspace-overlay';
-import { WorkspaceOverview } from '../native/web/workspace';
+import { WorkspaceOverlay, WorkspaceOverlayTrigger, WorkspaceOverlayContent } from '../native/web/workspace/workspace-overlay';
+import { WorkspaceOverview } from '../native/web/workspace/workspace';
 function Fixture() {
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState(new URLSearchParams(location.search).get('panel') !== 'closed');
