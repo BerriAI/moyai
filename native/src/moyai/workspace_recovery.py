@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from sqlalchemy import select, update
 
 from .contracts import PreparedTurn, RunScope
-from .models import ComputerLease, ComputerOperation, Effect, Session, Turn, User
+from .models import ComputerLease, ComputerOperation, Effect, Event, Session, Turn, User
 from .performance import ComputerTiming, computer_timing
 from .product_continuation_errors import preparation_blocked
 
@@ -142,10 +142,12 @@ async def live_sandbox(reference: dict) -> bool:
 
 async def validate_checkpoint(
     database: Database, db: AsyncSession, session: Session, scope: RunScope, reference: dict,
+    *, require_image: bool = True, allow_stopped: bool = False,
 ) -> WorkspaceCheckpoint:
     saved = checkpoint(session.snapshot)
     if (
-        saved is None or not saved.image_id or saved.workspace != reference or saved.session_id != session.id
+        saved is None or (require_image and not saved.image_id)
+        or saved.workspace != reference or saved.session_id != session.id
         or saved.scope != scope.workspace_key or session.workspace_scope != saved.scope
         or session.conversation is None
         or hashlib.sha256(database.security.unseal(session.conversation)).hexdigest() != saved.conversation_digest
@@ -162,7 +164,8 @@ async def validate_checkpoint(
     else:
         valid_source = valid_source and source is not None and (
             source.result_accepted and source.result_fingerprint == saved.result_fingerprint
-            and source.status in {"completed", "waiting", "resumed"}
+            and source.status in ({"completed", "waiting", "resumed", "stopped"} if allow_stopped
+                                  else {"completed", "waiting", "resumed"})
         )
     if not valid_source:
         raise preparation_blocked("workspace_checkpoint_missing")
@@ -318,6 +321,19 @@ async def _prepare_workspace(
                 await preserve_restoration(db, session.id, reference["id"], replacement["id"], scope.workspace_key)
         prepared.workspace = replacement
         session.workspace = json.dumps(replacement)
+        recovered = await db.scalar(select(Event).where(
+            Event.session_id == session.id, Event.kind == "computer_recovered",
+        ).order_by(Event.id.desc()).limit(1))
+        if recovered is not None:
+            details = json.loads(database.security.unseal(recovered.content))
+            if details.get("restored") == reference["id"]:
+                # Human recovery changes the computer without rewriting model
+                # history. Tell the next execution not to trust old paths/tabs.
+                prepared.prompt += (
+                    "\n\nComputer recovery notice: " + details["notice"]
+                    + " Inspect current files and list browser tabs before using old paths or tab IDs. "
+                    "Prior actions and approvals remain recorded; do not repeat completed actions."
+                )
         # Once the SDK can mutate this computer, the preceding savepoint is no
         # longer current. A crash cannot silently roll files back to that point.
         session.snapshot = None

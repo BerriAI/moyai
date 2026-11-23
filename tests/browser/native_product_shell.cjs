@@ -125,6 +125,7 @@ async function handle(req,res,next) {
         state.computer={...state.computer,controlled:false,can_release:false,controller:null};
         return json({controlled:false,available:null,width:null,height:null});
       }
+      if(req.method==='POST'&&state.computerResult)return json(state.computerResult);
       return json({available:false,has_workspace:true,controlled:false,can_release:false,busy:false,controller:null,...state.computer});
     }
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
@@ -289,6 +290,34 @@ function loginRequest() {
   return {calls:[{tool_call_id:'login-call',tool_name:'request_browser_login',args:{url:'https://portal.example.test',reason:'Inspect the protected report.'}}],
     approvals:[],metadata:{'login-call':{kind:'browser_login',site:'https://portal.example.test',reason:'Inspect the protected report.',workspace_id:'test-computer'}}};
 }
+for(const width of [1440,768,320])test(`Reconnect recovers the desktop without answering sign-in at ${width}px`,async t=>{
+  reset({status:'waiting',canAnswer:true,canReply:false,pending:loginRequest(),computer:{available:true},
+    sessionOverrides:{[sessionId]:{workspace:{provider:'modal',id:'test-computer'}}}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const reconnect=page.getByRole('button',{name:'Reconnect',exact:true});
+  await reconnect.waitFor();
+  await reconnect.click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/computer')&&row.body?.action==='reconnect'));
+  assert.equal(state.requests.filter(row=>row.body?.action==='reconnect').length,1);
+  assert.equal(state.requests.some(row=>row.path.endsWith('/answers')),false);
+  assert.equal(state.requests.some(row=>row.body?.action==='claim'),false);
+  assert.equal(state.pending.calls[0].tool_name,'request_browser_login');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+for(const width of [1440,768,320])test(`Open computer recovers an idle workspace and explains fresh replacement at ${width}px`,async t=>{
+  const notice='Started a new computer because no current filesystem backup was available. Files and browser state from the expired computer were not recovered. Your chat and saved downloads are retained.';
+  reset({status:'idle',computer:{available:false},computerResult:{available:true,controlled:false,notice},
+    sessionOverrides:{[sessionId]:{workspace:{provider:'modal',id:'expired-computer'}}}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('button',{name:'Open side panel',exact:true}).click();
+  await page.getByRole('button',{name:'Add panel tab',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Computer Your session’s desktop and browser'}).click();
+  await page.getByRole('button',{name:'Open computer',exact:true}).click();
+  await page.getByText(notice,{exact:true}).waitFor();
+  assert.equal(state.requests.filter(row=>row.body?.action==='reconnect').length,1);
+  assert.equal(state.requests.some(row=>row.body?.action==='start'||row.body?.action==='claim'),false);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
 for(const width of [1440,768,320])test(`browser sign-in opens Computer and submits an explicit acknowledgement at ${width}px`,async t=>{
   reset({status:'waiting',canAnswer:true,canReply:false,pending:loginRequest()});
   const page=await pageFor(t,'#'+sessionId,width);
@@ -408,6 +437,12 @@ async function palette(page) {await page.keyboard.press('Control+k');const dialo
 before(async()=>{
   reset();const {createServer}=await import('vite');
   server=await createServer({configFile:path.resolve('native/web/vite.config.ts'),server:{host:'127.0.0.1',port:0,strictPort:false},plugins:[{name:'synthetic-native-api',configureServer(vite){vite.middlewares.use((req,res,next)=>{void handle(req,res,next).catch(error=>{res.writeHead(500);res.end(JSON.stringify({detail:error.message}));});});}}]});
+  // The fixture has no sandbox. Reject its desktop stream using a real socket
+  // so noVNC receives the same disconnect lifecycle as an unavailable computer.
+  server.httpServer.on('upgrade',(req,socket)=>{
+    if(req.url?.startsWith('/api/sessions/')&&req.url.includes('/computer/stream?'))
+      socket.end('HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n');
+  });
   await server.listen();base=`http://127.0.0.1:${server.httpServer.address().port}`;browser=await chromium.launch({headless:true});
 });
 after(async()=>{for(const client of clients)client.end();await browser?.close();await server?.close();});

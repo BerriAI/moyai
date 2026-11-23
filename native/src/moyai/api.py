@@ -848,7 +848,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                     if call is None or call.tool_name != TOOL_NAME:
                         raise HTTPException(422, "Unknown browser sign-in request.")
                     calls[identity] = await login_result(
-                        db, session_id, (pending.metadata or {}).get(identity) or {}, outcome,
+                        db, session_id, (pending.metadata or {}).get(identity) or {}, outcome, turn_id=turn.id,
                     )
             for identity, value in body.answers.items():
                 call = questions.get(identity)

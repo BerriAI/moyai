@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
@@ -33,6 +33,7 @@ VIEW_PORT = 6081
 CONTROL_PORT = 6080
 RECHECK_SECONDS = 1
 MAX_CLIENT_MESSAGE = 1024 * 1024
+DESKTOP_KEEPALIVE_SECONDS = 20  # Below the minimum configured idle timeout (60s).
 logger = logging.getLogger(__name__)
 
 
@@ -188,7 +189,28 @@ async def upstream(access: StreamAccess) -> AsyncIterator[ClientConnection]:
         compression=None, max_size=16 * 1024 * 1024, max_queue=8,
         open_timeout=15, close_timeout=3, ping_interval=20, ping_timeout=20, proxy=None,
     ) as connection:
-        yield connection
+        # A waiting login has no running workflow maintenance. Keep the existing
+        # computer alive only while this authorized foreground stream is open.
+        maintenance = asyncio.create_task(keep_desktop_alive(sandbox))
+        try:
+            yield connection
+        finally:
+            maintenance.cancel()
+            with suppress(asyncio.CancelledError):
+                await maintenance
+
+
+async def keep_desktop_alive(sandbox) -> None:
+    while True:
+        await asyncio.sleep(DESKTOP_KEEPALIVE_SECONDS)
+        try:
+            async with asyncio.timeout(15):
+                process = await sandbox.exec.aio("/bin/true", timeout=10)
+                await process.wait.aio()
+        except Exception as error:  # noqa: BLE001 - maintenance retries sanitized provider failures
+            # A transient keepalive failure is not evidence of expiry. The
+            # stream owns liveness/errors; never log provider connection details.
+            logger.warning("Desktop idle maintenance failed (%s).", type(error).__name__)
 
 
 async def relay(runtime: Runtime, socket: WebSocket, remote: ClientConnection, access: StreamAccess) -> None:

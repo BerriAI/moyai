@@ -76,9 +76,15 @@ def terminal():
 def ensure_process(name, *command):
     pid_file = STATE / f"{name}.pid"
     try:
-        os.kill(int(pid_file.read_text()), 0)
+        process = Path(f"/proc/{int(pid_file.read_text())}")
+        running = tuple(os.fsdecode(part) for part in (process / "cmdline").read_bytes().split(b"\0") if part)
+        if running and (Path(running[0]).name, *running[1:]) == (Path(command[0]).name, *command[1:]):
+            return
     except (OSError, ValueError):
-        pid_file.write_text(str(launch(*command).pid))
+        pass
+    # A filesystem snapshot retains PID files, not processes. The new machine
+    # can reuse that PID for an unrelated program; leave it alone and start ours.
+    pid_file.write_text(str(launch(*command).pid))
 
 
 def ensure_stream_process(name, deadline, *command):
@@ -90,11 +96,9 @@ def ensure_stream_process(name, deadline, *command):
         running = tuple(part.decode() for part in (process / "cmdline").read_bytes().split(b"\0") if part)
         if running == command:
             return
-        if running:
+        if running and running[:6] == command[:6]:
             # Both command prefixes include the display/listen port, in addition
             # to the executable. A stale PID must not target an unrelated app.
-            if running[:6] != command[:6]:
-                raise RuntimeError("The desktop stream process changed identity.")
             os.kill(pid, signal.SIGTERM)
             for _ in range(50):
                 remaining(deadline, 1)
@@ -293,8 +297,16 @@ def start(deadline):
             time.sleep(.1)
         else:
             raise RuntimeError("The browser did not open.")
-    subprocess.run(["xdotool", "windowactivate", "--sync", existing[-1]],
-                   env=ENV, check=True, timeout=remaining(deadline, 5))
+    # A recovered browser can already be visible while its new window manager
+    # is still starting. Wait for activation instead of failing that recovery.
+    for _ in range(50):
+        activated = subprocess.run(["xdotool", "windowactivate", "--sync", existing[-1]],
+                                   env=ENV, check=False, capture_output=True, timeout=remaining(deadline, 5))
+        if activated.returncode == 0:
+            break
+        time.sleep(.1)
+    else:
+        raise RuntimeError("The desktop window manager did not start.")
     for _ in range(100):
         remaining(deadline, 1)
         if browser_runtime.endpoint_alive():

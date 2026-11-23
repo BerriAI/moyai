@@ -13,12 +13,13 @@ from pydantic_ai.capabilities import Toolset, durable_operation
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.workspaces import WorkspaceRef
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .computer import DESKTOP_VERSION, ComputerCommand
 from .contracts import RunScope
 from .database import Database
-from .models import ComputerDesktop, ComputerLease, ComputerOperation, Session, Turn, User, new_id
+from .models import ComputerDesktop, ComputerLease, ComputerOperation, Event, Session, Turn, User, new_id
 
 TOOL_NAME = "request_browser_login"
 LoginOutcome = Literal["signed_in", "cancelled"]
@@ -72,7 +73,7 @@ class BrowserLogin(Toolset[RunScope]):
 
 
 async def login_result(
-    db: AsyncSession, session_id: str, metadata: dict, outcome: LoginOutcome,
+    db: AsyncSession, session_id: str, metadata: dict, outcome: LoginOutcome, *, turn_id: str | None = None,
 ) -> dict[str, str]:
     """An explicit acknowledgement is never an authentication-success receipt."""
     if metadata.get("kind") != "browser_login":
@@ -85,15 +86,39 @@ async def login_result(
     session = await db.get(Session, session_id, populate_existing=True)
     desktop = await db.get(ComputerDesktop, session_id, populate_existing=True)
     reference = TypeAdapter(WorkspaceRef).validate_python(json.loads(session.workspace)) if session and session.workspace else None
+    restored = False
+    original_turn = turn_id or (session.active_turn if session else None)
+    if original_turn and reference and reference.id != metadata.get("workspace_id"):
+        from .computer_recovery import login_restoration_id
+
+        restored = bool(await db.scalar(select(Event.id).where(
+            Event.session_id == session_id, Event.turn_id == original_turn,
+            Event.kind == "browser_login_restored",
+            Event.identity == login_restoration_id(
+                original_turn, str(metadata.get("workspace_id", "")), reference.id,
+            ),
+        )))
     if (
-        not reference or reference.provider != "modal" or reference.id != metadata.get("workspace_id")
+        not reference or reference.provider != "modal"
+        or (reference.id != metadata.get("workspace_id") and not restored)
         or not desktop or desktop.workspace_id != reference.id or desktop.version != DESKTOP_VERSION
     ):
         raise HTTPException(409, "The computer changed. Cancel this request and ask Moyai to reopen the sign-in page.")
+    instruction = (
+        "Use browser_read to verify that the requested site is accessible before continuing. "
+        "The user's confirmation alone does not prove authentication succeeded."
+    )
+    if restored:
+        instruction = (
+            "The computer was replaced and Chromium restarted. "
+            "Previous tab IDs and page targets are stale. First call browser_read with mode='tabs' "
+            "and no tab_id, then inspect the requested site using a newly observed tab ID. "
+            + instruction
+        )
     return {
         "status": "user_reported_signed_in",
         "site": metadata["site"],
-        "instruction": "Use browser_read to verify that the requested site is accessible before continuing. The user's confirmation alone does not prove authentication succeeded.",
+        "instruction": instruction,
     }
 
 
@@ -121,7 +146,10 @@ async def handoff_login_control(
         return
     for call in confirmed:
         # The computer can change between HTTP validation and admission.
-        await login_result(db, previous.session_id, (pending.metadata or {}).get(call.tool_call_id) or {}, "signed_in")
+        await login_result(
+            db, previous.session_id, (pending.metadata or {}).get(call.tool_call_id) or {}, "signed_in",
+            turn_id=previous.id,
+        )
     control = await db.get(ComputerLease, previous.session_id)
     stamp = time.time()
     if control and control.expires_at > stamp and not await database.same_person(db, actor, control.actor_id):

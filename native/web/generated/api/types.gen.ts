@@ -2777,7 +2777,7 @@ export type ComputerCommand = {
     /**
      * Action
      */
-    action: 'start' | 'claim' | 'release' | 'handoff' | 'heartbeat' | 'open' | 'terminal' | 'click' | 'type' | 'key' | 'scroll';
+    action: 'start' | 'reconnect' | 'claim' | 'release' | 'handoff' | 'heartbeat' | 'open' | 'terminal' | 'click' | 'type' | 'key' | 'scroll';
     /**
      * Alt
      */
@@ -2844,6 +2844,10 @@ export type ComputerControlResult = {
      * Height
      */
     height: number | null;
+    /**
+     * Notice
+     */
+    notice: string | null;
     /**
      * Width
      */

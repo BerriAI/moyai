@@ -204,6 +204,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .desktop-control-prompt strong { font-size: 15px; font-weight: 500; }
 .desktop-control-prompt > span { font-size: 12px; font-weight: 400; color: var(--ui-foreground); }
 .desktop-notice { position: absolute; z-index: 3; inset-inline: 12px; bottom: 12px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); color: var(--ui-danger); font-size: 12px; }
+.desktop-notice[role="status"] { color: var(--ui-foreground); }
 .desktop-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .desktop-notice > button { flex: none; }
 
