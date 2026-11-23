@@ -1,4 +1,4 @@
-import { sessionIsReadOnly, sessionKey, type SidebarSession } from "./session-actions"
+import { sessionIsReadOnly, sessionKey, type SidebarSession } from "./conversations/session-list"
 
 /** Native ancestry is independent of source-qualified historical session IDs. */
 export function sessionTree(sessions: SidebarSession[]) {

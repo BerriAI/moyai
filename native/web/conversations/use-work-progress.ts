@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ApiError, csrfToken } from "./api"
-import { getTurnProgress } from "./generated/api"
+import { ApiError, csrfToken } from "../api"
+import { getTurnProgress } from "../generated/api"
 import type { Turn } from "./conversation-state"
-import { pollVisible } from "./polling"
+import { pollVisible } from "../polling"
 import type { WorkEntry } from "./work-timeline"
 
 /** One shared read per execution, even when steering splits its visible history. */

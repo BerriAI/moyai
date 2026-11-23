@@ -1,6 +1,6 @@
-import type { UploadedFile } from "./attachment-uploads"
-import type { SidebarSession } from "./session-actions"
-import type { GoalStartedResult, SessionDetailSession, SessionMessage, SessionSummary, SessionTurn, TurnView } from "./generated/api"
+import type { UploadedFile } from "../attachment-uploads"
+import type { SidebarSession } from "./session-list"
+import type { GoalStartedResult, SessionDetailSession, SessionMessage, SessionSummary, SessionTurn, TurnView } from "../generated/api"
 
 export type Session = SidebarSession & {
   visibility: string; surface: string; model: string; active_turn: string | null

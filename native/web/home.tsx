@@ -9,7 +9,7 @@ import "./home.css"
 import { csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { GeneralPreferences } from "./general-preferences"
-import type { NewConversation, Session } from "./conversation-state"
+import type { NewConversation, Session } from "./conversations/conversation-state"
 import { createSession, createSessionMessage, listConnections, type ConnectionView, type NewSession } from "./generated/api"
 
 type HomeConnection = Pick<ConnectionView, "id" | "name" | "enabled" | "shared" | "read_only">

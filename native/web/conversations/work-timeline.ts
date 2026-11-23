@@ -1,6 +1,6 @@
 import type { Message, Turn } from "./conversation-state"
 import { progressMessages, type LiveTranscript, type ProgressMessage } from "./live-transcript"
-import type { TurnWorkProgress, WorkAgentProgress, WorkToolProgress } from "./generated/api"
+import type { TurnWorkProgress, WorkAgentProgress, WorkToolProgress } from "../generated/api"
 
 export type ToolProgress = WorkToolProgress
 export type AgentProgress = WorkAgentProgress

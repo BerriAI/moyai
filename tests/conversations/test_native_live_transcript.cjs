@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
-const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../native/web/live-transcript.ts'), 'utf8'), {
+const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../../native/web/conversations/live-transcript.ts'), 'utf8'), {
   compilerOptions: {module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022},
 }).outputText;
 const loaded = import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);

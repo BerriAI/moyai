@@ -5,7 +5,7 @@ const test = require("node:test")
 const ts = require("typescript")
 const exportsObject = {}
 new Function("exports", ts.transpileModule(
-  fs.readFileSync(path.join(__dirname, "../native/web/session-updates.ts"), "utf8"),
+  fs.readFileSync(path.join(__dirname, "../../native/web/conversations/session-updates.ts"), "utf8"),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
 ).outputText)(exportsObject)
 const { SessionUpdates, sessionUpdatePatch } = exportsObject

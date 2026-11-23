@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer } from "react"
-import { updateSession } from "./generated/api"
+import { updateSession } from "../generated/api"
 import { SessionUpdates } from "./session-updates"
 
 export function useSessionUpdates(scope: string) {

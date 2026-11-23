@@ -114,6 +114,14 @@ The frontend is `native/web`, using `frontend/components/ui` and `frontend/theme
 Its generated build is served from `native/src/moyai/static`. The wheel includes
 both the runtime and shared `app` package, so it works outside this checkout.
 
+`native/web/conversations` owns conversation state: inventory, history/live
+lifecycle, pending session edits and work progress. Renderers consume its
+individual files; state does not import renderers, and shared transport does not
+import features. The [conversation module guide](../native/web/conversations/README.md)
+maps interfaces to their responsibilities and documents the import rules enforced
+by `tests/conversations`. Consolidate other features only when their interfaces
+are stable; this is not a requirement to relocate every flat module at once.
+
 See [deployment](pydantic-deployment.md) for the exact ownership and migration
 contracts, [usage](usage.md) for supported behavior, and [scope](consolidation.md)
 for deferred features.

@@ -1,3 +1,4 @@
+import { sessionIsReadOnly, sessionHash, type SidebarSession, type SessionFolder } from "./conversations/session-list"
 import { appPath } from "./api"
 import React, { createContext, useContext, useEffect, useRef, useState } from "react"
 import { Archive, Check, ChevronRight, Copy, Download, Folder, FolderPlus, History, Mail, MessageSquare, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
@@ -5,25 +6,13 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { createSessionFolder, deleteSessionFolder, renameSessionFolder, type PullRequestStatus, type SessionFolderView } from "./generated/api"
+import { createSessionFolder, deleteSessionFolder, renameSessionFolder } from "./generated/api"
 import { deleteSession, restoreSession, updateSession, type SessionEdit } from "./generated/api"
-import { sessionUpdatePatch, type SessionUpdates } from "./session-updates"
+import { sessionUpdatePatch, type SessionUpdates } from "./conversations/session-updates"
 import { downloadDebugTrace } from "./debug-trace"
 import { ApiError } from "./api"
 import { SlackSessionDialog } from "./slack-session-dialog"
 
-export type SidebarSession = {
-  id: string; title: string; owner_id: string; status: string; archived: boolean; deleted?: boolean
-  can_manage?: boolean; pinned?: boolean; folder?: string; participated?: boolean; created_by_me?: boolean; unread?: boolean; updated_at?: string
-  surface?: string
-  parent_session_id?: string | null
-  source?: "native" | "legacy"; key?: string; url?: string; read_only?: boolean; deleting?: boolean; folder_id?: string | null
-  pull_requests?: PullRequestStatus[]
-}
-export const sessionIsReadOnly = (row: SidebarSession) => row.source === "legacy" || row.read_only === true
-export const sessionKey = (row: SidebarSession) => row.key ?? `${row.source ?? "native"}:${row.id}`
-export const sessionHash = (row: SidebarSession) => `${row.source === "legacy" ? "run=" : ""}${encodeURIComponent(row.id)}`
-export type SessionFolder = SessionFolderView
 type Action = "rename" | "move" | "archive" | "delete" | "restore" | "folder-create" | "folder-rename" | "folder-remove"
 type Editor = { action: Action; session?: SidebarSession; folder?: SessionFolder }
 type Actions = {
