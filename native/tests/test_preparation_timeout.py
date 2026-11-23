@@ -63,7 +63,7 @@ async def test_preparation_notice_is_allowlisted_and_replay_compatible(runtime, 
     code = "recovery_collection_incomplete" if known else "untrusted-provider-code"
     async def blocked(_turn_id):
         raise ApplicationError("private-provider-detail", code, type=PREPARATION_BLOCKED_TYPE, non_retryable=True)
-    monkeypatch.setattr(runtime.database, "prepare", blocked)
+    monkeypatch.setattr(runtime.admission, "prepare", blocked)
     original_patched = workflow.patched
     if old_history:
         def before_notice(identity, **kwargs):

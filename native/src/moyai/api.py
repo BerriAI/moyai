@@ -727,7 +727,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
             body = body.model_copy(update={"prompt": await runtime.skill_invocations.normalize(body.prompt, user, session)})
-        return TurnView.model_validate(turn_view(await runtime.database.submit(
+        return TurnView.model_validate(turn_view(await runtime.admission.submit(
             user, session_id, body, received_at=request.state.moyai_received_at,
         )))
 

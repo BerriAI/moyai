@@ -320,7 +320,7 @@ async def test_delete_between_authorization_and_admission_cannot_leave_queued_wo
                 actor = await db.scalar(select(User).where(User.username == "admin"))
         session = await submitting.create_session(actor, NewSession())
         checked, release = asyncio.Event(), asyncio.Event()
-        original = submitting._submit
+        original = submitting.admission._submit
 
         async def delayed(user, session_id, body, fingerprint, **kwargs):
             # Simulate access checked before admission, then let deletion win.
@@ -331,7 +331,7 @@ async def test_delete_between_authorization_and_admission_cannot_leave_queued_wo
             await release.wait()
             return await original(user, session_id, body, fingerprint, **kwargs)
 
-        monkeypatch.setattr(submitting, "_submit", delayed)
+        monkeypatch.setattr(submitting.admission, "_submit", delayed)
         task = asyncio.create_task(submitting.submit(actor, session.id, NewMessage(
             prompt="Racing deletion", request_key="delete-wins",
         )))

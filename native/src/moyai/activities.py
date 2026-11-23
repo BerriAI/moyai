@@ -30,7 +30,7 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
     heartbeats = asyncio.create_task(heartbeat()) if recover_workspace and activity.in_activity() else None
     try:
         runtime = current()
-        prepared = await runtime.database.prepare(turn_id)
+        prepared = await runtime.admission.prepare(turn_id)
         if recover_workspace and runtime.product is None:
             prepared = await prepare_workspace(runtime, prepared)
         if runtime.product is not None:
@@ -126,7 +126,7 @@ async def prepare_steering(parent_id: str, turn_id: str) -> SteeringInput:
     from .skill_invocations import has_invocations
     if has_invocations(prepared.prompt):
         try:
-            parent = await runtime.database.prepare(parent_id)
+            parent = await runtime.admission.prepare(parent_id)
             prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, parent.scope, input_turn_id=turn_id)
         except HTTPException as error:
             raise ApplicationError(str(error.detail), type="SkillUnavailable", non_retryable=True) from error

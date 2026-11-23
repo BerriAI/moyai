@@ -54,6 +54,28 @@ process lifespan. `api_views.py` holds their wire models and the shared session
 and turn projections used by mutation receipts. Session inventory and paged
 history remain in `product_routes.py`; reads never admit or resume execution.
 
+## Turn admission
+
+`turn_admission.py` owns `TurnAdmission.submit` and `prepare`: input validation,
+request fingerprints, duplicate detection, user/session fences, generated-input
+provenance, attachment reservation and the authorized preparation checkpoint.
+The HTTP send handler and preparation activities use `Runtime.admission`.
+The module takes the existing `Database` as its persistence and policy dependency,
+without a Runtime or model. It reads that dependency's current session factory and
+product adapters on each operation, including after startup installs role authority.
+
+Generated input requires the caller's native transaction. The caller keeps its
+occurrence receipt, turn and commit/rollback together; admission never recovers a
+conflict in a separate transaction. Product authority still precedes the user,
+swarm and session fences. Audience prefetch stays outside an owned transaction;
+final authorization and the commit-bound dispatch notification stay inside it.
+
+`Database.submit` and `prepare` temporarily forward for generated-input modules
+and existing integrations. Remove those forwarding methods once those callers
+and their tests use `database.admission` or `Runtime.admission`. Session creation,
+authority helpers, continuation/resume and dispatch remain on Database; answer
+settlement and read projections keep their existing owners.
+
 ## Connector execution and answer settlement
 
 `product_connector_execution.py` owns canonical connection execution: worker
