@@ -188,11 +188,13 @@ async def exchange(
         payload["resource"] = definition.resource
     value = await provider_request(definition.token_url, data=payload)
     token, refresh, expires = value.get("access_token"), value.get("refresh_token"), value.get("expires_in", 0)
+    # Slack's user-only OAuth endpoint labels bearer credentials as "user".
+    token_types = {"bearer", "user"} if provider == "slack" else {"bearer"}
     if (
         not isinstance(token, str) or not token or len(token) > 32768
         or any(ord(char) < 33 or ord(char) > 126 for char in token)
         or not isinstance(value.get("token_type", "bearer"), str)
-        or value.get("token_type", "bearer").lower() != "bearer"
+        or value.get("token_type", "bearer").lower() not in token_types
         or not isinstance(expires, (int, float)) or not 0 <= expires <= 10 * 365 * 86400
         or (refresh is not None and (not isinstance(refresh, str) or len(refresh) > 32768))
     ):

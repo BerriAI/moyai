@@ -223,6 +223,7 @@ async def test_provider_protocol_never_sends_secret_to_authorization_url(runtime
         sent.append((url, kwargs))
         return {"client_id": "registered-client"} if url.endswith("/register") else {
             "access_token": "access-token", "refresh_token": "new-refresh", "expires_in": 3600,
+            "token_type": "user" if provider == "slack" else "bearer",
         }
     monkeypatch.setattr(oauth_providers, "provider_request", request)
     client = await oauth_providers.register(runtime.settings, provider)
@@ -235,6 +236,17 @@ async def test_provider_protocol_never_sends_secret_to_authorization_url(runtime
     await oauth_providers.exchange(provider, client, previous=tokens)
     assert sent[-1][1]["data"]["refresh_token"] == "new-refresh"
     assert "code" not in sent[-1][1]["data"]
+
+
+@pytest.mark.parametrize("provider,token_type", [("slack", "bot"), ("linear", "user"), ("github", "user")])
+async def test_provider_token_type_does_not_admit_a_different_credential(monkeypatch, provider, token_type):
+    async def request(url, **kwargs):
+        return {"access_token": "access-token", "token_type": token_type}
+
+    monkeypatch.setattr(oauth_providers, "provider_request", request)
+    client = OAuthClient(client_id="client", redirect_uri="https://moyai.test/callback")
+    with pytest.raises(oauth_providers.OAuthFailure, match="invalid token"):
+        await oauth_providers.exchange(provider, client, code="code", verifier="verifier")
 
 
 async def test_personal_tools_approval_live_tokens_and_revocation(runtime, actor, oauth, monkeypatch):
