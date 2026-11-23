@@ -119,8 +119,17 @@ lifecycle, pending session edits and work progress. Renderers consume its
 individual files; state does not import renderers, and shared transport does not
 import features. The [conversation module guide](../native/web/conversations/README.md)
 maps interfaces to their responsibilities and documents the import rules enforced
-by `tests/conversations`. Consolidate other features only when their interfaces
-are stable; this is not a requirement to relocate every flat module at once.
+by `tests/conversations`.
+
+`native/web/automations` owns the saved product automation editor, review,
+history presentation and validation. Settings imports its page and UTC date
+helpers; it retains navigation and the existing lazy entrypoint.
+The [automation module guide](../native/web/automations/README.md) documents
+these interfaces and the import rules enforced by `tests/automations`,
+including JavaScript helpers and their declarations. Shared controls and
+transport do not import automations. Consolidate other features only when their
+interfaces are stable; this is not a requirement to relocate every flat module
+at once.
 
 See [deployment](pydantic-deployment.md) for the exact ownership and migration
 contracts, [usage](usage.md) for supported behavior, and [scope](consolidation.md)

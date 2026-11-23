@@ -2,13 +2,13 @@ import type {
   EventTriggerInput, ProductAutomationDefinition, ProductAutomationHistoryEntry, ProductAutomationPreview,
   ProductAutomationSummary, TimingOutput, ProductAutomationTrigger,
   OrganizationConnection,
-} from "./generated/api"
+} from "../generated/api"
 
 export type {
   ProductAutomationHistoryPage as AutomationHistoryPage, ProductAutomationInventory as AutomationInventory,
   ProductAutomationRunResult as AutomationRunResult, ProductAutomationWebhookInfo as AutomationWebhookInfo,
   ProductAutomationWebhookResult as AutomationWebhookResult, ProductAutomationTestResult as AutomationTestResult,
-} from "./generated/api"
+} from "../generated/api"
 
 export type AutomationTiming = TimingOutput
 /** Editor state: a saved event, or a partially filled one; the service validates every field. */
@@ -18,7 +18,7 @@ export type AutomationDefinition = Omit<ProductAutomationDefinition, "triggers">
 export type ProductAutomation = ProductAutomationSummary
 export type AutomationPreview = ProductAutomationPreview
 export type AutomationHistory = ProductAutomationHistoryEntry
-export type { ProductEnvironment as AutomationEnvironment } from "./generated/api"
+export type { ProductEnvironment as AutomationEnvironment } from "../generated/api"
 export type AutomationConnection = Pick<OrganizationConnection, "id" | "connected" | "enabled" | "read_only"> & { tools?: OrganizationConnection["tools"] }
 
 export const calendarFrequencies: { value: AutomationTiming["frequency"]; label: string }[] = [

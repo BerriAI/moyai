@@ -7,13 +7,13 @@ const {spawnSync} = require('node:child_process');
 const React = require('react');
 const {renderToStaticMarkup} = require('react-dom/server');
 let server, data, ui, triggers, helpers;
-const root=path.resolve(__dirname,'..');
+const root=path.resolve(__dirname,'../..');
 test.before(async()=>{
   const {createServer}=await import('vite');
   server=await createServer({configFile:path.join(root,'native/web/vite.config.ts'),optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true},appType:'custom'});
-  data=await server.ssrLoadModule('/product-automation-data.ts');
-  ui=await server.ssrLoadModule('/product-automations.tsx');
-  helpers=await server.ssrLoadModule('/automation-helpers.js');
+  data=await server.ssrLoadModule('/automations/product-automation-data.ts');
+  ui=await server.ssrLoadModule('/automations/product-automations.tsx');
+  helpers=await server.ssrLoadModule('/automations/automation-helpers.js');
   triggers=helpers;
 });
 test.after(async()=>{await server?.close();});

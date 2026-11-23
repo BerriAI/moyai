@@ -11,8 +11,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ApiError, csrfToken } from "./api"
 import { getGatewayDefaults, checkConnection, createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
 import { AnalyticsPage } from "./analytics"
-import { ProductAutomationsPage } from "./product-automations"
-import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
+import { ProductAutomationsPage } from "./automations/product-automations"
+import { onceUtcInput, onceUtcInstant } from "./automations/product-automation-data"
 import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "./generated/api"
 import {
   listLinkedSignIns, startGoogleSignIn, startOktaSignIn,

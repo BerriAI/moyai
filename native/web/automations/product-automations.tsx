@@ -9,12 +9,12 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { automationDefaultSchedule, automationEventFields, automationSetupNotes, automationSources, automationTriggers } from "./automation-helpers.js"
 import { automationHistoryMerge, automationRunStatus, automationTiming } from "./automation-helpers.js"
-import { ApiError, csrfToken } from "./api"
+import { ApiError, csrfToken } from "../api"
 import {
   configureProductAutomationWebhook, createProductAutomation, getMe, getProductAutomationPreview, getProductAutomationWebhook,
   listProductAutomationHistory, listProductAutomations, migrateProductAutomation, runProductAutomation, setProductAutomationState,
   testProductAutomationEvent, updateProductAutomation, listSessions, listConnections, type SessionListItem, type ConnectionView,
-} from "./generated/api"
+} from "../generated/api"
 import {
   AutomationRequestKeys, automationActions, automationBlocker, automationMetadata, automationSamplePayload, automationStatus, calendarFrequencies, changeAutomationEvent, changeAutomationEventField, changeAutomationRepository, eventFieldVisible, historySessionHash, isAutomationProvider,
   onceUtcInput, onceUtcInstant, validateAutomation,
@@ -22,7 +22,7 @@ import {
   type AutomationTiming, type AutomationTrigger, type AutomationEvent, type ProductAutomation, type AutomationRunResult,
   type AutomationWebhookResult, type AutomationEnvironment, type AutomationConnection,
 } from "./product-automation-data"
-import { listOrganizationConnections, listProductEnvironments } from "./generated/api"
+import { listOrganizationConnections, listProductEnvironments } from "../generated/api"
 import "./product-automations.css"
 
 const base = "/product/automations"
