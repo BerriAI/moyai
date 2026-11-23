@@ -22,6 +22,7 @@ import {
 import { MoyaiBrand, SidebarToggle } from "../brand"
 import { AppearanceToggle } from "../appearance-toggle"
 import { ProductGitLabSetup } from "./product-gitlab-settings"
+import { PersonalConnections } from "./personal-connections"
 import type { GeneralPreferences } from "./general-preferences"
 import {
   checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
@@ -779,6 +780,7 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
   }
   const authorizationResult = new URLSearchParams(location.search).get("connection")
   return <>
+    <PersonalConnections userId={user.id} individual={user.individual !== false} />
     <section aria-label="Organization connections">
     <h2>Organization connections</h2>
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
@@ -1096,7 +1098,7 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
   const canManage = (row: Connection) => user.individual !== false && row.owner_id === user.id && (!row.shared || user.role === "admin")
   const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", url: row.policy.gateway?.url ?? row.policy.mcp?.url ?? "", shared: row.shared, read_only: row.read_only, enabled: row.enabled, gateway_skills: row.policy.gateway?.skills ?? true, gateway_mcp: row.policy.gateway?.mcp ?? true }, row.policy, row)
   return <LoadState resource={resource}>{data => {
-    const rows = data.filter(row => (!allowedKinds || services.some(service => service.value === row.kind)) && contains(search, row.name, row.kind, row.policy.mcp?.url, row.policy.gateway?.url) && (filter === "all" || row.kind === filter))
+    const rows = data.filter(row => !row.policy.oauth && (!allowedKinds || services.some(service => service.value === row.kind)) && contains(search, row.name, row.kind, row.policy.mcp?.url, row.policy.gateway?.url) && (filter === "all" || row.kind === filter))
     return <><p className="ns-muted">Choose default connections in <a className="ns-link" href="#settings/general">General preferences</a>.</p>
       {user.individual === false && <p className="ns-help">Sign in with your individual work account to add or edit connections.</p>}
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={!mcpOnly && !gatewayOnly && <Choice label="Service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...services]} />}
@@ -1343,7 +1345,10 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
               : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />
-                    : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} /> : <ConnectionsPage user={user} />
+                    : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} /> : <>
+                      <PersonalConnections userId={user.id} individual={user.individual !== false} />
+                      <details className="ns-advanced-connections"><summary>Advanced connections</summary><ConnectionsPage user={user} /></details>
+                    </>
                       : current === "personal-slack" ? <ProductPersonalSlack onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
                       : current === "secrets" ? productMode === "existing" ? <ProductSecretsPage user={user} /> : <SecretsPage user={user} />
                         : current === "users" ? <UsersPage user={user} />

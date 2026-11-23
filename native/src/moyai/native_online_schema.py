@@ -43,6 +43,7 @@ AUTOMATION_CHAT_VERSION = "2026-10-19-automation-chats-v23"
 PRIVATE_AUTOMATION_VERSION = "2026-11-21-private-automations-v24"
 SLACK_WEB_VERSION = "2026-11-21-slack-web-v25"
 SKILL_LEARNING_VERSION = "2026-11-21-skill-learning-v26"
+PERSONAL_OAUTH_VERSION = "2026-11-23-personal-oauth-v27"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -208,6 +209,27 @@ def _skill_learning_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _personal_oauth_tables(metadata: MetaData, schema: str) -> None:
+    Table(
+        "moyai_oauth_credentials", metadata,
+        Column("connection_id", String(36), ForeignKey(f"{schema}.moyai_connections.id"), primary_key=True),
+        Column("encrypted", Text, nullable=False),
+        Column("revision", Integer, nullable=False), schema=schema,
+    )
+    Table(
+        "moyai_oauth_authorizations", metadata,
+        Column("state_hash", String(64), primary_key=True),
+        Column("owner_id", String(512), ForeignKey(f"{schema}.moyai_users.id"), nullable=False, index=True),
+        Column("provider", String(40), nullable=False),
+        Column("session_hash", String(64), nullable=False),
+        Column("auth_version", Integer, nullable=False),
+        Column("connection_id", String(36), ForeignKey(f"{schema}.moyai_connections.id"), nullable=False),
+        Column("connection_revision", Integer, nullable=False),
+        Column("expires_at", Integer, nullable=False),
+        Column("encrypted", Text, nullable=False), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -219,6 +241,8 @@ EXPANSIONS = (
     Expansion(SLACK_WEB_VERSION, SKILL_LEARNING_VERSION, frozenset({
         "moyai_skill_learning_preferences", "moyai_skill_learning_jobs", "moyai_learned_skills",
     }), (), _skill_learning_tables),
+    Expansion(SKILL_LEARNING_VERSION, PERSONAL_OAUTH_VERSION,
+              frozenset({"moyai_oauth_credentials", "moyai_oauth_authorizations"}), (), _personal_oauth_tables),
 )
 
 

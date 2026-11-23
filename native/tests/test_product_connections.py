@@ -20,6 +20,7 @@ from test_product_identity import settings_for
 
 from moyai.contracts import RunScope
 from moyai.models import Base, Connection, User, new_id
+from moyai.oauth_models import OAuthCredential
 from moyai.product_connections import ProductConnections, ProductGitHubToolset
 
 
@@ -182,7 +183,7 @@ async def mixed_connections(bridge, runtime):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: Base.metadata.create_all(
-            sync, tables=[User.__table__, Connection.__table__],
+            sync, tables=[User.__table__, Connection.__table__, OAuthCredential.__table__],
         ))
     async with sessions.begin() as db:
         db.add(User(
@@ -204,6 +205,27 @@ def native_mcp(runtime, **changes):
         policy=json.dumps({"mcp": {"url": "https://mcp.example.test/mcp", "transport": "streamable_http"}}),
         **changes,
     )
+
+
+async def test_product_personal_oauth_is_private_and_requires_registered_credentials(mixed_connections, runtime):
+    service = mixed_connections
+    async with service.database.sessions.begin() as db:
+        row = Connection(id=new_id(), owner_id="google:owner", kind="linear", name="Personal Linear",
+                         credential=runtime.security.seal(""), policy=json.dumps({"oauth": True}))
+        db.add(row)
+        await db.flush()
+        db.add(OAuthCredential(connection_id=row.id, encrypted=runtime.security.seal("private-token")))
+    grants = await service.resolve_grants("google:owner", [row.id])
+    assert len(grants) == 1 and grants[0].policy["oauth"] and grants[0].id == row.id
+    with pytest.raises(HTTPException, match="private conversation"):
+        await service.resolve_grants("google:owner", [row.id], shared_session=True)
+    with pytest.raises(HTTPException):
+        await service.resolve_grants("google:other", [row.id])
+    async with service.database.sessions.begin() as db:
+        saved = await db.get(Connection, row.id)
+        saved.enabled = False
+    with pytest.raises(HTTPException):
+        await service.resolve_grants("google:owner", [row.id])
 
 
 @pytest.mark.parametrize("provider", ["linear", "gitlab"])

@@ -5569,6 +5569,11 @@
               }
             ]
           },
+          "oauth": {
+            "default": false,
+            "title": "Oauth",
+            "type": "boolean"
+          },
           "product": {
             "anyOf": [
               {
@@ -5636,6 +5641,11 @@
               }
             ]
           },
+          "oauth": {
+            "default": false,
+            "title": "Oauth",
+            "type": "boolean"
+          },
           "product": {
             "anyOf": [
               {
@@ -5659,6 +5669,7 @@
         "required": [
           "allowed_tools",
           "require_approval",
+          "oauth",
           "product",
           "mcp",
           "gateway",
@@ -10444,6 +10455,79 @@
           "part_kind"
         ],
         "title": "PendingToolCall",
+        "type": "object"
+      },
+      "PersonalOAuthDisconnected": {
+        "properties": {
+          "connected": {
+            "default": false,
+            "title": "Connected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "connected"
+        ],
+        "title": "PersonalOAuthDisconnected",
+        "type": "object"
+      },
+      "PersonalOAuthStart": {
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "PersonalOAuthStart",
+        "type": "object"
+      },
+      "PersonalOAuthView": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "linear",
+              "notion",
+              "github",
+              "slack"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "name",
+          "configured",
+          "connected",
+          "connection_id"
+        ],
+        "title": "PersonalOAuthView",
         "type": "object"
       },
       "PersonalSlackOAuthStart": {
@@ -22207,6 +22291,118 @@
           }
         },
         "summary": "Me"
+      }
+    },
+    "/api/personal-connections": {
+      "get": {
+        "operationId": "listPersonalConnections",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PersonalOAuthView"
+                  },
+                  "title": "Response Listpersonalconnections",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Inventory"
+      }
+    },
+    "/api/personal-connections/{provider}": {
+      "delete": {
+        "operationId": "disconnectPersonalConnection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "linear",
+                "notion",
+                "github",
+                "slack"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalOAuthDisconnected"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disconnect"
+      }
+    },
+    "/api/personal-connections/{provider}/oauth": {
+      "post": {
+        "operationId": "startPersonalConnection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "linear",
+                "notion",
+                "github",
+                "slack"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalOAuthStart"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start"
       }
     },
     "/api/product/automations": {

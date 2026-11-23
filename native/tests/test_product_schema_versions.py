@@ -29,6 +29,7 @@ from moyai.product_schema import (
     INFERENCE_SCHEMA_VERSION,
     MEMORY_REVIEW_SCHEMA_VERSION,
     MESSAGE_SOURCE_SCHEMA_VERSION,
+    PERSONAL_OAUTH_SCHEMA_VERSION,
     PRIVATE_AUTOMATION_SCHEMA_VERSION,
     SKILL_LEARNING_SCHEMA_VERSION,
     SLACK_ACTIVITY_SCHEMA_VERSION,
@@ -174,6 +175,7 @@ async def test_additive_versions_preserve_every_earlier_receipt(product_database
         DELEGATION_SCHEMA_VERSION, SLACK_ACTIVITY_SCHEMA_VERSION, SLACK_TURN_SOURCE_SCHEMA_VERSION,
         MESSAGE_SOURCE_SCHEMA_VERSION, GOAL_SCHEMA_VERSION, AUTOMATION_CHAT_SCHEMA_VERSION,
         PRIVATE_AUTOMATION_SCHEMA_VERSION, SLACK_WEB_SCHEMA_VERSION, SKILL_LEARNING_SCHEMA_VERSION,
+        PERSONAL_OAUTH_SCHEMA_VERSION,
     ):
         await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai", version=version)
         current = await receipts(product)

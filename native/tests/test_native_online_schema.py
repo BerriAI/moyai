@@ -28,6 +28,7 @@ from moyai.native_online_schema import (
 )
 from moyai.product_schema import (
     AUTOMATION_CHAT_SCHEMA_VERSION,
+    PERSONAL_OAUTH_SCHEMA_VERSION,
     PRIVATE_AUTOMATION_SCHEMA_VERSION,
     SKILL_LEARNING_SCHEMA_VERSION,
     SLACK_WEB_SCHEMA_VERSION,
@@ -177,15 +178,19 @@ async def test_slack_web_expansion_preserves_existing_receipts(product_database)
     await verify_product_schema(product.source, schema=product.schema, version=SLACK_WEB_SCHEMA_VERSION)
 
 
-async def test_skill_learning_expansion_matches_runtime_and_preserves_v25(product_database):
+@pytest.mark.parametrize("before,target", [
+    (SLACK_WEB_SCHEMA_VERSION, SKILL_LEARNING_SCHEMA_VERSION),
+    (SKILL_LEARNING_SCHEMA_VERSION, PERSONAL_OAUTH_SCHEMA_VERSION),
+])
+async def test_latest_expansions_match_runtime_and_preserve_receipts(product_database, before, target):
     product = product_database
     await migrate_product_schema(
-        product.source, schema=product.schema, source_schema="moyai", version=SLACK_WEB_SCHEMA_VERSION,
+        product.source, schema=product.schema, source_schema="moyai", version=before,
     )
-    value = plan("moyai", product.schema, "native-online-test", from_version=SLACK_WEB_SCHEMA_VERSION)
-    assert value["to_version"] == SKILL_LEARNING_SCHEMA_VERSION
-    frozen = _metadata(product.schema, version=SKILL_LEARNING_SCHEMA_VERSION)
-    actual = application_metadata(product.schema, version=SKILL_LEARNING_SCHEMA_VERSION)
+    value = plan("moyai", product.schema, "native-online-test", from_version=before, to_version=target)
+    assert value["to_version"] == target
+    frozen = _metadata(product.schema, version=target)
+    actual = application_metadata(product.schema, version=target)
     assert _manifest(frozen) == _manifest(actual) and _indexes(frozen) == _indexes(actual)
     with psycopg.connect(product.settings.postgres_url, autocommit=True) as connection:
         receipts = sql.Identifier(product.schema, "moyai_app_schema_versions")
@@ -193,7 +198,7 @@ async def test_skill_learning_expansion_matches_runtime_and_preserves_v25(produc
         assert apply(connection, value, guard=lambda _: None)["status"] == "applied"
         assert apply(connection, value, guard=lambda _: None)["status"] == "already_applied"
         assert set(original) <= set(connection.execute(sql.SQL("SELECT * FROM {}").format(receipts)).fetchall())
-    await verify_product_schema(product.source, schema=product.schema)
+    await verify_product_schema(product.source, schema=product.schema, version=target)
 
 
 @pytest.mark.parametrize("change", ["sql", "digest", "prefix", "schema", "queue", "extra"])

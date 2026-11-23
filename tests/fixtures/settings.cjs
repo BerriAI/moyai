@@ -20,6 +20,9 @@ const gatewayConnection = (patch={}) => mcpConnection({
 function defaults() {
   return {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
+    personalApps: [['linear','Linear'],['notion','Notion'],['github','GitHub'],['slack','Slack']].map(([provider,name])=>({
+      provider,name,configured:['linear','notion'].includes(provider),connected:false,connection_id:null,
+    })),
     general: {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0},
     organizationConnections:[{id:'slack',connected:true,enabled:true,read_only:true,label:'Example workspace',identity:'Workspace app',tools:[],check_status:'healthy',checked_at:'2026-10-19T10:00:00Z'}],
     gatewayDefaults:{url:'https://gateway.example.com/v1'},gatewayDiscovery:gatewayConnection().policy.gateway_discovery,
@@ -71,6 +74,19 @@ async function settingsFixture() {
       state.requests.push({path:url.pathname,method:req.method,body});
       const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
       if(url.pathname==='/api/me')return json({user:{id:state.userId,name:'Alex Example',role:state.role,individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.productMode});
+      if(url.pathname==='/api/personal-connections'){
+        if(state.personalAppsGate)await state.personalAppsGate;
+        return state.personalAppsError?json({detail:'Temporarily unavailable'},503):json(state.personalApps);
+      }
+      const appMatch=url.pathname.match(/^\/api\/personal-connections\/([^/]+)(\/oauth)?$/);
+      if(appMatch){
+        if(state.personalAppMutationGate)await state.personalAppMutationGate;
+        if(state.personalAppMutationError)return json({detail:'Try again'},502);
+        const row=state.personalApps.find(item=>item.provider===appMatch[1]);
+        if(!row)return json({detail:'Not found'},404);
+        if(req.method==='DELETE'){Object.assign(row,{connected:false,connection_id:null});return json({connected:false});}
+        return json({url:`https://provider.example.test/authorize?provider=${row.provider}`});
+      }
       if(url.pathname==='/api/gateway/defaults'){
         if(state.gatewayDefaultsGate)await state.gatewayDefaultsGate;
         return json(state.gatewayDefaults);

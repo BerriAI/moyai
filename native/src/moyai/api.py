@@ -134,6 +134,8 @@ class ConnectionInput(BaseModel):
 
     @model_validator(mode="after")
     def service_configuration(self) -> ConnectionInput:
+        if self.policy.oauth:
+            raise ValueError("Manage personal OAuth accounts through Connect and Disconnect.")
         if self.kind == "litellm":
             if self.shared:
                 raise ValueError("LiteLLM gateway connections are personal and cannot be shared.")
@@ -375,6 +377,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     from .product_routes import routes as product_routes
     app.include_router(product_routes(runtime, actor))
     app.include_router(settings_routes(runtime, actor))
+    from .personal_oauth import routes as personal_oauth_routes
+    app.include_router(personal_oauth_routes(runtime, actor))
     from .swarm_routes import routes as swarm_routes
     app.include_router(swarm_routes(runtime, actor))
 
@@ -397,6 +401,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        from .personal_oauth import public_oauth_landing
+
         if not hasattr(request.state, "moyai_received_at"):
             request.state.moyai_received_at = now()
         if request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/hooks/"):
@@ -407,6 +413,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if runtime.product is not None and (
             request.url.path not in {"/health", "/healthz"}
             and not request.url.path.startswith(("/hooks/", "/broker/native/"))
+            and not (request.method == "GET" and public_oauth_landing(request.url.path))
         ):
             from .product_access import access_session
             try:
@@ -440,7 +447,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             except HTTPException as error:
                 response = JSONResponse({"detail": error.detail}, status_code=error.status_code)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers["X-Frame-Options"] = "DENY"
         origin_url = urlsplit(runtime.settings.public_url or str(request.base_url))
         stream_origin = f"{'wss' if origin_url.scheme == 'https' else 'ws'}://{origin_url.netloc}"
@@ -972,7 +979,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
             )
             if runtime.product_connections is not None:
-                query = query.where(Connection.kind.in_(["mcp", "litellm"]))
+                from .personal_oauth import native_connections
+                query = query.where(native_connections())
             rows = await db.scalars(query.order_by(Connection.id))
             return canonical + [
                 ConnectionView.model_validate(connection_view(row)) for row in rows if not shared or row.shared
@@ -1013,6 +1021,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             row = await db.get(Connection, connection_id)
             if row is None or row.owner_id != user.id:
                 raise HTTPException(404, "Connection not found.")
+            if ConnectionPolicy.model_validate_json(row.policy).oauth:
+                raise HTTPException(409, "Manage this account through personal Connect and Disconnect.")
             if runtime.product_connections is not None and row.kind not in {"mcp", "litellm"}:
                 raise HTTPException(409, "Manage the existing product accounts in Connections.")
             if body.kind != row.kind:

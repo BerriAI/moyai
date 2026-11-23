@@ -216,12 +216,12 @@ class ProductConnections:
         native: list[Grant] = []
         if candidates:
             async def native_selection(transaction: AsyncSession) -> list[Grant]:
+                from .personal_oauth import native_connections
                 identities = list(await transaction.scalars(select(Connection.id).where(
-                    Connection.id.in_(candidates), Connection.kind.in_(["mcp", "litellm"]),
+                    Connection.id.in_(candidates), native_connections(),
                 )))
                 return await self.database.native_grants(
                     transaction, actor_id, identities, shared_session=shared_session,
-                    kinds=frozenset({"mcp", "litellm"}),
                 )
 
             if db is not None:

@@ -12,7 +12,9 @@ async function open(t,route='personal-slack',width=1440,theme='dark'){
   const errors=[];page.on('pageerror',e=>errors.push(e.message));t.after(()=>assert.deepEqual(errors,[]));
   await page.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme);
   await page.goto(fixture.base+'/#settings/'+route);
-  await page.locator('.ns-content h1').waitFor();return page;
+  await page.locator('.ns-content h1').waitFor();
+  if(route==='connections'&&fixture.state.productMode==='standalone')await page.getByText('Advanced connections',{exact:true}).click();
+  return page;
 }
 async function noOverflow(page){
   assert.equal(await page.locator('.ns-content').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
@@ -161,6 +163,60 @@ const connectionWrites=()=>fixture.state.requests.filter(r=>r.path.startsWith('/
 const organizationAccount=(id,patch={})=>({
   id,connected:false,scope:'organization',enabled:true,read_only:false,oauth_configured:true,
   label:'',identity:'Not connected',tools:[],check_status:null,checked_at:null,app_registered:id==='github',...patch,
+});
+for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Personal apps connect without token entry at ${width}px in ${theme}`,async t=>{
+  fixture.reset();fixture.state.role='member';
+  const page=await open(t,'connections',width,theme);
+  const apps=page.getByRole('region',{name:'Your apps',exact:true});
+  const connect=apps.getByRole('button',{name:'Connect personal Linear',exact:true});
+  await connect.waitFor();assert.equal(await connect.isEnabled(),true);
+  assert.equal(await apps.getByRole('button',{name:'Connect personal Slack',exact:true}).isEnabled(),false);
+  assert.equal(await apps.locator('input').count(),0);
+  await connect.focus();assert.equal(await connect.evaluate(el=>el===document.activeElement),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.route('https://provider.example.test/**',route=>route.fulfill({contentType:'text/html',body:'<h1>Fixture provider consent</h1>'}));
+  await connect.click();await page.waitForURL('https://provider.example.test/authorize?provider=linear');
+  assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections/linear/oauth').length,1);
+});
+test('Personal app errors retry and disconnect requires confirmation',async t=>{
+  fixture.reset();fixture.state.personalAppsError=true;
+  const page=await open(t,'connections');
+  const apps=page.getByRole('region',{name:'Your apps',exact:true});
+  await apps.getByRole('alert').waitFor();fixture.state.personalAppsError=false;
+  await apps.getByRole('button',{name:'Retry',exact:true}).click();
+  fixture.state.personalAppMutationError=true;
+  await apps.getByRole('button',{name:'Connect personal Linear',exact:true}).click();
+  await apps.getByRole('status').filter({hasText:'Could not connect Linear'}).waitFor();
+  fixture.state.personalAppMutationError=false;
+  Object.assign(fixture.state.personalApps[0],{connected:true,connection_id:'personal-linear'});
+  await page.reload();
+  await apps.getByRole('button',{name:'Disconnect personal Linear',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Disconnect Linear?',exact:true});
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  assert.equal(fixture.state.requests.filter(r=>r.method==='DELETE').length,0);
+  await apps.getByRole('button',{name:'Disconnect personal Linear',exact:true}).click();
+  await dialog.getByRole('button',{name:'Disconnect account',exact:true}).click();
+  await apps.getByRole('button',{name:'Connect personal Linear',exact:true}).waitFor();
+  assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections/linear'&&r.method==='DELETE').length,1);
+});
+test('Personal authorization responses cannot redirect a different signed-in user',async t=>{
+  fixture.reset();
+  let release;fixture.state.personalAppMutationGate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const page=await open(t,'connections');
+  await page.getByRole('button',{name:'Connect personal Linear',exact:true}).click();
+  await page.getByRole('button',{name:'Connect personal Linear',exact:true}).filter({hasText:'Connecting'}).waitFor();
+  await page.evaluate(()=>window.dispatchEvent(new Event('moyai:access-changed')));
+  release();
+  await page.getByRole('button',{name:'Connect personal Linear',exact:true}).filter({hasText:/^Connect/}).waitFor();
+  assert.ok(page.url().startsWith(fixture.base));
+});
+test('Shared identities cannot initiate personal app authorization',async t=>{
+  fixture.reset();fixture.state.individual=false;
+  const page=await open(t,'connections');
+  const apps=page.getByRole('region',{name:'Your apps',exact:true});
+  await apps.getByText('Sign in with your individual work account to connect your apps.',{exact:true}).waitFor();
+  assert.equal(await apps.getByRole('button').count(),0);
+  assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections').length,0);
 });
 for(const [id,name] of [['linear','Linear'],['slack','Slack'],['github','GitHub']])test(`${name} Connect opens authorization directly without token entry`,async t=>{
   fixture.reset();fixture.state.organizationConnections=[organizationAccount(id)];
