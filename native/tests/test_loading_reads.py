@@ -4,6 +4,7 @@ import hashlib
 from types import SimpleNamespace
 
 import httpx
+import pytest
 import test_product_identity as identity_fixtures
 from sqlalchemy import event, text
 from test_application_boundaries import sign_in
@@ -11,7 +12,7 @@ from test_sidebar import member_client
 
 from moyai.api import create_app
 from moyai.contracts import NewMessage, NewSession
-from moyai.models import Turn, User
+from moyai.models import Session, Turn, User
 
 canonical_product = identity_fixtures.product
 
@@ -105,6 +106,48 @@ async def test_transcript_snapshot_skips_optional_store_and_heavy_turn_columns(r
             assert (await other.get(f"/api/sessions/{session.id}/activity")).status_code == 404
     finally:
         event.remove(runtime.database.engine.sync_engine, "before_cursor_execute", observed)
+
+
+@pytest.mark.parametrize("suffix", ["?include_activity=true", "/activity"])
+@pytest.mark.parametrize("revocation", ["session", "deleted", "identity"])
+async def test_saved_activity_rechecks_reader_after_snapshot_io(runtime, active, monkeypatch, suffix, revocation):
+    from test_action_details import saved_action
+
+    session, turn, _ = active
+    await saved_action(runtime, turn.id, name="private_revocation_probe")
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Session, session.id)).visibility = "shared"
+        (await db.get(Turn, turn.id)).status = "completed"
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = runtime.stores.steps.latest_snapshot
+
+    async def delayed(**kwargs):
+        result = await original(**kwargs)
+        entered.set()
+        await release.wait()
+        return result
+
+    async with member_client(runtime) as (client, member):
+        path = f"/api/sessions/{session.id}" + suffix
+        readable = await client.get(path)
+        assert readable.status_code == 200
+        assert "private_revocation_probe" in readable.text
+        monkeypatch.setattr(runtime.stores.steps, "latest_snapshot", delayed)
+        pending = asyncio.create_task(client.get(path))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            async with runtime.database.sessions.begin() as db:
+                if revocation == "identity":
+                    (await db.get(User, member.id)).auth_version += 1
+                elif revocation == "deleted":
+                    (await db.get(Session, session.id)).deleted = True
+                else:
+                    (await db.get(Session, session.id)).visibility = "private"
+        finally:
+            release.set()
+        denied = await pending
+        assert denied.status_code == (401 if revocation == "identity" else 404)
+        assert "private_revocation_probe" not in denied.text
 
 
 async def test_only_successful_hashed_build_assets_can_be_cached(runtime, tmp_path, monkeypatch):
