@@ -1,7 +1,8 @@
 import React, { useLayoutEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { sessionIsReadOnly, useSessionActions, type SidebarSession } from "./session-actions"
+import { useSessionActions } from "./session-actions"
+import { sessionIsReadOnly, type SidebarSession } from "./conversations/session-list"
 
 type Props = { session: SidebarSession }
 

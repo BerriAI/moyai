@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
-const compile = name => ts.transpileModule(fs.readFileSync(path.join(__dirname, '../native/web', name), 'utf8'), {
+const compile = name => ts.transpileModule(fs.readFileSync(path.join(__dirname, '../../native/web/conversations', name), 'utf8'), {
   compilerOptions: {module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022},
 }).outputText;
 const url = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;

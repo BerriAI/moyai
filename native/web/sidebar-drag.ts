@@ -1,4 +1,4 @@
-import type { SessionFolder, SidebarSession } from "./session-actions"
+import type { SessionFolder, SidebarSession } from "./conversations/session-list"
 
 export const SESSION_DRAG_TYPE = "application/x-moyai-session"
 export type SessionDrag = { version: 1; userId: string; sessionId: string; nonce: string }

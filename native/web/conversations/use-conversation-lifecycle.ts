@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ApiError, appPath, csrfToken } from "./api"
+import { ApiError, appPath, csrfToken } from "../api"
 import { getSession, getSessionActivity, getSessionPlan, listSessionMessages, markSessionRead,
-  type CreateSessionMessageResponse, type PlanStep, type SessionDetail } from "./generated/api"
+  type CreateSessionMessageResponse, type PlanStep, type SessionDetail } from "../generated/api"
 import { firstMessage, reconcileHistory, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { applyLiveEvent, emptyLiveTranscript, type ActivityEvent, type LiveEvent } from "./live-transcript"
-import { activeSession, pollVisible } from "./polling"
-import type { UploadedFile } from "./attachment-uploads"
+import { activeSession, pollVisible } from "../polling"
+import type { UploadedFile } from "../attachment-uploads"
 import type { SessionUpdates } from "./session-updates"
 
 /** A loaded detail, or the optimistic view of a just-created conversation. */

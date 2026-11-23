@@ -1,5 +1,5 @@
-import type { SidebarSession } from "./session-actions"
-import type { SessionEdit } from "./generated/api"
+import type { SidebarSession } from "./session-list"
+import type { SessionEdit } from "../generated/api"
 
 export type SessionUpdatePatch = { [K in "title" | "pinned" | "folder"]?: NonNullable<SessionEdit[K]> }
 type Pending = { patch: SessionUpdatePatch }

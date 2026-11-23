@@ -1,5 +1,5 @@
 /** Presentation of the SDK's root-only stream. Saved messages remain authoritative. */
-import type { LiveEvent as LiveEventFrame, TextEvent } from "./generated/api"
+import type { LiveEvent as LiveEventFrame, TextEvent } from "../generated/api"
 
 /** One server frame; activity rows also record when the browser received them. */
 export type LiveEvent = LiveEventFrame & { created_at?: string }

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ApiError } from "./api"
-import { listConnections, listHistorySessions, listSessionFolders, type ConnectionView, type HistorySessionList, type Me, type SourcedHistorySession } from "./generated/api"
+import { ApiError } from "../api"
+import { listConnections, listHistorySessions, listSessionFolders, type ConnectionView, type HistorySessionList, type Me, type SourcedHistorySession } from "../generated/api"
 import type { Session } from "./conversation-state"
-import { activeSession, pollVisible } from "./polling"
-import { sessionIsReadOnly, sessionKey, type SidebarSession } from "./session-actions"
-import type { SessionFolder, SessionListView } from "./sidebar"
+import { activeSession, pollVisible } from "../polling"
+import { sessionIsReadOnly, sessionKey, type SidebarSession } from "./session-list"
+import type { SessionFolder, SessionListView } from "./session-list"
 import type { SessionUpdates } from "./session-updates"
 
 const emptyInventory = () => ({ hasMore: false, loading: false, loaded: false, notice: "" })
