@@ -38,7 +38,7 @@ def statements(database):
 
 async def seeded_messages(runtime, actor, count):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Seed", request_key="seed"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Seed", request_key="seed"))
     async with runtime.database.sessions.begin() as db:
         rows = [Message(
             session_id=session.id, turn_id=turn.id, author_id=actor.id, role="user",
@@ -113,7 +113,7 @@ async def test_batched_legacy_and_saved_provenance_match_single_projection(runti
     if change == "attachment":
         prefix += FILES + "Ambiguous old file context" + FILES_END
     prompt = prefix + REFERENCE + json.dumps(origin) + REFERENCE_END
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt=prompt, request_key="other-receipt" if change == "receipt" else "slack-message:" + key,
     ))
     async with runtime.database.sessions.begin() as db:
@@ -143,10 +143,10 @@ async def test_prepare_reconstructs_ordered_history_with_one_provenance_read(run
         saved.active_turn = None
         saved.conversation = runtime.security.seal("Different actor/model context")
         saved.last_actor_id = None
-    current = await runtime.database.submit(actor, session.id, NewMessage(prompt="Next", request_key="next"))
+    current = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Next", request_key="next"))
     assert (await runtime.database.claim_next()).id == current.id
     with statements(runtime.database) as queries:
-        prepared = await runtime.database.prepare(current.id)
+        prepared = await runtime.admission.prepare(current.id)
     assert sum("FROM moyai_message_sources" in query for query in queries) == 1
     history = ConversationTypeAdapter.validate_json(prepared.conversation).messages
     assert len(history) == 41

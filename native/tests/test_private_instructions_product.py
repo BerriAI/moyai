@@ -118,5 +118,5 @@ async def test_canonical_verified_approval_resume_retains_private_preferences(ad
     )
     resumed = await product.database.resume(product.actor, session.id, turn.id, "approval", {})
     assert (await product.database.claim_next()).id == resumed.id
-    scope = (await product.database.prepare(resumed.id)).scope
+    scope = (await product.database.admission.prepare(resumed.id)).scope
     assert await PrivateInstructions(product.database).load(scope) == "PRIVATE_CANONICAL_TEST"

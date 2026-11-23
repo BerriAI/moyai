@@ -1,7 +1,7 @@
 """An explicit, fenced handoff of an existing logical session to the native core.
 
 No legacy checkpoint, tool call, approval or model usage is replayed/imported.
-The first new message is admitted by Database.submit in the SAME transaction
+The first new message is admitted by TurnAdmission.submit in the SAME transaction
 that freezes source execution and records the original-ID mapping.
 
 Assembly (parent-owned):
@@ -11,7 +11,7 @@ Assembly (parent-owned):
 Construct these BEFORE ProductAutomationService.from_runtime. Existing
 product_routes.routes(runtime, actor) then includes the continuation router.
 
-Worker, after database.prepare and before input hydration/model execution:
+Worker, after database.admission.prepare and before input hydration/model execution:
     prepared = await prepare_product_turn(runtime, prepared)
 Allow this preparation activity 20 minutes (with a 30-second heartbeat timeout)
 for verified snapshot/export/restore. Normal native turns remain a cheap no-op.
@@ -500,7 +500,7 @@ class ProductContinuationService:
         setattr(actor, "product_grant", principal.grant)  # noqa: B010 -- transient authenticated projection
         binding = await self.lookup(db, source_id, current)
         if binding is not None:
-            turn = await self.runtime.database.submit(
+            turn = await self.runtime.admission.submit(
                 actor, binding.native_session_id, body, db=db, received_at=received_at,
             )
             return self.result(binding, turn.id)
@@ -575,7 +575,7 @@ class ProductContinuationService:
                 db.add(SessionFolder(user_id=actor.id, name=metadata["folder"]))
         db.add(SessionPreference(user_id=actor.id, session_id=target.id,
                                  pinned=bool(metadata["pinned"]), folder=metadata["folder"] or ""))
-        turn = await self.runtime.database.submit(actor, target.id, body, db=db, received_at=received_at)
+        turn = await self.runtime.admission.submit(actor, target.id, body, db=db, received_at=received_at)
         await self.workspace.bind_automation_turn(db, target, turn, context)
         # Invalidate old broker capabilities before publishing the immutable
         # mapping. The trigger then refuses every later source admission/write.

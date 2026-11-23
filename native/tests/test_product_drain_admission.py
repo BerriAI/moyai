@@ -25,7 +25,7 @@ async def test_paused_dispatch_preserves_message_until_explicit_resume(drain):
     database = product.database
     database.product_drain = service
     session = await database.create_session(product.actor, NewSession())
-    turn = await database.submit(product.actor, session.id, NewMessage(prompt="Preserve me", request_key=str(uuid4())))
+    turn = await database.admission.submit(product.actor, session.id, NewMessage(prompt="Preserve me", request_key=str(uuid4())))
     assert await database.claim_next() is None
     async with database.sessions() as db:
         assert (await db.get(Turn, turn.id)).status == "queued"
@@ -40,10 +40,10 @@ async def test_paused_new_and_saved_steering_remain_queued_with_intent(drain):
     await service.request(paused=False, expected_generation=0, request_key="start")
     session, active, _ = await active_turn(product)
     await service.request(paused=True, expected_generation=1, request_key="pause")
-    immediate = await database.submit(product.actor, session.id, NewMessage(
+    immediate = await database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Steer me", mode="asap", request_key=str(uuid4()),
     ))
-    saved = await database.submit(product.actor, session.id, NewMessage(prompt="Queued", request_key=str(uuid4())))
+    saved = await database.admission.submit(product.actor, session.id, NewMessage(prompt="Queued", request_key=str(uuid4())))
     promoted = await database.steer_queued(product.actor, saved.id)
     assert immediate.status == promoted.status == "queued"
     assert immediate.mode == promoted.mode == "asap"
@@ -72,7 +72,7 @@ async def test_pause_waits_for_the_actual_steering_admission_commit(drain, monke
         return allowed
 
     monkeypatch.setattr(service, "admit", held_admission)
-    submission = asyncio.create_task(database.submit(product.actor, session.id, NewMessage(
+    submission = asyncio.create_task(database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Before pause", mode="asap", request_key=str(uuid4()),
     )))
     await asyncio.wait_for(entered.wait(), 2)

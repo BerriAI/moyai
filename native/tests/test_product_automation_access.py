@@ -42,7 +42,7 @@ async def invoke(ctx, run_ctx, action, body):
 async def automation_context(ctx, row, binding):
     result = await fixtures.occurrence(ctx, row, binding)
     await ctx.product.database.claim_next()
-    prepared = await ctx.product.database.prepare(result["turn_id"])
+    prepared = await ctx.product.database.admission.prepare(result["turn_id"])
     from pydantic_ai import RunContext, RunUsage
     from pydantic_ai.models.test import TestModel
     return RunContext(

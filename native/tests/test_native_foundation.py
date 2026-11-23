@@ -34,8 +34,8 @@ async def test_concurrent_duplicate_submission_has_one_turn_and_message(runtime,
     session = await runtime.database.create_session(actor, NewSession())
     body = NewMessage(prompt="Do this once.", request_key="same-request")
     a, b = await asyncio.gather(
-        runtime.database.submit(actor, session.id, body),
-        runtime.database.submit(actor, session.id, body),
+        runtime.admission.submit(actor, session.id, body),
+        runtime.admission.submit(actor, session.id, body),
     )
     assert a.id == b.id
     async with runtime.database.sessions() as db:
@@ -45,9 +45,9 @@ async def test_concurrent_duplicate_submission_has_one_turn_and_message(runtime,
 
 async def test_request_identity_cannot_change_model_or_connections(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    await runtime.database.submit(actor, session.id, NewMessage(prompt="Task", request_key="same"))
+    await runtime.admission.submit(actor, session.id, NewMessage(prompt="Task", request_key="same"))
     with pytest.raises(HTTPException) as caught:
-        await runtime.database.submit(
+        await runtime.admission.submit(
             actor, session.id, NewMessage(prompt="Task", request_key="same", mode="asap")
         )
     assert caught.value.status_code == 409
@@ -56,7 +56,7 @@ async def test_request_identity_cannot_change_model_or_connections(runtime, acto
 async def test_concurrent_dispatch_claims_only_one_turn_per_session(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
     for index in range(2):
-        await runtime.database.submit(
+        await runtime.admission.submit(
             actor, session.id, NewMessage(prompt=f"Task {index}", request_key=str(index))
         )
     claims = await asyncio.gather(runtime.database.claim_next(), runtime.database.claim_next())
@@ -89,7 +89,7 @@ async def test_preparation_retries_keep_original_conversation(runtime, active):
         row.conversation = runtime.security.seal("a later value must not replace the admitted input")
         row.last_actor_id = prepared.scope.actor_id
         row.last_model = prepared.scope.model
-    retried = await runtime.database.prepare(turn.id)
+    retried = await runtime.admission.prepare(turn.id)
     assert retried == prepared
 
 
@@ -100,7 +100,7 @@ async def test_stop_revokes_authority_before_worker_acknowledgment(runtime, acto
     assert workflow_id == turn.workflow_id
     with pytest.raises(PermissionError):
         await runtime.database.authorize_scope(prepared.scope)
-    await runtime.database.submit(actor, session.id, NewMessage(prompt="Next", request_key="next"))
+    await runtime.admission.submit(actor, session.id, NewMessage(prompt="Next", request_key="next"))
     assert await runtime.database.claim_next() is None
     await runtime.database.stopped(turn.id)
     assert await runtime.database.claim_next() is not None
@@ -114,11 +114,11 @@ async def test_revoked_connection_cannot_dispatch(runtime, actor):
         )
         db.add(connection)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Read the repository", request_key="grant", connections=[connection.id]
     ))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     async with runtime.database.sessions.begin() as db:
         saved = await db.get(Connection, connection.id)
         saved.enabled = False
@@ -146,7 +146,7 @@ async def test_answer_survives_snapshot_failure(runtime, actor, active):
 
 async def test_steering_fences_old_tool_dispatch(runtime, actor, active):
     session, turn, prepared = active
-    correction = await runtime.database.submit(actor, session.id, NewMessage(
+    correction = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Read only; don't edit.", mode="asap", request_key="correction"
     ))
     assert correction.parent_turn == turn.id

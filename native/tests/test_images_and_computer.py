@@ -119,9 +119,9 @@ async def test_private_upload_is_not_readable_or_submittable_by_another_user(run
 
 async def finished_computer(runtime, actor, *, visibility="private"):
     session = await runtime.database.create_session(actor, NewSession(visibility=visibility))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Set up", request_key=new_id()))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Set up", request_key=new_id()))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     await runtime.database.save_workspace_reference(prepared.scope, {"provider": "modal", "id": "scoped-computer"})
     await runtime.database.stopped(turn.id)
     return session
@@ -130,7 +130,7 @@ async def finished_computer(runtime, actor, *, visibility="private"):
 async def test_human_control_does_not_block_chat_or_coding(runtime, actor):
     session = await finished_computer(runtime, actor)
     await lease(runtime, session.id, actor, "claim")
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Next", request_key="under-human"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Next", request_key="under-human"))
     assert (await runtime.database.claim_next()).id == turn.id
     # People can keep controlling the desktop during active agent work.
     await lease(runtime, session.id, actor, "heartbeat")
@@ -143,7 +143,7 @@ async def test_expired_control_lease_does_not_hold_queue_forever(runtime, actor)
     await lease(runtime, session.id, actor, "claim")
     async with runtime.database.sessions.begin() as db:
         (await db.get(ComputerLease, session.id)).expires_at = int(time.time()) - 1
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Next", request_key="after-expiry"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Next", request_key="after-expiry"))
     assert (await runtime.database.claim_next()).id == turn.id
 
 
@@ -166,7 +166,7 @@ async def test_desktop_input_keeps_its_fence_without_blocking_chat(runtime, acto
         try:
             released = await second.post(f"/api/sessions/{session.id}/computer", json={"action": "release"})
             assert released.status_code == 409
-            queued = await runtime.database.submit(actor, session.id, NewMessage(
+            queued = await runtime.admission.submit(actor, session.id, NewMessage(
                 prompt="Wait for input.", request_key="input-in-flight",
             ))
             assert (await runtime.database.claim_next()).id == queued.id
@@ -209,7 +209,7 @@ async def test_confirmed_guest_failure_allows_immediate_retry_release_and_agent_
                 assert await db.get(ComputerOperation, session.id) is None
                 assert await db.get(ComputerLease, session.id) is None
         assert (await client.post(f"/api/sessions/{session.id}/computer", json={"action": "release"})).status_code == 200
-    queued = await runtime.database.submit(actor, session.id, NewMessage(
+    queued = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Continue without the desktop.", request_key="after-confirmed-guest-failure",
     ))
     assert (await runtime.database.claim_next()).id == queued.id
@@ -268,11 +268,11 @@ async def test_computer_access_rechecks_revoked_connection_grants(runtime, actor
         )
         db.add(account)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Prepare", connections=[account.id], request_key="scoped-computer",
     ))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     await runtime.database.save_workspace_reference(prepared.scope, {"provider": "modal", "id": "scoped-computer"})
     await runtime.database.stopped(turn.id)
     async with runtime.database.sessions.begin() as db:

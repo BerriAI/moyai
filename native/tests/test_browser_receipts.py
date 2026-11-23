@@ -297,7 +297,7 @@ async def test_real_sdk_reports_pending_write_without_crashing_or_dispatching_an
 async def test_native_temporal_browser_receipts_and_pre_guard_history_replay(runtime, actor, monkeypatch, old_history):
     """Actual SDK/Temporal history with a controlled dispatch, not browser E2E."""
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Controlled browser dispatch", request_key="browser-replay"),
     )
     await runtime.database.claim_next()

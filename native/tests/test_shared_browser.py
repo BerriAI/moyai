@@ -20,9 +20,9 @@ from moyai.models import ComputerDesktop, ComputerLease, ComputerOperation, new_
 
 async def running_browser(runtime, actor):
     session = await ready_computer(runtime, actor)
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Browse", request_key=new_id()))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Browse", request_key=new_id()))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     return session, prepared.scope
 
 
@@ -71,7 +71,7 @@ async def test_human_control_and_hidden_panel_suspend_agent_writes_but_allow_rea
     assert calls == []
     assert (await agent_request(runtime.database, scope, workspace(), {"action": "inspect"}, writing=False))["snapshot"]
     await runtime.database.authorize_scope(scope)  # No turn/agent stop or global effect barrier.
-    await runtime.database.submit(actor, session.id, NewMessage(prompt="Keep coding", request_key=new_id()))
+    await runtime.admission.submit(actor, session.id, NewMessage(prompt="Keep coding", request_key=new_id()))
     assert len(calls) == 1
     await lease(runtime, session.id, actor, "release", client)
     await agent_request(runtime.database, scope, workspace(), {"action": "reload"}, writing=True)

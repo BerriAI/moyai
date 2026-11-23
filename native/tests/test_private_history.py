@@ -215,7 +215,7 @@ async def resume(product, ctx):
         product.actor, ctx.deps.session_id, ctx.deps.turn_id, str(uuid4()), {"approvals": {"write": True}},
     )
     assert (await database.claim_next()).id == turn.id
-    scope = (await database.prepare(turn.id)).scope
+    scope = (await database.admission.prepare(turn.id)).scope
     return RunContext(deps=scope, run_id=scope.root_run_id, model=TestModel(), usage=RunUsage())
 
 

@@ -322,9 +322,9 @@ async def test_followup_is_told_about_replacement_and_stale_browser_state(runtim
                          "restored": reference["id"], "notice": FRESH_NOTICE,
                      })))
         current.snapshot = None
-    followup = await runtime.database.submit(actor, session.id, NewMessage(prompt="Continue", request_key="after-recovery"))
+    followup = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Continue", request_key="after-recovery"))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(followup.id)
+    prepared = await runtime.admission.prepare(followup.id)
     monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=True))
     prepared = await prepare_workspace(runtime, prepared)
     assert FRESH_NOTICE in prepared.prompt
@@ -372,7 +372,7 @@ async def test_new_turn_during_idle_recovery_fences_late_publication(runtime, ac
         object_id=REPLACEMENT["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
     )))
     async def new_turn(*_args):
-        await runtime.database.submit(actor, session.id, NewMessage(prompt="New task", request_key="race"))
+        await runtime.admission.submit(actor, session.id, NewMessage(prompt="New task", request_key="race"))
         await runtime.database.claim_next()
         return {"available": True}
     monkeypatch.setattr("moyai.computer_recovery.guest_request", new_turn)

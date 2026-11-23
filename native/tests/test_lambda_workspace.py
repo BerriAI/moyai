@@ -125,9 +125,9 @@ async def test_lambda_checkpoint_settlement_and_cold_followup_use_native_authori
         saved = await db.get(Session, session.id)
         assert checkpoint(saved.snapshot).workspace == REFERENCE
         assert saved.status == "idle" and not saved.save_warning
-    followup = await runtime.database.submit(actor, session.id, NewMessage(prompt="Print it", request_key="next"))
+    followup = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Print it", request_key="next"))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(followup.id)
+    prepared = await runtime.admission.prepare(followup.id)
     create = AsyncMock(return_value=SimpleNamespace(id="lambda:us-east-1:microvm-restored"))
     control = SimpleNamespace(
         get=AsyncMock(return_value=SimpleNamespace(alive=AsyncMock(return_value=False))), create=create,

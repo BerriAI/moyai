@@ -125,7 +125,7 @@ class SwarmService:
                 ), db=db)
                 await db.flush()
                 body = NewMessage(**request.model_dump(include=set(NewMessage.model_fields)))
-                turn = await self.database.submit(actor, root.id, body, db=db, received_at=received_at)
+                turn = await self.database.admission.submit(actor, root.id, body, db=db, received_at=received_at)
                 grants = await self.database.resolve_grants(
                     db, actor.id, request.connections, shared_session=root.visibility == "shared",
                 )
@@ -205,7 +205,7 @@ class SwarmService:
         self, db: AsyncSession, mission: SwarmMission, member: SwarmMember, actor: User,
         identity: str, prompt: str, *, attachments: list[str] | None = None,
     ) -> Turn:
-        return await self.database.submit(actor, member.session_id, NewMessage(
+        return await self.database.admission.submit(actor, member.session_id, NewMessage(
             prompt="Host-generated swarm wake (not a new human instruction).\n" + prompt,
             request_key=f"swarm:{mission.generation}:{identity}",
             model=member.model, connections=json.loads(mission.connections), attachments=attachments or [],

@@ -23,11 +23,11 @@ async def parent_context(runtime, actor, *, visibility="shared", surface="web", 
     parent = await database.create_session(actor, NewSession(visibility=visibility))
     async with database.sessions.begin() as db:
         (await db.get(Session, parent.id)).surface = surface
-    turn = await database.submit(actor, parent.id, NewMessage(
+    turn = await database.admission.submit(actor, parent.id, NewMessage(
         prompt="Delegate bounded work.", request_key="parent", connections=connections or [],
     ))
     await database.claim_next()
-    return parent, turn, await database.prepare(turn.id)
+    return parent, turn, await database.admission.prepare(turn.id)
 
 
 @pytest.mark.parametrize(("visibility", "surface"), [
@@ -48,7 +48,7 @@ async def test_child_keeps_skill_and_memory_context_through_grandchildren_and_hu
     expected = await SettingsSkills(database).catalog(original.scope)
     child = await DelegationService(database).start(original.scope, "child", "Bounded assignment")
     first = await database.claim_next()
-    prepared = await database.prepare(first.id)
+    prepared = await database.admission.prepare(first.id)
     assert prepared.scope.visibility == "private" and prepared.scope.surface == "web"
     assert await SettingsSkills(database).catalog(prepared.scope) == expected
     assert prepared.scope.memory_namespace.split("/")[0] == ("slack" if surface == "slack" else visibility)
@@ -58,7 +58,7 @@ async def test_child_keeps_skill_and_memory_context_through_grandchildren_and_hu
         if surface == "slack":
             assert skills == []
     grandchild = await DelegationService(database).start(prepared.scope, "grandchild", "Nested assignment")
-    nested = await database.prepare((await database.claim_next()).id)
+    nested = await database.admission.prepare((await database.claim_next()).id)
     assert nested.scope.session_id == grandchild["session_id"]
     assert await SettingsSkills(database).catalog(nested.scope) == expected
     await finish(runtime, nested, "Nested result")
@@ -68,17 +68,17 @@ async def test_child_keeps_skill_and_memory_context_through_grandchildren_and_hu
     await database.save_workspace_reference(prepared.scope, reference)
     async with database.sessions.begin() as db:
         await locked_scope(database, db, prepared.scope, status="running")
-    steer = await database.submit(actor, child["session_id"], NewMessage(
+    steer = await database.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Correct the assignment.", request_key="steer", mode="asap",
     ))
     assert steer.status == "steering"
     await database.steering_receipt(steer.id, "enqueue")
     await finish(runtime, prepared, "Bounded result")
-    follow = await database.submit(actor, child["session_id"], NewMessage(
+    follow = await database.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Explain your result.", request_key="follow",
     ))
     await database.claim_next()
-    direct = await database.prepare(follow.id)
+    direct = await database.admission.prepare(follow.id)
     assert not direct.scope.delegation_generated
     assert direct.workspace == reference and direct.scope.workspace_key == prepared.scope.workspace_key
     assert await SettingsSkills(database).catalog(direct.scope) == expected
@@ -98,7 +98,7 @@ async def test_legacy_grant_payload_recovers_original_preparation_not_live_paren
         (await db.get(Session, parent.id)).visibility = "private"
         db.add(SettingSkill(id="private", owner_id=actor.id, scope_key=actor.id, name="private", description="Private",
                             content=database.security.seal("Private instructions")))
-    prepared = await database.prepare((await database.claim_next()).id)
+    prepared = await database.admission.prepare((await database.claim_next()).id)
     assert await SettingsSkills(database).catalog(prepared.scope) == []
     assert prepared.scope.memory_namespace.startswith("shared/")
     grandchild = await DelegationService(database).start(prepared.scope, "nested", "Still shared work")
@@ -110,7 +110,7 @@ async def test_legacy_grant_payload_recovers_original_preparation_not_live_paren
         payload = json.loads(database.security.unseal(initial.preparation))
         payload["scope"].pop("execution_context", None)
         initial.preparation = database.security.seal(payload)
-    nested = await database.prepare((await database.claim_next()).id)
+    nested = await database.admission.prepare((await database.claim_next()).id)
     assert await SettingsSkills(database).catalog(nested.scope) == []
     assert nested.scope.memory_namespace.startswith("shared/")
 
@@ -126,7 +126,7 @@ async def test_shared_child_cannot_select_personal_connections_on_followup(runti
         catalog = (await client.get("/api/connections", params={"session_id": child["session_id"]})).json()
         assert not any(item["id"] == "personal" for item in catalog)
     with pytest.raises(HTTPException, match="private conversation"):
-        await database.submit(actor, child["session_id"], NewMessage(
+        await database.admission.submit(actor, child["session_id"], NewMessage(
             prompt="Use a personal connection", request_key="upgrade", connections=["personal"],
         ))
     async with database.sessions() as db:
@@ -136,8 +136,8 @@ async def test_shared_child_cannot_select_personal_connections_on_followup(runti
 async def test_promoting_an_older_message_makes_it_the_latest_guidance(runtime, actor, active):
     session, _, prepared = active
     database = runtime.database
-    older = await database.submit(actor, session.id, NewMessage(prompt="Queued first", request_key="older"))
-    newer = await database.submit(actor, session.id, NewMessage(
+    older = await database.admission.submit(actor, session.id, NewMessage(prompt="Queued first", request_key="older"))
+    newer = await database.admission.submit(actor, session.id, NewMessage(
         prompt="Correction sent second", request_key="newer", mode="asap",
     ))
     await database.steering_receipt(newer.id, "second")
@@ -156,8 +156,8 @@ async def test_promoting_an_older_message_makes_it_the_latest_guidance(runtime, 
 async def test_pending_guidance_dispatches_in_admission_order(runtime, actor, active):
     session, _, _ = active
     database = runtime.database
-    older = await database.submit(actor, session.id, NewMessage(prompt="Queued first", request_key="older"))
-    newer = await database.submit(actor, session.id, NewMessage(
+    older = await database.admission.submit(actor, session.id, NewMessage(prompt="Queued first", request_key="older"))
+    newer = await database.admission.submit(actor, session.id, NewMessage(
         prompt="Correction sent second", request_key="newer", mode="asap",
     ))
     await database.steer_queued(actor, older.id)

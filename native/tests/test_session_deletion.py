@@ -78,7 +78,7 @@ async def test_delete_hides_resources_rejects_writes_and_restore_preserves_histo
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
     async with sign_in(runtime) as owner, member_client(runtime) as (viewer, _):
         image = (await owner.post("/api/uploads?name=kept.png", content=image_bytes())).json()
-        turn = await runtime.database.submit(actor, session.id, NewMessage(
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Keep this history.", attachments=[image["id"]], request_key="queued-before-delete",
         ))
         artifact, content = await saved_artifact(runtime, session, turn)
@@ -127,7 +127,7 @@ async def test_delete_hides_resources_rejects_writes_and_restore_preserves_histo
 
 async def test_active_delete_revokes_scope_and_waits_for_existing_stop_dispatcher(runtime, active, actor):
     session, turn, prepared = active
-    queued = await runtime.database.submit(actor, session.id, NewMessage(
+    queued = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Queued work must stay stopped.", request_key="queued",
     ))
     await runtime.database.delete_session(actor, session.id)
@@ -150,7 +150,7 @@ async def test_active_delete_revokes_scope_and_waits_for_existing_stop_dispatche
         assert (await db.get(Turn, queued.id)).status == "stopped"
         assert (await db.get(Session, session.id)).active_turn is None
     assert await runtime.database.claim_next() is None
-    following = await runtime.database.submit(actor, session.id, NewMessage(
+    following = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Explicit new work after restore.", request_key="after-restore",
     ))
     assert (await runtime.database.claim_next()).id == following.id
@@ -169,7 +169,7 @@ async def test_restore_waits_for_desktop_operation_but_not_expired_receipt(runti
             await runtime.database.restore_session(actor, session.id)
         assert caught.value.status_code == 409
         with pytest.raises(HTTPException) as caught:
-            await runtime.database.submit(actor, session.id, NewMessage(prompt="Too soon", request_key="early"))
+            await runtime.admission.submit(actor, session.id, NewMessage(prompt="Too soon", request_key="early"))
         assert caught.value.status_code == 404
         async with runtime.database.sessions.begin() as db:
             await db.delete(await db.get(ComputerOperation, session.id))
@@ -207,7 +207,7 @@ async def test_delete_during_snapshot_settlement_preserves_confirmed_answer(runt
 @pytest.mark.parametrize("resource", ["file", "image"])
 async def test_download_rechecks_deleted_session_after_object_read(runtime, actor, monkeypatch, resource):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Task", request_key="file"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Task", request_key="file"))
     artifact, content = await saved_artifact(runtime, session, turn)
     async with runtime.database.sessions.begin() as db:
         image = Upload(
@@ -259,7 +259,7 @@ async def test_image_download_rechecks_upload_bound_to_deleted_session_during_re
         request = asyncio.create_task(client.get(f"/api/uploads/{image['id']}"))
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            await runtime.database.submit(actor, session.id, NewMessage(
+            await runtime.admission.submit(actor, session.id, NewMessage(
                 prompt="Bind the image while its download waits.",
                 attachments=[image["id"]], request_key="bind-during-read",
             ))
@@ -332,7 +332,7 @@ async def test_delete_between_authorization_and_admission_cannot_leave_queued_wo
             return await original(user, session_id, body, fingerprint, **kwargs)
 
         monkeypatch.setattr(submitting.admission, "_submit", delayed)
-        task = asyncio.create_task(submitting.submit(actor, session.id, NewMessage(
+        task = asyncio.create_task(submitting.admission.submit(actor, session.id, NewMessage(
             prompt="Racing deletion", request_key="delete-wins",
         )))
         try:
@@ -381,7 +381,7 @@ async def test_admission_holding_row_fence_is_stopped_by_concurrent_delete(
             await deleting.delete_session(actor, session.id)
 
         monkeypatch.setattr(submitting, "resolve_grants", delayed)
-        sending = asyncio.create_task(submitting.submit(actor, session.id, NewMessage(
+        sending = asyncio.create_task(submitting.admission.submit(actor, session.id, NewMessage(
             prompt="Admitted before deletion", request_key="submit-wins",
         )))
         deletion = None
@@ -410,7 +410,7 @@ async def test_delete_during_preparation_cannot_reanimate_stopped_turn(
             async with preparing.sessions() as db:
                 actor = await db.scalar(select(User).where(User.username == "admin"))
         session = await preparing.create_session(actor, NewSession())
-        turn = await preparing.submit(actor, session.id, NewMessage(
+        turn = await preparing.admission.submit(actor, session.id, NewMessage(
             prompt="Prepare while deletion starts", request_key="preparation-race",
         ))
         assert (await preparing.claim_next()).id == turn.id
@@ -428,7 +428,7 @@ async def test_delete_during_preparation_cannot_reanimate_stopped_turn(
             await deleting.delete_session(actor, session.id)
 
         monkeypatch.setattr(preparing, "resolve_grants", delayed)
-        preparation = asyncio.create_task(preparing.prepare(turn.id))
+        preparation = asyncio.create_task(preparing.admission.prepare(turn.id))
         deletion = None
         try:
             await asyncio.wait_for(checked.wait(), 5)
@@ -466,9 +466,9 @@ async def test_failure_rechecks_turn_after_concurrent_terminal_decision(
             async with failing.sessions() as db:
                 actor = await db.scalar(select(User).where(User.username == "admin"))
         session = await failing.create_session(actor, NewSession())
-        turn = await failing.submit(actor, session.id, NewMessage(prompt="Race", request_key="failure-race"))
+        turn = await failing.admission.submit(actor, session.id, NewMessage(prompt="Race", request_key="failure-race"))
         assert (await failing.claim_next()).id == turn.id
-        prepared = await failing.prepare(turn.id)
+        prepared = await failing.admission.prepare(turn.id)
         read, release = asyncio.Event(), asyncio.Event()
         original_get, original_scalar = AsyncSession.get, AsyncSession.scalar
 
@@ -540,9 +540,9 @@ async def test_failure_holds_session_fence_before_turn_settlement_without_stop_d
             async with failing.sessions() as db:
                 actor = await db.scalar(select(User).where(User.username == "admin"))
         session = await failing.create_session(actor, NewSession())
-        turn = await failing.submit(actor, session.id, NewMessage(prompt="Race", request_key="failure-first"))
+        turn = await failing.admission.submit(actor, session.id, NewMessage(prompt="Race", request_key="failure-first"))
         assert (await failing.claim_next()).id == turn.id
-        await failing.prepare(turn.id)
+        await failing.admission.prepare(turn.id)
         locked, release, stop_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
         original_get = AsyncSession.get
 

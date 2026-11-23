@@ -25,9 +25,9 @@ async def test_settled_answer_wakes_slack_on_existing_dispatch_connection(postgr
     monkeypatch.setattr(slack_module, "MIN_DELIVERY_INTERVAL", .01)
     database, actor = postgres_database
     session = await database.create_session(actor, NewSession())
-    turn = await database.submit(actor, session.id, NewMessage(prompt="Test", request_key="wake-answer"))
+    turn = await database.admission.submit(actor, session.id, NewMessage(prompt="Test", request_key="wake-answer"))
     await database.claim_next()
-    prepared = await database.prepare(turn.id)
+    prepared = await database.admission.prepare(turn.id)
     assert await database.save_result(
         prepared.scope, conversation="{}", output="Ready", workspace=None, usage={},
     )

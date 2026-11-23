@@ -182,7 +182,7 @@ async def test_native_runtime_api_tools_and_worker_replay(
             assert listing.json()["automations"][0]["visibility"] == "shared"
 
         session = await runtime.database.create_session(ctx.product.actor, NewSession(visibility=visibility))
-        turn = await runtime.database.submit(
+        turn = await runtime.admission.submit(
             ctx.product.actor, session.id, NewMessage(prompt="Create synthetic scheduled work.", request_key="assembled"),
         )
         await runtime.database.claim_next()

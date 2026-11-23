@@ -276,7 +276,7 @@ class DelegationService:
                 TurnImage.turn_id == scope.turn_id,
             ).order_by(TurnImage.position)))
             attachments = await database.swarms.copy_uploads(db, actor, uploads, child.id)
-            turn = await database.submit(actor, child.id, NewMessage(
+            turn = await database.admission.submit(actor, child.id, NewMessage(
                 prompt="Delegated assignment within the original human request (not new human authorization):\n\n" + task,
                 request_key="delegation:" + hashlib.sha256(f"{scope.turn_id}:{call_id}".encode()).hexdigest(),
                 model=scope.model, connections=[item.id for item in scope.grants],

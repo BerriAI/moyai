@@ -137,7 +137,7 @@ async def connected(runtime, actor, monkeypatch):
     provider = GitLab(None, None, SimpleNamespace(gitlab_allow_loopback_http=False), None)
     accounts = CanonicalAccounts(actor, provider, grant())
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt=URL, request_key="review"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt=URL, request_key="review"))
     async with runtime.database.sessions.begin() as db:
         row = await db.get(Turn, turn.id)
         row.connections = '["' + accounts.grant.id + '"]'

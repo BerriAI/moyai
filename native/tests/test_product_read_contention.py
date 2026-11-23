@@ -205,7 +205,7 @@ async def test_mapped_history_recheck_preserves_source_and_native_privacy(
         ), {"id": source_id, "owner": product.actor.id})
         await writer.execute(text("INSERT INTO moyai.run_roots VALUES (:id,:id)"), {"id": source_id})
         await writer.execute(text("INSERT INTO moyai.run_ancestry VALUES (:id,:id)"), {"id": source_id})
-    turn = await product.runtime.database.submit(
+    turn = await product.runtime.admission.submit(
         product.actor, product.session_id, NewMessage(prompt="Local input", request_key="local"),
     )
     async with product.runtime.database.sessions.begin() as db:

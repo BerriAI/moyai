@@ -527,7 +527,7 @@ async def test_each_activity_attempt_checks_source_even_when_mirror_is_unchanged
 
 async def test_standalone_native_admission_remains_usable_and_product_sqlite_admission_is_explicit(product, runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Standalone", request_key="local"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Standalone", request_key="local"))
     assert (await runtime.database.claim_next()).id == turn.id
     principal = await product.adapter.current("google:admin-sub")
     async with runtime.database.sessions.begin() as db:

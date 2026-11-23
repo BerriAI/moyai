@@ -51,7 +51,7 @@ async def test_participation_read_state_and_preferences_do_not_reorder_other_peo
         assert not (await member.get("/api/sessions")).json()[0]["participated"]
         # Viewing is not participation.
         assert (await member.get(f"/api/sessions/{shared.id}")).status_code == 200
-        turn = await runtime.database.submit(other, shared.id, NewMessage(prompt="Contribute", request_key="participate"))
+        turn = await runtime.admission.submit(other, shared.id, NewMessage(prompt="Contribute", request_key="participate"))
         row = (await member.get("/api/sessions")).json()[0]
         assert row["participated"]
         message = (await member.get(f"/api/sessions/{shared.id}/messages")).json()[0]
@@ -65,7 +65,7 @@ async def test_participation_read_state_and_preferences_do_not_reorder_other_peo
         assert (await member.post(f"/api/sessions/{private.id}/read", json={"message_id": 10**9})).status_code == 404
         # A caller cannot mark unseen future messages read with an arbitrary high id.
         await member.post(f"{path}/read", json={"message_id": 10**9})
-        await runtime.database.submit(other, shared.id, NewMessage(prompt="Another", request_key="next"))
+        await runtime.admission.submit(other, shared.id, NewMessage(prompt="Another", request_key="next"))
         assert (await member.get("/api/sessions")).json()[0]["unread"]
         assert (await member.get("/api/sessions")).json()[0]["id"] == turn.session_id
 
@@ -86,7 +86,7 @@ async def test_queued_steering_reuses_the_saved_message_and_preserves_actor_boun
     session, parent, _ = active
     async with runtime.database.sessions.begin() as db:
         (await db.get(Turn, parent.id)).status = "running"
-    child = await runtime.database.submit(actor, session.id, NewMessage(prompt="Correct the task", request_key="queue-first"))
+    child = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Correct the task", request_key="queue-first"))
     async with sign_in(runtime) as client, member_client(runtime) as (other, _):
         path = f"/api/turns/{child.id}/steer"
         assert (await other.post(path)).status_code == 404

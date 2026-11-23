@@ -336,11 +336,11 @@ async def test_mcp_concurrent_updates_cannot_reuse_revision_or_forward_a_new_tok
             assert runtime.security.unseal(row.credential).decode() == "first-token"
             assert json.loads(row.policy)["mcp"]["url"] == "https://mcp.example.test/mcp"
         session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-        turn = await runtime.database.submit(actor, session.id, NewMessage(
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Synthetic selected scope", request_key="after-first-edit", connections=[identity],
         ))
         await runtime.database.claim_next()
-        prepared = await runtime.database.prepare(turn.id)
+        prepared = await runtime.admission.prepare(turn.id)
         retried = await client.put(f"/api/connections/{identity}", json=second_body)
         if concurrent_change == "credential":
             assert retried.status_code == 200 and retried.json()["revision"] == created["revision"] + 2
@@ -658,9 +658,9 @@ async def test_saved_skills_are_native_deferred_capabilities_with_correct_scopes
         # authorize_scope verifies the genuine persisted scope. A shared session
         # needs its own native turn, not a caller-mutated authority.
         session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-        turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="shared"))
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="shared"))
         await runtime.database.claim_next()
-        shared_scope = (await runtime.database.prepare(turn.id)).scope
+        shared_scope = (await runtime.admission.prepare(turn.id)).scope
         assert {row["id"] for row in await capability.catalog(shared_scope)} == {shared["id"]}
 
         captured = []
@@ -686,12 +686,12 @@ async def test_analytics_uses_actual_rows_and_never_private_content_or_fabricate
     session = await runtime.database.create_session(other, NewSession(
         title="Never disclose this private title", visibility="private",
     ))
-    first = await runtime.database.submit(other, session.id, NewMessage(
+    first = await runtime.admission.submit(other, session.id, NewMessage(
         prompt="Never disclose this private prompt", request_key="analytics-first",
     ))
     await runtime.database.claim_next()
-    await runtime.database.prepare(first.id)
-    second = await runtime.database.submit(other, session.id, NewMessage(prompt="Secret second", request_key="analytics-second"))
+    await runtime.admission.prepare(first.id)
+    second = await runtime.admission.submit(other, session.id, NewMessage(prompt="Secret second", request_key="analytics-second"))
     start = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
     async with runtime.database.sessions.begin() as db:
         one, two = await db.get(Turn, first.id), await db.get(Turn, second.id)

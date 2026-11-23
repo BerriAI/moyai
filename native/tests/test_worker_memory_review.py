@@ -46,7 +46,7 @@ async def test_review_failure_preserves_manual_dispatch(runtime, actor, failure)
     from moyai.contracts import NewMessage, NewSession
 
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="manual", request_key="manual-before-review"),
     )
     client = SimpleNamespace(start_workflow=AsyncMock())

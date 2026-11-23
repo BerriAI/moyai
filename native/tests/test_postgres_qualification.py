@@ -58,7 +58,7 @@ async def test_native_postgres_stores_in_temporal(tmp_path, monkeypatch):
         async with runtime.database.sessions() as db:
             actor = await db.scalar(select(User))
         session = await runtime.database.create_session(actor, NewSession())
-        turn = await runtime.database.submit(actor, session.id, NewMessage(
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Verify the native stores.", request_key="postgres-proof"
         ))
         await runtime.database.claim_next()
@@ -91,7 +91,7 @@ async def test_native_postgres_stores_in_temporal(tmp_path, monkeypatch):
             saved_session = await db.get(Session, session.id)
             saved_session.workspace = json.dumps({"provider": "modal", "id": "policy-only"})
         await lease(runtime, session.id, actor, "claim")
-        following = await runtime.database.submit(actor, session.id, NewMessage(
+        following = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Continue after handoff.", request_key="postgres-human-control",
         ))
         assert (await runtime.database.claim_next()).id == following.id

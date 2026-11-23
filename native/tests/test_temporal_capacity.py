@@ -128,7 +128,7 @@ class CapacityScenario:
 
 async def queued(runtime, actor, prompt):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt=prompt, request_key=prompt),
     )
     assert (await runtime.database.claim_next()).id == turn.id

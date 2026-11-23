@@ -58,7 +58,7 @@ async def test_signed_ingress_deduplicates_and_admits_linked_actor(runtime, acto
         session = await db.get(Session, turns[0].session_id)
         assert session.surface == "slack" and session.visibility == "private"
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turns[0].id)
+    prepared = await runtime.admission.prepare(turns[0].id)
     assert prepared.scope.memory_namespace.startswith(f"slack/{session.id}/")
 
 

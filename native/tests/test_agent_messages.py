@@ -108,7 +108,7 @@ async def test_child_pushes_progress_parent_guides_and_completion_arrives(runtim
     if rollover:
         runtime.settings.history_continue_bytes = 16384
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Coordinate with a child." + (" Reference." * 3000 if rollover else ""),
         request_key="message-exchange",
     ))
@@ -184,7 +184,7 @@ async def test_message_receipts_are_idempotent_and_unrelated_followups_cannot_me
     service, mail = DelegationService(runtime.database), AgentMessages(runtime.database)
     child = await service.start(prepared.scope, "child", "Assignment")
     child_turn = await runtime.database.claim_next()
-    child_context = await runtime.database.prepare(child_turn.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
     first = await mail.send(prepared.scope, "guidance", child["session_id"], "Keep the evidence.", parent.id)
     assert await mail.send(
         prepared.scope, "guidance", child["session_id"], "Keep the evidence.", parent.id,
@@ -196,11 +196,11 @@ async def test_message_receipts_are_idempotent_and_unrelated_followups_cannot_me
     assert await mail.read(child_context.scope, returned["message_id"]) is None
     assert (await mail.read(prepared.scope, returned["message_id"])).content == "Working."
     await finish(runtime, child_context, "Done.")
-    later = await runtime.database.submit(actor, child["session_id"], NewMessage(
+    later = await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Private later work", request_key="later",
     ))
     await runtime.database.claim_next()
-    context = await runtime.database.prepare(later.id)
+    context = await runtime.admission.prepare(later.id)
     with pytest.raises(PermissionError):
         await mail.send(context.scope, "leak", "parent", "Private unrelated content", later.id)
     with pytest.raises(PermissionError):
@@ -212,7 +212,7 @@ async def test_lost_signal_reply_retries_in_order_without_starving_other_recipie
     mail = AgentMessages(runtime.database)
     child = await DelegationService(runtime.database).start(prepared.scope, "child", "Work")
     child_turn = await runtime.database.claim_next()
-    child_context = await runtime.database.prepare(child_turn.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
     sent = [
         await mail.send(prepared.scope, f"guidance-{i}", child["session_id"], f"Update {i}", parent.id)
         for i in range(8)
@@ -221,7 +221,7 @@ async def test_lost_signal_reply_retries_in_order_without_starving_other_recipie
         await mail.send(prepared.scope, "too-many", child["session_id"], "Overflow", parent.id)
     other = await DelegationService(runtime.database).start(prepared.scope, "other-child", "Other work")
     other_turn = await runtime.database.claim_next()
-    await runtime.database.prepare(other_turn.id)
+    await runtime.admission.prepare(other_turn.id)
     independent = await mail.send(prepared.scope, "independent", other["session_id"], "Unblocked", parent.id)
     # Simulate acceptance by Temporal followed by a lost RPC acknowledgment.
     signal = AsyncMock(side_effect=[RPCError("lost reply", RPCStatusCode.UNAVAILABLE, b""), None])
@@ -259,7 +259,7 @@ async def test_answer_continuations_receive_pending_mail_in_both_directions(runt
     child = await DelegationService(runtime.database).start(prepared.scope, "child", "Work")
     prepared.scope.background_agents.append(child["session_id"])
     child_turn = await runtime.database.claim_next()
-    child_context = await runtime.database.prepare(child_turn.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
     progress = await mail.send(child_context.scope, "progress", "parent", "Finding", child_turn.id)
     guidance = await mail.send(prepared.scope, "guidance", child["session_id"], "Direction", parent_turn.id)
     signal = AsyncMock()
@@ -280,8 +280,8 @@ async def test_answer_continuations_receive_pending_mail_in_both_directions(runt
         actor, child["session_id"], child_turn.id, "child-answer", {"calls": {}},
     )
     await runtime.database.claim_batch(10)
-    parent_context = await runtime.database.prepare(parent_answer.id)
-    child_context = await runtime.database.prepare(child_answer.id)
+    parent_context = await runtime.admission.prepare(parent_answer.id)
+    child_context = await runtime.admission.prepare(child_answer.id)
     async with runtime.database.sessions() as db:
         assert (await db.get(Event, progress["message_id"])).kind == PENDING
         assert (await db.get(Event, guidance["message_id"])).kind == PENDING
@@ -292,9 +292,9 @@ async def test_answer_continuations_receive_pending_mail_in_both_directions(runt
     ] == parent.id
     await mail.send(parent_context.scope, "next-guidance", child["session_id"], "Next direction", parent_answer.id)
     await finish(runtime, parent_context, "Done")
-    later = await runtime.database.submit(actor, parent.id, NewMessage(prompt="New work", request_key="new-work"))
+    later = await runtime.admission.submit(actor, parent.id, NewMessage(prompt="New work", request_key="new-work"))
     await runtime.database.claim_next()
-    later_context = await runtime.database.prepare(later.id)
+    later_context = await runtime.admission.prepare(later.id)
     assert await mail.read(later_context.scope, progress["message_id"]) is None
     with pytest.raises(PermissionError, match="different assignment"):
         await mail.send(child_context.scope, "late-progress", "parent", "Must stay private", child_answer.id)
@@ -308,7 +308,7 @@ async def test_saved_conversation_acknowledges_only_its_consumed_mail(runtime, a
     mail = AgentMessages(runtime.database)
     child = await DelegationService(runtime.database).start(parent.scope, "child", "Work")
     child_turn = await runtime.database.claim_next()
-    child_context = await runtime.database.prepare(child_turn.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
     sender, receiver = (child_context, parent) if direction == "parent" else (parent, child_context)
     target = "parent" if direction == "parent" else child["session_id"]
     consumed, unread = [
@@ -351,7 +351,7 @@ async def test_answer_resume_reconciles_legacy_snapshot_before_requeuing(runtime
     parent.scope.background_delegation = True
     parent.scope.background_agents = [child["session_id"]]
     child_turn = await runtime.database.claim_next()
-    child_context = await runtime.database.prepare(child_turn.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
     sender, receiver = (child_context, parent) if direction == "parent" else (parent, child_context)
     target = "parent" if direction == "parent" else child["session_id"]
     consumed, unread = [
@@ -378,7 +378,7 @@ async def test_answer_resume_reconciles_legacy_snapshot_before_requeuing(runtime
             actor, receiver.scope.session_id, receiver.scope.turn_id, f"answer-{attempt}", {"calls": {}},
         )).id == resumed.id
         await runtime.database.claim_next()
-        context = await runtime.database.prepare(resumed.id)
+        context = await runtime.admission.prepare(resumed.id)
         async with runtime.database.sessions() as db:
             seen = await db.get(Event, consumed["message_id"])
             assert seen.kind == DELIVERED
@@ -403,7 +403,7 @@ async def test_saved_completion_is_not_carried_as_outstanding_after_answer(runti
     service, mail = DelegationService(runtime.database), AgentMessages(runtime.database)
     completed = await service.start(prepared.scope, "done-child", "Finish")
     child_turn = await runtime.database.claim_next()
-    child_context = await runtime.database.prepare(child_turn.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
     await finish(runtime, child_context, "Completed evidence")
     outstanding = await service.start(prepared.scope, "busy-child", "Keep working")
     prepared.scope.background_agents = [completed["session_id"], outstanding["session_id"]]
@@ -437,7 +437,7 @@ async def test_saved_completion_is_not_carried_as_outstanding_after_answer(runti
             paused.preparation = runtime.security.seal(TypeAdapter(PreparedTurn).dump_json(saved))
     resumed = await runtime.database.resume(actor, session.id, turn.id, "answer", {"calls": {}})
     await runtime.database.claim_batch(10)
-    context = await runtime.database.prepare(resumed.id)
+    context = await runtime.admission.prepare(resumed.id)
     assert context.scope.background_agents == [outstanding["session_id"]]
     async with runtime.database.sessions() as db:
         row = await db.get(Event, completion.id)
@@ -496,7 +496,7 @@ async def test_fast_completion_follows_committed_progress_without_duplicating_re
     prepared.scope.agent_messages = True
     await DelegationService(runtime.database).start(prepared.scope, "child", "Work")
     child_turn = await runtime.database.claim_next()
-    child_context = await runtime.database.prepare(child_turn.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
     mail = AgentMessages(runtime.database)
     progress = await mail.send(child_context.scope, "progress", "parent", "Discovery", child_turn.id)
     await finish(runtime, child_context, "Final evidence")

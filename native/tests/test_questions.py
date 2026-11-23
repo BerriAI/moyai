@@ -39,9 +39,9 @@ def test_question_response_uses_the_validated_harness_schema(string_arguments):
 
 async def waiting(runtime, actor, *, optional=False, extra=None):
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Choose a color.", request_key="first"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Choose a color.", request_key="first"))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     call = ToolCallPart("ask_user_question", {"questions": [{
         "header": "Color", "question": "Blue or green?",
         "options": [{"label": "Blue"}, {"label": "Green"}],
@@ -72,7 +72,7 @@ async def expire_deadline(runtime, turn):
 
 async def test_answer_is_reserved_before_five_older_followups(runtime, actor):
     session, original, pending = await waiting(runtime, actor)
-    followups = [await runtime.database.submit(
+    followups = [await runtime.admission.submit(
         actor, session.id, NewMessage(prompt=f"Follow-up {i}", request_key=f"queued-{i}", mode="when_idle"),
     ) for i in range(5)]
     resumed = await runtime.database.resume(actor, session.id, original.id, "answer", text_results(pending, "Blue"))
@@ -80,7 +80,7 @@ async def test_answer_is_reserved_before_five_older_followups(runtime, actor):
         assert (await db.get(Session, session.id)).active_turn == resumed.id
     claimed = await runtime.database.claim_batch(10)
     assert [turn.id for turn in claimed] == [resumed.id]
-    prepared = await runtime.database.prepare(resumed.id)
+    prepared = await runtime.admission.prepare(resumed.id)
     assert prepared.prompt == "" and prepared.deferred_results is not None
     resolved = Conversation(conversation_id=prepared.scope.conversation_id)
     assert await runtime.database.save_result(
@@ -90,14 +90,14 @@ async def test_answer_is_reserved_before_five_older_followups(runtime, actor):
     await runtime.database.settle(resumed.id)
     next_turn = await runtime.database.claim_next()
     assert next_turn.id == followups[0].id
-    assert (await runtime.database.prepare(next_turn.id)).deferred_results is None
+    assert (await runtime.admission.prepare(next_turn.id)).deferred_results is None
 
 
 async def test_typed_answer_is_an_idempotent_resume_and_a_visible_message(runtime, actor):
     session, original, _ = await waiting(runtime, actor)
     body = NewMessage(prompt="Blue, please.", request_key="typed-answer", reply_to=original.id)
-    first = await runtime.database.submit(actor, session.id, body)
-    retry = await runtime.database.submit(actor, session.id, body)
+    first = await runtime.admission.submit(actor, session.id, body)
+    retry = await runtime.admission.submit(actor, session.id, body)
     assert first.id == retry.id and first.deferred_results
     async with runtime.database.sessions() as db:
         messages = list(await db.scalars(select(Message).where(Message.turn_id == first.id)))
@@ -105,14 +105,14 @@ async def test_typed_answer_is_an_idempotent_resume_and_a_visible_message(runtim
     assert len(messages) == 1 and runtime.security.unseal(messages[0].content).decode() == "Blue, please."
     assert runtime.security.unseal(first.prompt).decode() == ""
     with pytest.raises(HTTPException) as error:
-        await runtime.database.submit(actor, session.id, body.model_copy(update={"request_key": "stale"}))
+        await runtime.admission.submit(actor, session.id, body.model_copy(update={"request_key": "stale"}))
     assert error.value.status_code == 409
 
 
 async def test_five_concurrent_asap_messages_answer_once_and_preserve_the_rest(runtime, actor):
     session, original, _ = await waiting(runtime, actor)
     turns = await asyncio.gather(*(
-        runtime.database.submit(actor, session.id, NewMessage(
+        runtime.admission.submit(actor, session.id, NewMessage(
             prompt=f"Blue. Additional detail {i}.", mode="asap", request_key=f"burst-{i}",
         )) for i in range(5)
     ))
@@ -167,12 +167,12 @@ async def test_required_questions_and_mixed_requests_never_timeout(runtime, acto
 ])
 async def test_chat_cannot_resolve_approvals_or_credentials(runtime, actor, extra):
     session, original, _ = await waiting(runtime, actor, extra=extra)
-    queued = await runtime.database.submit(
+    queued = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="yes", mode="asap", request_key="not-an-approval"),
     )
     assert queued.deferred_results is None
     with pytest.raises(HTTPException):
-        await runtime.database.submit(actor, session.id, NewMessage(
+        await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="yes", reply_to=original.id, request_key="explicit-not-an-approval",
         ))
     async with runtime.database.sessions() as db:
@@ -184,7 +184,7 @@ async def test_timeout_racing_a_reply_produces_one_resume(runtime, actor):
     await expire_deadline(runtime, original)
     outcomes = await asyncio.gather(
         expire_optional_questions(runtime.database),
-        runtime.database.submit(actor, session.id, NewMessage(
+        runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Blue", reply_to=original.id, request_key="human",
         )), return_exceptions=True,
     )

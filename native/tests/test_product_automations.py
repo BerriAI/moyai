@@ -358,11 +358,11 @@ async def test_stale_source_editor_and_pending_sync_block_admission(automations)
 async def test_private_and_delegated_tool_sources_are_denied_from_persisted_state(automations):
     ctx = automations
     session = await ctx.product.database.create_session(ctx.product.actor, NewSession(visibility="shared"))
-    turn = await ctx.product.database.submit(
+    turn = await ctx.product.database.admission.submit(
         ctx.product.actor, session.id, NewMessage(prompt="Synthetic direct request", request_key="tool-origin"),
     )
     await ctx.product.database.claim_next()
-    scope = (await ctx.product.database.prepare(turn.id)).scope
+    scope = (await ctx.product.database.admission.prepare(turn.id)).scope
     await ctx.service.authorize_tool(scope, turn.id)
     with pytest.raises(HTTPException):
         await ctx.service.authorize_tool(scope, "delegated-run")
@@ -442,9 +442,9 @@ async def test_shared_password_ui_authority_does_not_authorize_agent_tools(autom
     async with ctx.product.database.sessions.begin() as db:
         actor = await ctx.product.adapter.project_native_user(db, principal)
     session = await ctx.product.database.create_session(actor, NewSession(visibility="shared"))
-    turn = await ctx.product.database.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="shared-ui"))
+    turn = await ctx.product.database.admission.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="shared-ui"))
     await ctx.product.database.claim_next()
-    scope = (await ctx.product.database.prepare(turn.id)).scope
+    scope = (await ctx.product.database.admission.prepare(turn.id)).scope
     with pytest.raises(HTTPException) as denied:
         await ctx.service.authorize_tool(scope, turn.id)
     assert denied.value.status_code == 403
@@ -490,11 +490,11 @@ async def tool_context(ctx, *, visibility="shared", actor=None, delegate=False, 
             await db.execute(update(Session).where(Session.id == session.id).values(surface=surface))
     if surface == "slack":
         await bind_slack_test_session(ctx.product.database, session.id, actor)
-    turn = await ctx.product.database.submit(
+    turn = await ctx.product.database.admission.submit(
         actor, session.id, NewMessage(prompt="Synthetic user scheduling request", request_key="tool-" + uuid4().hex),
     )
     await ctx.product.database.claim_next()
-    scope = (await ctx.product.database.prepare(turn.id)).scope
+    scope = (await ctx.product.database.admission.prepare(turn.id)).scope
     return RunContext(
         deps=scope, model=FunctionModel(lambda *_: ModelResponse(parts=[TextPart("unused")])),
         usage=RunUsage(), run_id="delegated" if delegate else turn.id,

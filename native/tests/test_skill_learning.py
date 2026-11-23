@@ -353,9 +353,9 @@ async def test_recall_requires_relevance_repository_and_authorized_audience(lear
 
     async def context(prompt, private):
         session = await product.database.create_session(product.actor, NewSession(visibility="private" if private else "shared"))
-        turn = await product.database.submit(product.actor, session.id, NewMessage(prompt=prompt, request_key=session.id))
+        turn = await product.database.admission.submit(product.actor, session.id, NewMessage(prompt=prompt, request_key=session.id))
         assert (await product.database.claim_next()).id == turn.id
-        prepared = await product.database.prepare(turn.id)
+        prepared = await product.database.admission.prepare(turn.id)
         result = await source.render(prepared.scope)
         await product.database.save_result(prepared.scope, conversation='{"messages":[]}', output="Done.", workspace=None, usage={})
         await product.database.settle(turn.id)

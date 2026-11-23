@@ -3,7 +3,7 @@
 Integration:
 * Add settings_capability(database) alongside the existing bundled Skills(...).
 * Register SETTINGS_WORKFLOWS and SETTINGS_ACTIVITIES in make_worker.
-* Keep the existing dispatcher: scheduled admissions use Database.submit.
+* Keep the existing dispatcher: scheduled admissions use TurnAdmission.submit.
 """
 
 from __future__ import annotations
@@ -270,7 +270,7 @@ async def admit_automation(runtime: Any, automation_id: str, occurrence_id: str)
             owner = await runtime.database.user(snapshot["owner_id"])
             if owner.auth_version != snapshot["auth_version"]:
                 raise HTTPException(403, "Automation owner's access changed.")
-            turn = await runtime.database.submit(owner, snapshot["session_id"], NewMessage(
+            turn = await runtime.admission.submit(owner, snapshot["session_id"], NewMessage(
                 prompt=snapshot["prompt"], model=snapshot["model"], connections=snapshot["connections"],
                 request_key=f"automation:{identity}",
             ))

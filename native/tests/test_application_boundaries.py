@@ -87,7 +87,7 @@ async def test_snapshot_cleanup_preserves_published_answer_and_releases_queue(ru
         assert await db.scalar(select(func.count()).select_from(Message).where(
             Message.identity == f"answer:{turn.id}"
         )) == 1
-    following = await runtime.database.submit(
+    following = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Continue.", request_key="after-snapshot-failure"),
     )
     assert (await runtime.database.claim_next()).id == following.id
@@ -96,7 +96,7 @@ async def test_snapshot_cleanup_preserves_published_answer_and_releases_queue(ru
 @pytest.mark.parametrize("cleanup", ["snapshot", "fail", "stopped"])
 async def test_completed_answer_settlement_preserves_stop_and_cancelled_queue(runtime, active, actor, cleanup):
     session, turn, prepared = active
-    queued = await runtime.database.submit(actor, session.id, NewMessage(
+    queued = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Queued work must stay cancelled.", request_key="queued-before-stop",
     ))
     await runtime.database.save_result(
@@ -153,7 +153,7 @@ async def test_personal_accounts_cannot_feed_shared_conversations(runtime, actor
         db.add(connection)
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
     with pytest.raises(HTTPException) as error:
-        await runtime.database.submit(actor, session.id, NewMessage(
+        await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Use my personal account", connections=[connection.id], request_key="private-in-shared"
         ))
     assert error.value.status_code == 403
@@ -170,7 +170,7 @@ async def test_existing_computer_cannot_be_reused_under_changed_accounts(runtime
         )
         db.add(connection)
     with pytest.raises(HTTPException) as error:
-        await runtime.database.submit(actor, session.id, NewMessage(
+        await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Change accounts", connections=[connection.id], request_key="different-account"
         ))
     assert error.value.status_code == 409
@@ -231,11 +231,11 @@ async def test_uncertain_write_blocks_new_call_ids_until_turn_fails(runtime, act
         assert not (await client.get(f"/api/sessions/{session.id}")).json()["has_unsettled_effects"]
     async with runtime.database.sessions() as db:
         assert (await db.get(Effect, "first-call")).state == "failed"
-    follow_up = await runtime.database.submit(actor, session.id, NewMessage(
+    follow_up = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Continue.", request_key="after-failure"
     ))
     await runtime.database.claim_next()
-    admitted = await runtime.database.prepare(follow_up.id)
+    admitted = await runtime.admission.prepare(follow_up.id)
     await receipts.reserve(admitted.scope, "next-action", "shell", {"command": "next operation"})
 
 
@@ -336,7 +336,7 @@ async def test_native_steering_fences_old_action_and_authorizes_new_delegate(
                 task_queue=runtime.settings.temporal_queue,
             )
             await asyncio.wait_for(model_gates[0].wait(), 20)
-            correction = await runtime.database.submit(actor, session.id, NewMessage(
+            correction = await runtime.admission.submit(actor, session.id, NewMessage(
                 prompt="NEW GUIDANCE: delegate the corrected work.",
                 request_key="urgent-correction", mode="asap",
             ))

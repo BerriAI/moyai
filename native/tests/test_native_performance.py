@@ -147,7 +147,7 @@ def test_breakdown_means_share_a_cohort_and_missing_or_reversed_times_stay_unkno
 
 async def test_report_is_admin_only_root_scoped_bounded_and_csv_keeps_evidence(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Secret", request_key="one"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Secret", request_key="one"))
     async with runtime.database.sessions.begin() as db:
         root = await db.get(Turn, turn.id)
         root.created_at = stamp(0)
@@ -268,7 +268,7 @@ async def test_computer_first_attempt_success_failure_and_retry_coverage(runtime
         async with computer_timing(runtime.database, prepared.scope, "cold"):
             raise RuntimeError("Later attempt cannot overwrite the original")
     assert (await saved(runtime, turn.id, "computer")).content == first.content
-    other = await runtime.database.submit(
+    other = await runtime.admission.submit(
         await runtime.database.user(prepared.scope.actor_id), prepared.scope.session_id,
         NewMessage(prompt="Another turn", request_key="two"),
     )

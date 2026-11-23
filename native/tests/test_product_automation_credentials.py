@@ -37,7 +37,7 @@ async def resumed_context(ctx, credentials):
     supplied = credential_fixtures.provide().model_copy(update={"scope": "organization"})
     result = await credentials.service.resolve(None, ctx.product.principal, pending["request_id"], supplied)
     assert (await ctx.product.database.claim_next()).id == result["turn_id"]
-    caller.deps = (await ctx.product.database.prepare(result["turn_id"])).scope
+    caller.deps = (await ctx.product.database.admission.prepare(result["turn_id"])).scope
     caller.run_id, caller.tool_call_id = caller.deps.turn_id, "configure-receiver"
     return caller, original, pending["request_id"]
 
@@ -120,7 +120,7 @@ async def test_owner_turn_grant_survives_verified_resume_but_not_forged_prefix(e
         credential_fixtures.provide().model_copy(update={"scope": "organization"}),
     )
     await ctx.product.database.claim_next()
-    scope = (await ctx.product.database.prepare(result["turn_id"])).scope
+    scope = (await ctx.product.database.admission.prepare(result["turn_id"])).scope
     assert (await ctx.service.access.read(scope))["automations"][0]["id"] == row["id"]
     async with ctx.product.database.sessions() as db:
         assert await ctx.service.human_origin(db, scope) == original
@@ -220,7 +220,7 @@ async def test_secure_request_resume_and_receiver_mutation_use_real_temporal_act
             workspace=LocalWorkspace(workspace), skills_directory="skills",
         )
         session = await runtime.database.create_session(ctx.product.actor, NewSession(visibility="shared"))
-        turn = await runtime.database.submit(ctx.product.actor, session.id, NewMessage(
+        turn = await runtime.admission.submit(ctx.product.actor, session.id, NewMessage(
             prompt="Configure the authorized receiver through the secure form.", request_key="credential-temporal",
         ))
         assert (await runtime.database.claim_next()).id == turn.id

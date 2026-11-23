@@ -379,7 +379,7 @@ async def test_real_pg_capture_retained_before_drain_and_immutable_on_retry(cont
     product = continuation
     result = await admit(product)
     await product.database.claim_next()
-    prepared = await product.database.prepare(result["turn_id"])
+    prepared = await product.database.admission.prepare(result["turn_id"])
     events = []
 
     class Transport:
@@ -444,7 +444,7 @@ async def test_real_pg_recovery_readback_precedes_drain_and_restore_retries_no_o
     await product.sql("UPDATE moyai.runs SET snapshot_id='verified-old-snapshot'")
     result = await admit(product, accept_workspace_omissions=True)
     await product.database.claim_next()
-    prepared = await product.database.prepare(result["turn_id"])
+    prepared = await product.database.admission.prepare(result["turn_id"])
     events = []
     destination = tmp_path / "fresh-native"
 
@@ -496,7 +496,7 @@ async def test_real_pg_repository_bootstrap_rechecks_access_before_publishing_wo
     product = continuation
     result = await admit(product)
     await product.database.claim_next()
-    prepared = await product.database.prepare(result["turn_id"])
+    prepared = await product.database.admission.prepare(result["turn_id"])
     events = []
 
     class Transport:
@@ -559,7 +559,7 @@ async def test_real_pg_revocation_during_capture_prevents_receipt_and_native_exe
     product = continuation
     result = await admit(product)
     await product.database.claim_next()
-    prepared = await product.database.prepare(result["turn_id"])
+    prepared = await product.database.admission.prepare(result["turn_id"])
 
     class Transport:
         async def export(self, member, target):
@@ -582,7 +582,7 @@ async def test_real_pg_collection_failure_stops_before_old_computer_drain(contin
     await product.sql("UPDATE moyai.runs SET snapshot_id='old-snapshot'")
     result = await admit(product, accept_workspace_omissions=True)
     await product.database.claim_next()
-    prepared = await product.database.prepare(result["turn_id"])
+    prepared = await product.database.admission.prepare(result["turn_id"])
 
     async def export(member, target):
         package(target, omitted=["project (repository collection failed)"])
@@ -713,7 +713,7 @@ async def test_real_pg_environment_refresh_context_integrity_and_exact_memory_tu
         refreshed = await workspace.validate_workspace_context(db, product.principal, selection, original)
     assert refreshed["environment_build_id"] == second
     session = await product.database.create_session(product.actor, NewSession())
-    turn = await product.database.submit(product.actor, session.id, NewMessage(prompt="new", request_key="new"))
+    turn = await product.database.admission.submit(product.actor, session.id, NewMessage(prompt="new", request_key="new"))
     async with product.database.sessions.begin() as db:
         await workspace.bind_automation_turn(db, session, turn, refreshed)
     scoped = await workspace.repository_scope(session.id, product.principal.grant, turn_id=turn.id)
@@ -735,9 +735,9 @@ async def test_real_pg_repository_memory_uses_exact_completed_turn_receipt_and_c
     product = continuation
     workspace = product.runtime.product_workspace
     session = await product.database.create_session(product.actor, NewSession())
-    turn = await product.database.submit(product.actor, session.id, NewMessage(prompt="new", request_key="receipt"))
+    turn = await product.database.admission.submit(product.actor, session.id, NewMessage(prompt="new", request_key="receipt"))
     await product.database.claim_next()
-    prepared = await product.database.prepare(turn.id)
+    prepared = await product.database.admission.prepare(turn.id)
     prepared.workspace = {"provider": "modal", "id": "sb-original"}
     context = {"repo_url": "https://github.com/example/project", "source_schema": "moyai", "repository_id": None}
     context["context_fingerprint"] = fingerprint(context)
@@ -837,9 +837,9 @@ async def test_real_pg_gitlab_historical_memory_rechecks_exact_frozen_selection(
     product = continuation
     workspace = product.runtime.product_workspace
     session = await product.database.create_session(product.actor, NewSession())
-    turn = await product.database.submit(product.actor, session.id, NewMessage(prompt="new", request_key="gitlab-receipt"))
+    turn = await product.database.admission.submit(product.actor, session.id, NewMessage(prompt="new", request_key="gitlab-receipt"))
     await product.database.claim_next()
-    prepared = await product.database.prepare(turn.id)
+    prepared = await product.database.admission.prepare(turn.id)
     selected = Grant(
         "gitlab-selected", "github" if case == "github-collision" else "gitlab",
         2 if case == "changed-revision" else 1, "",
@@ -926,7 +926,7 @@ async def test_real_pg_pre_manifest_local_archive_is_discovered_and_read_with_or
     assert preview["requires_workspace_ack"]
     result = await admit(product, accept_workspace_omissions=True)
     await product.database.claim_next()
-    prepared = await product.database.prepare(result["turn_id"])
+    prepared = await product.database.admission.prepare(result["turn_id"])
     async with product.database.sessions() as db:
         binding = await db.get(ProductContinuation, ("moyai", ROOT))
         plan = json.loads(product.runtime.security.unseal(binding.workspace))
