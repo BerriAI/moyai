@@ -22,10 +22,26 @@ The broker forwards only a valid `traceparent`, without forwarding arbitrary
 headers or baggage.
 
 Native spans include the agent name, session and turn IDs, model usage, tool
-names and timings. They do not copy prompts, completions, private memory,
-capability content, credential tool arguments, binary attachments or full model
-request parameters. Existing gateway model logging supplies the request and
-response content according to the gateway's own configuration.
+names and timings. Prompt and response capture is off by default. To show
+conversation text in Lens, explicitly set this on the API, coordinator and workers:
+
+```sh
+export LITELLM_TRACE_INCLUDE_CONTENT=true
+```
+
+This records user text and assistant text on model and agent spans for new
+runs. It excludes system instructions, injected memory and saved private
+preferences, tool arguments and results, reasoning, media, and full model
+request parameters. Configured application credentials are redacted from the
+recorded text. User-supplied text is still conversation data: enable this only
+where the Lens access and retention policy is appropriate for that content.
+This does not change the gateway's independent logging policy or backfill old
+traces.
+
+Logfire's default scrubbing remains enabled. Only a valid UUID in the exact
+`metadata.moyai_session_id` field is exempted from its `session` pattern, so the
+application's session can be correlated without allowing session cookies or
+other credential fields through.
 
 The exporter uses a bounded background queue and a three-second request timeout.
 An unavailable collector does not fail or retry model inference. Shutdown

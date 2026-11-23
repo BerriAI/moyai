@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextContent, TextPart, UserPromptPart
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -187,8 +187,9 @@ async def test_request_only_user_role_never_mutates_history_or_authority(runtime
                                   model_request_parameters=ModelRequestParameters())
     capability = PrivateInstructions(runtime.database)
     changed = await capability.before_model_request(ctx, request)
-    assert TEXT in changed.messages[0].parts[0].content
+    assert TEXT in changed.messages[0].parts[0].content[0].content
     assert isinstance(changed.messages[0].parts[0], UserPromptPart)
+    assert changed.messages[0].parts[0].content[0].metadata == "moyai.private-context:preferences"
     assert changed.messages[1:] == history == request.messages
     assert len(ctx.messages) == 1
     assert changed.model_request_parameters is request.model_request_parameters
@@ -202,10 +203,16 @@ async def test_saved_instructions_run_in_temporal_and_replay(runtime, actor, act
     _, turn, _ = active
 
     def respond(messages, info):
-        preferences = [
-            part.content for message in messages if isinstance(message, ModelRequest)
-            for part in message.parts if isinstance(part, UserPromptPart) and isinstance(part.content, str)
-        ]
+        preferences = []
+        for message in messages:
+            if isinstance(message, ModelRequest):
+                for part in message.parts:
+                    if isinstance(part, UserPromptPart):
+                        items = [part.content] if isinstance(part.content, str) else part.content
+                        preferences.extend(
+                            item.content if isinstance(item, TextContent) else item
+                            for item in items if isinstance(item, str | TextContent)
+                        )
         assert any(TEXT in content for content in preferences)
         assert TEXT not in str(info.instructions)
         return ModelResponse(parts=[TextPart("Private instructions reached the model as user preferences.")])

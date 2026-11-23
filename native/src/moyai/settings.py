@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     gateway_key: SecretStr = Field(default=SecretStr(""), validation_alias="LITELLM_API_KEY")
     trace_endpoint: str = Field(default="", validation_alias="LITELLM_TRACE_ENDPOINT")
     trace_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="LITELLM_TRACE_API_KEY")
+    trace_include_content: bool = Field(default=False, validation_alias="LITELLM_TRACE_INCLUDE_CONTENT")
     customer_org_alias: str = Field(
         default="", max_length=200, pattern=r"^[\x20-\x7E]*$",
         validation_alias="MOYAI_CUSTOMER_ORG_ALIAS",
