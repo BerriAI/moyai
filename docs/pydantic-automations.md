@@ -82,6 +82,20 @@ the existing coordinator dispatcher. The exported lists include schedule sync,
 calendar admission, event admission, and the factual pre-body-refusal activity.
 There is no new process timer or model loop.
 
+`product_automations.py` owns authorized definition commands, operation receipts,
+and atomic occurrence admission. Its internal `ProductAutomationSync` module in
+`product_automation_sync.py` owns pending schedule dispatch and reconciliation:
+the per-automation remote-operation lock, confirmed legacy pauses, durable
+schedule IDs before remote creation, generation convergence, stale schedule
+deletion, and remote readback before marking an intent ready.
+
+Synchronization uses the command module's canonical row reader and writer fence.
+It retains the injected Temporal client seam used by the deterministic failure
+adapter and the local Temporal tests. A committed mutation still succeeds when
+dispatch is unavailable; the existing coordinator recovers pending intent.
+Workflow/activity names, arguments, registrations and declarations remain in
+`product_automations.py` so this separation does not change replay contracts.
+
 `Database.admit_automation(..., connections=...)` must preserve the caller's
 transaction. `Database.resolve_grants` must pass `db=db` to
 `product_connections.resolve_grants`. Source reads during canonical admission
