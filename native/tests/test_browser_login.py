@@ -23,7 +23,7 @@ from moyai.models import ComputerDesktop, ComputerLease, ComputerOperation, Sess
 from moyai.questions import expire_optional_questions
 
 
-async def waiting_login(runtime, actor, *, extra=None):
+async def waiting_login(runtime, actor, *, extra=None, checkpoint_workspace=False):
     session, scope = await running_browser(runtime, actor)
     capability = BrowserLogin(runtime.database)
     tool = capability.get_toolset().tools["request_browser_login"]
@@ -45,6 +45,7 @@ async def waiting_login(runtime, actor, *, extra=None):
     assert await runtime.database.save_result(
         scope, conversation=ConversationTypeAdapter.dump_json(conversation).decode(),
         output="", workspace={"provider": "modal", "id": "scoped-computer"}, usage={}, deferred=True,
+        checkpoint_workspace=checkpoint_workspace,
     )
     return session, scope.turn_id
 

@@ -48,7 +48,7 @@ class DesktopCommandFailed(HTTPException):
 
 
 class ComputerCommand(BaseModel):
-    action: Literal["start", "claim", "release", "handoff", "heartbeat", "open", "terminal", "click", "type", "key", "scroll"]
+    action: Literal["start", "reconnect", "claim", "release", "handoff", "heartbeat", "open", "terminal", "click", "type", "key", "scroll"]
     x: int = Field(default=0, ge=0, lt=1280)
     y: int = Field(default=0, ge=0, lt=800)
     button: Literal[1, 2, 3] = 1
@@ -295,6 +295,10 @@ def routes(runtime: Runtime, actor, *, cookie_name: str = "moyai_session") -> AP
 
     @router.post("/api/sessions/{session_id}/computer", operation_id="controlComputer")
     async def control(session_id: str, body: ComputerCommand, user: User = Depends(actor)) -> ComputerControlResult:
+        if body.action == "reconnect":
+            from .computer_recovery import reconnect
+
+            return await reconnect(runtime, session_id, user, body.client_id)
         operation = await lease(runtime, session_id, user, body.action, body.client_id)
         session = await authorize(runtime, session_id, user)
         if body.action in {"claim", "release", "handoff", "heartbeat"}:
