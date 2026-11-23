@@ -3,6 +3,7 @@ import asyncio
 import io
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -197,6 +198,9 @@ async def test_confirmed_guest_failure_allows_immediate_retry_release_and_agent_
             return SimpleNamespace(exit_code=1 if failure == "exit" else 0, stdout='{"error":"failed"}')
 
     monkeypatch.setattr("moyai.computer.Workspace", lambda _backend: FailedWorkspace())
+    # This fixture models a live guest failing its command, after the new
+    # reconnect preflight. Never send its synthetic sandbox ID to Modal.
+    monkeypatch.setattr("moyai.computer_recovery.live_sandbox", AsyncMock(return_value=True))
     async with sign_in(runtime) as client:
         for _ in range(2):
             failed = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "start"})
@@ -218,6 +222,7 @@ async def test_ambiguous_desktop_timeout_keeps_operation_ownership(runtime, acto
         raise TimeoutError("Response was lost.")
 
     monkeypatch.setattr("moyai.computer.request", timeout)
+    monkeypatch.setattr("moyai.computer_recovery.live_sandbox", AsyncMock(return_value=True))
     async with sign_in(runtime) as client:
         failed = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "start"})
         assert failed.status_code == 503
