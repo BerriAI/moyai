@@ -73,9 +73,9 @@ async def active_turn(product, *, private=False):
     session = await database.create_session(
         product.actor, NewSession(visibility="private") if private else NewSession(),
     )
-    turn = await database.submit(product.actor, session.id, NewMessage(prompt="Work", request_key=str(uuid4())))
+    turn = await database.admission.submit(product.actor, session.id, NewMessage(prompt="Work", request_key=str(uuid4())))
     assert (await database.claim_next()).id == turn.id
-    prepared = await database.prepare(turn.id)
+    prepared = await database.admission.prepare(turn.id)
     return session, turn, prepared
 
 

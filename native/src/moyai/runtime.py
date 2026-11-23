@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from .product_skill_learning import SkillLearningService
     from .product_slack import ProductSlack
     from .tracing import LensTracing
+    from .turn_admission import TurnAdmission
 
 
 class Runtime:
@@ -222,6 +223,10 @@ class Runtime:
         except BaseException:
             await self.close()
             raise
+
+    @property
+    def admission(self) -> TurnAdmission:
+        return self.database.admission
 
     @property
     def product_store(self):

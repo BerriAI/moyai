@@ -162,7 +162,7 @@ async def test_postgres_submission_notifies_only_after_outer_commit_and_never_af
         await asyncio.wait_for(listener.ready.wait(), 5)
         listener.event.clear()
         async with database.sessions.begin() as db:
-            committed = await database.submit(
+            committed = await database.admission.submit(
                 actor, session.id, NewMessage(prompt="Committed", request_key="commit"), db=db,
             )
             with pytest.raises(TimeoutError):
@@ -171,7 +171,7 @@ async def test_postgres_submission_notifies_only_after_outer_commit_and_never_af
         listener.event.clear()
         async with database.sessions() as db:
             await db.begin()
-            rolled_back = await database.submit(
+            rolled_back = await database.admission.submit(
                 actor, session.id, NewMessage(prompt="Discarded", request_key="rollback"), db=db,
             )
             await db.rollback()
