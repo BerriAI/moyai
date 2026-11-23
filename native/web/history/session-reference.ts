@@ -1,6 +1,7 @@
-import type { PaletteSession } from "./command-palette"
+import type { SourcedHistorySession } from "../generated/api"
 
-export type SessionReference = Pick<PaletteSession, "id" | "source" | "url"> & { source_session_id?: string | null }
+export type SessionReference = Pick<SourcedHistorySession, "id">
+  & Partial<Pick<SourcedHistorySession, "source" | "url" | "source_session_id">>
 export function sessionReferenceHash(session: SessionReference): string {
   const original = session.url?.match(/^\/#run=([a-f0-9]{32})$/)?.[1]
   return original ? `run=${original}` : session.source === "legacy" ? `run=${encodeURIComponent(session.id)}` : encodeURIComponent(session.id)

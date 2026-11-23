@@ -9,7 +9,7 @@
     "typecheck:native": "npm run typecheck",
     "api:generate": "uv run python -m moyai.openapi_dump native/web/generated/openapi.json && openapi-ts",
     "api:check": "npm run api:generate && git diff --exit-code -- native/web/generated && test -z \"$(git ls-files --others --exclude-standard -- native/web/generated)\"",
-    "test": "node --test tests/test_native_*.cjs tests/conversations/test_native_*.cjs tests/automations/test_native_*.cjs",
+    "test": "node --test tests/test_native_*.cjs tests/conversations/test_native_*.cjs tests/automations/test_native_*.cjs tests/history/test_native_*.cjs",
     "test:ui": "node --test --test-concurrency=1 tests/browser/native_*.cjs"
   },
   "dependencies": {

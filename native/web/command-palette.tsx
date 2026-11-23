@@ -4,13 +4,14 @@ import type { LucideIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
+import type { SourcedHistorySession } from "./generated/api"
 import "./command-palette.css"
 
 export const COMMAND_PALETTE_ID = "native-command-palette"
 export type PaletteMode = "commands" | "sessions"
 export type PaletteSession = {
   id: string; key?: string; title: string; status?: string; description?: string; parent_title?: string
-  source?: string; source_format?: string; url?: string; read_only?: boolean
+  source?: SourcedHistorySession["source"]; source_format?: string; url?: string; read_only?: boolean
   deleted?: boolean; deleting?: boolean; parent_session_id?: string | null
   snippet?: string; search_snippet?: string; search_query?: string
   match?: { message_id?: string | number | null; snippet?: string } | null

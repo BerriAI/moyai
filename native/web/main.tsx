@@ -37,7 +37,7 @@ import { sessionCreatedByMe } from "./sidebar-drag"
 import { useSessionUpdates } from "./conversations/use-session-updates"
 import { useSessionInventory } from "./conversations/use-session-inventory"
 import { useConversationLifecycle, type ConversationView as View } from "./conversations/use-conversation-lifecycle"
-import { sessionReferenceHash, continuationReference, type SessionReference } from "./session-reference"
+import { sessionReferenceHash, continuationReference, type SessionReference } from "./history/session-reference"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
@@ -62,8 +62,8 @@ import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
-const ProductHistory = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistory })))
-const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
+const ProductHistory = React.lazy(() => import("./history/product-history").then(module => ({ default: module.ProductHistory })))
+const ProductHistoryPrefix = React.lazy(() => import("./history/product-history").then(module => ({ default: module.ProductHistoryPrefix })))
 
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 

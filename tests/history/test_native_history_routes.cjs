@@ -4,14 +4,14 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const React = require('react');
 const {renderToStaticMarkup} = require('react-dom/server');
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '../..');
 const original = 'a'.repeat(32), native = '12345678-1234-1234-1234-123456789abc';
 let helpers, server, history;
 test.before(async () => {
   const {createServer} = await import('vite');
   server = await createServer({configFile: path.join(root, 'native/web/vite.config.ts'), optimizeDeps: {noDiscovery: true, include: []}, server: {middlewareMode: true}, appType: 'custom'});
-  helpers = await server.ssrLoadModule('/session-reference.ts');
-  history = await server.ssrLoadModule('/product-history.tsx');
+  helpers = await server.ssrLoadModule('/history/session-reference.ts');
+  history = await server.ssrLoadModule('/history/product-history.tsx');
 });
 test.after(async () => { await server?.close(); });
 
