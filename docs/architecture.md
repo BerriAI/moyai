@@ -107,6 +107,14 @@ The feature guides map responsibilities to existing test suites.
 `test_feature_packages.py` prevents eager package initialization and keeps
 arithmetic and model modules independent of command composition.
 
+`moyai.automations` co-locates product automation commands, schedule
+reconciliation, access, event ingestion, tools and persistence models.
+`moyai.continuations` co-locates historical handoff, HTTP bindings, workspace
+collection/restoration, its guest script and records. Their initializers do not
+register or load execution. Model registration uses qualified package paths;
+the migration registries, frozen expansions, Temporal identities, canonical
+`app` package and historical formats retain their existing values.
+
 ## Runtime roles and data
 
 Production retains API, coordinator, broker and worker roles. They use the same

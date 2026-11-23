@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import defer
 
 from .answer_settlement import AnswerSettlement
+from .automations.product_automation_models import ProductAutomationTurn
 from .contracts import (
     ExecutionContext,
     Grant,
@@ -61,7 +62,6 @@ from .models import (
 )
 from .postgres import create_engine
 from .preferences.settings_models import SettingAutomationRun
-from .product_automation_models import ProductAutomationTurn
 from .product_identity import ProductGrant, ProductIdentityAdapter
 from .security import Security, password_hash
 from .settings import Settings

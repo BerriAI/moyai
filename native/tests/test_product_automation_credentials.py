@@ -14,9 +14,9 @@ from fastapi import HTTPException
 from pydantic_ai.exceptions import ToolFailed
 from sqlalchemy import delete, select, text, update
 
+from moyai.automations.product_automation_models import ProductAutomationOperation as Operation
+from moyai.automations.product_automation_tools import GrantRequest, WebhookRequest
 from moyai.models import Effect, Message, Turn
-from moyai.product_automation_models import ProductAutomationOperation as Operation
-from moyai.product_automation_tools import GrantRequest, WebhookRequest
 from moyai.worker_capacity import ActivityCapacity
 
 pytestmark = pytest.mark.skipif(

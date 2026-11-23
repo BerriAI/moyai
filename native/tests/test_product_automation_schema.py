@@ -16,13 +16,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_product_authority import demote
 
-from moyai.contracts import NewMessage, NewSession
-from moyai.models import Message, ProductTurnAuthority, Session, Turn, User
-from moyai.product_automation_models import (
+from moyai.automations.product_automation_models import (
     ProductAutomationBinding,
     ProductAutomationOccurrence,
     ProductAutomationOperation,
 )
+from moyai.contracts import NewMessage, NewSession
+from moyai.models import Message, ProductTurnAuthority, Session, Turn, User
 from moyai.product_identity import ProductGrant
 from moyai.product_schema import (
     AUTHORITY_SCHEMA_VERSION,

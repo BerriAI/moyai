@@ -9,7 +9,13 @@ import pytest
 import test_product_automations as fixtures
 from temporalio.service import RPCError, RPCStatusCode
 
-from moyai.product_automations import Migration, Mutation, Save, legacy_schedule_id, native_schedule_id
+from moyai.automations.product_automations import (
+    Migration,
+    Mutation,
+    Save,
+    legacy_schedule_id,
+    native_schedule_id,
+)
 
 pytestmark = fixtures.pytestmark
 product_database = fixtures.product_database

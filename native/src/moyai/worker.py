@@ -41,7 +41,10 @@ def make_worker(runtime: Runtime) -> WorkerPools:
     product_workflows = []
     product_activities = []
     if runtime.product_automations is not None:
-        from .product_automations import PRODUCT_AUTOMATION_ACTIVITIES, PRODUCT_AUTOMATION_WORKFLOWS
+        from .automations.product_automations import (
+            PRODUCT_AUTOMATION_ACTIVITIES,
+            PRODUCT_AUTOMATION_WORKFLOWS,
+        )
         product_workflows.extend(PRODUCT_AUTOMATION_WORKFLOWS)
         product_activities.extend(PRODUCT_AUTOMATION_ACTIVITIES)
     interceptors: list[Interceptor] = [ExecutionAuthority(runtime.database), ActivityCapacity()]

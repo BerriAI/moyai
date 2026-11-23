@@ -187,7 +187,7 @@ The current source, rather than provider-wide feature lists, defines this guide:
   [`prepare_repository`](../native/src/moyai/product_gitlab_bootstrap.py): managed
   chains and repository bootstrap.
 - [`gitlab_recipe_identity`, `gitlab_build_identity` and
-  `ProductWorkspaceCompatibility`](../native/src/moyai/product_continuation_workspace.py):
+  `ProductWorkspaceCompatibility`](../native/src/moyai/continuations/product_continuation_workspace.py):
   validated environment selection and current project authority;
-  [`ProductWorkspaceRestorer`](../native/src/moyai/product_continuation_restore.py):
+  [`ProductWorkspaceRestorer`](../native/src/moyai/continuations/product_continuation_restore.py):
   shared image consumption.

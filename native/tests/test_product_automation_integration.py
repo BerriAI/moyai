@@ -28,10 +28,10 @@ from test_product_deployment import environment as source_environment
 from test_product_identity import google_cookie
 
 from moyai.api import create_app
+from moyai.automations.product_automation_tools import TOOLSET_ID
+from moyai.automations.product_automations import ProductAutomationService
 from moyai.contracts import NewMessage, NewSession
 from moyai.models import Effect
-from moyai.product_automation_tools import TOOLSET_ID
-from moyai.product_automations import ProductAutomationService
 from moyai.runtime import Runtime
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter

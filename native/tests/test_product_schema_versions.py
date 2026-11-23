@@ -75,7 +75,7 @@ async def test_inference_version_preserves_prior_receipts_and_requires_explicit_
 
 
 async def test_automation_context_version_is_additive_and_rejects_rewriting_captured_authority(admitted_product):
-    from moyai.product_automation_context_models import ProductAutomationExecutionContext
+    from moyai.automations.product_automation_context_models import ProductAutomationExecutionContext
 
     product = admitted_product
     automation_id = await source_automation(product)
@@ -109,8 +109,8 @@ async def test_automation_context_version_is_additive_and_rejects_rewriting_capt
 
 @pytest.mark.parametrize("mutation", ["update", "noop", "delete"])
 async def test_continuation_capture_cannot_be_rewritten_or_deleted(admitted_product, mutation):
+    from moyai.continuations.product_continuation_models import ProductContinuationCapture
     from moyai.contracts import NewSession
-    from moyai.product_continuation_models import ProductContinuationCapture
 
     product = admitted_product
     session = await product.database.create_session(product.actor, NewSession())

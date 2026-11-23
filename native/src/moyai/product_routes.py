@@ -243,7 +243,7 @@ class ProductReadService:
             parent.id == DelegatedSession.parent_session_id, parent.deleted.is_(False), parent_access,
         ))
         if self.continuations is not None:
-            from .product_continuation_models import ProductContinuation
+            from .continuations.product_continuation_models import ProductContinuation
             query = query.add_columns(ProductContinuation.source_session_id).outerjoin(
                 ProductContinuation, and_(
                     ProductContinuation.native_session_id == Session.id,
@@ -344,7 +344,7 @@ class ProductReadService:
                         raise
                     valid.discard(session_id)
             if self.continuations and self.history and reader.principal and not deleted:
-                from .product_continuation_models import ProductContinuation
+                from .continuations.product_continuation_models import ProductContinuation
                 mapped = dict((await db.execute(select(
                     ProductContinuation.native_session_id, ProductContinuation.source_session_id,
                 ).where(
@@ -448,7 +448,7 @@ class ProductReadService:
                 candidates.update({r["id"]: self.native_view(r) | {"match": matches[r["id"]]} for r in rows})
         historical_limited = False
         if self.continuations and self.history and reader.principal:
-            from .product_continuation_models import ProductContinuation
+            from .continuations.product_continuation_models import ProductContinuation
             earlier = await self.history.search(reader.principal, query, limit=MAX_PAGE, continued_only=True)
             historical_limited = earlier["has_more"]
             async with self.runtime.database.sessions() as db:
@@ -770,7 +770,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
     if service.history is not None:
         router.include_router(legacy_routes(service.history))
     if service.continuations is not None:
-        from .product_continuation_routes import continuation_routes
+        from .continuations.product_continuation_routes import continuation_routes
         router.include_router(continuation_routes(runtime, reader))
     if service.files is not None:
         router.include_router(file_routes(service.files))

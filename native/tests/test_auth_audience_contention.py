@@ -363,9 +363,9 @@ async def test_expired_prefetch_cannot_be_used_by_a_mutation(audience):
 
 @pytest.mark.parametrize("signed_ingress", [False, True])
 async def test_cold_legacy_continuation_prewarms_or_uses_verified_ingress(continuation, signed_ingress):
+    from moyai.continuations.product_continuation import ContinuationRequest
     from moyai.contracts import NewMessage
     from moyai.models import User
-    from moyai.product_continuation import ContinuationRequest
     from moyai.product_slack_conversations import SlackConversations
     from moyai.slack_audience import historical_access, prefetch_historical
 

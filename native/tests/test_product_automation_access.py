@@ -13,11 +13,11 @@ from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.tools import ToolDefinition
 from sqlalchemy import update
 
+from moyai.automations.product_automation_models import ProductAutomationBinding as Binding
+from moyai.automations.product_automation_tools import GrantRequest, ScopedUpdate
+from moyai.automations.product_automations import AUTOMATION_MUTATIONS
 from moyai.effects import requires_receipt
 from moyai.models import Effect, Session, Turn
-from moyai.product_automation_models import ProductAutomationBinding as Binding
-from moyai.product_automation_tools import GrantRequest, ScopedUpdate
-from moyai.product_automations import AUTOMATION_MUTATIONS
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Set a disposable local PostgreSQL URL.")
 product_database = fixtures.product_database

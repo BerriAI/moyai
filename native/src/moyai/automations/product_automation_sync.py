@@ -29,10 +29,10 @@ from temporalio.client import (
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from .models import now
+from ..models import now
+from ..product_config import CORE_IDENTITY
+from ..product_identity import ProductGrant
 from .product_automation_models import ProductAutomationBinding as Binding
-from .product_config import CORE_IDENTITY
-from .product_identity import ProductGrant
 
 if TYPE_CHECKING:
     from .product_automations import ProductAutomationService

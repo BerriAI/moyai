@@ -250,7 +250,7 @@ async def test_reconnect_recovers_without_a_signin_request(runtime, actor, activ
 async def test_no_backup_starts_fresh_with_visible_and_durable_notice(runtime, actor, monkeypatch, reason):
     session, turn_id, restored, _guest = await saved_login(runtime, actor, monkeypatch)
     if reason == "image_expired":
-        from moyai.product_continuation_errors import preparation_blocked
+        from moyai.continuations.product_continuation_errors import preparation_blocked
 
         restored.side_effect = preparation_blocked("workspace_checkpoint_missing")
     elif reason == "human_changes":

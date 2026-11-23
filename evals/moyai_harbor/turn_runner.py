@@ -34,7 +34,7 @@ from moyai.product_config import (
     NATIVE_OBJECT_FORMAT,
     load_product_config,
 )
-from moyai.product_continuation_schema import (
+from moyai.continuations.product_continuation_schema import (
     install_source_continuation_fence,
     verify_source_continuation_fence,
 )

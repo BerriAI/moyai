@@ -25,27 +25,31 @@ from sqlalchemy.exc import DBAPIError
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import ApplicationError
 
-from moyai.contracts import Grant, NewMessage, NewSession, PreparedTurn, RunScope
-from moyai.models import Effect, Message, Session, Turn
-from moyai.product_continuation import ContinuationRequest, ProductContinuationService, public_conversation
-from moyai.product_continuation_errors import preparation_blocked, public_preparation_message
-from moyai.product_continuation_guest import archive_manifest, restore_archive
-from moyai.product_continuation_models import (
+from moyai.continuations.product_continuation import (
+    ContinuationRequest,
+    ProductContinuationService,
+    public_conversation,
+)
+from moyai.continuations.product_continuation_errors import preparation_blocked, public_preparation_message
+from moyai.continuations.product_continuation_guest import archive_manifest, restore_archive
+from moyai.continuations.product_continuation_models import (
     ProductContinuation,
     ProductContinuationCapture,
     ProductWorkspaceRestoration,
 )
-from moyai.product_continuation_restore import ModalRecoveryTransport, ProductWorkspaceRestorer
-from moyai.product_continuation_schema import (
+from moyai.continuations.product_continuation_restore import ModalRecoveryTransport, ProductWorkspaceRestorer
+from moyai.continuations.product_continuation_schema import (
     install_source_continuation_fence,
     session_lease_key,
     verify_source_continuation_fence,
 )
-from moyai.product_continuation_workspace import (
+from moyai.continuations.product_continuation_workspace import (
     ProductWorkspaceCompatibility,
     canonical_repository,
     fingerprint,
 )
+from moyai.contracts import Grant, NewMessage, NewSession, PreparedTurn, RunScope
+from moyai.models import Effect, Message, Session, Turn
 from moyai.product_history import ProductHistoryAdapter
 from moyai.storage import ObjectStore
 
@@ -157,7 +161,7 @@ def test_archive_rejects_symlink_duplicate_bounds_and_corruption(tmp_path, monke
     with pytest.raises(ValueError, match="duplicate"):
         archive_manifest(path)
     package(path)
-    monkeypatch.setattr("moyai.product_continuation_guest.MAX_BYTES", 4)
+    monkeypatch.setattr("moyai.continuations.product_continuation_guest.MAX_BYTES", 4)
     with pytest.raises(ValueError, match="budget"):
         archive_manifest(path)
 
@@ -408,7 +412,7 @@ async def test_real_pg_changed_fingerprint_rolls_back_and_refuses_lost_history(c
             prompt="new", request_key="new", expected_source_fingerprint=preview["source_fingerprint"],
         ))
     assert failure.value.status_code == 409
-    monkeypatch.setattr("moyai.product_continuation.MAX_HISTORY_MESSAGES", 1)
+    monkeypatch.setattr("moyai.continuations.product_continuation.MAX_HISTORY_MESSAGES", 1)
     preview = await product.service.preview(product.principal, ROOT)
     assert preview["requires_recent_history"]
     with pytest.raises(HTTPException) as failure:

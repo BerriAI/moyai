@@ -23,10 +23,10 @@ from sqlalchemy.pool import NullPool
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
-from .coding_image import with_node
-from .contracts import PreparedTurn, RunScope
-from .models import Session, Turn
-from .postgres import create_engine
+from ..coding_image import with_node
+from ..contracts import PreparedTurn, RunScope
+from ..models import Session, Turn
+from ..postgres import create_engine
 from .product_continuation_errors import preparation_blocked
 from .product_continuation_guest import MAX_BYTES, MAX_ENTRIES, archive_manifest, digest_file
 from .product_continuation_models import (
@@ -57,8 +57,8 @@ def repository_requested(context: dict[str, Any], plan: dict | None) -> bool:
 
 def runtime_image(base: Any = None):
     """Overlay native runtime resources on a validated *environment* image."""
-    from .agent import PACKAGE_ROOT
-    from .tools import WORKSPACE_TOOLS
+    from ..agent import PACKAGE_ROOT
+    from ..tools import WORKSPACE_TOOLS
 
     image = base or modal.Image.debian_slim(python_version="3.13")
     image = (
@@ -181,8 +181,8 @@ class ModalRecoveryTransport:
     async def native(self, scope: RunScope, context: dict[str, Any], reference: dict | None) -> Any:
         provider = reference.get("provider") if reference else self.runtime.settings.sandbox_provider
         if provider == "lambda":
-            from .lambda_control import LambdaControl
-            from .lambda_workspace import LambdaProductComputer
+            from ..lambda_control import LambdaControl
+            from ..lambda_workspace import LambdaProductComputer
             if context.get("environment_snapshot_id"):
                 raise ValueError("This prepared environment is a Modal image; select Modal or a plain repository.")
             control = LambdaControl(self.runtime.settings)
@@ -379,7 +379,7 @@ class ProductWorkspaceRestorer:
                 raise ValueError("The workspace transition plan failed integrity verification.")
         if plan is None and not context.get("environment_snapshot_id") and not context.get("repo_url"):
             return prepared
-        from .performance import computer_timing
+        from ..performance import computer_timing
         mode = "reuse" if prepared.workspace else "restore" if plan else "cold"
         async with (
             computer_timing(self.runtime.database, scope, mode, preparation=True),
