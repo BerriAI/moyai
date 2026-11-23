@@ -19,7 +19,7 @@ import {
 } from "../generated/api"
 import "./product-history.css"
 import slackLogo from "../assets/slack-logo.svg"
-import { SlackMessage } from "../slack-content"
+import { SlackMessage } from "../messages/slack-content"
 
 export type HistorySessionRef = Pick<ProductContinuationResult, "id" | "url"> & { source: "native" | "legacy"; source_session_id?: string }
 export type ProductHistoryProps = {

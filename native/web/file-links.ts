@@ -1,6 +1,6 @@
 import { appPath, internalPath } from "./api"
 import type { MouseEvent } from "react"
-import type { OutputResource } from "./workspace-types"
+import type { OutputResource } from "./workspace/workspace-types"
 
 export type OpenFile = (resource: OutputResource, sessionId: string) => void
 export type FileReference = { kind: "artifact" | "upload"; id: string; sessionId: string; url: string }
