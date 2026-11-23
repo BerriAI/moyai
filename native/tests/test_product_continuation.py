@@ -275,6 +275,7 @@ async def continuation(tmp_path):
         history = ProductHistoryAdapter(product.adapter, product.source, schema="moyai")
         runtime = SimpleNamespace(
             database=product.database, security=product.database.security, settings=product.settings,
+            admission=product.database.admission,
             product_identity=product.adapter, product_history=history, product_files=None,
             objects=ObjectStore(product.settings, product.database.security),
         )
