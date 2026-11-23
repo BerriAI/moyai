@@ -68,7 +68,8 @@ async def linked(slack_admission):
 
     from moyai.skill_invocations import SkillInvocations
     runtime = SimpleNamespace(
-        database=product.database, slack_activity=SimpleNamespace(wake=asyncio.Event()),
+        database=product.database, admission=product.database.admission,
+        slack_activity=SimpleNamespace(wake=asyncio.Event()),
         product_identity=product.adapter, product_skill_catalog=None, security=product.database.security,
     )
     runtime.skill_invocations = SkillInvocations(runtime)
