@@ -8,6 +8,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -134,3 +135,36 @@ def test_release_closes_x_connection_when_query_fails(monkeypatch, xserver):
     with pytest.raises(OSError):
         desktop.release_vnc_input()
     assert xserver.calls == ["open", "close"]
+
+
+@pytest.mark.parametrize("kind", ["reused", "zombie", "missing", "live"])
+@pytest.mark.parametrize("component", ["openbox", "vnc-view"])
+def test_snapshot_pid_files_do_not_prevent_desktop_restart(tmp_path, monkeypatch, kind, component):
+    state, process = tmp_path / "state", tmp_path / "proc" / "42"
+    state.mkdir()
+    process.mkdir(parents=True)
+    (state / f"{component}.pid").write_text("42")
+    command = ("openbox", "--sm-disable") if component == "openbox" else (
+        "x11vnc", "-display", ":99", "-localhost", "-rfbport", "5901",
+    )
+    raw = b"python\0unrelated-worker.py\0" if kind == "reused" else (
+        b"" if kind == "zombie" else b"\0".join(part.encode() for part in command) + b"\0"
+    )
+    if kind != "missing":
+        (process / "cmdline").write_bytes(raw)
+    monkeypatch.setattr(desktop, "STATE", state)
+    monkeypatch.setattr(desktop, "Path", lambda value: process if str(value) == "/proc/42" else Path(value))
+    launch, kill = Mock(return_value=SimpleNamespace(pid=99)), Mock()
+    monkeypatch.setattr(desktop, "launch", launch)
+    monkeypatch.setattr(desktop.os, "kill", kill)
+    if component == "openbox":
+        desktop.ensure_process(component, *command)
+    else:
+        desktop.ensure_stream_process(component, time.time() + 10, *command)
+    if kind == "live":
+        launch.assert_not_called()
+        assert (state / f"{component}.pid").read_text() == "42"
+    else:
+        launch.assert_called_once_with(*command)
+        assert (state / f"{component}.pid").read_text() == "99"
+    kill.assert_not_called()
