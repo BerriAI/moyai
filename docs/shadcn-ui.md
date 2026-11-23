@@ -21,7 +21,7 @@ The retired escaped-template renderer is no longer used.
 
 Use direct React components for buttons, dialogs, forms, selects and menus.
 Preserve labels, focus behavior, portal geometry and permission-driven actions.
-`native/web/settings.tsx` and `settings.css` own the Settings shell; product
+`native/web/settings/settings.tsx` and `settings.css` own the Settings shell; product
 adapters supply capability-specific forms. `style.css` and the focused panel,
 sidebar and workspace styles own application layout.
 Desktop sidebars collapse to a 52px rail with an open button at the top;

@@ -5,20 +5,20 @@ const path = require('node:path');
 const ts = require('typescript');
 
 function load(relative) {
-  const filename = path.resolve(__dirname, '..', relative);
+  const filename = path.resolve(__dirname, '../..', relative);
   const module = {exports: {}};
   const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX},
   }).outputText;
   new Function('require', 'module', 'exports', source)(name => {
-    if (name === './analytics-format') return load('native/web/analytics-format.ts');
+    if (name === './analytics-format') return load('native/web/analytics/analytics-format.ts');
     // These tests exercise the production segment arithmetic, not rendered UI.
     if (name.startsWith('@/') || name === './analytics-shared') return {};
     return require(name);
   }, module, module.exports);
   return module.exports;
 }
-const {trendSegments} = load('native/web/performance-trend.tsx');
+const {trendSegments} = load('native/web/analytics/performance-trend.tsx');
 
 test('native timing trends leave gaps between unobserved intervals', () => {
   assert.deepEqual(trendSegments([null, 15, 20, null, 4, null, 9, 12]), [[1, 2], [4], [6, 7]]);

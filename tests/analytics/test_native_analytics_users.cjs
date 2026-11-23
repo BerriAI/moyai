@@ -9,7 +9,7 @@ const ts = require('typescript');
 const React = require('react');
 const {renderToStaticMarkup} = require('react-dom/server');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '../..');
 const cache = new Map();
 function load(relative) {
   let filename = path.isAbsolute(relative) ? relative : path.join(root, relative);
@@ -29,7 +29,7 @@ function load(relative) {
     // adapter is outside this test; table/Input/Button are the real shared components.
     if (request === './analytics-shared' || request === './analytics-render.js') return {};
     // The generated SDK only fetches reports, which UsersReport receives as props.
-    if (request === './generated/api') return {};
+    if (request === '../generated/api') return {};
     if (request.startsWith('@/')) return load(path.join(root, 'frontend', request.slice(2)));
     if (request.startsWith('.')) return load(path.resolve(path.dirname(filename), request));
     return requireFromFile(request);
@@ -39,8 +39,8 @@ function load(relative) {
   );
   return module.exports;
 }
-const {combinedUserRows, reportedCostPerMerge, sortUserRows} = load('native/web/analytics-data.ts');
-const {UsersReport} = load('native/web/analytics.tsx');
+const {combinedUserRows, reportedCostPerMerge, sortUserRows} = load('native/web/analytics/analytics-data.ts');
+const {UsersReport} = load('native/web/analytics/analytics.tsx');
 const distribution = (values = {}) => ({merged: 0, open: 0, draft: 0, closed: 0, unknown: 0, ...values});
 const person = (id, display_name = id, username = id, email) => ({id, display_name, username, email});
 function report(by_user, users = []) {

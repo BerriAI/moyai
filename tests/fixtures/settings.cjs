@@ -54,7 +54,7 @@ async function settingsFixture() {
         const html=await vite.transformIndexHtml(url.pathname,`<!doctype html><html><body><div id="settings-root"></div><script type="module">
           import React from "react";
           import {createRoot} from "react-dom/client";
-          import {SettingsPage} from "/settings.tsx";
+          import {SettingsPage} from "/settings/settings.tsx";
           import "/@fs/${path.resolve('frontend/theme.css')}";
           const root=createRoot(document.getElementById("settings-root"));
           window.renderSettingsUser=user=>root.render(React.createElement(SettingsPage,{

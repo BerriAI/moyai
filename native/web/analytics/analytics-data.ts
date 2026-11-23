@@ -3,7 +3,7 @@ import { finiteValue } from "./analytics-format"
 import type {
   AnalyticsPerformance, AnalyticsReport as GeneratedAnalyticsReport, AnalyticsReportUser, AnalyticsSummary, AnalyticsTimingCard,
   AnalyticsTimingCards, AnalyticsTimingInterval, AnalyticsUserAggregate,
-} from "./generated/api"
+} from "../generated/api"
 
 export type PRState = keyof AnalyticsSummary["pr_status_counts"]
 export type ReportUser = AnalyticsReportUser

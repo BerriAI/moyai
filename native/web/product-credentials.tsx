@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { csrfToken } from "./api"
 import { getCredentialRequest, resolveCredentialRequest, type CredentialAccessRequestDetail, type ResolveWritable } from "./generated/api"
-import "./settings.css"
+import "./settings/settings.css"
 
 const credentialScope = (value: string): value is "personal" | "organization" => value === "personal" || value === "organization"
 const credentialLifetime = (value: string): value is "session" | "persistent" => value === "session" || value === "persistent"

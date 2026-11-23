@@ -1,4 +1,4 @@
-import { appPath } from "./api"
+import { appPath } from "../api"
 import React, { useCallback, useEffect, useId, useRef, useState } from "react"
 import { ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Gauge, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, Slack, SlidersHorizontal, FileText, Trash2, Users, Wallet, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -8,19 +8,19 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { ApiError, csrfToken } from "./api"
-import { getGatewayDefaults, checkConnection, createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
-import { AnalyticsPage } from "./analytics"
-import { ProductAutomationsPage } from "./automations/product-automations"
-import { onceUtcInput, onceUtcInstant } from "./automations/product-automation-data"
-import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "./generated/api"
+import { ApiError, csrfToken } from "../api"
+import { getGatewayDefaults, checkConnection, createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "../generated/api"
+import { AnalyticsPage } from "../analytics/analytics"
+import { ProductAutomationsPage } from "../automations/product-automations"
+import { onceUtcInput, onceUtcInstant } from "../automations/product-automation-data"
+import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "../generated/api"
 import {
   listLinkedSignIns, startGoogleSignIn, startOktaSignIn,
   checkPersonalSlack, connectExistingGitHubApp, disconnectPersonalSlack, getMe, getPersonalSlack, listGitHubRepositories,
   selectGitHubRepositories, startGitHubConnection, startPersonalSlackOAuth,
-} from "./generated/api"
-import { MoyaiBrand, SidebarToggle } from "./brand"
-import { AppearanceToggle } from "./appearance-toggle"
+} from "../generated/api"
+import { MoyaiBrand, SidebarToggle } from "../brand"
+import { AppearanceToggle } from "../appearance-toggle"
 import { ProductGitLabSetup } from "./product-gitlab-settings"
 import type { GeneralPreferences } from "./general-preferences"
 import {
@@ -37,8 +37,8 @@ import {
   listSettingsAutomations, listSettingsMemory, listSettingsSecrets, listSettingsSkills, updateSettingsAutomation, updateSettingsGeneral,
   updateSettingsSecret, updateSettingsSkill, updateSettingsUser, writeSettingsMemory,
   type SecretEditWritable, type SettingsAutomation, type SettingsMemoryFile, type SettingsSecret, type SettingsSkill, type UserEditWritable,
-} from "./generated/api"
-import { listHistorySessions, type HistorySessionList, type SourcedHistorySession } from "./generated/api"
+} from "../generated/api"
+import { listHistorySessions, type HistorySessionList, type SourcedHistorySession } from "../generated/api"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }

@@ -61,7 +61,7 @@ import { QuestionChoices } from "./question-choices"
 import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./browser-login"
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
-const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
+const SettingsPage = React.lazy(() => import("./settings/settings").then(module => ({ default: module.SettingsPage })))
 const ProductHistory = React.lazy(() => import("./history/product-history").then(module => ({ default: module.ProductHistory })))
 const ProductHistoryPrefix = React.lazy(() => import("./history/product-history").then(module => ({ default: module.ProductHistoryPrefix })))
 
