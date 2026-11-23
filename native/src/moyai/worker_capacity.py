@@ -24,6 +24,7 @@ from temporalio.worker import (
 )
 
 ROUTING_VERSION = "moyai-activity-capacity-isolation-v1"
+PRIVATE_INSTRUCTIONS_ROUTING_VERSION = "moyai-private-instructions-control-v1"
 WORKER_SHUTDOWN_VERSION = "moyai-worker-shared-drain-v1"
 DELEGATION_RETRY_VERSION = "moyai-delegation-receipt-retries-v1"
 ActivityPool = Literal["model", "tools", "control"]
@@ -54,6 +55,7 @@ def activity_pool(name: str, args: Sequence[object] = ()) -> ActivityPool:
             return "model"
         if name.endswith((
             "__event_stream_handler", "__get_tools", "__get_instructions", "__validate_args",
+            "__capability__moyai_private_instructions__load",
         )) or any(
             marker in name for marker in (
                 "__capability__step_persistence__", "__capability__moyai_effects__",
@@ -91,6 +93,13 @@ class CapacityOutbound(WorkflowOutboundInterceptor):
         # Old histories keep their exact queue. Explicit SDK/tool routing also
         # remains authoritative. New histories record this decision in Temporal.
         if input.task_queue in (None, queue) and workflow.patched(ROUTING_VERSION):
+            if (
+                input.activity.endswith("__capability__moyai_private_instructions__load")
+                and not workflow.patched(PRIVATE_INSTRUCTIONS_ROUTING_VERSION)
+            ):
+                # Existing split histories loaded preferences on the tool
+                # queue. Preserve those commands while new reads use control.
+                pool = "tools"
             input = replace(input, task_queue=f"{queue}-{pool}")
         if (
             input.activity in {

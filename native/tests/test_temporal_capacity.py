@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -15,12 +16,13 @@ from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurabili
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
+from temporalio import workflow
 from temporalio.client import Client
 from temporalio.common import RetryPolicy
 from temporalio.runtime import Runtime as TemporalRuntime
 from temporalio.runtime import TelemetryConfig
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Replayer, Worker
+from temporalio.worker import Replayer, StartActivityInput, Worker, WorkflowInboundInterceptor
 
 from moyai.activities import ACTIVITIES
 from moyai.agent import HarnessActivityContext, make_agent
@@ -31,7 +33,13 @@ from moyai.runtime import configure
 from moyai.settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
-from moyai.worker_capacity import ROUTING_VERSION, ActivityCapacity, activity_pool
+from moyai.worker_capacity import (
+    PRIVATE_INSTRUCTIONS_ROUTING_VERSION,
+    ROUTING_VERSION,
+    ActivityCapacity,
+    CapacityOutbound,
+    activity_pool,
+)
 from moyai.workflow import TurnWorkflow
 
 
@@ -124,9 +132,9 @@ def scheduled_queues(history):
     ]
 
 
-def routed_marker(history):
+def routed_marker(history, version=ROUTING_VERSION):
     return any(
-        ROUTING_VERSION.encode() in event.marker_recorded_event_attributes.SerializeToString()
+        version.encode() in event.marker_recorded_event_attributes.SerializeToString()
         for event in history.events if event.HasField("marker_recorded_event_attributes")
     )
 
@@ -183,6 +191,7 @@ async def test_blocked_tool_cannot_consume_model_or_control_capacity_and_new_his
                         "agent__moyai__capability__planning__read_plan",
                         "agent__moyai__capability__moyai_authority__check",
                         "agent__moyai__capability__memory__load_snapshot",
+                        "agent__moyai__capability__moyai_private_instructions__load",
                     ):
                         assert scheduled[name] == runtime.settings.temporal_queue + "-control"
             finally:
@@ -193,6 +202,8 @@ async def test_blocked_tool_cannot_consume_model_or_control_capacity_and_new_his
             f"{runtime.settings.temporal_queue}-{pool}" for pool in ("model", "tools", "control")
         }
         assert routed_marker(history)
+        if default_capabilities:
+            assert routed_marker(history, PRIVATE_INSTRUCTIONS_ROUTING_VERSION)
         calls = scenario.model_calls
         await Replayer(
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
@@ -203,10 +214,80 @@ async def test_blocked_tool_cannot_consume_model_or_control_capacity_and_new_his
 
 
 def test_workspace_receipt_and_no_computer_settlement_use_control_capacity():
+    assert activity_pool("agent__moyai__capability__moyai_private_instructions__load") == "control"
     assert activity_pool("agent__moyai__capability__moyai_authority__save_workspace") == "control"
     assert activity_pool("moyai_save_computer_v1", ["turn", None]) == "control"
     assert activity_pool("moyai_save_computer_v1", ["turn", {"provider": "local"}]) == "control"
     assert activity_pool("moyai_save_computer_v1", ["turn", {"provider": "modal"}]) == "tools"
+
+
+class PriorSplitOutbound(CapacityOutbound):
+    def start_activity(self, input: StartActivityInput) -> workflow.ActivityHandle[object]:
+        if input.activity == "agent__moyai__capability__moyai_private_instructions__load":
+            # Record the pre-fix split queue, without the new patch marker.
+            # Explicit queues bypass both versions of the routing decision.
+            input = replace(input, task_queue=workflow.info().task_queue + "-tools")
+        return super().start_activity(input)
+
+
+class PriorSplitInbound(WorkflowInboundInterceptor):
+    def init(self, outbound):
+        self.next.init(PriorSplitOutbound(outbound))
+
+
+class PriorSplitCapacity(ActivityCapacity):
+    def workflow_interceptor_class(self, input):
+        return PriorSplitInbound
+
+
+async def test_existing_split_preferences_history_replays_before_and_after_completion(
+    runtime, actor, monkeypatch,
+):
+    scenario = CapacityScenario()
+    scenario.install(runtime, default_capabilities=True)
+    runtime.settings.temporal_workflow_cache_size = 0
+    turn = await queued(runtime, actor, "slow")
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        with monkeypatch.context() as legacy:
+            legacy.setattr("moyai.worker.ActivityCapacity", PriorSplitCapacity)
+            pools = make_worker(runtime)
+        async with pools:
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            try:
+                await asyncio.wait_for(scenario.wait_started(), 15)
+                pending = await handle.fetch_history()
+                calls = scenario.model_calls
+                await Replayer(
+                    workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+                    interceptors=[ActivityCapacity()],
+                ).replay_workflow(pending)
+                assert scenario.model_calls == calls
+            finally:
+                scenario.release()
+            assert (await asyncio.wait_for(handle.result(), 15))["status"] == "completed"
+            completed = await handle.fetch_history()
+        for history in (pending, completed):
+            preferences_queues = [
+                event.activity_task_scheduled_event_attributes.task_queue.name
+                for event in history.events if event.HasField("activity_task_scheduled_event_attributes")
+                and event.activity_task_scheduled_event_attributes.activity_type.name
+                == "agent__moyai__capability__moyai_private_instructions__load"
+            ]
+            assert preferences_queues and set(preferences_queues) == {runtime.settings.temporal_queue + "-tools"}
+            assert routed_marker(history)
+            assert not routed_marker(history, PRIVATE_INSTRUCTIONS_ROUTING_VERSION)
+        calls = scenario.model_calls
+        await Replayer(
+            workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            interceptors=[ActivityCapacity()],
+        ).replay_workflow(completed)
+        assert scenario.model_calls == calls
 
 
 async def test_existing_unsplit_native_history_replays_with_versioned_routing(runtime, actor):
