@@ -34,7 +34,9 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.run import AgentRun
     from pydantic_ai.usage import UsageLimits
     from pydantic_ai.workspaces import WorkspaceRef, WorkspaceUnavailableError
+    from pydantic_ai_harness.step_persistence import is_provider_valid
 
+    from .active_workspace import VERSION as ACTIVE_WORKSPACE_VERSION
     from .agent_messages import (
         DELIVERY_VERSION,
         AgentMail,
@@ -76,6 +78,11 @@ PREPARE = {
     "start_to_close_timeout": timedelta(minutes=20),
     "schedule_to_close_timeout": timedelta(minutes=20),
     "heartbeat_timeout": timedelta(seconds=30),
+}
+ACTIVE_FILES = {
+    "start_to_close_timeout": timedelta(minutes=4),
+    "schedule_to_close_timeout": timedelta(minutes=12),
+    "retry_policy": RetryPolicy(maximum_attempts=3),
 }
 MAINTENANCE_FILES = {
     "start_to_close_timeout": timedelta(minutes=17),
@@ -361,8 +368,10 @@ class TurnWorkflow(PydanticAIWorkflow):
         prepared: PreparedTurn | None = None
         keepalive: asyncio.Task[None] | None = None
         preserve_maintenance = False
+        active_workspace = False
         try:
             history_handoff = workflow.patched(HISTORY_VERSION)
+            active_workspace = workflow.patched(ACTIVE_WORKSPACE_VERSION) and history_handoff
             preserve_maintenance = workflow.patched(MAINTENANCE_WORKSPACE_VERSION) and history_handoff
             deployment_handoff = workflow.patched(DEPLOYMENT_HANDOFF_VERSION)
             if self.deployment_handoff and not self.deployment_handoff.applies_to(
@@ -537,6 +546,34 @@ class TurnWorkflow(PydanticAIWorkflow):
                             await self.steer(steering_id)
                         for message_id in list(self.pending_agent_mail):
                             await self.agent_message(message_id)
+                    if (
+                        active_workspace and isinstance(node, ModelRequestNode)
+                        and not agent_run.pending_messages and agent_run.result is None
+                        and agent_run.ctx.deps.workspace.ref is not None
+                        and agent_run.ctx.deps.workspace.ref.provider == "modal"
+                    ):
+                        # Stop admitting guidance into this SDK run while its
+                        # graph/files are saved. Later inputs follow the same
+                        # continuation protocol as ordinary history rollover.
+                        self.handing_off = True
+                        await workflow.wait_condition(
+                            lambda: not self.steered.intersection(self.pending_steering) and not self.mail_handlers,
+                        )
+                        saved = await workflow.execute_activity(
+                            "moyai_active_workspace_boundary_v1",
+                            args=[self.checkpoint(prepared, agent_run, node), False],
+                            result_type=CheckpointSave, **ACTIVE_FILES,
+                        )
+                        if saved.reference is not None:
+                            checkpoint_ref = saved.reference
+                            self.events.stream.detach_pollers()
+                            await workflow.wait_condition(workflow.all_handlers_finished)
+                            break
+                        self.handing_off = False
+                        for steering_id in list(self.pending_steering):
+                            await self.steer(steering_id)
+                        for message_id in list(self.pending_agent_mail):
+                            await self.agent_message(message_id)
                     boundary += 1
                 result = agent_run.result
                 if result is None and checkpoint_ref is None:
@@ -549,32 +586,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                     keepalive = None
                 self.events.stream.detach_pollers()
                 await workflow.wait_condition(workflow.all_handlers_finished)
-                workflow.continue_as_new(
-                    args=[
-                        turn_id, HistoryHandoff(
-                            checkpoint=checkpoint_ref, stream_state=self.events.stream.get_state(),
-                            steered=sorted(self.steered), pending_steering=list(self.pending_steering),
-                            pending_agent_mail=list(self.pending_agent_mail),
-                            deployment_handoff=checkpoint_release or self.previous_deployment_handoff,
-                            # A signal can arrive while the snapshot is being
-                            # saved. Carry the latest unconsumed intent after
-                            # handlers settle; do not grant it an unchecked
-                            # version change on that already-saved snapshot.
-                            pending_deployment_handoff=(
-                                self.deployment_handoff
-                                if self.deployment_handoff != checkpoint_release else None
-                            ),
-                            maintenance_workspace=checkpoint_maintenance,
-                        ),
-                    ],
-                    # Ordinary history rollover retains its pinned version.
-                    # Only an explicit request may select the deployment's
-                    # reviewed current/ramping destination at this boundary.
-                    initial_versioning_behavior=(
-                        workflow.ContinueAsNewVersioningBehavior.USE_RAMPING_VERSION
-                        if checkpoint_release is not None else None
-                    ),
-                )
+                self.continue_checkpoint(checkpoint_ref, checkpoint_release, checkpoint_maintenance)
             assert result is not None
             self.finished = True
             await workflow.wait_condition(lambda: workflow.all_handlers_finished())
@@ -644,7 +656,49 @@ class TurnWorkflow(PydanticAIWorkflow):
             ))
             # Temporal remains the cancellation and recovery authority.
             raise
-        except Exception as error:
+        except Exception as original_error:
+            error = original_error
+            if (
+                active_workspace and not self.finished and prepared is not None and self.agent_run is not None
+                and public_preparation_message(error) is None
+                and not self.agent_run.pending_messages
+                and self.agent_run.all_messages()
+                and is_provider_valid(self.agent_run.all_messages())
+                and self.agent_run.ctx.deps.workspace.ref is not None
+                and self.agent_run.ctx.deps.workspace.ref.provider == "modal"
+            ):
+                # Failures in workspace-backed startup/instruction reads can
+                # escape before the next graph node. Only a settled graph may
+                # cross this path; never invent results for unfinished tools.
+                self.handing_off = True
+                await workflow.wait_condition(
+                    lambda: not self.steered.intersection(self.pending_steering) and not self.mail_handlers,
+                )
+                interrupted = self.checkpoint(prepared, self.agent_run, ModelRequestNode(ModelRequest(parts=[
+                    UserPromptPart("The previous step failed. Inspect the recorded results before continuing."),
+                ])))
+                recovered = CheckpointSave()
+                try:
+                    recovered = await workflow.execute_activity(
+                        "moyai_active_workspace_boundary_v1", args=[interrupted, True],
+                        result_type=CheckpointSave, **ACTIVE_FILES,
+                    )
+                except ActivityError as recovery_error:
+                    if is_cancelled_exception(recovery_error):
+                        raise asyncio.CancelledError from recovery_error
+                    # Preserve a specific recovery refusal for the public
+                    # failure; arbitrary provider details remain private.
+                    if public_preparation_message(recovery_error):
+                        error = recovery_error
+                if recovered.reference is not None:
+                    if keepalive is not None:
+                        keepalive.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await keepalive
+                        keepalive = None
+                    self.events.stream.detach_pollers()
+                    await workflow.wait_condition(workflow.all_handlers_finished)
+                    self.continue_checkpoint(recovered.reference)
             self.finished = True
             message = (
                 "The conversation's computer is no longer available. "
@@ -673,11 +727,11 @@ class TurnWorkflow(PydanticAIWorkflow):
                 **CONTROL,
             )
             if isinstance(error, ApplicationError):
-                raise
+                raise error
             raise ApplicationError(
                 "The agent turn failed; inspect its recorded activity before retrying.",
                 type=type(error).__name__, non_retryable=True,
-            ) from error
+            ) from original_error
         finally:
             # Keep maintenance running through answer/checkpoint settlement,
             # including deferred answers, but never beyond this execution.
@@ -693,6 +747,27 @@ class TurnWorkflow(PydanticAIWorkflow):
             info.is_continue_as_new_suggested()
             or info.get_current_history_size() >= limits.max_bytes
             or info.get_current_history_length() >= limits.max_events
+        )
+
+    def continue_checkpoint(
+        self, reference: str, release: DeploymentHandoff | None = None, maintenance: bool = False,
+    ) -> None:
+        workflow.continue_as_new(
+            args=[
+                self.turn_id, HistoryHandoff(
+                    checkpoint=reference, stream_state=self.events.stream.get_state(),
+                    steered=sorted(self.steered), pending_steering=list(self.pending_steering),
+                    pending_agent_mail=list(self.pending_agent_mail),
+                    deployment_handoff=release or self.previous_deployment_handoff,
+                    # Signals received during capture remain pending; a restore
+                    # does not implicitly authorize a deployment version change.
+                    pending_deployment_handoff=self.deployment_handoff if self.deployment_handoff != release else None,
+                    maintenance_workspace=maintenance,
+                ),
+            ],
+            initial_versioning_behavior=(
+                workflow.ContinueAsNewVersioningBehavior.USE_RAMPING_VERSION if release is not None else None
+            ),
         )
 
     @staticmethod

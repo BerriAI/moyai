@@ -21,9 +21,11 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 from test_bundled_skills_startup import scripted_model
 
+from moyai.active_workspace import active_workspace_boundary
 from moyai.agent import make_agent
 from moyai.computer_keepalive import Keepalive, keep_computer_alive
 from moyai.contracts import RunScope
+from moyai.history_handoff import AgentCheckpoint, CheckpointSave
 from moyai.maintenance_workspace import VERSION
 from moyai.models import ComputerLease, Effect, Session, Turn
 from moyai.product_drain import ProductDrainService
@@ -137,6 +139,12 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
     async def test_keepalive(scope: RunScope) -> Keepalive:
         return Keepalive(True, 60)
 
+    @activity.defn(name="moyai_active_workspace_boundary_v1")
+    async def settled_boundary(graph: AgentCheckpoint, recover_only: bool) -> CheckpointSave:
+        # This scenario isolates maintenance capture, including intentionally
+        # uncertain captures. Active recovery has its own provider/replay suite.
+        return CheckpointSave()
+
     async def capture_available(_runtime, _reference):
         nonlocal expired
         if refusal == "expired":
@@ -148,7 +156,8 @@ async def test_expired_files_resume_in_a_fresh_sdk_run_and_both_histories_replay
         return True
 
     monkeypatch.setattr(worker, "ACTIVITIES", [
-        test_keepalive if item is keep_computer_alive else item for item in worker.ACTIVITIES
+        test_keepalive if item is keep_computer_alive else
+        settled_boundary if item is active_workspace_boundary else item for item in worker.ACTIVITIES
     ])
     monkeypatch.setattr(runtime.database.answers, "snapshots", SimpleNamespace(capture=capture))
     monkeypatch.setattr("moyai.maintenance_workspace.live_sandbox", AsyncMock(return_value=False))
