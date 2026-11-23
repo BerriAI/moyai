@@ -5363,6 +5363,17 @@
             ],
             "title": "Height"
           },
+          "notice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice"
+          },
           "width": {
             "anyOf": [
               {
@@ -5379,7 +5390,8 @@
           "controlled",
           "available",
           "width",
-          "height"
+          "height",
+          "notice"
         ],
         "title": "ComputerControlResult",
         "type": "object"

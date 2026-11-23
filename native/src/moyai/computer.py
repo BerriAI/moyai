@@ -94,6 +94,7 @@ class ComputerControlResult(BaseModel):
     available: bool | None = None
     width: int | None = None
     height: int | None = None
+    notice: str | None = None
 
 
 async def authorize(runtime: Runtime, session_id: str, user: User) -> Session:
@@ -295,10 +296,18 @@ def routes(runtime: Runtime, actor, *, cookie_name: str = "moyai_session") -> AP
 
     @router.post("/api/sessions/{session_id}/computer", operation_id="controlComputer")
     async def control(session_id: str, body: ComputerCommand, user: User = Depends(actor)) -> ComputerControlResult:
-        if body.action == "reconnect":
+        if body.action == "reconnect" or body.action == "start":
             from .computer_recovery import reconnect
 
-            return await reconnect(runtime, session_id, user, body.client_id)
+            current = await authorize(runtime, session_id, user)
+            reference = json.loads(current.workspace or "null")
+            if body.action == "reconnect" or (reference and reference.get("provider") == "modal"):
+                result = await reconnect(runtime, session_id, user, body.client_id)
+                if result.available:
+                    return result
+                # A live workspace may never have opened its desktop. Only
+                # start it after recovery has ruled out a dead reference.
+                body = body.model_copy(update={"action": "start"})
         operation = await lease(runtime, session_id, user, body.action, body.client_id)
         session = await authorize(runtime, session_id, user)
         if body.action in {"claim", "release", "handoff", "heartbeat"}:

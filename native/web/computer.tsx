@@ -18,6 +18,7 @@ export function ComputerPanel(props: PanelProps) {
 function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
   const [view, setView] = useState<DesktopState>({ available: false, has_workspace: hasWorkspace, controlled: false, can_release: false, busy: false, controller: null })
   const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
   const [working, setWorking] = useState(false)
   const [connected, setConnected] = useState(false)
   const [connecting, setConnecting] = useState(false)
@@ -174,7 +175,7 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
     return () => clearInterval(timer)
   }, [id, view.controlled, pauseInput])
 
-  async function command(action: "claim" | "start" | "reconnect" | "handoff") {
+  async function command(action: "claim" | "reconnect" | "handoff") {
     if (commandPending.current || !lifetime.current.visible) return
     commandPending.current = true
     changingControl.current = true
@@ -190,6 +191,7 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
         return
       }
       setView(previous => ({ ...previous, controlled: owned.current, can_release: owned.current }))
+      if (result.notice) setNotice(result.notice)
       if (action === "reconnect") setAttempt(value => value + 1)
     } catch (error) {
       if (mounted.current) setError(String(error))
@@ -270,8 +272,9 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
       </Button>}
       {!connected && <div className="desktop-empty"><Monitor size={32} />
         <p role="status">{working ? "Opening computer…" : connecting ? "Connecting…" : hasWorkspace ? "Your sandbox desktop" : "Send Moyai a task to start its computer."}</p>
-        {hasWorkspace && <Button disabled={!foreground || working || connecting || Boolean(view.controller && !view.available && !view.controlled)} onClick={() => void command(view.available ? "reconnect" : "start")}>{working ? "Preparing desktop…" : view.available ? <><RefreshCw size={15} />Reconnect</> : "Open computer"}</Button>}
+        {hasWorkspace && <Button disabled={!foreground || working || connecting} onClick={() => void command("reconnect")}>{working ? "Preparing desktop…" : view.available ? <><RefreshCw size={15} />Reconnect</> : "Open computer"}</Button>}
       </div>}
+      {notice && !error && <div className="desktop-notice" role="status"><span>{notice}</span><Button variant="ghost" size="icon-sm" aria-label="Dismiss computer notice" onClick={() => setNotice("")}><X size={14} /></Button></div>}
       {error && <div className="desktop-notice" role="alert"><span>{error}</span><Button variant="ghost" size="icon-sm" aria-label="Dismiss computer error" onClick={() => setError("")}><X size={14} /></Button></div>}
     </div>
   </div>

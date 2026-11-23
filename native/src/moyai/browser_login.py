@@ -110,7 +110,7 @@ async def login_result(
     )
     if restored:
         instruction = (
-            "The computer was restored from its saved filesystem and Chromium restarted. "
+            "The computer was replaced and Chromium restarted. "
             "Previous tab IDs and page targets are stale. First call browser_read with mode='tabs' "
             "and no tab_id, then inspect the requested site using a newly observed tab ID. "
             + instruction

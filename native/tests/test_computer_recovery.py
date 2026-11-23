@@ -12,7 +12,7 @@ from test_application_boundaries import sign_in
 from test_browser_login import waiting_login
 
 from moyai.computer import lease
-from moyai.computer_recovery import reconnect
+from moyai.computer_recovery import FRESH_NOTICE, reconnect
 from moyai.computer_stream import bind, validate
 from moyai.models import ComputerDesktop, ComputerLease, ComputerOperation, Event, Session, Turn, User, new_id
 from moyai.workspace_recovery import checkpoint
@@ -90,25 +90,18 @@ async def test_live_reconnect_preserves_checkpoint_and_existing_control(runtime,
     restored.assert_not_awaited()
 
 
-@pytest.mark.parametrize("blocker", ["missing", "digest", "human_changes", "lease", "operation", "stopped"])
+@pytest.mark.parametrize("blocker", ["digest", "operation", "stopped"])
 async def test_recovery_requires_a_current_settled_checkpoint(runtime, actor, monkeypatch, blocker):
     session, turn_id, restored, _guest = await saved_login(runtime, actor, monkeypatch)
     async with runtime.database.sessions.begin() as db:
         current = await db.get(Session, session.id)
-        if blocker == "missing":
-            current.snapshot = None
-        elif blocker == "digest":
+        if blocker == "digest":
             current.conversation = runtime.security.seal("{}")
-        elif blocker == "lease":
-            db.add(ComputerLease(session_id=session.id, actor_id=actor.id, expires_at=int(time.time()) + 90))
         elif blocker == "operation":
             db.add(ComputerOperation(session_id=session.id, identity=new_id(), expires_at=int(time.time()) + 90))
         elif blocker == "stopped":
             current.status = "stopped"
             (await db.get(Turn, turn_id)).status = "stopped"
-    if blocker == "human_changes":
-        await lease(runtime, session.id, actor, "claim", new_id())
-        await lease(runtime, session.id, actor, "handoff")
     async with sign_in(runtime) as client:
         response = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "reconnect"})
         assert response.status_code == 409, response.text
@@ -220,3 +213,171 @@ async def test_visible_desktop_maintenance_retries_and_stops_with_its_stream(mon
     with pytest.raises(asyncio.CancelledError):
         await task
     assert attempts == 2
+
+
+@pytest.mark.parametrize("state", ["waiting", "idle", "failed", "stopped"])
+async def test_reconnect_recovers_without_a_signin_request(runtime, actor, active, monkeypatch, state):
+    from test_workspace_recovery import REFERENCE as reference
+    from test_workspace_recovery import saved
+
+    session, turn, _prepared, _capture = await saved(runtime, active, monkeypatch, waiting=state == "waiting")
+    await runtime.database.answers.save_computer(turn.id, reference, product=False)
+    if state in {"failed", "stopped"}:
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Session, session.id)).status = state
+    restored = AsyncMock(return_value=SimpleNamespace(
+        object_id=REPLACEMENT["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
+    ))
+    monkeypatch.setattr("moyai.computer_recovery.live_sandbox", AsyncMock(return_value=False))
+    monkeypatch.setattr("moyai.computer_recovery.restored_sandbox", restored)
+    monkeypatch.setattr("moyai.computer_recovery.guest_request", AsyncMock(return_value={"available": True}))
+    # Open computer also recovers a workspace whose desktop was never opened.
+    async with sign_in(runtime) as client:
+        response = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "start"})
+        assert response.status_code == 200, response.text
+        assert response.json()["available"] and not response.json()["controlled"]
+        assert "saved files" in response.json()["notice"]
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert current.status == state
+        assert current.active_turn == (turn.id if state == "waiting" else None)
+        assert checkpoint(current.snapshot).workspace == REPLACEMENT
+        assert not await db.scalar(select(Event.id).where(Event.kind == "browser_login_restored"))
+    restored.assert_awaited_once()
+
+
+@pytest.mark.parametrize("reason", ["missing", "human_changes", "capture_failed", "image_expired"])
+async def test_no_backup_starts_fresh_with_visible_and_durable_notice(runtime, actor, monkeypatch, reason):
+    session, turn_id, restored, _guest = await saved_login(runtime, actor, monkeypatch)
+    if reason == "image_expired":
+        from moyai.product_continuation_errors import preparation_blocked
+
+        restored.side_effect = preparation_blocked("workspace_checkpoint_missing")
+    elif reason == "human_changes":
+        # Recovery revokes this requester's dead lease without waiting for its
+        # heartbeat to expire; claiming has invalidated the old savepoint.
+        await lease(runtime, session.id, actor, "claim", new_id())
+    else:
+        async with runtime.database.sessions.begin() as db:
+            current = await db.get(Session, session.id)
+            current.snapshot = checkpoint(current.snapshot).model_copy(update={"image_id": None}).model_dump_json() if reason == "capture_failed" else None
+    fresh = AsyncMock(return_value=SimpleNamespace(
+        object_id="fresh-computer", poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
+    ))
+    monkeypatch.setattr("moyai.computer_recovery.fresh_sandbox", fresh)
+    async with sign_in(runtime) as client:
+        response = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "reconnect"})
+        assert response.status_code == 200, response.text
+        assert response.json()["notice"] == FRESH_NOTICE
+        assert response.json()["available"] and not response.json()["controlled"]
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert current.snapshot is None and current.save_warning == FRESH_NOTICE
+        assert json.loads(current.workspace)["id"] == "fresh-computer"
+        assert (await db.get(Turn, turn_id)).status == "waiting"
+        assert await db.get(ComputerLease, session.id) is None
+        event = await db.scalar(select(Event).where(Event.kind == "computer_recovered"))
+        assert json.loads(runtime.security.unseal(event.content))["files_restored"] is False
+    fresh.assert_awaited_once()
+    if reason == "image_expired":
+        restored.assert_awaited_once()
+    else:
+        restored.assert_not_awaited()
+
+
+async def test_failed_interrupted_checkpoint_recovers_without_new_agent_turn(runtime, actor, active, monkeypatch):
+    from test_workspace_recovery import interrupted
+
+    from moyai.failure_checkpoint import preserve_failed_workspace
+
+    session, turn, _ = active
+    await interrupted(runtime, active, monkeypatch)
+    await preserve_failed_workspace(runtime, turn.id)
+    await runtime.database.fail(turn.id, "Worker exited")
+    monkeypatch.setattr("moyai.computer_recovery.live_sandbox", AsyncMock(return_value=False))
+    monkeypatch.setattr("moyai.computer_recovery.restored_sandbox", AsyncMock(return_value=SimpleNamespace(
+        object_id=REPLACEMENT["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
+    )))
+    monkeypatch.setattr("moyai.computer_recovery.guest_request", AsyncMock(return_value={"available": True}))
+    assert (await reconnect(runtime, session.id, actor, new_id())).available
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert current.status == "failed" and current.active_turn is None
+        assert checkpoint(current.snapshot).kind == "interrupted"
+
+
+async def test_followup_is_told_about_replacement_and_stale_browser_state(runtime, actor, active, monkeypatch):
+    from test_workspace_recovery import REFERENCE as reference
+    from test_workspace_recovery import saved
+
+    from moyai.contracts import NewMessage
+    from moyai.workspace_recovery import prepare_workspace
+
+    session, turn, _prepared, _capture = await saved(runtime, active, monkeypatch, waiting=False)
+    await runtime.database.answers.save_computer(turn.id, reference, product=False)
+    async with runtime.database.sessions.begin() as db:
+        current = await db.get(Session, session.id)
+        db.add(Event(session_id=session.id, turn_id=turn.id, kind="computer_recovered",
+                     identity="fresh-recovery", content=runtime.security.seal({
+                         "restored": reference["id"], "notice": FRESH_NOTICE,
+                     })))
+        current.snapshot = None
+    followup = await runtime.database.submit(actor, session.id, NewMessage(prompt="Continue", request_key="after-recovery"))
+    await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(followup.id)
+    monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=True))
+    prepared = await prepare_workspace(runtime, prepared)
+    assert FRESH_NOTICE in prepared.prompt
+    assert "list browser tabs" in prepared.prompt
+    assert "do not repeat completed actions" in prepared.prompt
+
+
+@pytest.mark.parametrize("blocker", ["effect", "other_controller", "running"])
+async def test_fresh_replacement_keeps_execution_and_control_fences(runtime, actor, monkeypatch, blocker):
+    from moyai.models import Effect
+
+    session, turn_id, _restored, _guest = await saved_login(runtime, actor, monkeypatch)
+    fresh = AsyncMock()
+    monkeypatch.setattr("moyai.computer_recovery.fresh_sandbox", fresh)
+    async with runtime.database.sessions.begin() as db:
+        current = await db.get(Session, session.id)
+        current.snapshot = None
+        if blocker == "effect":
+            db.add(Effect(id="uncertain", session_id=session.id, turn_id=turn_id, actor_id=actor.id,
+                          tool_name="publish", arguments=runtime.security.seal("{}"), fingerprint="same", state="pending"))
+        elif blocker == "other_controller":
+            other = User(id=new_id(), username="other-controller", display_name="Other", password="unused")
+            db.add(other)
+            await db.flush()
+            db.add(ComputerLease(session_id=session.id, actor_id=other.id, expires_at=int(time.time()) + 60))
+        else:
+            current.status = "running"
+            (await db.get(Turn, turn_id)).status = "running"
+    async with sign_in(runtime) as client:
+        result = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "reconnect"})
+        assert result.status_code == 409, result.text
+    fresh.assert_not_awaited()
+
+
+async def test_new_turn_during_idle_recovery_fences_late_publication(runtime, actor, active, monkeypatch):
+    from test_workspace_recovery import REFERENCE as reference
+    from test_workspace_recovery import saved
+
+    from moyai.contracts import NewMessage
+
+    session, turn, _prepared, _capture = await saved(runtime, active, monkeypatch, waiting=False)
+    await runtime.database.answers.save_computer(turn.id, reference, product=False)
+    monkeypatch.setattr("moyai.computer_recovery.live_sandbox", AsyncMock(return_value=False))
+    monkeypatch.setattr("moyai.computer_recovery.restored_sandbox", AsyncMock(return_value=SimpleNamespace(
+        object_id=REPLACEMENT["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
+    )))
+    async def new_turn(*_args):
+        await runtime.database.submit(actor, session.id, NewMessage(prompt="New task", request_key="race"))
+        await runtime.database.claim_next()
+        return {"available": True}
+    monkeypatch.setattr("moyai.computer_recovery.guest_request", new_turn)
+    with pytest.raises(HTTPException):
+        await reconnect(runtime, session.id, actor, new_id())
+    async with runtime.database.sessions() as db:
+        assert json.loads((await db.get(Session, session.id)).workspace) == reference
+        assert await db.get(ComputerOperation, session.id) is None

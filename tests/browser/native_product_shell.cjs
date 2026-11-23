@@ -125,6 +125,7 @@ async function handle(req,res,next) {
         state.computer={...state.computer,controlled:false,can_release:false,controller:null};
         return json({controlled:false,available:null,width:null,height:null});
       }
+      if(req.method==='POST'&&state.computerResult)return json(state.computerResult);
       return json({available:false,has_workspace:true,controlled:false,can_release:false,busy:false,controller:null,...state.computer});
     }
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
@@ -301,6 +302,20 @@ for(const width of [1440,768,320])test(`Reconnect recovers the desktop without a
   assert.equal(state.requests.some(row=>row.path.endsWith('/answers')),false);
   assert.equal(state.requests.some(row=>row.body?.action==='claim'),false);
   assert.equal(state.pending.calls[0].tool_name,'request_browser_login');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+for(const width of [1440,768,320])test(`Open computer recovers an idle workspace and explains fresh replacement at ${width}px`,async t=>{
+  const notice='Started a new computer because no current filesystem backup was available. Files and browser state from the expired computer were not recovered. Your chat and saved downloads are retained.';
+  reset({status:'idle',computer:{available:false},computerResult:{available:true,controlled:false,notice},
+    sessionOverrides:{[sessionId]:{workspace:{provider:'modal',id:'expired-computer'}}}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('button',{name:'Open side panel',exact:true}).click();
+  await page.getByRole('button',{name:'Add panel tab',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Computer Your session’s desktop and browser'}).click();
+  await page.getByRole('button',{name:'Open computer',exact:true}).click();
+  await page.getByText(notice,{exact:true}).waitFor();
+  assert.equal(state.requests.filter(row=>row.body?.action==='reconnect').length,1);
+  assert.equal(state.requests.some(row=>row.body?.action==='start'||row.body?.action==='claim'),false);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
 });
 for(const width of [1440,768,320])test(`browser sign-in opens Computer and submits an explicit acknowledgement at ${width}px`,async t=>{

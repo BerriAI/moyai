@@ -2845,6 +2845,10 @@ export type ComputerControlResult = {
      */
     height: number | null;
     /**
+     * Notice
+     */
+    notice: string | null;
+    /**
      * Width
      */
     width: number | null;
