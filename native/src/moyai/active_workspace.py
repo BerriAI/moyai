@@ -25,7 +25,7 @@ from temporalio.exceptions import ApplicationError
 
 from .history_handoff import AgentCheckpoint, CheckpointSave, save_history_checkpoint
 from .models import ComputerDesktop, ComputerLease, ComputerOperation, Event, new_id
-from .product_continuation_errors import preparation_blocked
+from .continuations.product_continuation_errors import preparation_blocked
 from .workspace_recovery import (
     WorkspaceCheckpoint,
     live_sandbox,
