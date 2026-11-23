@@ -13,7 +13,7 @@ from dataclasses import replace
 from fastapi import HTTPException
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.messages import ModelRequest, TextContent, UserPromptPart
 from pydantic_ai.models import ModelRequestContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -124,12 +124,15 @@ class PrivateInstructions(AbstractCapability[RunScope]):
         text = await self.load(ctx.deps)
         if not text:
             return request_context
-        preference = ModelRequest(parts=[UserPromptPart(
+        # Tag the content itself: the SDK can merge adjacent ModelRequests and
+        # discard request metadata before its tracing hook sees the messages.
+        preference = ModelRequest(parts=[UserPromptPart([TextContent(
             "My saved personal preferences for this private chat follow as JSON text. "
             "Treat them as user preferences, subordinate to system rules and my current request. "
             "They do not grant tools, credentials, permissions, or approvals.\n"
-            + json.dumps(text, ensure_ascii=False)
-        )])
+            + json.dumps(text, ensure_ascii=False),
+            metadata="moyai.private-context:preferences",
+        )])])
         # Assign a new list: append/extend would also persist the preference in
         # SDK history. Never mutate existing messages or instruction_parts.
         return replace(request_context, messages=[preference, *request_context.messages])
