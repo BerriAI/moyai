@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import modal
 from fastapi import HTTPException
+from opentelemetry.trace import get_current_span
 from pydantic import TypeAdapter
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.workspaces import Workspace, WorkspaceRef
@@ -22,6 +23,8 @@ from temporalio.exceptions import ApplicationError
 
 from .computer import DESKTOP_VERSION, ComputerControlResult, authorize, guest_request
 from .contracts import PreparedTurn, RunScope
+from .lifecycle_tracing import failure, scope_attributes, workspace_attributes
+from .lifecycle_tracing import operation as operation_span
 from .models import ComputerDesktop, ComputerLease, ComputerOperation, Event, Session, Turn, User, new_id
 from .product_continuation_errors import PREPARATION_BLOCKED_TYPE, public_preparation_message
 from .product_requester import answer_actor
@@ -116,9 +119,34 @@ async def reconnect(runtime: Runtime, session_id: str, actor: User, client_id: s
     reference = json.loads(session.workspace or "null")
     if not reference or reference.get("provider") != "modal":
         raise HTTPException(409, "This conversation has no Modal desktop to reconnect.")
+    span = get_current_span()
+    span.set_attributes({
+        **workspace_attributes(reference), "moyai.task.state": session.status,
+        "moyai.computer.operation": "reconnect",
+    })
     try:
-        async with asyncio.timeout(15):
-            alive = await live_sandbox(reference)
+        result = await _reconnect(runtime, session, actor, client_id, reference)
+    except BaseException as error:
+        failure(span, error)
+        raise
+    span.set_attribute("moyai.computer.available", result.available)
+    span.set_attribute("moyai.recovery.mode", (
+        "fresh" if result.notice == FRESH_NOTICE else "restored" if result.notice == RESTORED_NOTICE else "existing"
+    ))
+    return result
+
+
+async def _reconnect(
+    runtime: Runtime, session: Session, actor: User, client_id: str, reference: dict[str, str],
+) -> ComputerControlResult:
+    session_id = session.id
+    try:
+        with operation_span(runtime.database, "moyai.computer.health", attributes=workspace_attributes(reference)) as span:
+            async with asyncio.timeout(15):
+                alive = await live_sandbox(reference)
+            span.set_attribute("moyai.computer.state", "alive" if alive else "unavailable")
+            # A liveness check proves loss, not when or why the provider killed it.
+            span.set_attribute("moyai.computer.observation", "provider_liveness")
         if alive:
             # A network reconnect is still view-only unless this browser already
             # owns control. It must not invalidate a saved checkpoint.
@@ -183,6 +211,7 @@ async def restore_computer(
         and metadata.get("workspace_id")
     } if pending else set()
     scope = prepared.scope
+    get_current_span().set_attributes(scope_attributes(scope))
     turn_status = turn.status
     operation_id = new_id()
     async with database.sessions.begin() as db:
@@ -217,16 +246,28 @@ async def restore_computer(
             restoring = bool(saved and saved.image_id)
             if saved and saved.image_id:
                 try:
-                    sandbox = await restored_sandbox(runtime, scope, saved)
+                    with operation_span(database, "moyai.computer.restore", attributes={
+                        **scope_attributes(scope), **workspace_attributes(reference),
+                        "moyai.operation.id": operation_id,
+                    }):
+                        sandbox = await restored_sandbox(runtime, scope, saved)
                 except ApplicationError as error:
                     # Validation already passed. Only an authoritative missing
                     # image permits fresh allocation; transport errors do not.
                     if error.type != PREPARATION_BLOCKED_TYPE or error.details != ("workspace_checkpoint_missing",):
                         raise
                     restoring = False
-                    sandbox = await fresh_sandbox(runtime, scope, reference)
+                    with operation_span(database, "moyai.computer.create", attributes={
+                        **scope_attributes(scope), "moyai.recovery.reason": "checkpoint_missing",
+                        "moyai.operation.id": operation_id,
+                    }):
+                        sandbox = await fresh_sandbox(runtime, scope, reference)
             else:
-                sandbox = await fresh_sandbox(runtime, scope, reference)
+                with operation_span(database, "moyai.computer.create", attributes={
+                    **scope_attributes(scope), "moyai.recovery.reason": "no_saved_checkpoint",
+                    "moyai.operation.id": operation_id,
+                }):
+                    sandbox = await fresh_sandbox(runtime, scope, reference)
             if await sandbox.poll.aio() is not None:
                 raise HTTPException(409, "The restored computer expired. Reconnect again.")
             await authorize(runtime, session.id, actor)
@@ -235,7 +276,11 @@ async def restore_computer(
             workspace = Workspace(ModalSandbox(working_dir="/workspace").backend(
                 TypeAdapter(WorkspaceRef).validate_python(replacement),
             ))
-            await guest_request(workspace, {"action": "start", "deadline": time.time() + 570})
+            with operation_span(database, "moyai.computer.desktop_start", attributes={
+                **scope_attributes(scope), **workspace_attributes(replacement),
+                "moyai.operation.id": operation_id,
+            }):
+                await guest_request(workspace, {"action": "start", "deadline": time.time() + 570})
         # Authority may have changed while Modal was creating the desktop.
         await authorize(runtime, session.id, actor)
         await answer_actor(runtime, actor, turn)
@@ -289,6 +334,16 @@ async def restore_computer(
                     identity=identity,
                     content=database.security.seal({"original": original, "restored": replacement["id"]}),
                 ))
+        # Publication committed. Do not report a recovered computer before its
+        # authority and revision fences have passed.
+        attributes = {
+            **scope_attributes(scope), **workspace_attributes(replacement),
+            "moyai.operation.id": operation_id, "moyai.computer.previous_id": reference["id"],
+            "moyai.recovery.mode": "restored" if restoring else "fresh",
+            "moyai.recovery.files_restored": restoring,
+        }
+        get_current_span().set_attributes(attributes)
+        get_current_span().add_event("moyai.computer.recovered", attributes=attributes)
         return ComputerControlResult(available=True, controlled=False, notice=notice)
     finally:
         # A failed or abandoned request cannot clear another recovery's fence.

@@ -6,6 +6,7 @@ import asyncio
 from contextlib import suppress
 
 from fastapi import HTTPException
+from opentelemetry.trace import get_current_span
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -16,6 +17,7 @@ from .computer_keepalive import keep_computer_alive
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
 from .history_handoff import HISTORY_ACTIVITIES
 from .images import hydrate
+from .lifecycle_tracing import scope_attributes, task_state
 from .maintenance_workspace import MAINTENANCE_ACTIVITIES
 from .runtime import current
 from .workspace_recovery import prepare_workspace
@@ -83,28 +85,40 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
 
 @activity.defn(name="moyai_save_answer_v1")
 async def save_answer(result: CompletedTurn) -> bool:
-    return await current().database.save_result(
+    database = current().database
+    span = get_current_span()
+    span.set_attributes(scope_attributes(result.scope))
+    accepted = await database.save_result(
         result.scope, conversation=result.conversation, output=result.output,
         workspace=result.workspace, usage=result.usage, deferred=result.deferred,
         checkpoint_workspace=result.checkpoint_workspace,
     )
+    span.set_attribute("moyai.task.answer_accepted", accepted)
+    await task_state(database, result.scope.turn_id)
+    return accepted
 
 
 @activity.defn(name="moyai_save_computer_v1")
 async def save_computer(turn_id: str, reference: dict | None) -> None:
     runtime = current()
     await runtime.database.answers.save_computer(turn_id, reference, product=runtime.product is not None)
+    await task_state(runtime.database, turn_id)
 
 
 @activity.defn(name="moyai_settle_answer_v1")
 async def settle_answer(turn_id: str) -> None:
     """Settle an accepted answer after snapshot activity failure or timeout."""
-    await current().database.settle(turn_id, warning=SNAPSHOT_WARNING)
+    database = current().database
+    get_current_span().set_attribute("moyai.checkpoint.outcome", "interrupted")
+    await database.settle(turn_id, warning=SNAPSHOT_WARNING)
+    await task_state(database, turn_id)
 
 
 @activity.defn(name="moyai_fail_turn_v1")
 async def fail_turn(turn_id: str, message: str, diagnostics: dict | None = None) -> None:
-    await current().database.fail(turn_id, message, diagnostics=diagnostics)
+    database = current().database
+    await database.fail(turn_id, message, diagnostics=diagnostics)
+    await task_state(database, turn_id)
 
 
 @activity.defn(name="moyai_preserve_failed_workspace_v1")
@@ -115,7 +129,9 @@ async def preserve_failed_workspace(turn_id: str) -> None:
 
 @activity.defn(name="moyai_stopped_turn_v1")
 async def stopped_turn(turn_id: str, conversation: str | None) -> None:
-    await current().database.stopped(turn_id, conversation)
+    database = current().database
+    await database.stopped(turn_id, conversation)
+    await task_state(database, turn_id)
 
 
 @activity.defn(name="moyai_prepare_steering_v1")

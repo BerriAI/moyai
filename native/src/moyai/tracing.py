@@ -6,14 +6,16 @@ import asyncio
 from collections.abc import Mapping, MutableMapping
 from copy import copy
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import logfire
 import requests
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import get_current_span
+from opentelemetry.trace import Span, Status, get_current_span
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pydantic import SecretStr
 from pydantic_ai.durable_exec.temporal import LogfirePlugin
@@ -32,6 +34,9 @@ from pydantic_ai.models.instrumented import InstrumentationSettings
 
 from .presentation import redact
 from .settings import Settings
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 TRACE_CONTEXT = TraceContextTextMapPropagator()
 
@@ -58,6 +63,49 @@ class _NoRedirectSession(requests.Session):
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
         kwargs["allow_redirects"] = False
         return super().send(request, **kwargs)
+
+
+class _ContentSafeBatchSpanProcessor(BatchSpanProcessor):
+    """Keep framework diagnostics without exporting request or exception content."""
+
+    def on_end(self, span: ReadableSpan) -> None:
+        hidden = {"exception.message", "exception.stacktrace"}
+        attributes = {key: value for key, value in (span.attributes or {}).items() if key not in hidden}
+        if span.instrumentation_scope and span.instrumentation_scope.name == "opentelemetry.instrumentation.fastapi":
+            # Route templates, methods and status suffice for request diagnostics.
+            # Raw URLs can contain file names, login codes or signed query values.
+            attributes = {
+                key: value for key, value in attributes.items()
+                if key not in {"http.url", "http.target", "url.full", "url.path", "url.query"}
+                and not key.startswith(("http.request.header.", "http.response.header."))
+            }
+            attributes["logfire.msg"] = span.name
+        events = [
+            Event(event.name, attributes={
+                key: value for key, value in (event.attributes or {}).items() if key not in hidden
+            }, timestamp=event.timestamp)
+            for event in span.events
+        ]
+        # Frameworks put the exception text in status.description as well.
+        super().on_end(ReadableSpan(
+            name=span.name, context=span.context, parent=span.parent, resource=span.resource,
+            attributes=attributes, events=events, links=span.links, kind=span.kind,
+            status=Status(span.status.status_code), start_time=span.start_time, end_time=span.end_time,
+            instrumentation_scope=span.instrumentation_scope,
+        ))
+
+
+def _request_context(span: Span, scope: dict[str, Any]) -> None:
+    """Correlate separate reconnect requests without reviving an old trace."""
+    path = scope.get("path", "").split("/")
+    if len(path) >= 4 and path[1:3] == ["api", "sessions"]:
+        try:
+            session_id = str(UUID(path[3]))
+        except ValueError:
+            return
+        import json
+
+        span.set_attribute("metadata", json.dumps({"moyai_session_id": session_id}))
 
 
 def _keep_session_id(match: logfire.ScrubMatch) -> str | None:
@@ -128,14 +176,11 @@ class LensTracing:
             local=True, send_to_logfire=False, console=False, metrics=False,
             service_name="moyai", inspect_arguments=False,
             scrubbing=logfire.ScrubbingOptions(callback=_keep_session_id),
-            additional_span_processors=[BatchSpanProcessor(
+            additional_span_processors=[_ContentSafeBatchSpanProcessor(
                 exporter, max_queue_size=2048, max_export_batch_size=128,
                 schedule_delay_millis=1000, export_timeout_millis=3000,
             )],
         )
-        # Keep context propagation across activities while showing the agent's
-        # work instead of the SDK's control-plane polling and bookkeeping.
-        self.logfire.suppress_scopes("temporalio")
         options: dict[str, Any] = {}
         instrumentation_type = InstrumentationSettings
         if settings.trace_include_content:
@@ -152,6 +197,17 @@ class LensTracing:
             **options,
         )
         self.plugin = LogfirePlugin(setup_logfire=lambda: self.logfire, metrics=False)
+
+    def instrument_app(self, app: FastAPI) -> None:
+        """Install the official middleware before FastAPI builds its stack."""
+        FastAPIInstrumentor.instrument_app(
+            app, tracer_provider=self.logfire.config.get_tracer_provider(),
+            server_request_hook=_request_context, exclude_spans=["send", "receive"],
+            excluded_urls=r"/(?:health|healthz|readyz|favicon\.ico)(?:\?|$),/assets/",
+            # Nonempty impossible patterns also override environment-wide capture.
+            http_capture_headers_server_request=["^$"],
+            http_capture_headers_server_response=["^$"],
+        )
 
     async def close(self) -> None:
         await asyncio.to_thread(self.logfire.shutdown, timeout_millis=5000)

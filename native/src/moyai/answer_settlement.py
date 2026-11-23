@@ -29,6 +29,8 @@ from sqlalchemy import delete, literal, select, update
 from .contracts import PreparedTurn, RunScope
 from .failed_action_attempts import settle_failed_action_attempts
 from .failure_diagnostics import FAILURE_KIND, safe_failure_metadata
+from .lifecycle_tracing import operation as operation_span
+from .lifecycle_tracing import scope_attributes, workspace_attributes
 from .models import ComputerOperation, Event, Message, Session, Turn, now
 from .product_continuation_errors import preparation_blocked
 from .workspace_recovery import (
@@ -128,7 +130,11 @@ class AnswerSettlement:
                         )
                         await asyncio.sleep(2 ** attempt)
                 # Older workflows retain their historical capture behavior.
-                image = await self.snapshots.capture(ref, require_live=False)
+                with operation_span(
+                    self.database, "moyai.computer.checkpoint",
+                    attributes={"moyai.checkpoint.source": "legacy", **workspace_attributes(reference)},
+                ):
+                    image = await self.snapshots.capture(ref, require_live=False)
         except Exception:
             logger.warning(
                 "Computer snapshot settlement failed; the answer remains saved. turn=%s provider=%s",
@@ -277,7 +283,13 @@ class AnswerSettlement:
             db.add(ComputerOperation(session_id=session.id, identity=identity, expires_at=int(time.time()) + lease_seconds))
             expected, revision = session.snapshot, session.revision
         try:
-            image = await self.snapshots.capture(TypeAdapter(WorkspaceRef).validate_python(reference), require_live=True)
+            with operation_span(database, "moyai.computer.checkpoint", attributes={
+                **scope_attributes(prepared.scope), **workspace_attributes(reference),
+                "moyai.checkpoint.source": "current",
+            }):
+                image = await self.snapshots.capture(
+                    TypeAdapter(WorkspaceRef).validate_python(reference), require_live=True,
+                )
             # A returned image is evidence, but publication still needs current
             # authority and the exact source. Stop/revocation cannot resurrect it.
             async with database.sessions.begin() as db:

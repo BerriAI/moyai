@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from .product_inference import ProductInferenceService
     from .product_memory_review import ProductMemoryReviewService
     from .product_skill_learning import SkillLearningService
+    from .tracing import LensTracing
 
 
 def grant_fingerprint(grants: list[Grant]) -> str:
@@ -92,6 +93,7 @@ class Database:
     def __init__(self, settings: Settings, security: Security):
         self.settings = settings
         self.security = security
+        self.tracing: LensTracing | None = None
         self.performance_tasks: set[asyncio.Task[None]] = set()
         from .performance import DispatchRecorder
         self.dispatch_timings = DispatchRecorder(self)

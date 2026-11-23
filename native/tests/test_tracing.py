@@ -105,6 +105,7 @@ async def test_native_temporal_trace_content_policy_and_replay_emits_no_duplicat
         "trace_api_key": SecretStr("synthetic-export-key"),
         "trace_include_content": include_content,
     }))
+    runtime.database.tracing = runtime.tracing
     runtime.agent, runtime.durability = make_agent(
         runtime.settings, runtime.database, runtime.stores, runtime.objects, models=runtime.models,
         workspace=LocalWorkspace(runtime.settings.data_dir.parent / "computer"), skills_directory="skills",
@@ -130,7 +131,9 @@ async def test_native_temporal_trace_content_policy_and_replay_emits_no_duplicat
         assert ("Task completed." in attributes) is include_content
         assert active[0].id in attributes
         assert "synthetic-export-key" not in attributes
-        assert not any(span.instrumentation_scope.name == "temporalio" for span in spans)
+        activities = [span for span in spans if span.instrumentation_scope.name == "temporalio"]
+        assert any("moyai_save_answer_v1" in span.name for span in activities)
+        assert any(span.attributes.get("moyai.task.state") == "completed" for span in activities)
         await Replayer(
             interceptors=[ActivityCapacity()], workflows=[TurnWorkflow],
             plugins=runtime.temporal_plugins(), data_converter=converter,

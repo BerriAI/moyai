@@ -204,6 +204,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     app = FastAPI(title="Moyai", lifespan=lifespan)
     app.state.runtime = runtime
+    if tracing := runtime.configure_tracing():
+        tracing.instrument_app(app)
     if runtime.product_slack is not None:
         app.include_router(runtime.product_slack.routes())
     else:
