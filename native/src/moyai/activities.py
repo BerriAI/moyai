@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from .active_workspace import active_workspace_boundary
 from .agent_messages import read_agent_mail, read_agent_mail_v2
 from .answer_settlement import SNAPSHOT_WARNING
 from .computer_keepalive import keep_computer_alive
@@ -139,6 +140,7 @@ async def steering_receipt(turn_id: str, enqueue_id: str | None) -> None:
 
 
 ACTIVITIES = [
+    active_workspace_boundary,
     prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
     prepare_steering, steering_receipt, keep_computer_alive, preserve_failed_workspace,
     *HISTORY_ACTIVITIES, *MAINTENANCE_ACTIVITIES,

@@ -52,6 +52,8 @@ async def finish_cleanup[Result](operation: Awaitable[Result]) -> Result:
 
 
 def activity_pool(name: str, args: Sequence[object] = ()) -> ActivityPool:
+    if name == "moyai_active_workspace_boundary_v1":
+        return "tools"
     if name.startswith("agent__"):
         if name.endswith((
             "__model_request", "__model_request_stream",
