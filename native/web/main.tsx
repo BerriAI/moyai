@@ -16,8 +16,8 @@ import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
 import { ApiError, csrfToken, setCsrf } from "./api"
-import { getMe, listPullRequestStatuses, startGoogleSignIn, startOktaSignIn, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
-import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, getSessionActivity, getSessionPlan, listConnections, listSessionMessages, listSessions, loginWithPassword, logout, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending, type PlanStep, type SessionDetail } from "./generated/api"
+import { getMe, listPullRequestStatuses, startGoogleSignIn, startOktaSignIn, type Me, type PullRequestStatus } from "./generated/api"
+import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, listConnections, listSessions, loginWithPassword, logout, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending } from "./generated/api"
 import { listHistorySessions, searchHistory } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
 import { FailureBanner } from "./failure-banner"
@@ -35,6 +35,8 @@ import { SessionTitle } from "./session-title"
 import { sessionCreatedByMe } from "./sidebar-drag"
 import { useSessionUpdates } from "./use-session-updates"
 import { useSessionInventory } from "./use-session-inventory"
+import { useConversationLifecycle, type ConversationView as View } from "./use-conversation-lifecycle"
+import { sessionReferenceHash, continuationReference, type SessionReference } from "./session-reference"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
@@ -43,7 +45,7 @@ import { FilesPanel, OutputPanel } from "./output"
 import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
 import type { ActionSelection, OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
-import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type ActivityEvent, type LiveEvent } from "./live-transcript"
+import { liveFinalAnswer, mergeActivity, type ActivityEvent } from "./live-transcript"
 import { TurnProgress, toolLabel } from "./turn-progress"
 import { ActionPanel } from "./action-panel"
 import { useWorkProgress } from "./use-work-progress"
@@ -52,7 +54,7 @@ import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { SidebarResizeHandle } from "./sidebar-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
-import { firstMessage, reconcileHistory, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
+import { waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
 import { QuestionChoices } from "./question-choices"
 import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./browser-login"
@@ -65,9 +67,6 @@ const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(m
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
 type Connection = ConnectionView
-/** A loaded session detail, or the optimistic view of a just-created conversation. */
-type View = Partial<Omit<SessionDetail, "session" | "turns" | "messages">> & { session: Session; turns: Turn[]; messages?: Message[] | null }
-type Activity = ActivityEvent
 function metadataText(value: { [key: string]: unknown } | undefined, key: string): string | undefined {
   const item = value?.[key]
   return typeof item === "string" ? item : undefined
@@ -97,16 +96,6 @@ const searchSessions: PaletteSearchAdapter = async (query, { signal, limit }) =>
     ? await searchHistory({ query: { source: "all", limit, q: query }, signal })
     : await listHistorySessions({ query: { source: "all", limit }, signal })
   return { sessions: data.sessions, has_more: data.has_more, notice: data.notice ?? undefined }
-}
-type SessionReference = Pick<PaletteSession, "id" | "source" | "url"> & { source_session_id?: string | null }
-export function sessionReferenceHash(session: SessionReference): string {
-  const original = session.url?.match(/^\/#run=([a-f0-9]{32})$/)?.[1]
-  return original ? `run=${original}` : session.source === "legacy" ? `run=${encodeURIComponent(session.id)}` : encodeURIComponent(session.id)
-}
-export function continuationReference(session: SessionReference, original: string): SessionReference | null {
-  return /^[a-f0-9]{32}$/.test(original) && session.source === "native"
-    && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(session.id)
-    && session.source_session_id === original && session.url === `/#run=${original}` ? session : null
 }
 function openSessionReference(session: SessionReference) {
   location.hash = sessionReferenceHash(session)
@@ -374,20 +363,32 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
 }
 
 function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PullRequestStatus[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
-  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages != null ? resolved : null)
-  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
-  const [historyState, setHistoryState] = useState(() => ({
-    complete: Boolean(initial || resolved?.messages && resolved.messages.length < 200), loading: false, error: "",
-  }))
-  const [plan, setPlan] = useState<PlanStep[]>([])
-  const [panelLoading, setPanelLoading] = useState(false)
-  const [panelError, setPanelError] = useState("")
+  const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
+  const sessionActions = useSessionActions()
+  const sessionUpdates = sessionActions.updates
+  const auxiliaryPanel = panelState.visible && visible
+    ? panelState.tabs.find(tab => tab.id === panelState.activeId)?.kind : undefined
+  const conversation = useConversationLifecycle({ id, visible, initial, resolved, sessionUpdates, auxiliaryPanel,
+    onRead: next => {
+      if (!next) { clearComposer(); onSession?.(null); return }
+      // Initialize only once: polling and late read receipts cannot replace a draft's choices.
+      if (!composerInitialized.current) {
+        setModel(next.session.model)
+        const latest = next.turns[0]
+        setSelectedAccounts((latest?.is_self ?? latest?.actor_id === me.user.id) ? latest.connections ?? [] : [])
+        composerInitialized.current = true
+      }
+      setSendingNow(previous => {
+        const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
+        return pending.length === previous.size ? previous : new Set(pending)
+      })
+      onSession?.(next.session)
+    },
+  })
+  const { view, messages, historyState, plan, activity, liveText, reconnecting, panelLoading, panelError, loadError,
+    refresh: load, refreshAfterAction: reloadAfterAction } = conversation
   const [traceBusy, setTraceBusy] = useState(false)
   const [traceError, setTraceError] = useState("")
-  const resolvedOnce = useRef(resolved)
-  const viewNow = useRef(view)
-  viewNow.current = view
-  const sensitiveVersion = useRef(0)
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
@@ -405,18 +406,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const mode = me.preferences?.delivery_mode ?? "when_idle"
   const [skippedAccountScope, setSkippedAccountScope] = useState("")
   const [error, setError] = useState("")
-  const [loadError, setLoadError] = useState("")
   const pictures = useAttachments(setError)
   const [busy, setBusy] = useState(false)
   const submitting = useRef(false)
   const [sending, setSending] = useState(false)
-  const receiptMessageId = useRef(-3)
-  const [activity, setActivity] = useState<Activity[]>([])
-  const [liveText, setLiveText] = useState(emptyLiveTranscript)
-  const liveNow = useRef(liveText)
-  const [reconnecting, setReconnecting] = useState(false)
-  const [streamAttempt, setStreamAttempt] = useState(0)
-  const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const announcedDelegation = useRef("")
   const automaticWorkspace = useRef(false)
@@ -426,8 +419,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [])
   const openedBrowserLogin = useRef("")
   const panelReturnFocus = useRef<HTMLElement | null>(null)
-  const sessionActions = useSessionActions()
-  const sessionUpdates = sessionActions.updates
   const exportTrace = useCallback(() => {
     setTraceBusy(true)
     setTraceError("")
@@ -435,8 +426,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [id])
   const titleCallback = useRef(onTitle)
   titleCallback.current = onTitle
-  const sessionCallback = useRef(onSession)
-  sessionCallback.current = onSession
   const [editing, setEditing] = useState<Message | null>(null)
   const [sendingNow, setSendingNow] = useState<Set<string>>(() => new Set())
   const fileDrop = useFileDrop(pictures.add, setError, busy || Boolean(editing) || !visible)
@@ -453,200 +442,29 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const lastGoalRequest = useRef<{ payload: string; key: string } | null>(null)
   const goalSending = useRef(false)
   const composerInitialized = useRef(Boolean(view))
-  const readThrough = useRef<number | null>(null)
-  const loadVersion = useRef(0)
-  const loadFlight = useRef<{ version: number; signal?: AbortSignal; promise: Promise<void> } | null>(null)
-  const completeHistory = useRef<{ version: string; messages: Message[] } | null>(null)
-  const historyRequest = useRef<{ version: View["transcript_version"]; controller: AbortController } | null>(null)
-  const visibleNow = useRef(visible)
-  visibleNow.current = visible
-  function clearSensitive(message = "Access to this conversation changed. Please reopen it.") {
-    sessionUpdates.invalidate(id)
-    ++loadVersion.current
-    ++sensitiveVersion.current
-    historyRequest.current?.controller.abort(); historyRequest.current = null
+  function clearComposer() {
     setGoalMode(false); setGoalEditorOpen(false); lastGoalRequest.current = null; setBusy(false)
-    resolvedOnce.current = undefined
     composerInitialized.current = false
-    readThrough.current = null
     lastRequest.current = null
     submitting.current = false; setSending(false)
-    viewNow.current = null
-    completeHistory.current = null
-    setHistoryState({ complete: false, loading: false, error: "" })
-    liveNow.current = emptyLiveTranscript()
-    setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
-    setError(""); setLoadError(message); setBusy(false)
+    setError(""); setBusy(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
     openedBrowserLogin.current = ""
     panelReturnFocus.current = null
-    sessionCallback.current?.(null)
-  }
-  const clearSensitiveNow = useRef(clearSensitive)
-  clearSensitiveNow.current = clearSensitive
-  useEffect(() => () => {
-    ++loadVersion.current; ++sensitiveVersion.current
-    historyRequest.current?.controller.abort()
-  }, [])
-  useEffect(() => {
-    const pause = () => {
-      if (!visible || document.hidden) {
-        historyRequest.current?.controller.abort(); historyRequest.current = null
-        setHistoryState(previous => ({ ...previous, loading: false }))
-      }
-    }
-    pause()
-    document.addEventListener("visibilitychange", pause)
-    return () => document.removeEventListener("visibilitychange", pause)
-  }, [visible])
-  const readHistory = useCallback((next: View) => {
-    const existing = historyRequest.current
-    // Session polls do not restart the same transcript's pagination. Its owner
-    // is the transcript revision and authority scope, not a metadata refresh.
-    if (existing && existing.version === next.transcript_version && !existing.controller.signal.aborted) return
-    existing?.controller.abort()
-    const request = { version: next.transcript_version, controller: new AbortController() }
-    historyRequest.current = request
-    const { signal } = request.controller, auth = csrfToken(), scope = sensitiveVersion.current
-    const current = () => historyRequest.current === request && !signal.aborted
-      && auth === csrfToken() && scope === sensitiveVersion.current
-    const cached = next.transcript_version && completeHistory.current?.version === next.transcript_version
-      ? completeHistory.current.messages : undefined
-    setHistoryState(previous => ({ ...previous, complete: Boolean(cached), loading: true }))
-    void (async () => {
-      try {
-        // Older servers may omit the first page during a rolling deployment.
-        const history = [...(cached ?? next.messages ?? (await listSessionMessages({ path: { session_id: id }, signal })).data)]
-        if (!current()) return
-        let pageSize = cached ? 0 : history.length
-        setMessages(previous => reconcileHistory(previous, history, pageSize < 200))
-        setHistoryState({ complete: pageSize < 200, loading: true, error: "" })
-        while (pageSize === 200 && current()) {
-          const after = history.at(-1)!.id
-          const { data: page } = await listSessionMessages({ path: { session_id: id }, query: { after }, signal })
-          if (!current()) return
-          if (page.some(message => message.id <= after)) throw new Error("Conversation history changed while loading. Refresh to retry.")
-          history.push(...page); pageSize = page.length
-          setMessages(previous => reconcileHistory(previous, pageSize < 200 ? history : page, pageSize < 200))
-          setHistoryState({ complete: pageSize < 200, loading: true, error: "" })
-        }
-        if (!current()) return
-        if (next.transcript_version) completeHistory.current = { version: next.transcript_version, messages: history }
-        const latestMessage = history.at(-1)?.id ?? 0
-        if (visibleNow.current && readThrough.current !== latestMessage) {
-          await markSessionRead({ path: { session_id: id }, body: { message_id: latestMessage }, signal })
-          if (!current()) return
-          readThrough.current = latestMessage
-        }
-        setHistoryState({ complete: true, loading: false, error: "" })
-      } catch (reason) {
-        if (!current()) return
-        if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) clearSensitiveNow.current(String(reason))
-        else setHistoryState(previous => ({ ...previous, loading: false, error: String(reason) }))
-      } finally {
-        if (historyRequest.current === request) historyRequest.current = null
-      }
-    })()
-  }, [id])
-  const load = useCallback(async (signal?: AbortSignal, share = false) => {
-    if (signal?.aborted) return
-    // Polling and reconnects share a read instead of superseding each other.
-    // Explicit action refreshes always start a fresh read.
-    const flight = loadFlight.current
-    if (share && flight && flight.version === loadVersion.current && !flight.signal?.aborted) return flight.promise
-    const version = ++loadVersion.current
-    const updateCheckpoint = sessionUpdates.checkpoint()
-    const auth = csrfToken()
-    const current = () => !signal?.aborted && version === loadVersion.current && auth === csrfToken()
-    const request = (async () => {
-    try {
-      const cached = resolvedOnce.current
-      resolvedOnce.current = undefined
-      const next: View = cached ?? (await getSession({ path: { session_id: id }, query: { include_activity: false, include_messages: true }, signal })).data
-      if (!current()) return
-      if (!cached) sessionUpdates.acceptRead(updateCheckpoint, [next.session], true)
-      // Authorized turn status can start live progress while older history pages load.
-      // Seed only once so polling and late receipts cannot overwrite user edits.
-      if (!composerInitialized.current) {
-        setModel(next.session.model)
-        const latest = next.turns[0]
-        setSelectedAccounts((latest?.is_self ?? latest?.actor_id === me.user.id) ? latest.connections ?? [] : [])
-        composerInitialized.current = true
-      }
-      viewNow.current = next
-      setView(next)
-      if (next.activity) setActivity(next.activity)
-      setSendingNow(previous => {
-        const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
-        return pending.length === previous.size ? previous : new Set(pending)
-      })
-      sessionCallback.current?.(next.session)
-      readHistory(next)
-      setLoadError("")
-    } catch (reason) {
-      if (!current()) return
-      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) {
-        clearSensitiveNow.current(String(reason))
-      }
-      throw reason
-    }
-    })()
-    loadFlight.current = { version, signal, promise: request }
-    try { await request }
-    finally { if (loadFlight.current?.version === version) loadFlight.current = null }
-  }, [id, me.user.id, sideMode, sessionUpdates, readHistory])
-  async function reloadAfterAction(message?: string) {
-    const version = sensitiveVersion.current, auth = csrfToken()
-    try { await load() }
-    catch (reason) {
-      if (version !== sensitiveVersion.current || auth !== csrfToken()) return
-      const denied = reason instanceof ApiError && [401, 403, 404].includes(reason.status)
-      setLoadError(denied ? String(reason) : message ?? String(reason))
-    }
   }
   async function runConversationAction(action: () => Promise<unknown>, onAccepted?: () => void) {
-    const version = sensitiveVersion.current
+    const current = conversation.checkpoint()
     try {
       await action()
-      if (version !== sensitiveVersion.current) return
+      if (!current()) return
       onAccepted?.()
       await reloadAfterAction()
     } catch (reason) {
-      if (version === sensitiveVersion.current) setError(String(reason))
+      if (current()) setError(String(reason))
     }
   }
-  useEffect(() => {
-    if (sideMode && !visible) return
-    return pollVisible(signal => load(signal, true), () => {
-      const current = viewNow.current
-      return !current || activeSession(current.session.status) || current.turns.some(turn => activeSession(turn.status)) ? 1500 : 10000
-    }, reason => setLoadError(String(reason)))
-  }, [load, sideMode, visible])
-  const auxiliaryPanel = panelState.visible && visible
-    ? panelState.tabs.find(tab => tab.id === panelState.activeId)?.kind : undefined
-  useEffect(() => {
-    if (!view || (auxiliaryPanel !== "plan" && auxiliaryPanel !== "activity")) return
-    const version = sensitiveVersion.current
-    setPanelLoading(true); setPanelError("")
-    return pollVisible(async signal => {
-      if (auxiliaryPanel === "plan") {
-        const { data: rows } = await getSessionPlan({ path: { session_id: id }, signal })
-        if (signal.aborted || version !== sensitiveVersion.current) return
-        setPlan(rows)
-      } else {
-        const { data: rows } = await getSessionActivity({ path: { session_id: id }, signal })
-        if (signal.aborted || version !== sensitiveVersion.current) return
-        setActivity(rows)
-      }
-      setPanelLoading(false); setPanelError("")
-    }, () => activeSession(viewNow.current?.session.status) ? 1500 : 10000, reason => {
-      if (version !== sensitiveVersion.current) return
-      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) clearSensitiveNow.current(String(reason))
-      else { setPanelLoading(false); setPanelError(String(reason)) }
-    })
-  }, [id, auxiliaryPanel, Boolean(view)])
   const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
   const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows.filter(row => row.enabled && (view?.session.visibility === "private" || row.shared)) : []
   const preferredAccounts = me.preferences?.connection_ids ?? selectedAccounts
@@ -695,7 +513,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const work = useWorkProgress(
     id, `${authorityKey}:${connectionVersion}:${id}:${me.user.id}`,
     active, visible && !swarmSpace,
-    () => clearSensitiveNow.current(),
+    () => conversation.invalidate(),
   )
   const activeProgress = active ? work.entries[active.id] : undefined
   const hasWorkingSubagent = !activeProgress?.error && activeProgress?.data?.subagents?.some(agent =>
@@ -728,49 +546,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     return () => cancelAnimationFrame(frame)
   }, [id, active?.id, browserLoginIds, canResolveInput, visible, requestAnswered, sideMode])
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
-  const activeId = visible && active && ["running", "saving"].includes(active.status) ? active.id : null
-  useEffect(() => {
-    if (!activeId) return
-    if (liveNow.current.turnId !== activeId) {
-      liveNow.current = emptyLiveTranscript(activeId)
-      setLiveText(liveNow.current)
-    }
-    const auth = csrfToken(), version = sensitiveVersion.current
-    let closed = false
-    let retry: ReturnType<typeof setTimeout> | undefined
-    const stream = new EventSource(appPath(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`))
-    const current = () => !closed && auth === csrfToken() && version === sensitiveVersion.current && visibleNow.current
-    const refreshSaved = () => { if (current()) void load(undefined, true).catch(reason => { if (current()) setLoadError(String(reason)) }) }
-    stream.onmessage = event => {
-      if (!current() || !/^\d+$/.test(event.lastEventId)) return
-      try {
-        const value: LiveEvent = JSON.parse(event.data)
-        if (!value || typeof value.type !== "string") return
-        const next = applyLiveEvent(liveNow.current, value, Number(event.lastEventId))
-        if (next !== liveNow.current) { liveNow.current = next; setLiveText(next) }
-      } catch { /* A malformed presentation event must not interrupt saved-state refresh. */ }
-    }
-    stream.addEventListener("connected", () => { if (current()) setReconnecting(false) })
-    stream.addEventListener("refresh", refreshSaved)
-    stream.addEventListener("finished", () => {
-      if (!current()) return
-      // A transport can finish before its workflow is available. Only refreshed
-      // turn state ends subscription; keep the cursor and retry while still active.
-      refreshSaved(); closed = true; stream.close(); setReconnecting(true)
-      retry = setTimeout(() => {
-        if (auth === csrfToken() && version === sensitiveVersion.current && visibleNow.current) setStreamAttempt(value => value + 1)
-      }, 1500)
-    })
-    stream.addEventListener("access_revoked", () => {
-      if (!current()) return
-      closed = true; stream.close(); setReconnecting(false)
-      clearSensitiveNow.current()
-      window.dispatchEvent(new Event("moyai:access-changed"))
-      void load().catch(reason => { if (auth === csrfToken()) setLoadError(String(reason)) })
-    })
-    stream.onerror = () => { if (current()) { setReconnecting(true); refreshSaved() } }
-    return () => { closed = true; stream.close(); clearTimeout(retry) }
-  }, [activeId, id, load, streamAttempt])
   useEffect(() => {
     followWork()
   }, [liveText, followWork])
@@ -782,8 +557,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       throw new Error("Finish uploading or retry the attached files before starting a goal.")
     }
     if (startingGoal && accountBlocked) throw new Error("Resolve the connection error before starting a goal.")
-    const auth = csrfToken(), version = sensitiveVersion.current
-    const current = () => auth === csrfToken() && version === sensitiveVersion.current
+    const auth = csrfToken(), current = conversation.checkpoint()
     const body = { prompt: command, ...(startingGoal ? {
       model, connections: [...sendAccounts].sort(), attachments: pictures.readyFiles.map(file => file.id),
     } : {}) }
@@ -795,20 +569,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       const { data: result } = await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: attempt.key } })
       if (lastGoalRequest.current === attempt) lastGoalRequest.current = null
       if (!current()) return
-      if ("goal" in result) {
-        setView(previous => previous ? { ...previous, goal: result.goal } : previous)
-        if (result.goal) onSaved?.(result.goal)
-      }
-      if (startingGoal && "id" in result && viewNow.current) {
-        const message = firstMessage({ session: viewNow.current.session, turn: result, prompt: command, attachments: pictures.readyFiles })
-        message.id = receiptMessageId.current--
-        setMessages(previous => [...previous, message])
-        setDraft(""); setGoalMode(false); pictures.clear()
-      }
+      const started = conversation.acceptGoal(result, startingGoal ? { prompt: command, attachments: pictures.readyFiles } : undefined)
+      if ("goal" in result && result.goal) onSaved?.(result.goal)
+      if (started) { setDraft(""); setGoalMode(false); pictures.clear() }
       if (goalCommandAction(command) === "clear") { dispatchPanel({ type: "close", id: "goal" }); setGoalEditorOpen(false) }
       // The mutation is acknowledged. Refresh errors must not retry that mutation.
       await reloadAfterAction("Your goal was updated, but the conversation could not be refreshed.")
-      if (current()) await refreshList().catch(reason => { if (current()) setLoadError(`Your goal was updated, but the conversation list could not be refreshed: ${String(reason)}`) })
+      if (current()) await refreshList().catch(reason => { if (current()) conversation.reportRefreshError(`Your goal was updated, but the conversation list could not be refreshed: ${String(reason)}`) })
     } finally {
       goalSending.current = false
       if (current()) setBusy(false)
@@ -819,8 +586,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (submitting.current || goalSending.current) return
     const input = promptOverride ?? (editing ? editText : draft)
     const prompt = !editing && goalMode && input.trim() ? `/goal --budget none ${input}` : input
-    const version = sensitiveVersion.current, auth = csrfToken()
-    const current = () => version === sensitiveVersion.current && auth === csrfToken()
+    const auth = csrfToken(), current = conversation.checkpoint()
     if (!editing && prompt.trim() === "/goal") {
       setGoalMode(true); setDraft(""); setComposerFocus(value => value + 1); return
     }
@@ -831,8 +597,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     }
     if (!editing && goalMode && !input.trim()) return
     if (!editing && goalCommandAction(prompt)) {
-      try { await applyGoal(prompt); if (version === sensitiveVersion.current) setDraft("") }
-      catch (reason) { if (version === sensitiveVersion.current) setError(String(reason)) }
+      try { await applyGoal(prompt); if (current()) setDraft("") }
+      catch (reason) { if (current()) setError(String(reason)) }
       return
     }
     if (editing) {
@@ -840,12 +606,12 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       setBusy(true); setError("")
       try {
         await updateQueuedTurn({ path: { turn_id: editing.turn_id }, body: { prompt } })
-        if (version !== sensitiveVersion.current) return
+        if (!current()) return
         setEditing(null); await reloadAfterAction()
       } catch (error) {
-        if (version === sensitiveVersion.current) setError(String(error))
+        if (current()) setError(String(error))
       } finally {
-        if (version === sensitiveVersion.current) setBusy(false)
+        if (current()) setBusy(false)
       }
       return
     }
@@ -864,20 +630,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     try {
       const { data: turn } = await createSessionMessage({ path: { session_id: id }, body: { ...body, request_key: lastRequest.current.key } })
       if (!current()) return
-      // Invalidate reads begun before admission; they cannot erase this receipt.
-      ++loadVersion.current
+      conversation.acceptMessage(turn, prompt, attachments, body.reply_to)
       if (body.reply_to) setAnsweredRequest(body.reply_to)
-      else if ("id" in turn) {
-        const message: Message = { id: receiptMessageId.current--, turn_id: turn.id, role: "user",
-          author_id: turn.actor_id, is_self: true, content: prompt, attachments }
-        setMessages(previous => previous.some(item => item.role === "user" && item.turn_id === turn.id)
-          ? previous : [...previous, message])
-        const previous = viewNow.current
-        if (previous) {
-          const next = { ...previous, turns: [turn, ...previous.turns.filter(item => item.id !== turn.id)] }
-          viewNow.current = next; setView(next)
-        }
-      }
       setDraft(""); pictures.clear(); lastRequest.current = null
       // Admission releases the composer. Reads never turn an accepted send into a retry.
       void reloadAfterAction(body.reply_to
@@ -893,20 +647,20 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }
   async function sendNow(turnId: string) {
     if (busy) return
-    const version = sensitiveVersion.current
+    const current = conversation.checkpoint()
     setBusy(true); setError("")
     setSendingNow(previous => new Set(previous).add(turnId))
     try {
       const { data: turn } = await steerQueuedTurn({ path: { turn_id: turnId } })
-      if (version !== sensitiveVersion.current) return
-      setView(previous => previous ? { ...previous, turns: previous.turns.map(item => item.id === turn.id ? turn : item) } : previous)
+      if (!current()) return
+      conversation.acceptSteering(turn)
       await reloadAfterAction()
     } catch (reason) {
-      if (version !== sensitiveVersion.current) return
+      if (!current()) return
       setSendingNow(previous => { const next = new Set(previous); next.delete(turnId); return next })
       setError(String(reason))
     } finally {
-      if (version === sensitiveVersion.current) setBusy(false)
+      if (current()) setBusy(false)
     }
   }
   if (!view) return <div className="center" role={loadError || error ? "alert" : "status"}>{loadError || error || "Opening conversation…"}</div>
@@ -1027,7 +781,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
           {view.turns[0]?.error && <FailureBanner key={`${id}:${view.turns[0].id}`}
             sessionId={id} turn={view.turns[0]} canInspect={view.turns[0].is_self ?? view.turns[0].actor_id === me.user.id}
-            onDenied={() => clearSensitiveNow.current()} />}
+            onDenied={() => conversation.invalidate()} />}
           {session.save_warning && <p className="notice" role="status">{session.save_warning}</p>}
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
@@ -1035,8 +789,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {session.surface === "slack" && <p className="composer-hint slack-conversation-hint"><img src={slackLogo} width={14} height={14} alt="Slack" /> Messages and replies appear in the linked Slack conversation.</p>}
           {[
             { key: "action", message: error, clear: () => setError("") },
-            { key: "session", message: loadError, clear: () => setLoadError("") },
-            { key: "history", message: historyState.error, clear: () => setHistoryState(previous => ({ ...previous, error: "" })) },
+            { key: "session", message: loadError, clear: () => conversation.dismissError("session") },
+            { key: "history", message: historyState.error, clear: () => conversation.dismissError("history") },
           ].filter(notice => notice.message).map(notice => <div className="error" role="alert" key={notice.key}>{notice.message}
             {notice.key === "history" && <Button type="button" size="sm" variant="ghost" disabled={historyState.loading} onClick={() => void reloadAfterAction()}>Retry history</Button>}
             <Button type="button" size="sm" variant="ghost" onClick={notice.clear}>Dismiss</Button>
@@ -1056,8 +810,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           {view.goal && <GoalPanel goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy}
             onCommand={command => {
-              const version = sensitiveVersion.current
-              void applyGoal(command).catch(reason => { if (version === sensitiveVersion.current) setError(String(reason)) })
+              const current = conversation.checkpoint()
+              void applyGoal(command).catch(reason => { if (current()) setError(String(reason)) })
             }} onEdit={openGoal} />}
           <div className="composer">
             <div className="composer-entry">
@@ -1137,7 +891,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           : <div className="panel-empty">This goal was cleared.</div>
         if (tab.kind === "action") return <ActionPanel
           key={JSON.stringify([authorityKey, connectionVersion, me.user.id, me.csrf, tab.action])}
-          action={tab.action} active={activeTab} onDenied={() => clearSensitiveNow.current()} />
+          action={tab.action} active={activeTab} onDenied={() => conversation.invalidate()} />
         if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); changeWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
         if (tab.kind === "subagent") return <SubagentPanel sessionId={id} agent={{ id: tab.runId, name: tab.name, status: tab.status, avatar: tab.avatar }} active={activeTab} onOpenFile={openOutput} />
         if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
@@ -1214,7 +968,7 @@ function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelec
   </div>
 }
 
-function ActivityRow({ item }: { item: Activity }) {
+function ActivityRow({ item }: { item: ActivityEvent }) {
   return <details className="activity-row"><summary>{item.type === "tool_result" ? "Finished" : item.type === "tool_call" ? "Using" : "Updated"} {item.name?.replaceAll("_", " ")}</summary><pre>{item.type === "tool_result" ? item.content ?? "{}" : JSON.stringify((item.type === "tool_call" ? item.arguments : item.data) ?? {}, null, 2)}</pre></details>
 }
 
