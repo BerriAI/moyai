@@ -114,7 +114,8 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
     requester = next(step for step in steps if step.get("extra", {}).get("turn_id") == turn.id and step["source"] == "user")
     assert requester["source"] == "user"
     assert requester["message"] == "Inspect the project."
-    assert requester["extra"] == {
+    assert {key: value for key, value in requester["extra"].items()
+            if key not in {"activity", "activity_scope", "reasoning_omitted"}} == {
         "turn_id": turn.id,
         "turn_status": "failed",
         "author": "requester",

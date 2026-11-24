@@ -1,4 +1,4 @@
-"""Requester-only export of private reasoning and tool details."""
+"""Session debug traces with public activity and requester-only private context."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -25,8 +26,10 @@ from sqlalchemy import select
 from .failure_diagnostics import FAILURE_KIND, safe_failure_metadata
 from .history_handoff import is_turn_run, latest_turn_snapshot
 from .models import Event, Message, Turn, User
-from .presentation import private_tool
+from .presentation import private_tool, redact
+from .progress import progress_secrets
 from .runtime import Runtime
+from .trace_activity import prune_delegations, redact_trace_calls, tool_result_activity, trace_activity
 
 
 def _timestamp(value: datetime | str | None) -> str | None:
@@ -97,6 +100,7 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
         messages_by_turn.setdefault(message.turn_id, []).append(message)
 
     steps: list[dict[str, Any]] = []
+    delegated_owners: dict[str, str] = {}
     last_instructions: str | None = None
     total_cost_usd = 0.0
     has_cost = False
@@ -124,6 +128,7 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
         add_system(message, timestamp)
 
     for turn in turns:
+        turn_start = len(steps)
         turn_messages = messages_by_turn.get(turn.id, [])
         user_message = next((row for row in turn_messages if row.role == "user"), None)
         user_step: dict[str, Any] | None = None
@@ -192,12 +197,18 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                                             )
                                     continue
                                 agent_step, private = issued
-                                private_result = private or private_tool(part.tool_name)
+                                activity_result = tool_result_activity(part, _timestamp(part.timestamp) or "")
+                                private_result = private or activity_result["redacted"]
+                                if activity_result.get("children") and activity_result["redacted"]:
+                                    for call in agent_step.get("tool_calls", []):
+                                        if call["tool_call_id"] == call_id:
+                                            call["arguments"] = {"redacted": "Code arguments include private subtool activity."}
+                                            call.setdefault("extra", {})["redacted"] = True
                                 result_content = (
                                     f"[redacted: result of private tool {part.tool_name} "
                                     "is hidden in debug traces]"
-                                    if private_result
-                                    else str(part.content)[:30_000]
+                                    if private and not activity_result["redacted"]
+                                    else activity_result["content"][:30_000]
                                 )
                                 failed = part.part_kind == "retry-prompt" or getattr(part, "outcome", None) == "failed"
                                 observation = agent_step.setdefault("observation", {"results": []})
@@ -311,6 +322,24 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                     **({"diagnostics": failure_metadata[turn.id]} if failure_metadata.get(turn.id) else {}),
                 },
             })
+        # Keep the ATIF model steps compatible while placing the complete
+        # recorded execution tree beneath the input that caused it.
+        activity = await trace_activity(
+            runtime, turn, include_private=own[turn.actor_id], delegated_owners=delegated_owners,
+        )
+        redact_trace_calls(steps[turn_start:], activity)
+        anchor = user_step
+        if anchor is None:
+            anchor = next((step for step in steps[turn_start:] if step["source"] == "agent"), None)
+        if anchor is None:
+            add_system("Recorded turn activity.", turn.created_at, {"turn_id": turn.id})
+            anchor = steps[-1]
+        anchor.setdefault("extra", {}).update({
+            "activity": activity,
+            "activity_scope": "requester" if own[turn.actor_id] else "public",
+            "reasoning_omitted": not own[turn.actor_id],
+        })
+        steps[turn_start:] = redact(steps[turn_start:], progress_secrets(runtime, turn))
         if (cost := _turn_cost(turn)) is not None:
             total_cost_usd += cost
             has_cost = True
@@ -352,9 +381,22 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
     if has_cost:
         final_metrics["total_cost_usd"] = total_cost_usd
 
+    # Exporting descendant snapshots can take time; do not retain an access
+    # decision from before a membership or session-visibility change.
+    fresh = await runtime.database.user(user.id)
+    if fresh.auth_version != user.auth_version:
+        raise HTTPException(401, "Your session expired.")
+    await runtime.database.session(user, session_id)
+    async with runtime.database.sessions() as db:
+        for actor_id, visible in own.items():
+            if visible and not await runtime.database.same_person(db, user, actor_id):
+                raise HTTPException(403, "The requester's private activity is no longer available.")
+    await prune_delegations(runtime, [step["extra"]["activity"] for step in steps
+                                      if "activity" in step.get("extra", {})], delegated_owners)
     hidden_turns = sum(not own[turn.actor_id] for turn in turns)
     visibility_note = (
-        f" {hidden_turns} turn(s) belong to another requester; their private activity is omitted. "
+        f" {hidden_turns} turn(s) belong to another requester; their private reasoning and model context "
+        "are omitted; public activity is included. "
         "Token totals cover only visible activity, not the whole session."
     ) if hidden_turns else ""
     return {
@@ -369,7 +411,9 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
         "notes": (
             f"Moyai debug trace for session {session.title}: user messages, the agent's reasoning, "
             "tool calls and tool results in order. Hand it to Moyai with what you expected to debug "
-            "where it went wrong. Arguments and results marked redacted were hidden for privacy, not empty."
+            "where it went wrong. Each turn input includes a nested extra.activity timeline of recorded "
+            "model responses, tools, results, lifecycle events, and delegated work. "
+            "Missing snapshots are labeled unavailable. Arguments and results marked redacted were hidden for privacy, not empty."
             + visibility_note
         ),
         "final_metrics": final_metrics,
