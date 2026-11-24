@@ -11,8 +11,8 @@ let server, browser, address, cache;
 const fixture = `
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { GoalChip, GoalEditor, GoalPanel } from '../native/web/goal';
-import { SkillComposer } from '../native/web/skill-composer';
+import { GoalChip, GoalEditor, GoalPanel } from '../native/web/messages/goal';
+import { SkillComposer } from '../native/web/messages/skill-composer';
 import { Home } from '../native/web/home';
 import { setCsrf } from '../native/web/api';
 import '../frontend/theme.css';

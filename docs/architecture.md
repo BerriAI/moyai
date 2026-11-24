@@ -143,8 +143,18 @@ the application retains the Settings lazy entrypoint. Their module guides and
 `tests/settings` / `tests/analytics` document and enforce this dependency
 direction, including JavaScript helpers and declarations.
 
-Consolidate features around established interfaces, retaining direct imports
-and the existing lazy-loading behavior.
+`native/web/workspace` owns resource and side-panel rendering, including the
+lazy computer panel. `native/web/navigation` owns the sidebar, palette and
+session actions. `native/web/messages` owns message rendering and input.
+Conversation state remains independent of these renderers. Their module guides
+list the existing cross-feature interfaces; `tests/test_native_feature_imports.cjs`
+keeps application composition out of those modules and prevents shared
+transport/controls from importing features.
+
+The remaining root files are application composition (`main.tsx`, `home.tsx`),
+branding/appearance, build entrypoints and shared transport/file helpers.
+There are no feature barrels. Consolidation retains direct imports and the
+existing lazy-loading behavior.
 
 See [deployment](pydantic-deployment.md) for the exact ownership and migration
 contracts, [usage](usage.md) for supported behavior, and [scope](consolidation.md)

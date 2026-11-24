@@ -7,7 +7,7 @@ const feature = path.join(web, "history")
 const generated = path.join(web, "generated")
 const ui = path.join(root, "frontend/components/ui")
 const logic = new Set(sources(feature).filter(file => !file.endsWith(".tsx")))
-const rendering = new Set(["api.ts", "slack-content.tsx", "assets/slack-logo.svg"]
+const rendering = new Set(["api.ts", "messages/slack-content.tsx", "assets/slack-logo.svg"]
   .map(name => path.join(web, name)))
 
 test("nested history TypeScript sources are typechecked", () => {
@@ -40,7 +40,7 @@ test("history rendering uses its own modules, shared presentation and transport"
 
 test("shared transport, helpers and presentation never depend on history", () => {
   for (const file of new Set([...shared, ...sources(generated), ...sources(ui),
-    path.join(web, "slack-content.tsx")])) {
+    path.join(web, "messages/slack-content.tsx")])) {
     for (const dependency of imports(file)) {
       assert.ok(!inside(dependency.file, feature),
         `${path.relative(root, file)} imports ${dependency.specifier}; shared code must not load a feature`)
