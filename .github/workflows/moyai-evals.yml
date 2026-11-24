@@ -55,6 +55,28 @@ jobs:
             echo "Model quality is **not evaluated**: required configuration is missing. See evals/README.md." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+          python - <<'PY'
+          import os
+          import socket
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          try:
+              url = urlsplit(os.environ["LITELLM_API_BASE"])
+              if url.scheme not in {"https", "http"} or not url.hostname or url.username or url.password:
+                  raise ValueError("Expected an HTTP(S) gateway URL without embedded credentials.")
+              with socket.create_connection((url.hostname, url.port or (443 if url.scheme == "https" else 80)), timeout=10):
+                  pass
+          except (OSError, ValueError):
+              message = (
+                  "Model quality is **not evaluated**: the evaluation gateway is invalid or unreachable "
+                  "from this runner. Check MOYAI_EVAL_GATEWAY_URL, DNS and runner network access."
+              )
+              print("::error::" + message)
+              with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+                  summary.write(message + "\n")
+              raise SystemExit(1)
+          PY
           {
             echo "Model evaluations configured for commit \`$GITHUB_SHA\`."
             echo "- Agent: \`$MOYAI_EVAL_AGENT_MODEL\`"

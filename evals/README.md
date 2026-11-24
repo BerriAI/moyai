@@ -74,6 +74,11 @@ model takes precedence, then the shared model, then an agent-only configuration.
 The runner and judges normalize gateway URLs to `/v1`.
 
 Missing required settings fail the trusted model-evaluation job. Configuration
+also checks gateway DNS/TCP reachability before starting the trial containers.
+The gateway must be reachable from the GitHub runner; a development endpoint
+reachable only on a private network is insufficient for `ubuntu-latest`.
+This preflight does not establish authentication, model availability or quality.
+Configuration
 success alone is not qualification: every task must produce at least two passing
 trials out of three, and missing trial results fail the report. Saved Harbor jobs
 include the replies, tool traces, judgments and usage; inspect execution errors
