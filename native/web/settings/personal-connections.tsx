@@ -2,11 +2,11 @@ import React, { useEffect, useRef, useState } from "react"
 import { ArrowRight, Check, Github, Link2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { csrfToken } from "./api"
+import { csrfToken } from "../api"
 import {
   disconnectPersonalConnection, listPersonalConnections, startPersonalConnection,
   type PersonalOAuthView,
-} from "./generated/api"
+} from "../generated/api"
 
 const descriptions: Record<PersonalOAuthView["provider"], string> = {
   linear: "Work with your issues, projects, and teams.",
