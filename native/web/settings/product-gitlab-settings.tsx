@@ -2,11 +2,11 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { ApiError, csrfToken } from "./api"
+import { ApiError, csrfToken } from "../api"
 import {
   connectGitLabOrganization, discoverGitLabProjects, listGitLabProjects, selectGitLabProjects,
   type GitLabProjectDiscoveryResult, type OrganizationConnection,
-} from "./generated/api"
+} from "../generated/api"
 
 /** The token remains in this mounted form until save, cancellation, or access loss. */
 export function ProductGitLabSetup({ connection, mode, onDone, onBack, onBusyChange }: {

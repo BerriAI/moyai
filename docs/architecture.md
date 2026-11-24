@@ -136,9 +136,15 @@ renderer. The [history module guide](../native/web/history/README.md) documents
 these interfaces and the import rules enforced by `tests/history`.
 Shared transport and presentation do not import history.
 
-Consolidate other features only when their
-interfaces are stable; this is not a requirement to relocate every flat module
-at once.
+`native/web/settings` owns Settings navigation and capability-aware forms.
+`native/web/analytics` owns report loading, arithmetic, charts and timing views.
+Settings composes analytics and automations through their existing interfaces;
+the application retains the Settings lazy entrypoint. Their module guides and
+`tests/settings` / `tests/analytics` document and enforce this dependency
+direction, including JavaScript helpers and declarations.
+
+Consolidate features around established interfaces, retaining direct imports
+and the existing lazy-loading behavior.
 
 See [deployment](pydantic-deployment.md) for the exact ownership and migration
 contracts, [usage](usage.md) for supported behavior, and [scope](consolidation.md)

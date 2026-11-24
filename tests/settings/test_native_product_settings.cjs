@@ -7,13 +7,13 @@ const {spawnSync}=require('node:child_process');
 const ts=require('typescript');
 const React=require('react');
 const {renderToStaticMarkup}=require('react-dom/server');
-const {mcpConnection,gatewayConnection}=require('./fixtures/settings.cjs');
-const root=path.resolve(__dirname,'..'),nativeId='12345678-1234-1234-1234-123456789abc',legacyId='a'.repeat(32);
+const {mcpConnection,gatewayConnection}=require('../fixtures/settings.cjs');
+const root=path.resolve(__dirname,'../..'),nativeId='12345678-1234-1234-1234-123456789abc',legacyId='a'.repeat(32);
 let server,ui,homeSubmission;
 test.before(async()=>{
   const {createServer}=await import('vite');
   server=await createServer({configFile:path.join(root,'native/web/vite.config.ts'),optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true},appType:'custom'});
-  ui=await server.ssrLoadModule('/settings.tsx');
+  ui=await server.ssrLoadModule('/settings/settings.tsx');
   // Import the actual pure admission helper without evaluating the home canvas bootstrap.
   const source=ts.createSourceFile('home.tsx',fs.readFileSync(path.join(root,'native/web/home.tsx'),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
   const fn=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='homeSubmission');assert.ok(fn);

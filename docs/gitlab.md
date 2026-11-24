@@ -173,7 +173,7 @@ The current source, rather than provider-wide feature lists, defines this guide:
   encrypted credential storage.
 - [`normalize_base_url` / `GitLabTransport`](../app/gitlab_transport.py) and
   [`Settings.gitlab_allow_loopback_http`](../app/config.py): origin restrictions.
-- [`ProductGitLabSetup`](../native/web/product-gitlab-settings.tsx) and
+- [`ProductGitLabSetup`](../native/web/settings/product-gitlab-settings.tsx) and
   [`ProductConnections`](../native/src/moyai/product_connections.py): setup,
   selection and current grants.
 - [`toolset`](../native/src/moyai/product_gitlab.py): exposed native capabilities.

@@ -8,7 +8,7 @@ import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
 import { csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
-import type { GeneralPreferences } from "./general-preferences"
+import type { GeneralPreferences } from "./settings/general-preferences"
 import type { NewConversation, Session } from "./conversations/conversation-state"
 import { createSession, createSessionMessage, listConnections, type ConnectionView, type NewSession } from "./generated/api"
 
