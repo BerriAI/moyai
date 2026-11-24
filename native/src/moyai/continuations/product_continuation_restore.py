@@ -261,7 +261,7 @@ class ModalRecoveryTransport:
                 # This named computer has never been published for model/user
                 # work. Retire a rejected image so a rebuild can retry cleanly.
                 await sandbox.terminate.aio()
-                raise
+                raise preparation_blocked("prepared_environment_unverified") from None
         return sandbox
 
     async def restore(self, sandbox: Any, package: Path, destination: str, digest: str) -> dict[str, Any]:

@@ -4,6 +4,10 @@ from temporalio.exceptions import ApplicationError
 
 PREPARATION_BLOCKED_TYPE = "ProductPreparationBlocked"
 MESSAGES = {
+    "prepared_environment_unverified": (
+        "The prepared environment's repository and commit could not be verified against its selected build. "
+        "No model work started on that image. Select a rebuilt environment or a bare repository checkout."
+    ),
     "workspace_checkpoint_missing": (
         "This conversation's computer expired without a current, verified checkpoint. "
         "Saved messages, approvals and downloads are retained. No action was replayed "

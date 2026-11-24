@@ -56,16 +56,21 @@ async def test_build_must_name_an_exact_commit(commit):
 
 async def test_recovered_unpublished_image_is_checked_and_bad_image_retired(monkeypatch):
     import modal
+    from temporalio.exceptions import ApplicationError
+
+    from moyai.continuations.product_continuation_errors import public_preparation_message
 
     sandbox = computer(commit="b" * 40)
     monkeypatch.setattr(modal.Sandbox.from_name, "aio", AsyncMock(return_value=sandbox))
     runtime = SimpleNamespace(settings=SimpleNamespace(sandbox_provider="modal", modal_app="test-app"))
     scope = RunScope("session", "turn", "actor", "model")
-    with pytest.raises(ValueError, match="does not match"):
+    with pytest.raises(ApplicationError) as raised:
         await ModalRecoveryTransport(runtime).native(
             scope, {"environment_snapshot_id": "im-test", "commit_sha": SHA, "repo_url": URL}, None,
         )
     sandbox.terminate.aio.assert_awaited_once()
+    assert raised.value.non_retryable
+    assert "No model work started" in public_preparation_message(raised.value)
 
 
 async def test_admitted_workspace_does_not_reset_or_reject_later_user_commits(monkeypatch):
