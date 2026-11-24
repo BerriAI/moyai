@@ -18,7 +18,13 @@ from moyai.contracts import RunScope
 
 
 def history():
-    old = "COMMAND: pytest tests/importer\n" + "ordinary output\n" * 100 + "\nFAILED test_reload; exit code 1"
+    footer = (
+        "\nPID: 1234 (supervisor; use `kill -- -1234` to stop the whole process tree)\n"
+        "Output: /workspace/.pydantic-ai-harness/shell/" + "a" * 32 + "/output.log\n"
+        "Status: /workspace/.pydantic-ai-harness/shell/" + "a" * 32 + "/status.json\n"
+        '{"pid": 1234, "exit_code": 1}'
+    )
+    old = "COMMAND: pytest tests/importer\n" + "ordinary output\n" * 100 + "\nFAILED test_reload; exit code 1" + footer
     recent = {"stdout": "recent output\n" * 100, "exit_code": 0}
     return [
         ModelRequest(parts=[UserPromptPart("Fix the importer; do not publish.")]),

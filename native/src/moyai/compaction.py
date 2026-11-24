@@ -20,7 +20,9 @@ def excerpt(text: str) -> str:
     """Keep the original budget, with room for commands and trailing outcomes."""
     if len(text) <= EXCERPT_CHARS:
         return text
-    head = 200
+    # The shell's process/log-location footer itself is about 280 characters.
+    # Reserve enough tail to include the observed outcome immediately above it.
+    head = 80
     tail = EXCERPT_CHARS - head - len(OMISSION)
     return text[:head] + OMISSION + text[-tail:]
 

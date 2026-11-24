@@ -3,7 +3,7 @@
 Native conversations compact at 75% of the resolved model context window,
 preserve 20 recent messages, and retain the SDK's saved-history receipts.
 The summarizer still receives at most 500 characters per older tool result.
-For long results, Moyai uses the first 200 characters and the trailing outcome,
+For long results, Moyai uses the first 80 characters and the trailing outcome,
 with an explicit omitted-middle notice. This preserves command context and
 common trailing test summaries, exit codes, paths and artifact references without
 increasing the summarizer's tool-result budget.
