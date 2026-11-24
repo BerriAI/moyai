@@ -114,8 +114,8 @@ async def test_automation_chat_expansion_preserves_history_and_matches_offline_s
 async def test_private_automation_expansion_preserves_existing_shared_turns_and_receipts(product_database):
     from sqlalchemy import text
 
+    from moyai.automations.product_automation_models import ProductAutomationTurn
     from moyai.models import Session, Turn, User
-    from moyai.product_automation_models import ProductAutomationTurn
 
     product = product_database
     await migrate_product_schema(

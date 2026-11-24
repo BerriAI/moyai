@@ -75,15 +75,15 @@ async def test_real_slack_child_runs_production_memory_hook(slack_admission, mem
     from pydantic_ai.models.function import FunctionModel
     from test_product_memory import note
 
-    from moyai.product_continuation_workspace import ProductWorkspaceCompatibility
+    from moyai.continuations.product_continuation_workspace import ProductWorkspaceCompatibility
     from moyai.product_memory_store import memory_capability
 
     product = slack_admission
     await product.memory.save(product.principal.grant, note())
     _, _, prepared = await slack_parent(product)
     if repository:
-        from moyai.product_continuation_models import ProductExecutionContext
-        from moyai.product_continuation_workspace import fingerprint
+        from moyai.continuations.product_continuation_models import ProductExecutionContext
+        from moyai.continuations.product_continuation_workspace import fingerprint
         context = {"source_schema": "moyai", "repo_url": "https://github.com/BerriAI/moyai", "repository_id": 123}
         context["context_fingerprint"] = fingerprint(context)
         async with product.database.sessions.begin() as db:
@@ -171,8 +171,8 @@ async def test_verified_requester_can_open_and_find_slack_child_but_stale_link_c
 async def test_child_pins_parent_repository_descriptor_at_admission(slack_admission):
     import json
 
-    from moyai.product_continuation_models import ProductExecutionContext
-    from moyai.product_continuation_workspace import fingerprint
+    from moyai.continuations.product_continuation_models import ProductExecutionContext
+    from moyai.continuations.product_continuation_workspace import fingerprint
 
     product = slack_admission
     _, _, prepared = await slack_parent(product)

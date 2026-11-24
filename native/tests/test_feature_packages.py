@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "moyai"
-FEATURES = ("reporting", "billing", "preferences")
+FEATURES = ("reporting", "billing", "preferences", "automations", "continuations")
 
 
 @pytest.mark.parametrize("feature", FEATURES)
@@ -34,6 +34,10 @@ def test_report_arithmetic_is_database_and_runtime_independent():
     "billing/billing_storage_models.py",
     "preferences/settings_models.py",
     "preferences/settings_views.py",
+    "automations/product_automation_models.py",
+    "automations/product_automation_access_models.py",
+    "automations/product_automation_context_models.py",
+    "continuations/product_continuation_models.py",
 ])
 def test_persistence_and_wire_models_do_not_import_command_modules(relative):
     tree = ast.parse((PACKAGE / relative).read_text())

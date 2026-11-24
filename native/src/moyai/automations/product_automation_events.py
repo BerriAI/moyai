@@ -23,15 +23,15 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.exceptions import WorkflowAlreadyStartedError
     from temporalio.service import RPCError
 
-    from .models import Message, Session, Turn, now
+    from ..models import Message, Session, Turn, now
+    from ..product_config import CORE_IDENTITY
+    from ..product_identity import ProductGrant
     from .product_automation_context_models import ProductAutomationEventCursor as Cursor
     from .product_automation_context_models import ProductAutomationExecutionContext as ExecutionContext
     from .product_automation_models import ProductAutomationBinding as Binding
     from .product_automation_models import ProductAutomationOccurrence as Occurrence
     from .product_automation_models import ProductAutomationOperation as Operation
     from .product_automation_models import ProductAutomationTurn
-    from .product_config import CORE_IDENTITY
-    from .product_identity import ProductGrant
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -775,7 +775,7 @@ class ProductAutomationEvents:
 
 @activity.defn(name="moyai_product_automation_event_admit_v1")
 async def admit_product_automation_event(occurrence: str) -> dict:
-    from .runtime import current
+    from ..runtime import current
     service = current().product_automations
     if service is None or not isinstance(service.events, ProductAutomationEvents):
         raise RuntimeError("The canonical event adapter is not configured.")

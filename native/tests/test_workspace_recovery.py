@@ -479,7 +479,7 @@ async def test_modal_snapshot_adapter_preserves_capture_modes_and_timeouts(monke
 
 
 async def test_exact_restore_inherits_legacy_file_provenance(runtime, actor, active, monkeypatch):
-    from moyai.product_continuation_models import ProductWorkspaceRestoration
+    from moyai.continuations.product_continuation_models import ProductWorkspaceRestoration
 
     async with runtime.database.engine.begin() as connection:
         await connection.run_sync(lambda conn: ProductWorkspaceRestoration.__table__.create(conn, checkfirst=True))

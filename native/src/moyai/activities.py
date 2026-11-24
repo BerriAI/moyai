@@ -37,7 +37,7 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
         if recover_workspace and runtime.product is None:
             prepared = await prepare_workspace(runtime, prepared)
         if runtime.product is not None:
-            from .product_continuation import prepare_product_turn
+            from .continuations.product_continuation import prepare_product_turn
             prepared = await prepare_product_turn(runtime, prepared, recover_workspace=recover_workspace)
         prepared.images = await runtime.database.input_images(turn_id, session_id=prepared.scope.session_id)
         await hydrate(runtime, prepared)

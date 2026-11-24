@@ -305,8 +305,8 @@ class DelegationService:
             # Copy the exact admitted selection, not the parent's later selection
             # or mutable workspace. Existing preparation validates its build and
             # repository authority before allocating the child's own computer.
-            from .product_continuation_models import ProductExecutionContext
-            from .product_continuation_workspace import fingerprint as context_fingerprint
+            from .continuations.product_continuation_models import ProductExecutionContext
+            from .continuations.product_continuation_workspace import fingerprint as context_fingerprint
             project = await db.get(ProductExecutionContext, scope.turn_id) if database.product_authority_enabled else None
             if project is not None:
                 descriptor = json.loads(database.security.unseal(project.descriptor))

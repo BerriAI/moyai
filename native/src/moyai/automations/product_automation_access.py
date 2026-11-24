@@ -10,15 +10,15 @@ from app.automation_definitions import Definition
 from fastapi import HTTPException
 from sqlalchemy import select, text
 
-from .contracts import RunScope
-from .models import Session, Turn, now
+from ..contracts import RunScope
+from ..models import Session, Turn, now
+from ..product_config import CORE_IDENTITY
+from ..product_identity import ProductGrant
 from .product_automation_access_models import ProductAutomationChatGrant as ChatGrant
 from .product_automation_models import ProductAutomationBinding as Binding
 from .product_automation_models import ProductAutomationOccurrence as Occurrence
 from .product_automation_models import ProductAutomationOperation as Operation
 from .product_automation_models import ProductAutomationTurn
-from .product_config import CORE_IDENTITY
-from .product_identity import ProductGrant
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession

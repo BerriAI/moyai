@@ -19,9 +19,9 @@ from pydantic_ai.models.function import FunctionModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from moyai.continuations.product_continuation_models import ProductContinuation
 from moyai.effects import EffectReceipts, confirm_effect
 from moyai.models import Session, Turn
-from moyai.product_continuation_models import ProductContinuation
 from moyai.product_credential_models import ProductCredentialRequest as AccessRequest
 from moyai.product_credential_tools import capability, redact_output
 from moyai.product_secrets import ProductSecrets

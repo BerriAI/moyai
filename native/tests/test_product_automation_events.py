@@ -19,22 +19,22 @@ from sqlalchemy import select, text, update
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from moyai.contracts import NewMessage, NewSession
-from moyai.models import Message, Session, Turn
-from moyai.product_automation_events import (
+from moyai.automations.product_automation_events import (
     PENDING,
     ProductAutomationEvents,
     WebhookSetup,
 )
-from moyai.product_automation_events import (
+from moyai.automations.product_automation_events import (
     TestEvent as EventSample,
 )
-from moyai.product_automations import (
+from moyai.automations.product_automations import (
     PRODUCT_AUTOMATION_ACTIVITIES,
     PRODUCT_AUTOMATION_WORKFLOWS,
     Migration,
     Mutation,
 )
+from moyai.contracts import NewMessage, NewSession
+from moyai.models import Message, Session, Turn
 from moyai.storage import ObjectStore, encrypted_converter
 
 product_database = fixtures.product_database
@@ -320,7 +320,7 @@ async def test_webhook_routes_do_not_fall_through_the_action_route(events):
     from fastapi import FastAPI
     from test_product_identity import google_cookie
 
-    from moyai.product_automations import routes
+    from moyai.automations.product_automations import routes
 
     ctx = events
     row = await event_automation(ctx)

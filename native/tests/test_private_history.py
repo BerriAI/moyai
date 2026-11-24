@@ -14,6 +14,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from sqlalchemy import delete, text, update
 
+from moyai.automations.product_automation_models import ProductAutomationTurn
 from moyai.contracts import ExecutionContext
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Message, MessageSource, Session, Turn, User
@@ -28,7 +29,6 @@ from moyai.private_history import (
     PrivateHistory,
     PrivateHistoryRecall,
 )
-from moyai.product_automation_models import ProductAutomationTurn
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 admitted_product = authority.admitted_product

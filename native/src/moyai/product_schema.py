@@ -229,12 +229,12 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
     if version not in versions:
         raise ProductSchemaError("Unknown native application migration version.")
     for module in (
-        "preferences.settings_models", "inference_usage", "pr_publications", "product_automation_models", "product_inference",
-        "product_automation_context_models",
-        "product_continuation_models",
+        "preferences.settings_models", "inference_usage", "pr_publications", "automations.product_automation_models", "product_inference",
+        "automations.product_automation_context_models",
+        "continuations.product_continuation_models",
         "product_slack_models",
         "product_memory_models",
-        "product_automation_access_models",
+        "automations.product_automation_access_models",
         "product_credential_models",
         "product_memory_review_models",
         "product_skill_learning_models",

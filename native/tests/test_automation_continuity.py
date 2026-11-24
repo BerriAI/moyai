@@ -13,12 +13,12 @@ from pydantic_ai.models.function import FunctionModel
 from sqlalchemy import select, update
 from test_product_automation_access import invoke
 
+from moyai.automations.product_automation_models import ProductAutomationTurn
+from moyai.automations.product_automation_tools import CreateRequest
+from moyai.automations.product_automations import Mutation, definition_digest
 from moyai.contracts import NewMessage, NewSession
 from moyai.goal_models import Goal, GoalTurn
 from moyai.models import Message, Session, Turn
-from moyai.product_automation_models import ProductAutomationTurn
-from moyai.product_automation_tools import CreateRequest
-from moyai.product_automations import Mutation, definition_digest
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
 product_database = fixtures.product_database
@@ -209,8 +209,8 @@ async def test_multiple_schedules_in_one_chat_keep_separate_scoped_permissions(a
 
 @pytest.mark.parametrize("change", ["accounts", "project"])
 async def test_changed_chat_selections_require_explicit_reenable(automations, change):
-    from moyai.product_continuation_models import ProductExecutionContext
-    from moyai.product_continuation_workspace import fingerprint
+    from moyai.continuations.product_continuation_models import ProductExecutionContext
+    from moyai.continuations.product_continuation_workspace import fingerprint
     ctx = automations
     run = await fixtures.tool_context(ctx)
     database = ctx.product.database

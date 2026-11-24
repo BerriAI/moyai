@@ -20,11 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from test_product_identity import google_cookie
 
 from moyai.api import create_app
+from moyai.continuations.product_continuation import ProductContinuationService
+from moyai.continuations.product_continuation_models import ProductContinuation
 from moyai.contracts import NewMessage, NewSession
 from moyai.database import Database
 from moyai.models import Session, User
-from moyai.product_continuation import ProductContinuationService
-from moyai.product_continuation_models import ProductContinuation
 from moyai.product_history import ProductHistoryAdapter
 from moyai.product_identity import ProductIdentityAdapter, ProductPrincipal
 from moyai.product_routes import ProductReadService, Reader

@@ -27,14 +27,11 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 from test_product_authority import demote
 
-from moyai.contracts import NewMessage, NewSession, RunScope
-from moyai.effects import EffectReceipts, effect_id
-from moyai.models import Effect, Session, Turn
-from moyai.product_automation_models import ProductAutomationBinding as Binding
-from moyai.product_automation_models import ProductAutomationOccurrence as Occurrence
-from moyai.product_automation_models import ProductAutomationOperation as Operation
-from moyai.product_automation_tools import CreateRequest, MigrateRequest, TargetRequest, toolset
-from moyai.product_automations import (
+from moyai.automations.product_automation_models import ProductAutomationBinding as Binding
+from moyai.automations.product_automation_models import ProductAutomationOccurrence as Occurrence
+from moyai.automations.product_automation_models import ProductAutomationOperation as Operation
+from moyai.automations.product_automation_tools import CreateRequest, MigrateRequest, TargetRequest, toolset
+from moyai.automations.product_automations import (
     PRODUCT_AUTOMATION_ACTIVITIES,
     PRODUCT_AUTOMATION_WORKFLOWS,
     AutomationDefinition,
@@ -45,6 +42,9 @@ from moyai.product_automations import (
     legacy_schedule_id,
     native_schedule_id,
 )
+from moyai.contracts import NewMessage, NewSession, RunScope
+from moyai.effects import EffectReceipts, effect_id
+from moyai.models import Effect, Session, Turn
 from moyai.product_connections import ProductConnections
 from moyai.storage import ObjectStore, encrypted_converter
 

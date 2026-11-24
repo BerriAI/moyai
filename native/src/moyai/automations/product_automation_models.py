@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .models import Base, now
+from ..models import Base, now
 
 
 class ProductAutomationBinding(Base):

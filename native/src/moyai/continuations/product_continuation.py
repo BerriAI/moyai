@@ -35,17 +35,17 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 
-from .contracts import NewMessage, PreparedTurn, RunScope
-from .database import grant_fingerprint
-from .models import Session, SessionFolder, SessionPreference, Turn, User, new_id, now
+from ..contracts import NewMessage, PreparedTurn, RunScope
+from ..database import grant_fingerprint
+from ..models import Session, SessionFolder, SessionPreference, Turn, User, new_id, now
+from ..product_history import session_id
+from ..product_identity import ProductPrincipal
 from .product_continuation_models import ProductContinuation
 from .product_continuation_schema import identifier, session_lease_key
 from .product_continuation_workspace import ProductWorkspaceCompatibility, fingerprint
-from .product_history import session_id
-from .product_identity import ProductPrincipal
 
 if TYPE_CHECKING:
-    from .runtime import Runtime
+    from ..runtime import Runtime
 
 MAX_FAMILY = 1000
 MAX_HISTORY_MESSAGES = 2000

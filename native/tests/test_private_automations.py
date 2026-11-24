@@ -13,10 +13,10 @@ from pydantic_ai_harness.memory import MemoryOperation
 from sqlalchemy import text
 from test_product_memory import MEMORY_SCHEMA, note
 
+from moyai.automations.product_automation_models import ProductAutomationTurn
+from moyai.automations.product_automation_tools import TargetRequest, toolset
+from moyai.automations.product_automations import Mutation, Save
 from moyai.models import Connection, Session
-from moyai.product_automation_models import ProductAutomationTurn
-from moyai.product_automation_tools import TargetRequest, toolset
-from moyai.product_automations import Mutation, Save
 from moyai.product_memory import ProductMemoryService
 from moyai.product_memory_store import ProductMemoryStore
 
