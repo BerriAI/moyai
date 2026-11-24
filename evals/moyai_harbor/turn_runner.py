@@ -5,7 +5,7 @@ import json
 import os
 import traceback
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from importlib import import_module
 from pathlib import Path
@@ -34,7 +34,7 @@ from moyai.runtime import Runtime, configure
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
-from moyai.worker import make_worker
+from moyai.worker import dispatcher, make_worker
 from moyai.workflow import TurnWorkflow
 from pydantic import SecretStr
 from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
@@ -63,6 +63,17 @@ OBJECT_STORAGE_BUCKET = "synthetic-bucket"
 OBJECT_STORAGE_REGION = "us-east-1"
 OBJECT_STORAGE_ACCESS_KEY_ID = "synthetic-key-id"
 OBJECT_STORAGE_SECRET_ACCESS_KEY = "synthetic-secret"
+
+
+@asynccontextmanager
+async def trial_dispatch(runtime: Runtime):
+    """Run the native dispatcher so admitted child work can actually execute."""
+    task = asyncio.create_task(dispatcher(runtime), name="harbor-native-dispatch")
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def conversation_trace(conversation_json: str | None, security: Any) -> list[dict[str, Any]]:
@@ -428,28 +439,29 @@ async def execute_turn(
             )
             execution_error = ""
             execution_traceback = ""
-            try:
-                await asyncio.wait_for(handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")))
-            except TimeoutError:
-                execution_error = "TimeoutError: The eval turn exceeded its execution deadline."
-                # Only stop this trial's owned workflow, before the surrounding
-                # worker/database are torn down. Never repeat its pending actions.
-                await handle.cancel()
+            async with trial_dispatch(runtime):
                 try:
-                    await asyncio.wait_for(handle.result(), timeout=30)
-                except WorkflowFailureError:
-                    pass  # A terminal cancelled/failed workflow is settled.
+                    await asyncio.wait_for(handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")))
                 except TimeoutError:
-                    await handle.terminate(reason="Harbor eval cancellation did not settle within 30 seconds.")
-            except WorkflowFailureError as error:
-                # A failed workflow is terminal; its saved tool evidence is
-                # still useful. Transport errors must not imply completion.
-                execution_error = f"{type(error).__name__}: {error}"
-                execution_traceback = traceback.format_exc()
-                for key in ("LITELLM_API_KEY", "LITELLM_GATEWAY_ADMIN_KEY"):
-                    if value := os.getenv(key):
-                        execution_error = execution_error.replace(value, "[redacted]")
-                        execution_traceback = execution_traceback.replace(value, "[redacted]")
+                    execution_error = "TimeoutError: The eval turn exceeded its execution deadline."
+                    # Only stop this trial's owned workflow, before the surrounding
+                    # worker/database are torn down. Never repeat its pending actions.
+                    await handle.cancel()
+                    try:
+                        await asyncio.wait_for(handle.result(), timeout=30)
+                    except WorkflowFailureError:
+                        pass  # A terminal cancelled/failed workflow is settled.
+                    except TimeoutError:
+                        await handle.terminate(reason="Harbor eval cancellation did not settle within 30 seconds.")
+                except WorkflowFailureError as error:
+                    # A failed workflow is terminal; its saved tool evidence is
+                    # still useful. Transport errors must not imply completion.
+                    execution_error = f"{type(error).__name__}: {error}"
+                    execution_traceback = traceback.format_exc()
+                    for key in ("LITELLM_API_KEY", "LITELLM_GATEWAY_ADMIN_KEY"):
+                        if value := os.getenv(key):
+                            execution_error = execution_error.replace(value, "[redacted]")
+                            execution_traceback = execution_traceback.replace(value, "[redacted]")
             for _ in range(4):
                 await service.pump(delivery)
             async with runtime.database.sessions() as db:

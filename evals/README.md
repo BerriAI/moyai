@@ -105,3 +105,8 @@ behavior. Run one trial at a time per process (`-n 1`) because this scoped fixtu
 replaces the external Modal lookup while the trial's worker is active. Actual-app
 E2E with real Modal remains separate evidence; do not add production Modal keys
 to make this Docker adapter pass.
+
+The native dispatcher runs while the trial is active, so admitted child agents
+can execute and deliver their results. The trial stops and awaits the dispatcher
+before tearing down its worker and database. The Docker adapter shares the
+trial container; it does not qualify production isolation between agent computers.

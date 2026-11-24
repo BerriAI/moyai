@@ -95,6 +95,11 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
     runner = harbor_runner
     network_calls = []
 
+    async def parked_dispatcher(_runtime):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner, "dispatcher", parked_dispatcher)
+
     async def network(_transport, request):
         # Catch all underlying HTTP, including environment proxy transports.
         assert request.url.host != "slack.com", "Synthetic token reached production Slack transport"
@@ -199,6 +204,32 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
     assert handle.terminate.await_count == (1 if outcome == "cancel_timeout" else 0)
     if outcome == "failed":
         assert "synthetic workflow failed after its tool call" in result["execution_traceback"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_trial_dispatch_runs_and_settles_on_exit(monkeypatch, harbor_runner, failed):
+    started, settled = asyncio.Event(), asyncio.Event()
+    runtime = object()
+
+    async def dispatch(received):
+        assert received is runtime
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            settled.set()
+
+    monkeypatch.setattr(harbor_runner, "dispatcher", dispatch)
+    try:
+        async with harbor_runner.trial_dispatch(runtime):
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert not settled.is_set()
+            if failed:
+                raise ValueError("Trial failed")
+    except ValueError:
+        assert failed
+    assert settled.is_set()
 
 
 @pytest.mark.asyncio
