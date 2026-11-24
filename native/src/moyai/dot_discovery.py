@@ -180,7 +180,8 @@ class Discovery:
                 accounts=accounts,
                 verified_closed=[
                     index for index, observation in enumerate(research.observations)
-                    if verified_closed(observation.evidence[0], conversation, scope.grants)
+                    if research.coverage == "complete"
+                    and verified_closed(observation.evidence[0], conversation, scope.grants)
                 ],
             )
             payload = snapshot.model_dump_json()
@@ -205,7 +206,9 @@ class Discovery:
         for change in judgment.items:
             if change.observation >= len(snapshot.research.observations):
                 raise ValueError("Use an observation from this check.")
-            if change.state == "resolved" and change.observation not in snapshot.verified_closed:
+            if change.state == "resolved" and (
+                snapshot.research.coverage != "complete" or change.observation not in snapshot.verified_closed
+            ):
                 raise ValueError("Automatic resolution requires verified provider closure evidence.")
             observation = snapshot.research.observations[change.observation]
             account, source, version = snapshot.identities[change.observation]

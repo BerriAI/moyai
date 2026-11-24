@@ -18,7 +18,7 @@ from .dot_contracts import DotDecision, DotEvidence
 # An unsupported record shape fails closed instead of guessing its identity.
 IDENTITY_FIELDS = ("html_url", "web_url", "permalink", "url", "id", "uid", "uuid")
 VERSION_FIELDS = ("updated_at", "updatedAt", "updated", "last_modified", "lastModified", "version", "revision", "etag")
-COLLECTION_FIELDS = ("data", "items", "result", "results", "records", "events", "messages", "issues", "pull_requests", "nodes", "edges", "node")
+COLLECTION_FIELDS = ("data", "items", "result", "results", "records", "events", "messages", "issues", "pull_requests", "nodes", "edges", "node", "comments", "issue", "pull_request")
 
 
 def structured_records(value: object) -> Iterator[dict]:

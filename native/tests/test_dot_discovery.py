@@ -275,6 +275,38 @@ async def test_bare_and_explicit_github_pages_cannot_be_claimed_as_complete(runt
         assert result["limited"]
 
 
+async def test_github_number_only_issues_and_structured_comments_retain_bound_evidence(runtime, actor):
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    grant = prepared.scope.grants[0]
+    grant.policy = {"allowed_tools": ["list_issues", "issue_read"], "mcp": {"url": GITHUB_MCP}}
+    prepared.scope.discovery_repositories = {grant.id: [("berriai", "moyai")]}
+    bounds, ctx = DiscoveryBounds(), SimpleNamespace(deps=prepared.scope)
+    args = {"owner": "BerriAI", "repo": "Moyai"}
+    result = await bounds.after_tool_execute(ctx, call=ToolCallPart(
+        f"mcp_{grant.id[:8]}_list_issues", {}, "read",
+    ), tool_def=None, args=args, result={
+        "issues": [
+            {"number": 25, "title": "Reply needed", "updated_at": "2026-11-24T12:00:00Z", "state": "OPEN"},
+            {"number": 26, "html_url": "https://github.com/other/project/issues/26", "title": "Foreign"},
+        ],
+        "pageInfo": {"hasNextPage": False},
+    })
+    assert result["scanned"] and result["limited"]  # Foreign row was excluded.
+    assert result["records"] == [{
+        "number": 25, "title": "Reply needed", "updated_at": "2026-11-24T12:00:00Z", "state": "OPEN",
+        "html_url": "https://github.com/berriai/moyai/issues/25",
+    }]
+    comment = {"html_url": "https://github.com/BerriAI/Moyai/issues/25#issuecomment-1",
+               "updated_at": "2026-11-24T12:00:00Z", "body": "A reply"}
+    result = await bounds.after_tool_execute(ctx, call=ToolCallPart(
+        f"mcp_{grant.id[:8]}_issue_read", {}, "comments",
+    ), tool_def=None, args={**args, "method": "get_comments"}, result={
+        "content": [], "structuredContent": {"method": "get_comments", "comments": [comment]},
+    })
+    assert result["scanned"] and result["limited"]
+    assert result["records"] == [{**comment, "html_url": comment["html_url"].lower()}]
+
+
 async def test_judgment_cannot_resolve_an_open_item_from_a_quote(runtime, actor):
     _, _, _, prepared = await observer(runtime, actor, discovery=True)
     _, conversation = await research(runtime, prepared, title="We attempted a fix")
@@ -302,7 +334,8 @@ async def test_github_resolution_requires_closed_field_in_same_verified_record(r
     assert verified_closed(evidence, conversation("closed"), [grant])
 
 
-async def test_verified_github_closure_resolves_existing_item_even_in_partial_scan(runtime, actor):
+@pytest.mark.parametrize("coverage", ["complete", "partial"])
+async def test_verified_github_closure_requires_complete_scan(runtime, actor, coverage):
     async with runtime.database.sessions.begin() as db:
         account = Connection(
             owner_id=actor.id, kind="mcp", name="GitHub reader", credential=runtime.security.seal("synthetic"),
@@ -315,9 +348,55 @@ async def test_verified_github_closure_resolves_existing_item_even_in_partial_sc
     _, conversation = await research(runtime, prepared, source=source)
     await publish(runtime, prepared, conversation, notify=False)
     _, _, _, later = await observer(runtime, actor, destination, account, automation, discovery=True)
-    _, conversation = await research(runtime, later, source=source, source_state="closed", version="two", coverage="partial")
-    await publish(runtime, later, conversation, notify=False, state="resolved")
-    assert (await runtime.database.dots.discovery.list(actor)).items[0].state == "resolved"
+    payload, conversation = await research(runtime, later, source=source, source_state="closed", version="two", coverage=coverage)
+    if coverage == "partial":
+        assert DiscoverySnapshot.model_validate_json(payload).verified_closed == []
+        with pytest.raises(ValueError, match="closure evidence"):
+            await publish(runtime, later, conversation, notify=False, state="resolved")
+    else:
+        await publish(runtime, later, conversation, notify=False, state="resolved")
+    assert (await runtime.database.dots.discovery.list(actor)).items[0].state == ("open" if coverage == "partial" else "resolved")
+
+
+async def test_result_cap_cannot_hide_a_reopened_item_from_resolution_guard(runtime, actor):
+    async with runtime.database.sessions.begin() as db:
+        account = Connection(
+            owner_id=actor.id, kind="mcp", name="GitHub reader", credential=runtime.security.seal("synthetic"),
+            read_only=True, policy=json.dumps({"allowed_tools": ["pull_request_read", "list_pull_requests"],
+                                              "mcp": {"url": GITHUB_MCP}}),
+        )
+        db.add(account)
+        await db.flush()
+    _, _, _, prepared = await observer(runtime, actor, connection=account, discovery=True)
+    bounds, ctx = DiscoveryBounds(), SimpleNamespace(deps=prepared.scope)
+    source, stamp = "https://github.com/berriai/moyai/pull/25", "2026-11-23T12:00:00Z"
+    old = {"html_url": source, "updated_at": stamp, "state": "closed", "title": "Item"}
+    newer = {**old, "updated_at": "2026-11-24T12:00:00Z", "state": "open"}
+    returns = []
+    for tool, payload in [
+        ("pull_request_read", old),
+        ("list_pull_requests", [{"html_url": f"https://github.com/berriai/moyai/pull/{i}",
+                                "updated_at": stamp, "body": "x" * 2000} for i in range(30)] + [newer]),
+    ]:
+        name = f"mcp_{account.id[:8]}_{tool}"
+        result = await bounds.after_tool_execute(
+            ctx, call=ToolCallPart(name, {}, tool), tool_def=None, args={"method": "get"}, result=payload,
+        )
+        if tool == "list_pull_requests":
+            assert result["limited"] and newer not in result["records"]
+        returns.append(ToolReturnPart(name, result, tool_call_id=tool))
+    conversation = ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=returns)])).decode()
+    report = DotResearch.model_validate({"coverage": "complete", "observations": [{
+        "title": "Item", "summary": "Closed in the older record", "evidence": [{
+            "connection_id": account.id, "source": source, "source_version": stamp, "quote": "Item",
+        }],
+    }]})
+    snapshot = DiscoverySnapshot.model_validate_json(await runtime.database.dots.discovery.judgment_input(
+        prepared.scope, report.model_dump_json(), conversation,
+    ))
+    assert snapshot.research.coverage == "partial" and snapshot.verified_closed == []
+    with pytest.raises(ValueError, match="closure evidence"):
+        await publish(runtime, prepared, conversation, notify=False, state="resolved")
 
 
 async def test_github_closure_uses_all_versions_and_rejects_stale_or_conflicting_state(runtime, actor):

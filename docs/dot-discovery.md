@@ -13,6 +13,8 @@ with cross-repository relationships. Records without a verified repository,
 out-of-scope records and earlier item references are excluded. Every selected account needs
 an approved repository in restricted mode; other providers support account-wide
 discovery only in this slice.
+GitHub's number-only issue rows are bound to the dispatched repository and
+normalized to canonical URLs; structured comment envelopes are decoded too.
 The existing automation tools own creation, review, enable, pause and timing.
 Discovery does not introduce another scheduler or create automations per item.
 
@@ -57,7 +59,9 @@ Automatic resolution requires the host to verify a closed/merged GitHub issue or
 pull request in the same provider record as the cited identity, version and
 quotation. All versions seen in the scan must agree on closure, and the citation
 must use the latest verifiable version; conflicting state or versions that
-cannot be ordered remain owner-controlled. Other resolution remains owner-controlled. Prose describing an
+cannot be ordered remain owner-controlled. Partial or truncated scans never
+auto-resolve items because discarded records could contradict a closed state.
+Other resolution remains owner-controlled. Prose describing an
 attempted fix cannot close an item.
 
 Connection and policy authority is rechecked on research, judgment, delivery and

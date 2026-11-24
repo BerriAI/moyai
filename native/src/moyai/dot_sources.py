@@ -1,7 +1,7 @@
 """Host-enforced provider scope for the verified discovery integration."""
 
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from app.automation_definitions import AttentionSource
 
@@ -60,6 +60,30 @@ def github_item(source: str) -> bool:
         r"https://(?:github\.com/[^/]+/[^/]+/(?:issues|pull)|api\.github\.com/repos/[^/]+/[^/]+/(?:issues|pulls))/[0-9]+",
         source,
     ))
+
+
+def github_record(record: dict, tool: str | None, args: dict) -> dict:
+    """Bind GitHub's number-only issue rows to the dispatched repository."""
+    result = dict(record)
+    if tool == "list_issues" and not any(record.get(key) for key in ("html_url", "web_url", "permalink", "url")):
+        owner, repo, number = args.get("owner"), args.get("repo"), record.get("number")
+        if type(number) is int and number > 0 and all(
+            isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", value) and value not in {".", ".."}
+            for value in (owner, repo)
+        ):
+            result["html_url"] = f"https://github.com/{owner}/{repo}/issues/{number}"
+    # Repository names are case-insensitive. Use one identity across provider
+    # URLs and number-only rows even when subsequent calls spell them differently.
+    for key in ("html_url", "web_url", "permalink", "url"):
+        value = result.get(key)
+        if not isinstance(value, str):
+            continue
+        parsed = urlsplit(value)
+        parts = parsed.path.split("/")
+        if parsed.scheme == "https" and parsed.netloc.casefold() == "github.com" and len(parts) >= 3:
+            parts[1:3] = [part.casefold() for part in parts[1:3]]
+            result[key] = urlunsplit(parsed._replace(netloc="github.com", path="/".join(parts)))
+    return result
 
 
 def provider_partial(record: dict) -> bool:

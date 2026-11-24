@@ -20,7 +20,14 @@ from .contracts import RunScope
 from .dot_contracts import DotJudgment, DotResearch
 from .dot_discovery import DiscoverySnapshot
 from .dot_evidence import COLLECTION_FIELDS, IDENTITY_FIELDS, VERSION_FIELDS, records, validate_evidence
-from .dot_sources import GITHUB_METHODS, github_reader, provider_complete, provider_partial, source_allowed
+from .dot_sources import (
+    GITHUB_METHODS,
+    github_reader,
+    github_record,
+    provider_complete,
+    provider_partial,
+    source_allowed,
+)
 
 if TYPE_CHECKING:
     from .database import Database
@@ -150,6 +157,8 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
         for record in records(value):
             limited |= provider_partial(record)
             complete |= provider_complete(record)
+            if tool:
+                record = github_record(record, tool, args)
             identity = next((record[key] for key in IDENTITY_FIELDS if record.get(key)), None)
             if allowed and (not isinstance(identity, str) or not source_allowed(identity, allowed)):
                 # Collection envelopes inform coverage but never expose their
