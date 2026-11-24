@@ -45,7 +45,8 @@ where the Lens access and retention policy is appropriate for that content.
 This does not change the gateway's independent logging policy or backfill old
 traces.
 
-Logfire's default scrubbing remains enabled. Only a valid UUID in the exact
+Logfire's default scrubbing remains enabled. Tool payloads keep diagnostic prose
+such as "authentication failed" while credential values are redacted. Only a valid UUID in the exact
 `metadata.moyai_session_id` field is exempted from its `session` pattern, so the
 application's session can be correlated without allowing session cookies or
 other credential fields through.
@@ -95,6 +96,38 @@ An unavailable collector does not fail or retry model inference. Shutdown
 flushes the remaining telemetry. The Pydantic AI Temporal plugin prevents
 workflow replay from emitting duplicate spans; telemetry is configured on a
 local provider without changing other agents' global instrumentation.
+
+## Instrumentation contract
+
+Use the framework integrations rather than creating replacement agent, model or
+tool spans. Pydantic AI's `InstrumentationSettings` owns their serialization;
+Moyai uses format version 6 so tool responses have `role="tool"`. The SDK emits
+`gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`,
+`gen_ai.tool.call.arguments` and `gen_ai.tool.call.result`. Arguments and results
+are opt-in content under the
+[OpenTelemetry tool execution conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/execute-tool.md).
+Failed spans retain `ERROR` status and `error.type`; successful tool spans do not
+gain an error status. Agent usage retains the SDK's aggregate fields so it is not
+counted again as model usage.
+
+The application-specific customization is its privacy policy and two compatibility
+adaptations:
+
+- Temporal 1.34 suppresses spans when `record_exception` sees Pydantic AI's handled
+  `ToolFailed` or `ModelRetry` (including their internal wrappers), mistaking them for workflow-task failures.
+  A Logfire exception callback uses OpenTelemetry's own exception serializer for
+  those exception families inside workflows. It adds the event to the SDK span and keeps
+  Temporal's replay guard and workflow failure semantics intact.
+- The current Lens forwarding path does not retain exception events. Moyai
+  mirrors the sanitized exception type/message onto the existing span and derives
+  `error.type` when absent. The original exception event and stack trace remain
+  in OTLP; this creates no extra error spans.
+
+GenAI conventions are still in Development. Exception events follow the installed
+SDK's supported format; migration to the newer exception log signal should happen
+with SDK and receiver support, not by introducing a separate Moyai telemetry format.
+See [Pydantic AI instrumentation settings](https://ai.pydantic.dev/api/models/instrumented/)
+and [OpenTelemetry exception migration guidance](https://opentelemetry.io/docs/specs/semconv/exceptions/exceptions-spans/).
 
 ## Receiver compatibility
 

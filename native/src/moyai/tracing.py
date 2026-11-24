@@ -10,14 +10,17 @@ from uuid import UUID
 
 import logfire
 import requests
+from logfire.types import ExceptionCallbackHelper
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.trace import Event, ReadableSpan
+from opentelemetry.sdk.trace import Span as SDKSpan
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import Span, Status, get_current_span
+from opentelemetry.trace import Span, Status, StatusCode, get_current_span
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pydantic import SecretStr
 from pydantic_ai.durable_exec.temporal import LogfirePlugin
+from pydantic_ai.exceptions import ModelRetry, ToolFailed, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import (
     BaseToolCallPart,
     BaseToolReturnPart,
@@ -31,6 +34,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.instrumented import InstrumentationSettings
+from temporalio import workflow
 
 from .presentation import private_tool
 from .settings import Settings
@@ -68,6 +72,22 @@ class _NoRedirectSession(requests.Session):
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
         kwargs["allow_redirects"] = False
         return super().send(request, **kwargs)
+
+
+def _record_handled_tool_exception(helper: ExceptionCallbackHelper) -> None:
+    """Keep handled Pydantic AI failures visible through Temporal's tracer.
+
+    Temporal 1.34's replay-safe span treats every recorded non-workflow failure
+    as a workflow-task failure and suppresses its end. These exceptions are
+    consumed by Pydantic AI as tool responses; they do not fail a workflow task.
+    Use the OTel SDK's event serializer via Logfire's public callback, without
+    changing Temporal's failure types, tracer, span lifetime or replay guard.
+    """
+    if workflow.in_workflow() and isinstance(helper.exception, (ToolFailed, ModelRetry, ToolFailedError, ToolRetryError)):
+        SDKSpan.record_exception(
+            helper.span, helper.exception, attributes=helper.event_attributes, escaped=True,
+        )
+        helper.no_record_exception()
 
 
 class _ContentSafeBatchSpanProcessor(BatchSpanProcessor):
@@ -111,6 +131,8 @@ class _ContentSafeBatchSpanProcessor(BatchSpanProcessor):
                 for key in ("exception.type", "exception.message"):
                     if event.attributes and key in event.attributes:
                         attributes[key] = event.attributes[key]
+        if span.status.status_code == StatusCode.ERROR and "exception.type" in attributes:
+            attributes.setdefault("error.type", attributes["exception.type"])
         description = redact_content(span.status.description, self._secrets) if capture else None
         super().on_end(ReadableSpan(
             name=span.name, context=span.context, parent=span.parent, resource=span.resource,
@@ -225,6 +247,7 @@ class LensTracing:
         self.logfire = logfire.configure(
             local=True, send_to_logfire=False, console=False, metrics=False,
             service_name="moyai", inspect_arguments=False,
+            advanced=logfire.AdvancedOptions(exception_callback=_record_handled_tool_exception),
             scrubbing=logfire.ScrubbingOptions(callback=scrub),
             additional_span_processors=[_ContentSafeBatchSpanProcessor(
                 exporter, include_content=settings.trace_include_content, secrets=secrets,
@@ -239,6 +262,7 @@ class LensTracing:
             options["secrets"] = secrets
         self.instrumentation = instrumentation_type(
             tracer_provider=self.logfire.config.get_tracer_provider(),
+            version=6,
             include_content=settings.trace_include_content, include_binary_content=False,
             include_model_request_parameters=False,
             **options,

@@ -22,7 +22,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.workspaces import WorkspaceUnavailableError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
@@ -94,13 +94,15 @@ async def test_real_inference_transport_propagates_current_span_and_keeps_broker
 
 
 @pytest.mark.parametrize("include_content", [False, True])
+@pytest.mark.parametrize("failure", [ToolFailed, ModelRetry])
 async def test_native_temporal_trace_content_policy_and_replay_emits_no_duplicates(
-    runtime, active, monkeypatch, include_content,
+    runtime, active, monkeypatch, include_content, failure,
 ):
     """Actual Temporal/agent path; fixture model supplements the real gateway proof."""
     _, turn, _ = active
     exporter = InMemorySpanExporter()
     monkeypatch.setattr(tracing, "OTLPSpanExporter", lambda **kwargs: exporter)
+    monkeypatch.setattr("moyai.artifacts.ToolFailed", failure)
     global_provider = get_tracer_provider()
     runtime.tracing = tracing.LensTracing(runtime.settings.model_copy(update={
         "trace_endpoint": "http://127.0.0.1:4318/v1/traces",
@@ -108,6 +110,26 @@ async def test_native_temporal_trace_content_policy_and_replay_emits_no_duplicat
         "trace_include_content": include_content,
     }))
     runtime.database.tracing = runtime.tracing
+
+    def respond(messages, info):
+        responses = sum(isinstance(message, ModelResponse) for message in messages)
+        if responses < 2:
+            return ModelResponse(parts=[ToolCallPart("attach_link", {
+                "url": "invalid-link" if responses == 0 else "https://example.com/trace-proof",
+                "kind": "source", "title": "Trace proof",
+            }, tool_call_id=f"trace-tool-{responses}")])
+        return ModelResponse(parts=[TextPart("Task completed.")])
+
+    async def stream(messages, info):
+        for part in respond(messages, info).parts:
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ToolCallPart):
+                yield {0: DeltaToolCall(
+                    name=part.tool_name, json_args=json.dumps(part.args), tool_call_id=part.tool_call_id,
+                )}
+
+    runtime.models["test"] = FunctionModel(respond, stream_function=stream)
     runtime.agent, runtime.durability = make_agent(
         runtime.settings, runtime.database, runtime.stores, runtime.objects, models=runtime.models,
         workspace=LocalWorkspace(runtime.settings.data_dir.parent / "computer"), skills_directory="skills",
@@ -133,6 +155,22 @@ async def test_native_temporal_trace_content_policy_and_replay_emits_no_duplicat
         assert ("Task completed." in attributes) is include_content
         assert active[0].id in attributes
         assert "synthetic-export-key" not in attributes
+        tools = [span for span in spans if span.attributes.get("gen_ai.operation.name") == "execute_tool"]
+        assert len(tools) == 2
+        failed = next(span for span in tools if span.status.status_code.name == "ERROR")
+        assert failed.attributes["gen_ai.tool.call.id"] == "trace-tool-0"
+        assert failed.attributes["error.type"] == f"pydantic_ai.exceptions.{failure.__name__}"
+        assert len([event for event in failed.events if event.name == "exception"]) == 1
+        if include_content:
+            assert any("exception.stacktrace" in event.attributes for event in failed.events)
+            agent = next(span for span in spans if span.attributes.get("gen_ai.operation.name") == "invoke_agent")
+            messages = json.loads(agent.attributes["pydantic_ai.all_messages"])
+            tool_messages = [message for message in messages
+                             if any(part["type"] == "tool_call_response" for part in message["parts"])]
+            assert len(tool_messages) == 2
+            assert all(message["role"] == "tool" for message in tool_messages)
+        assert ("Use a valid HTTP(S) link" in attributes) is include_content
+        assert ("invalid-link" in attributes) is include_content
         activities = [span for span in spans if span.instrumentation_scope.name == "temporalio"]
         assert any("moyai_save_answer_v1" in span.name for span in activities)
         assert any(span.attributes.get("moyai.task.state") == "completed" for span in activities)
@@ -290,6 +328,7 @@ async def test_tool_content_and_diagnostics_follow_flag(monkeypatch, include_con
             assert exported_args["options"]["token_count"] == 4
             assert exported_args["options"]["api_key"] != arguments["options"]["api_key"]
             if failure:
+                assert tool.attributes["error.type"] == tool.attributes["exception.type"]
                 assert "missing_scope channels:history" in tool.attributes["exception.message"]
                 assert any("missing_scope" in event.attributes.get("exception.message", "")
                            for event in tool.events)
@@ -297,6 +336,7 @@ async def test_tool_content_and_diagnostics_follow_flag(monkeypatch, include_con
                 if failure is not WorkspaceUnavailableError:
                     assert "missing_scope" in tool.attributes["gen_ai.tool.call.result"]
             else:
+                assert "error.type" not in tool.attributes
                 output = json.loads(tool.attributes["gen_ai.tool.call.result"])
                 assert output["text"] == "Authentication guide found"
                 assert output["token_count"] == 4
