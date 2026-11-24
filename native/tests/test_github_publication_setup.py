@@ -22,7 +22,9 @@ bridge = connections.bridge
 def setup_app(bridge, monkeypatch, permissions):
     github = bridge.connectors.github
     minted = []
-    app_info = {"id": 456, "slug": "moyai-test", "pem": "synthetic-key", "permissions": MANIFEST_PERMISSIONS,
+    app_info = {"id": 456, "slug": "moyai-test", "pem": "synthetic-key",
+                "client_id": "synthetic-client-id", "client_secret": "synthetic-client-secret",
+                "permissions": MANIFEST_PERMISSIONS,
                 "owner": {"id": 42, "login": "example", "type": "Organization"}}
     repository = {"id": 123, "full_name": "example/repo", "owner": {"id": 42}}
 
@@ -69,9 +71,13 @@ async def test_registration_manifest_and_installation_agree_on_publication(bridg
         assert match is not None
         manifest = json.loads(html.unescape(match[1]))
         assert supports_permissions(manifest["default_permissions"], {**PERMISSIONS, **PROTECTION_PERMISSIONS})
+        assert manifest["callback_urls"] == [f"{bridge.settings.public_url}/oauth/github/callback"]
         state = parse_qs(urlsplit(registration_url).query)["state"][0]
         registered = await client.get("/oauth/github/app-callback", params={"state": state, "code": "synthetic-code"})
         assert registered.status_code == 303
+        assert bridge.connectors.oauth_client("github") == ("synthetic-client-id", "synthetic-client-secret")
+        encrypted = bridge.store.rows("SELECT encrypted FROM github_app WHERE id=1")[0]["encrypted"]
+        assert "synthetic-client-secret" not in encrypted
         state = parse_qs(urlsplit(registered.headers["location"]).query)["state"][0]
         installed = await client.get("/oauth/github/callback", params={
             "state": state, "installation_id": "789", "setup_action": "install",

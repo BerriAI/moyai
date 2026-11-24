@@ -148,7 +148,17 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
 
     def scoped(ctx: RunContext[RunScope], connection: SelectedConnection) -> AbstractToolset[RunScope]:
         grant, policy = connection.grant, connection.policy
-        if grant.kind == "litellm":
+        if policy.oauth:
+            from .personal_oauth_tools import PersonalOAuthToolset
+
+            service = product_service()
+            native = (
+                PersonalOAuthToolset(service, ctx.deps, grant) if grant.kind == "github"
+                else service.toolset(ctx.deps, grant)
+            ).filtered(
+                lambda _ctx, tool: not grant.read_only or read_only_tool(tool),
+            )
+        elif grant.kind == "litellm":
             from .gateway_tools import gateway_toolset
             from .runtime import current
 
@@ -248,7 +258,9 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
                 catalog, ctx, lambda name: build(ctx, name), reconstruct=lambda tool: reconstruct(ctx, tool),
             )
         catalog_type = (
-            MCPConnectionCatalogToolset if any(grant.kind in {"mcp", "litellm"} for grant in ctx.deps.grants)
+            MCPConnectionCatalogToolset if any(
+                grant.kind in {"mcp", "litellm"} or grant.policy.get("oauth") for grant in ctx.deps.grants
+            )
             else CatalogToolset
         )
         return catalog_type(

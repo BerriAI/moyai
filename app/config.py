@@ -338,6 +338,8 @@ class Settings(BaseSettings):
     gitlab_allow_loopback_http: bool = False
     linear_client_id: str = ""
     linear_client_secret: str = ""
+    github_client_id: str = ""
+    github_client_secret: str = ""
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_signing_secret: str = ""

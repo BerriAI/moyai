@@ -515,6 +515,7 @@ class EffectResolveResult(ApiView):
 class ConnectionPolicyView(ApiView):
     allowed_tools: list[str] | None = None
     require_approval: bool = True
+    oauth: bool = False
     product: dict[str, JsonValue] | None = None
     mcp: RemoteMCPConfig | None = None
     gateway: GatewayConfig | None = None

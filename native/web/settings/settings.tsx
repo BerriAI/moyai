@@ -22,6 +22,7 @@ import {
 import { MoyaiBrand, SidebarToggle } from "../brand"
 import { AppearanceToggle } from "../appearance-toggle"
 import { ProductGitLabSetup } from "./product-gitlab-settings"
+import { PersonalConnections } from "./personal-connections"
 import type { GeneralPreferences } from "./general-preferences"
 import {
   checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
@@ -755,7 +756,7 @@ export function ProductConnectionRows({ connections, admin, onManage, onConnect,
     </div>
   </article>)}</div>
 }
-function ProductConnectionsPage({ user }: { user: SettingsUser }) {
+function ProductConnectionsPage({ user, onStartPrivateChat }: { user: SettingsUser; onStartPrivateChat: () => void }) {
   const resource = useResource("/product/connections", signal => listOrganizationConnections({ signal }).then(({ data }) => data))
   const mutation = useMutation()
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
@@ -779,6 +780,9 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
   }
   const authorizationResult = new URLSearchParams(location.search).get("connection")
   return <>
+    <PersonalConnections userId={user.id} individual={user.individual !== false}>
+      <ProductPersonalSlack embedded onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
+    </PersonalConnections>
     <section aria-label="Organization connections">
     <h2>Organization connections</h2>
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
@@ -794,7 +798,6 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
           onUpdated={() => { resource.refresh(); setSelected(null) }} />}
       </>
     }}</LoadState>
-    <p className="ns-help ns-footer-help">To use your own Slack account, connect <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
     </section>
     <section className="ns-mcp-connections" aria-label="LiteLLM gateways">
       <h2>LiteLLM gateways</h2>
@@ -927,7 +930,7 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
     </form>
   }}</LoadState>
 }
-function ProductPersonalSlack({ individual, onStartPrivateChat }: { individual: boolean; onStartPrivateChat: () => void }) {
+function ProductPersonalSlack({ individual, onStartPrivateChat, embedded = false }: { individual: boolean; onStartPrivateChat: () => void; embedded?: boolean }) {
   const resource = useResource("/connections/slack/personal", signal => getPersonalSlack({ signal }).then(({ data }) => data))
   const mutation = useMutation(), [disconnect, setDisconnect] = useState(false)
   const [checked, setChecked] = useState(false)
@@ -953,7 +956,7 @@ function ProductPersonalSlack({ individual, onStartPrivateChat }: { individual: 
         {data.available && !data.oauth_configured && <p className="ns-notice" role="status">Ask a workspace administrator to enable Slack sign-in.</p>}
         <div className="ns-row-actions">
           {healthy && canStart && <Button disabled={mutation.busy} onClick={onStartPrivateChat}>Start private chat<ArrowRight aria-hidden="true" /></Button>}
-          <Button variant={healthy ? "outline" : "default"} disabled={mutation.busy || !data.available || !data.oauth_configured} onClick={connect}>{data.connected ? "Reconnect Slack" : "Connect Slack"}</Button>
+          <Button variant={healthy ? "outline" : "default"} disabled={mutation.busy || !data.available || !data.oauth_configured} aria-label={embedded ? `${data.connected ? "Reconnect" : "Connect"} personal Slack` : undefined} onClick={connect}>{data.connected ? "Reconnect Slack" : "Connect Slack"}</Button>
           {!healthy && canStart && <Button variant="outline" disabled={mutation.busy} onClick={onStartPrivateChat}>Start private chat</Button>}
         </div>
         {data.connected && <div className="ns-connection-footer">
@@ -1096,7 +1099,7 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
   const canManage = (row: Connection) => user.individual !== false && row.owner_id === user.id && (!row.shared || user.role === "admin")
   const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", url: row.policy.gateway?.url ?? row.policy.mcp?.url ?? "", shared: row.shared, read_only: row.read_only, enabled: row.enabled, gateway_skills: row.policy.gateway?.skills ?? true, gateway_mcp: row.policy.gateway?.mcp ?? true }, row.policy, row)
   return <LoadState resource={resource}>{data => {
-    const rows = data.filter(row => (!allowedKinds || services.some(service => service.value === row.kind)) && contains(search, row.name, row.kind, row.policy.mcp?.url, row.policy.gateway?.url) && (filter === "all" || row.kind === filter))
+    const rows = data.filter(row => !row.policy.oauth && (!allowedKinds || services.some(service => service.value === row.kind)) && contains(search, row.name, row.kind, row.policy.mcp?.url, row.policy.gateway?.url) && (filter === "all" || row.kind === filter))
     return <><p className="ns-muted">Choose default connections in <a className="ns-link" href="#settings/general">General preferences</a>.</p>
       {user.individual === false && <p className="ns-help">Sign in with your individual work account to add or edit connections.</p>}
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={!mcpOnly && !gatewayOnly && <Choice label="Service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...services]} />}
@@ -1343,7 +1346,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
               : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />
-                    : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} /> : <ConnectionsPage user={user} />
+                    : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} onStartPrivateChat={onStartPrivateChat} /> : <ConnectionsPage user={user} />
                       : current === "personal-slack" ? <ProductPersonalSlack onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
                       : current === "secrets" ? productMode === "existing" ? <ProductSecretsPage user={user} /> : <SecretsPage user={user} />
                         : current === "users" ? <UsersPage user={user} />

@@ -59,6 +59,7 @@ from .models import (
     new_id,
     now,
 )
+from .oauth_models import OAuthCredential
 from .postgres import create_engine
 from .product_automation_models import ProductAutomationTurn
 from .product_identity import ProductGrant, ProductIdentityAdapter
@@ -583,9 +584,15 @@ class Database:
                 raise HTTPException(403, "A selected connection is no longer available.")
             if shared_session and not row.shared:
                 raise HTTPException(403, "Use a private conversation for a personal connection.")
+            policy = json.loads(row.policy)
+            if policy.get("oauth") and (
+                row.shared or row.owner_id != actor_id
+                or await db.get(OAuthCredential, row.id) is None
+            ):
+                raise HTTPException(403, "This personal OAuth connection is unavailable.")
             grants.append(Grant(
                 id=row.id, kind=row.kind, revision=row.revision,
-                credential=row.credential, read_only=row.read_only, policy=json.loads(row.policy),
+                credential=row.credential, read_only=row.read_only, policy=policy,
             ))
         return grants
 

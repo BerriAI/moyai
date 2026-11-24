@@ -216,12 +216,13 @@ class ProductConnections:
         native: list[Grant] = []
         if candidates:
             async def native_selection(transaction: AsyncSession) -> list[Grant]:
+                from .personal_oauth import native_connections
                 identities = list(await transaction.scalars(select(Connection.id).where(
-                    Connection.id.in_(candidates), Connection.kind.in_(["mcp", "litellm"]),
+                    Connection.id.in_(candidates),
+                    native_connections() if surface == "web" else Connection.kind.in_(["mcp", "litellm"]),
                 )))
                 return await self.database.native_grants(
                     transaction, actor_id, identities, shared_session=shared_session,
-                    kinds=frozenset({"mcp", "litellm"}),
                 )
 
             if db is not None:
@@ -297,7 +298,17 @@ class ProductConnections:
         if sorted(current, key=lambda item: item.id) != sorted(scope.grants, key=lambda item: item.id):
             raise PermissionError("The selected product account authority changed.")
 
-    async def check(self, scope: RunScope, grant: Grant) -> None:
+    async def check(self, scope: RunScope, grant: Grant, *, write: bool = False) -> None:
+        if grant.policy.get("oauth"):
+            if grant not in scope.grants:
+                raise PermissionError("This personal account was not selected.")
+            policy = await source_database(self.connectors.policy, grant.kind)
+            if not policy["enabled"]:
+                raise PermissionError("This provider is disabled by the workspace.")
+            if write and (grant.read_only or policy["read_only"]):
+                raise PermissionError("This provider is read only in the workspace.")
+            await self.database.authorize_scope(scope)
+            return
         if grant not in scope.grants or not grant.policy.get("product"):
             raise PermissionError("This product account was not selected.")
         # Native authorization already resolves live canonical grants under the
@@ -307,9 +318,12 @@ class ProductConnections:
         self._check_grants(scope, current)
 
     async def credentials(self, scope: RunScope, grant: Grant, *, write: bool = False) -> dict[str, Any]:
-        await self.check(scope, grant)
+        await self.check(scope, grant, write=write)
         if write and grant.read_only:
             raise PermissionError("This product account is read only.")
+        if grant.policy.get("oauth"):
+            from .personal_oauth import credentials
+            return await credentials(self.database, scope, grant)
         async with self._credential_lock(grant):
             value = await self._credentials(grant, write=write)
         await self.check(scope, grant)
@@ -609,7 +623,7 @@ class ProductConnections:
             # services; the bot adapter exposes their explicit compatibility state.
             if provider == "slack" and name not in {"slack_search", "slack_channel", "slack_thread", "slack_me", "slack_send"}:
                 continue
-            if grant.policy["product"].get("access") == "bot" and name == "slack_search":
+            if (grant.policy.get("product") or {}).get("access") == "bot" and name == "slack_search":
                 continue
 
             def build(tool_name: str):

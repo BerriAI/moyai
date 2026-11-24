@@ -212,3 +212,7 @@
 @media (prefers-reduced-motion: reduce) {
   .native-settings *, .native-settings-dialog * { animation: none; transition: none; scroll-behavior: auto; }
 }
+.ns-personal-connections { margin-bottom: 2rem; }
+.ns-personal-connections h3 { margin: 0; font-size: inherit; font-weight: 600; }
+.native-settings .ns-oauth-connected { color: var(--ui-success); background: var(--ui-success-bg); display: inline-flex; align-items: center; gap: .25rem; }
+.ns-advanced-connections { margin-top: 2rem; }

@@ -35,6 +35,7 @@ class ConnectionPolicy(BaseModel):
 
     allowed_tools: list[str] | None = Field(default=None, max_length=200)
     require_approval: bool = True
+    oauth: bool = False
     product: dict[str, object] | None = None
     mcp: RemoteMCPConfig | None = None
     gateway: GatewayConfig | None = None

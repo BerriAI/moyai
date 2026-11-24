@@ -151,7 +151,8 @@ class ConnectionGuide:
                     (Connection.owner_id == scope.actor_id) & Connection.shared.is_(False)),
             )
             if canonical is not None:
-                query = query.where(Connection.kind.in_(["mcp", "litellm"]))
+                from .personal_oauth import native_connections
+                query = query.where(native_connections())
             rows += [dict(row) for row in (await db.execute(
                 query.order_by(Connection.id.in_(selected).desc(), Connection.name, Connection.id).limit(LIMIT + 1),
             )).mappings()]

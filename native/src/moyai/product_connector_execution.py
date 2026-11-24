@@ -91,7 +91,7 @@ class CanonicalConnectorExecution:
         service = self.connections
         _, write, model, _ = TOOLS[name]
         args = model.model_validate(arguments).model_dump()
-        if grant.policy["product"].get("access") == "bot" and name in {"slack_channel", "slack_thread"}:
+        if (grant.policy.get("product") or {}).get("access") == "bot" and name in {"slack_channel", "slack_thread"}:
             args["as_bot"] = True
         bot_only = grant.kind == "slack" and (name in {"slack_me", "slack_send"} or args.get("as_bot") is True)
         if bot_only:
@@ -105,7 +105,7 @@ class CanonicalConnectorExecution:
         else:
             credentials = await service.credentials(scope, grant, write=write)
             bot_token = None
-        invocation = _Invocation(service.connectors, lambda: service.check(scope, grant), recheck=not write)
+        invocation = _Invocation(service.connectors, lambda: service.check(scope, grant, write=write), recheck=not write)
 
         async def operate(bound: Any) -> Any:
             async def selected_credentials(_provider: str):

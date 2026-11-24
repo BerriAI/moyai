@@ -2941,6 +2941,10 @@ export type ConnectionPolicy = {
     gateway_discovery?: GatewayDiscoveryInput | null;
     mcp?: RemoteMcpConfigInput | null;
     /**
+     * Oauth
+     */
+    oauth?: boolean;
+    /**
      * Product
      */
     product?: {
@@ -2963,6 +2967,10 @@ export type ConnectionPolicyView = {
     gateway: GatewayConfigOutput | null;
     gateway_discovery: GatewayDiscoveryOutput | null;
     mcp: RemoteMcpConfigOutput | null;
+    /**
+     * Oauth
+     */
+    oauth: boolean;
     /**
      * Product
      */
@@ -5812,6 +5820,52 @@ export type PendingToolCall = {
      * Tool Name
      */
     tool_name: string;
+};
+
+/**
+ * PersonalOAuthDisconnected
+ */
+export type PersonalOAuthDisconnected = {
+    /**
+     * Connected
+     */
+    connected: boolean;
+};
+
+/**
+ * PersonalOAuthStart
+ */
+export type PersonalOAuthStart = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PersonalOAuthView
+ */
+export type PersonalOAuthView = {
+    /**
+     * Configured
+     */
+    configured: boolean;
+    /**
+     * Connected
+     */
+    connected: boolean;
+    /**
+     * Connection Id
+     */
+    connection_id: string | null;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Provider
+     */
+    provider: 'linear' | 'notion' | 'github';
 };
 
 /**
@@ -13031,6 +13085,84 @@ export type GetMeResponses = {
 };
 
 export type GetMeResponse = GetMeResponses[keyof GetMeResponses];
+
+export type ListPersonalConnectionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/personal-connections';
+};
+
+export type ListPersonalConnectionsResponses = {
+    /**
+     * Response Listpersonalconnections
+     *
+     * Successful Response
+     */
+    200: Array<PersonalOAuthView>;
+};
+
+export type ListPersonalConnectionsResponse = ListPersonalConnectionsResponses[keyof ListPersonalConnectionsResponses];
+
+export type DisconnectPersonalConnectionData = {
+    body?: never;
+    path: {
+        /**
+         * Provider
+         */
+        provider: 'linear' | 'notion' | 'github';
+    };
+    query?: never;
+    url: '/api/personal-connections/{provider}';
+};
+
+export type DisconnectPersonalConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DisconnectPersonalConnectionError = DisconnectPersonalConnectionErrors[keyof DisconnectPersonalConnectionErrors];
+
+export type DisconnectPersonalConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: PersonalOAuthDisconnected;
+};
+
+export type DisconnectPersonalConnectionResponse = DisconnectPersonalConnectionResponses[keyof DisconnectPersonalConnectionResponses];
+
+export type StartPersonalConnectionData = {
+    body?: never;
+    path: {
+        /**
+         * Provider
+         */
+        provider: 'linear' | 'notion' | 'github';
+    };
+    query?: never;
+    url: '/api/personal-connections/{provider}/oauth';
+};
+
+export type StartPersonalConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type StartPersonalConnectionError = StartPersonalConnectionErrors[keyof StartPersonalConnectionErrors];
+
+export type StartPersonalConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: PersonalOAuthStart;
+};
+
+export type StartPersonalConnectionResponse = StartPersonalConnectionResponses[keyof StartPersonalConnectionResponses];
 
 export type ListProductAutomationsData = {
     body?: never;
