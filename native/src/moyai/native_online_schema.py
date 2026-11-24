@@ -47,6 +47,7 @@ PERSONAL_OAUTH_VERSION = "2026-11-23-personal-oauth-v27"
 RESPONSIBILITY_VERSION = "2026-11-23-responsibilities-v28"
 RESPONSIBILITY_WORKFLOW_VERSION = "2026-11-24-responsibility-workflows-v29"
 PERSONAL_DOT_VERSION = "2026-11-24-personal-dot-v30"
+DOT_DISCOVERY_VERSION = "2026-11-24-dot-discovery-v31"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -327,6 +328,33 @@ def _personal_dot_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _dot_discovery_tables(metadata: MetaData, schema: str) -> None:
+    Table(
+        "moyai_dot_discovery_turns", metadata,
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_dot_attention_turns.turn_id"), primary_key=True),
+        Column("snapshot", Text, nullable=True),
+        Column("sources", Text, nullable=False), schema=schema,
+    )
+    Table(
+        "moyai_dot_items", metadata,
+        Column("id", String(64), primary_key=True),
+        Column("owner_id", String(512), ForeignKey(f"{schema}.moyai_users.id"), nullable=False, index=True),
+        Column("connection_id", String(36), ForeignKey(f"{schema}.moyai_connections.id"), nullable=False),
+        Column("account_key", String(64), nullable=False),
+        Column("source_key", String(64), nullable=False),
+        Column("source_version", Text, nullable=False),
+        Column("content", Text, nullable=False),
+        Column("state", String(20), nullable=False),
+        Column("owner_controlled", Boolean, nullable=False),
+        Column("owner_revision", Integer, nullable=False),
+        Column("revision", Integer, nullable=False),
+        Column("snoozed_until", String(40), nullable=True),
+        Column("created_at", String(40), nullable=False),
+        Column("last_seen_at", String(40), nullable=False),
+        UniqueConstraint("owner_id", "source_key", name="dot_item_source"), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -349,6 +377,8 @@ EXPANSIONS = (
     Expansion(RESPONSIBILITY_WORKFLOW_VERSION, PERSONAL_DOT_VERSION, frozenset({
         "moyai_personal_dots", "moyai_dot_attention_turns", "moyai_dot_notifications",
     }), (), _personal_dot_tables),
+    Expansion(PERSONAL_DOT_VERSION, DOT_DISCOVERY_VERSION,
+              frozenset({"moyai_dot_discovery_turns", "moyai_dot_items"}), (), _dot_discovery_tables),
 )
 
 

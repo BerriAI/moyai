@@ -14,7 +14,7 @@ from .active_workspace import active_workspace_boundary
 from .agent_messages import read_agent_mail, read_agent_mail_v2
 from .answer_settlement import SNAPSHOT_WARNING
 from .computer_keepalive import keep_computer_alive
-from .contracts import CompletedTurn, PreparedTurn, SteeringInput
+from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
 from .history_handoff import HISTORY_ACTIVITIES
 from .images import hydrate
 from .lifecycle_tracing import scope_attributes, task_state
@@ -102,6 +102,11 @@ async def save_answer(result: CompletedTurn) -> bool:
     return accepted
 
 
+@activity.defn(name="moyai_dot_judgment_input_v1")
+async def dot_judgment_input(scope: RunScope, research: str, conversation: str) -> str:
+    return await current().database.dots.discovery.judgment_input(scope, research, conversation)
+
+
 @activity.defn(name="moyai_save_computer_v1")
 async def save_computer(turn_id: str, reference: dict | None) -> None:
     runtime = current()
@@ -160,6 +165,7 @@ async def steering_receipt(turn_id: str, enqueue_id: str | None) -> None:
 
 
 ACTIVITIES = [
+    dot_judgment_input,
     active_workspace_boundary,
     prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
     prepare_steering, steering_receipt, keep_computer_alive, preserve_failed_workspace,

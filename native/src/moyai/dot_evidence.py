@@ -11,7 +11,7 @@ from pydantic_ai.messages import ToolReturnPart
 
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant
-from .dot_contracts import DotDecision
+from .dot_contracts import DotDecision, DotEvidence
 
 # Prefer a provider's canonical URL when both URL and local ID are returned.
 # An unsupported record shape fails closed instead of guessing its identity.
@@ -65,8 +65,7 @@ def records(value: object) -> Iterator[dict]:
     yield from structured_records(value)
 
 
-def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tuple[DotDecision, str | None]:
-    decision = DotDecision.model_validate_json(output)
+def validate_evidence(evidence: list[DotEvidence], conversation: str, grants: list[Grant]) -> list[tuple[str, str, str]]:
     allowed = {
         f"{grant.kind}_{grant.id[:8]}_{name}": grant.id
         for grant in grants
@@ -80,7 +79,7 @@ def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tu
         for record in records(part.content)
     ]
     identities: list[tuple[str, str, str]] = []
-    for item in decision.evidence:
+    for item in evidence:
         matches: set[tuple[str, str, str]] = set()
         for account, record in sources:
             fields = {key: str(value) for key, value in record.items() if isinstance(value, (str, int))}
@@ -94,5 +93,11 @@ def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tu
         if len(matches) != 1:
             raise ValueError("Dot evidence must identify one connected account's structured provider record.")
         identities.append(matches.pop())
+    return identities
+
+
+def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tuple[DotDecision, str | None]:
+    decision = DotDecision.model_validate_json(output)
+    identities = validate_evidence(decision.evidence, conversation, grants)
     fingerprint = hashlib.sha256(json.dumps(identities[0], ensure_ascii=False).encode()).hexdigest() if identities else None
     return decision, fingerprint

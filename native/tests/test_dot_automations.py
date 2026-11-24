@@ -26,7 +26,7 @@ automations = automation_fixtures.automations
 canonical_connections = automation_fixtures.canonical_connections
 
 
-async def setup(ctx):
+async def setup(ctx, *, discovery=False):
     database = ctx.product.database
     destination = await database.dots.open(ctx.product.actor)
     async with database.sessions.begin() as db:
@@ -38,8 +38,33 @@ async def setup(ctx):
         db.add(connection)
         await db.flush()
     row, binding = await activate(ctx, kind="attention", session_id=destination,
-                                  visibility="private", connection_ids=[connection.id])
+                                  visibility="private", connection_ids=[connection.id],
+                                  attention_mode="discovery" if discovery else "focused")
     return destination, connection, row, binding
+
+
+async def test_discovery_overlap_fences_scheduled_and_manual_admission(automations, canonical_connections):
+    ctx = automations
+    destination, _, row, binding = await setup(ctx, discovery=True)
+    admitted = await occurrence(ctx, row, binding)
+    assert admitted["status"] == "admitted"
+    assert (await occurrence(ctx, row, binding))["status"] == "skipped"
+    with pytest.raises(HTTPException, match="previous discovery"):
+        await ctx.service.run_now(ctx.grant, row["id"], Mutation(revision=row["revision"], request_key=uuid4().hex))
+    # An ordinary reply is independent of the discovery admission fence.
+    assert (await ctx.product.database.admission.submit(ctx.product.actor, destination, NewMessage(
+        prompt="What is next?", request_key=uuid4().hex,
+    ))).id != admitted["turn_id"]
+
+
+async def test_only_one_standing_discovery_definition_per_owner(automations, canonical_connections):
+    ctx = automations
+    destination, connection, _, _ = await setup(ctx, discovery=True)
+    with pytest.raises(HTTPException, match="already has a discovery"):
+        await automation_fixtures.create(
+            ctx, kind="attention", attention_mode="discovery", session_id=destination,
+            visibility="private", connection_ids=[connection.id],
+        )
 
 
 async def test_attention_uses_separate_session_and_pins_selection(automations, canonical_connections):

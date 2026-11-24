@@ -88,6 +88,13 @@ class Trigger(BaseModel):
         return self
 
 
+class AttentionSource(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid')
+    connection_id: str = Field(pattern=r'^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+    source: str = Field(min_length=1, max_length=1000, pattern=r'^https://[^@\s?#]+$',
+                        description='Owner-approved starting URL, such as a project or inbox. Visible to account research; never copy private priorities here.')
+
+
 class Definition(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=2, max_length=100)
@@ -95,6 +102,14 @@ class Definition(BaseModel):
     kind: Literal['task', 'attention'] = Field(
         default='task',
         description='Attention checks read selected accounts and quietly decide whether to message the owner in their Dot chat. They cannot take external actions.',
+    )
+    attention_mode: Literal['focused', 'discovery'] = Field(
+        default='focused',
+        description='Discovery is one standing check of approved accounts for useful developments, without per-item reminders. Its prompt supplies private priorities to judgment and is never sent to the account-reading agent.',
+    )
+    attention_sources: list[AttentionSource] = Field(
+        default_factory=list, max_length=4,
+        description='Optional owner-approved starting locations for discovery. Omit to check account-native recent activity.',
     )
     visibility: Literal['private', 'shared'] = Field(
         default='shared', description='Private definitions and runs are visible only to their owner. Fixed after creation.',
@@ -148,6 +163,16 @@ class Definition(BaseModel):
 
     @model_validator(mode='after')
     def distinct_triggers(self):
+        if self.attention_sources and (
+            self.attention_mode != 'discovery'
+            or any(source.connection_id not in self.connection_ids for source in self.attention_sources)
+        ):
+            raise ValueError('Discovery starting locations must belong to selected accounts.')
+        if self.attention_mode == 'discovery' and (
+            self.kind != 'attention' or len(self.connection_ids) > 2 or len(self.prompt) > 2000
+            or len(self.triggers) != 1
+        ):
+            raise ValueError('Discovery requires one attention schedule, up to two approved accounts, and scan instructions of at most 2000 characters.')
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
         if self.visibility == 'private' and any(t.event for t in self.triggers):

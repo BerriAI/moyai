@@ -429,7 +429,7 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
   onCancel: () => void; onSave: (definition: AutomationDefinition) => Promise<void>
 }) {
   const [definition, setDefinition] = useState<AutomationDefinition>(() => existing ? structuredClone(existing) : {
-    name: "", prompt: "", kind: "task", visibility: "shared", connection_ids: [], session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null, gitlab_project_id: null,
+    name: "", prompt: "", kind: "task", attention_mode: "focused", attention_sources: [], visibility: "shared", connection_ids: [], session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null, gitlab_project_id: null,
     environment_id: "auto", plugins: [], metadata: {}, queue_events: false, max_runs_per_hour: 50,
     self_management: { instructions: false, schedule: false },
     triggers: [{ id: crypto.randomUUID(), schedule: { ...automationDefaultSchedule(), cron: "", run_at: null } }],

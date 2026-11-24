@@ -19,6 +19,7 @@ from pydantic import Field, ValidationError, model_validator
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import durable_operation
 from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai_harness import Memory
 from pydantic_ai_harness.memory import (
     MemoryConflictError,
@@ -692,15 +693,25 @@ class ProductMemory(Memory[RunScope]):
             return None, [], False, type(exc).__name__
 
 
+class ReadOnlyProductMemory(ProductMemory):
+    def get_toolset(self):
+        native = super().get_toolset()
+        if not isinstance(native, AbstractToolset):
+            raise TypeError("Read-only memory requires the Harness memory toolset.")
+        return native.filtered(
+            lambda _ctx, tool: tool.name in {"read_memory", "search_memory"},
+        )
+
+
 def memory_capability(
     service: ProductMemoryService, *, repository_scope: RepositoryScope | None = None,
-    native_store: MemoryStore | None = None,
+    native_store: MemoryStore | None = None, read_only: bool = False,
 ) -> Memory[RunScope]:
     """Pure construction; all source I/O happens in native durable memory operations."""
     service.recall_available = service.auto_save_available = True
     def resolve(ctx: RunContext[RunScope]) -> ProductMemoryStore:
         return ProductMemoryStore(service, ctx.deps, ctx.run_id, repository_scope, native_store, ctx)
-    return ProductMemory(
+    return (ReadOnlyProductMemory if read_only else ProductMemory)(
         store_resolver=resolve,
         namespace=lambda ctx: ctx.deps.memory_namespace,
         guidance=GUIDANCE, injection_errors="raise",

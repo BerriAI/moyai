@@ -235,6 +235,17 @@ class Runtime:
             self.attention_agent = make_attention_agent(
                 self.database, self.models, instrumentation=self.tracing.instrumentation if self.tracing else None,
             )
+            from .dot_discovery_agent import make_discovery_agents
+            discovery_memory = None
+            if self.product_memory is not None:
+                from .product_memory_store import memory_capability
+                discovery_memory = memory_capability(
+                    self.product_memory, native_store=self.stores.memory, read_only=True,
+                )
+            self.discovery_agent, self.dot_judgment_agent = make_discovery_agents(
+                self.database, self.models, memory=discovery_memory,
+                instrumentation=self.tracing.instrumentation if self.tracing else None,
+            )
         except BaseException:
             await self.close()
             raise

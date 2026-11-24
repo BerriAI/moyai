@@ -177,7 +177,9 @@ async def test_billing_identity_comes_from_canonical_actor_not_client_headers(in
     assert "x-litellm-customer-team-id" not in ctx.calls[0]
 
 
-@pytest.mark.parametrize("agent_name", ["moyai", "moyai_responsibility", "moyai_dot_attention"])
+@pytest.mark.parametrize("agent_name", [
+    "moyai", "moyai_responsibility", "moyai_dot_attention", "moyai_dot_research", "moyai_dot_judgment",
+])
 async def test_workflow_retry_with_new_run_id_cannot_repeat_paid_activity(inference, monkeypatch, agent_name):
     info = SimpleNamespace(
         activity_type=f"agent__{agent_name}__model_request", workflow_namespace="local",

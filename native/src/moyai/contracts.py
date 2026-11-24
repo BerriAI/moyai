@@ -67,6 +67,8 @@ class RunScope:
     responsibility_id: str | None = None
     responsibility_generation: int | None = None
     attention: bool = False
+    discovery: bool = False
+    attention_judgment: bool = False
     # Notifications present when an ordinary Dot turn was prepared. Settlement
     # records this cursor; later deliveries enter the next prepared input.
     dot_notification_cursor: int | None = None
@@ -74,7 +76,8 @@ class RunScope:
     @property
     def root_run_id(self) -> str:
         """One logical turn can contain several SDK runs across Temporal histories."""
-        return self.turn_id if not self.history_segment else f"{self.turn_id}:segment:{self.history_segment}"
+        identity = self.turn_id if not self.history_segment else f"{self.turn_id}:segment:{self.history_segment}"
+        return identity + ":judgment" if self.attention_judgment else identity
 
     @property
     def authority(self) -> ExecutionContext:

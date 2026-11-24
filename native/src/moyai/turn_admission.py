@@ -324,6 +324,9 @@ class TurnAdmission:
                 scope.responsibility_generation = responsibility.generation
             attention = await self.database.dots.authorize(db, turn)
             scope.attention = attention is not None
+            if attention is not None:
+                from .dot_models import DotDiscoveryTurn
+                scope.discovery = await db.get(DotDiscoveryTurn, turn.id) is not None
             if scope.delegation_generated and delegation is not None:
                 inherited = (await saved_authority(self.database, db, delegation)).grants
                 if inherited != grants:
@@ -346,7 +349,7 @@ class TurnAdmission:
                     raise PermissionError("Connection access changed during preparation.")
                 if delegation or context.surface == "automation":
                     prepared.scope.execution_context = context
-                if prepared.scope.attention != scope.attention:
+                if prepared.scope.attention != scope.attention or prepared.scope.discovery != scope.discovery:
                     raise PermissionError("The prepared attention authority changed.")
                 return prepared
             if attention is not None:

@@ -23,7 +23,7 @@ from moyai.models import Connection, Message, Session, Turn, User
 from moyai.workspace_recovery import WorkspaceCheckpoint, checkpoint, validate_checkpoint
 
 
-async def observer(runtime, actor, destination=None, connection=None, automation=None):
+async def observer(runtime, actor, destination=None, connection=None, automation=None, *, discovery=False):
     database = runtime.database
     destination = destination or await database.dots.open(actor)
     async with database.sessions.begin() as db:
@@ -49,6 +49,7 @@ async def observer(runtime, actor, destination=None, connection=None, automation
         await database.dots.bind_attention(
             db, turn, automation_id=automation.id, generation=1,
             destination=destination, grants_key=grant_fingerprint(grants),
+            discovery=discovery,
         )
     await database.claim_batch(20)
     prepared = await database.admission.prepare(turn.id)

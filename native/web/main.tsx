@@ -58,7 +58,7 @@ import { waitsBehindActive, type Session, type Message, type NewConversation } f
 import { ProductCredentialRequest } from "./messages/product-credentials"
 import { QuestionChoices } from "./messages/question-choices"
 import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./messages/browser-login"
-import { DotWelcome, usePersonalDot } from "./messages/personal-dot"
+import { DotFollowing, DotWelcome, usePersonalDot } from "./messages/personal-dot"
 import type { DotView } from "./generated/api"
 
 const ComputerPanel = React.lazy(() => import("./workspace/computer").then(module => ({ default: module.ComputerPanel })))
@@ -734,6 +734,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
+        {dot && <DotFollowing key={`${authorityKey}:${connectionVersion}:${id}`} />}
         {sideMode && view.goal && <Dialog open={goalEditorOpen} onOpenChange={setGoalEditorOpen}><DialogContent className="goal-side-dialog">
           <DialogHeader><DialogTitle>Edit goal</DialogTitle><DialogDescription>Review the objective and its budget.</DialogDescription></DialogHeader>
           <GoalEditor goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy} onSubmit={applyGoal} />

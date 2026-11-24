@@ -187,7 +187,11 @@ class AnswerSettlement:
                 from .dot import validate_decision
                 if workspace or deferred or checkpoint_workspace:
                     raise PermissionError("Attention checks cannot save computers or wait for action approvals.")
-                validate_decision(output, conversation, scope.grants)
+                if scope.discovery:
+                    from .dot_contracts import DotJudgment
+                    DotJudgment.model_validate_json(output)
+                else:
+                    validate_decision(output, conversation, scope.grants)
                 try:
                     await self.database.authorize_scope(scope, db=db)
                     await self.database.dots.authorize(db, turn, scope=scope, publication=True)

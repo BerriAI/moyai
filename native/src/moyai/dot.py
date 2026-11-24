@@ -14,7 +14,7 @@ from .automations.product_automation_models import ProductAutomationBinding, Pro
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant, NewSession, RunScope
 from .dot_evidence import validate_decision
-from .dot_models import DotAttentionTurn, DotNotification, PersonalDot
+from .dot_models import DotAttentionTurn, DotDiscoveryTurn, DotNotification, PersonalDot
 from .models import Connection, Message, Session, Turn, User, now
 from .private_instructions import individual
 
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 class Dots:
     def __init__(self, database: Database):
         self.database = database
+        from .dot_discovery import Discovery
+        self.discovery = Discovery(database)
 
     async def grants(self, db: AsyncSession, owner: str, ids: list[str], *, lock: bool = False) -> list[Grant]:
         """Require explicit personal read-tool policy in addition to provider hints."""
@@ -102,7 +104,8 @@ class Dots:
 
     async def bind_attention(
         self, db: AsyncSession, turn: Turn, *, automation_id: str, generation: int,
-        destination: str, grants_key: str,
+        destination: str, grants_key: str, discovery: bool = False,
+        sources: list[dict[str, str]] | None = None,
     ) -> None:
         await self.own_session(db, turn.actor_id, destination)
         worker = await db.get(Session, turn.session_id)
@@ -116,6 +119,9 @@ class Dots:
             turn_id=turn.id, automation_id=automation_id, generation=generation,
             destination_session_id=destination, grants_key=grants_key,
         ))
+        if discovery:
+            await db.flush()
+            db.add(DotDiscoveryTurn(turn_id=turn.id, sources=self.database.security.seal(json.dumps(sources or []))))
 
     async def authorize(
         self, db: AsyncSession, turn: Turn, *, scope: RunScope | None = None, publication: bool = False,
@@ -129,6 +135,8 @@ class Dots:
             return None
         if scope is not None and not scope.attention:
             raise PermissionError("Attention must use its restricted execution mode.")
+        if scope is not None and scope.discovery != (await db.get(DotDiscoveryTurn, turn.id) is not None):
+            raise PermissionError("The discovery execution mode changed.")
         if publication:
             # The product authority check holds the canonical shared writer fence.
             # Serialize native destination/connection changes through their rows.
@@ -153,6 +161,8 @@ class Dots:
     async def attention_prompt(self, db: AsyncSession, turn: Turn) -> str:
         record = await self.authorize(db, turn)
         assert record is not None
+        if await db.get(DotDiscoveryTurn, turn.id) is not None:
+            return await self.discovery.scan_prompt(db, turn, record.destination_session_id)
         messages = list(await db.scalars(select(Message).where(
             Message.session_id == record.destination_session_id, Message.role.in_(["user", "assistant"]),
         ).order_by(Message.id.desc()).limit(30)))
@@ -174,19 +184,27 @@ class Dots:
         record = await db.get(DotAttentionTurn, turn.id)
         if record is None:
             raise PermissionError("The attention occurrence is unavailable.")
-        decision, fingerprint = validate_decision(output, conversation, scope.grants)
-        if decision.action == "quiet":
-            record.outcome = "quiet"
-            return
+        if scope.discovery:
+            outcome, notification, source, fingerprint = await self.discovery.apply(db, turn, output)
+            record.outcome = outcome
+            if notification is None:
+                return
+        else:
+            decision, fingerprint = validate_decision(output, conversation, scope.grants)
+            if decision.action == "quiet":
+                record.outcome = "quiet"
+                return
+            notification, source = decision.message, decision.evidence[0].source
         session = await self.own_session(db, turn.actor_id, record.destination_session_id)
-        primary = decision.evidence[0]
         assert fingerprint is not None
+        assert source is not None
         if await db.scalar(select(DotNotification.turn_id).where(
             DotNotification.session_id == session.id, DotNotification.fingerprint == fingerprint,
         )):
-            record.outcome = "duplicate"
+            if record.outcome not in ("partial", "blocked"):
+                record.outcome = "duplicate"
             return
-        content = decision.message + "\n\nSource: " + primary.source
+        content = notification + "\n\nSource: " + source
         message = Message(
             session_id=session.id, turn_id=turn.id, role="assistant",
             content=self.database.security.seal(content), identity=f"dot:{turn.id}",
@@ -197,7 +215,8 @@ class Dots:
             turn_id=turn.id, session_id=session.id, message_id=message.id, fingerprint=fingerprint,
             content=self.database.security.seal(content),
         ))
-        record.outcome = "notified"
+        if record.outcome != "partial":
+            record.outcome = "notified"
         # Public delivery must not change the SDK checkpoint or its computer
         # recovery digest. The next normal preparation incorporates this mail.
         # Message IDs already invalidate the transcript projection. Computer

@@ -2590,6 +2590,30 @@
         "title": "AskUserRequest",
         "type": "object"
       },
+      "AttentionSource": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "source": {
+            "description": "Owner-approved starting URL, such as a project or inbox. Visible to account research; never copy private priorities here.",
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "^https://[^@\\s?#]+$",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "source"
+        ],
+        "title": "AttentionSource",
+        "type": "object"
+      },
       "AuthConfig": {
         "properties": {
           "access_enabled": {
@@ -2630,6 +2654,25 @@
       "AutomationDefinition": {
         "additionalProperties": false,
         "properties": {
+          "attention_mode": {
+            "default": "focused",
+            "description": "Discovery is one standing check of approved accounts for useful developments, without per-item reminders. Its prompt supplies private priorities to judgment and is never sent to the account-reading agent.",
+            "enum": [
+              "focused",
+              "discovery"
+            ],
+            "title": "Attention Mode",
+            "type": "string"
+          },
+          "attention_sources": {
+            "description": "Optional owner-approved starting locations for discovery. Omit to check account-native recent activity.",
+            "items": {
+              "$ref": "#/components/schemas/AttentionSource"
+            },
+            "maxItems": 4,
+            "title": "Attention Sources",
+            "type": "array"
+          },
           "connection_ids": {
             "description": "Exact authorized connection IDs for new-chat runs. Existing-chat runs retain that chat\u2019s selected accounts.",
             "items": {
@@ -6549,6 +6592,131 @@
           "can_manage"
         ],
         "title": "CredentialSecretMetadata",
+        "type": "object"
+      },
+      "DotItemEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "snoozed_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snoozed Until"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "resolved",
+              "dismissed",
+              "snoozed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "state"
+        ],
+        "title": "DotItemEdit",
+        "type": "object"
+      },
+      "DotItemView": {
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_seen_at": {
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "snoozed_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snoozed Until"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "resolved",
+              "dismissed",
+              "snoozed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "connection_id",
+          "title",
+          "summary",
+          "source",
+          "state",
+          "snoozed_until",
+          "last_seen_at"
+        ],
+        "title": "DotItemView",
+        "type": "object"
+      },
+      "DotItemsView": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DotItemView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limited": {
+            "title": "Limited",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "limited"
+        ],
+        "title": "DotItemsView",
         "type": "object"
       },
       "DotView": {
@@ -10831,6 +10999,25 @@
         "additionalProperties": false,
         "description": "A saved canonical definition as returned to the editor.",
         "properties": {
+          "attention_mode": {
+            "default": "focused",
+            "description": "Discovery is one standing check of approved accounts for useful developments, without per-item reminders. Its prompt supplies private priorities to judgment and is never sent to the account-reading agent.",
+            "enum": [
+              "focused",
+              "discovery"
+            ],
+            "title": "Attention Mode",
+            "type": "string"
+          },
+          "attention_sources": {
+            "description": "Optional owner-approved starting locations for discovery. Omit to check account-native recent activity.",
+            "items": {
+              "$ref": "#/components/schemas/AttentionSource"
+            },
+            "maxItems": 4,
+            "title": "Attention Sources",
+            "type": "array"
+          },
           "connection_ids": {
             "description": "Exact authorized connection IDs for new-chat runs. Existing-chat runs retain that chat\u2019s selected accounts.",
             "items": {
@@ -11004,6 +11191,8 @@
           "name",
           "prompt",
           "kind",
+          "attention_mode",
+          "attention_sources",
           "visibility",
           "connection_ids",
           "session_id",
@@ -22332,6 +22521,73 @@
           }
         },
         "summary": "Open Dot"
+      }
+    },
+    "/api/dot/items": {
+      "get": {
+        "operationId": "listDotItems",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DotItemsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Items"
+      }
+    },
+    "/api/dot/items/{identity}": {
+      "patch": {
+        "operationId": "editDotItem",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "title": "Identity",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DotItemEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DotItemView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit"
       }
     },
     "/api/effects/{effect_id}/resolve": {
