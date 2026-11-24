@@ -91,3 +91,12 @@ quality approval.
 Create a directory under `evals/tasks/` containing `task.toml`, `instruction.md`, an `environment/` with its Dockerfile and fixtures, and `tests/` with a `test.sh` verifier. Keep task-specific fixtures in that task's environment. The `moyai_harbor` package provides the Moyai agent and turn runner shared by tasks.
 
 `evals/moyai_harbor/workspace.py` contains an eval-only `WorkspaceRef(provider="modal")` shim. It presents Harbor's isolated environment as the Modal workspace reference expected by credential execution, while forwarding commands to Harbor's environment. It is not a production workspace backend.
+
+`moyai_harbor.lifecycle` routes that exact synthetic reference's lifecycle reads
+to the Harbor container. Liveness and the fixed keepalive probe execute
+`/bin/true` there; unknown references fail closed. Filesystem snapshots explicitly
+report unsupported, so these trials do not qualify Modal checkpoint/recovery
+behavior. Run one trial at a time per process (`-n 1`) because this scoped fixture
+replaces the external Modal lookup while the trial's worker is active. Actual-app
+E2E with real Modal remains separate evidence; do not add production Modal keys
+to make this Docker adapter pass.

@@ -46,6 +46,7 @@ from temporalio.testing import WorkflowEnvironment
 
 from app.credentials import SaveSecret
 
+from .lifecycle import harbor_lifecycle
 from .slack_fixture import route_slack_clients
 from .workspace import HarborWorkspace
 
@@ -248,40 +249,50 @@ async def run_runtime_turn(
     )
     runtime = Runtime(settings, product_config=product_config)
     try:
-        async with await WorkflowEnvironment.start_local(
-            plugins=[PydanticAIPlugin()],
-            data_converter=encrypted_converter(runtime.security, runtime.objects),
-        ) as temporal:
-            runtime.client = temporal.client
-            await workspace.environment.upload_dir(EVALS.parent / "native" / "skills", "/workspace/skills")
-            await runtime.start(workspace=workspace, skills_directory="skills")
-            assert runtime.product_connections is not None
-            assert runtime.product_slack is not None
-            configure(runtime)
-            bot_credentials = {
-                "access_token": "synthetic-slack-user-token",
-                "bot": {
-                    "access_token": SLACK_BOT_TOKEN,
-                    "bot_user_id": BOT_USER,
-                    "team": {"id": TEAM},
-                    "scope": "channels:read,channels:history,groups:history,chat:write,users:read,users:read.email",
-                },
-            }
-            runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
-            seed_credentials(runtime, credentials)
-            async with make_worker(runtime):
-                result = await execute_turn(
-                    case, trial=trial, thread=thread, runtime=runtime, temporal=temporal,
-                    workspace=workspace,
-                )
-                result["credential_tool_calls"] = {
-                    name: any(call["name"] == name for call in result["tool_trace"])
-                    for name in CREDENTIAL_TOOLS
-                }
-                result.pop("turn_id")
-                return result
+        with harbor_lifecycle(workspace):
+            return await run_isolated_worker(
+                runtime, workspace, case, trial, thread, credentials,
+            )
     finally:
         await runtime.close()
+
+
+async def run_isolated_worker(
+    runtime: Runtime, workspace: HarborWorkspace, case: dict[str, Any], trial: int,
+    thread: list[dict[str, Any]], credentials: dict[str, str],
+) -> dict[str, Any]:
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()],
+        data_converter=encrypted_converter(runtime.security, runtime.objects),
+    ) as temporal:
+        runtime.client = temporal.client
+        await workspace.environment.upload_dir(EVALS.parent / "native" / "skills", "/workspace/skills")
+        await runtime.start(workspace=workspace, skills_directory="skills")
+        assert runtime.product_connections is not None
+        assert runtime.product_slack is not None
+        configure(runtime)
+        bot_credentials = {
+            "access_token": "synthetic-slack-user-token",
+            "bot": {
+                "access_token": SLACK_BOT_TOKEN,
+                "bot_user_id": BOT_USER,
+                "team": {"id": TEAM},
+                "scope": "channels:read,channels:history,groups:history,chat:write,users:read,users:read.email",
+            },
+        }
+        runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
+        seed_credentials(runtime, credentials)
+        async with make_worker(runtime):
+            result = await execute_turn(
+                case, trial=trial, thread=thread, runtime=runtime, temporal=temporal,
+                workspace=workspace,
+            )
+            result["credential_tool_calls"] = {
+                name: any(call["name"] == name for call in result["tool_trace"])
+                for name in CREDENTIAL_TOOLS
+            }
+            result.pop("turn_id")
+            return result
 
 
 async def offered_tool_names(
