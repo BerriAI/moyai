@@ -538,9 +538,6 @@ async def test_canonical_capture_in_real_temporal_replays_without_rewriting_memo
     runtime = Runtime(settings)
     runtime.database.product_identity = product.adapter
     try:
-        await runtime.database.start()
-        await runtime.stores.start()
-
         def respond(messages, info):
             assert any("Use the existing formatter." in str(message) for message in messages)
             if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
@@ -557,7 +554,7 @@ async def test_canonical_capture_in_real_temporal_replays_without_rewriting_memo
                     yield {0: DeltaToolCall(name=part.tool_name, json_args=json.dumps(part.args),
                                            tool_call_id=part.tool_call_id)}
 
-        runtime.models = {"test": FunctionModel(respond, stream_function=stream)}
+        await runtime.start(models={"test": FunctionModel(respond, stream_function=stream)})
         runtime.durability = TemporalDurability(
             models=runtime.models, run_context_type=HarnessActivityContext,
         )

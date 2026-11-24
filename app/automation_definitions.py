@@ -92,6 +92,10 @@ class Definition(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=2, max_length=100)
     prompt: str = Field(min_length=3)
+    kind: Literal['task', 'attention'] = Field(
+        default='task',
+        description='Attention checks read selected accounts and quietly decide whether to message the owner in their Dot chat. They cannot take external actions.',
+    )
     visibility: Literal['private', 'shared'] = Field(
         default='shared', description='Private definitions and runs are visible only to their owner. Fixed after creation.',
     )
@@ -150,6 +154,12 @@ class Definition(BaseModel):
             raise ValueError('Private automations support calendar schedules. Event sources require a shared automation.')
         if self.visibility == 'private' and self.plugins:
             raise ValueError('Private automations require exact connection_ids or the selected chat’s accounts.')
+        if self.kind == 'attention' and (
+            self.visibility != 'private' or any(t.event for t in self.triggers)
+            or self.repo_url or self.environment_id != 'none' or self.plugins
+            or self.self_management.allowed()
+        ):
+            raise ValueError('Attention checks require a private Dot chat, calendar schedules, no project, environment_id="none", and no self-management.')
         if self.gitlab_project_id is not None and (
             not self.repo_url or repository_provider(self.repo_url) != 'gitlab'
             or self.github_repository_id is not None

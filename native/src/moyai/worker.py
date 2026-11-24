@@ -39,7 +39,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
     if runtime.client is None:
         raise RuntimeError("Connect to Temporal before creating the worker.")
     configure(runtime)
-    TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent, runtime.responsibility_agent]
+    TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent, runtime.responsibility_agent, runtime.attention_agent]
     product_workflows = []
     product_activities = []
     if runtime.product_automations is not None:
@@ -50,7 +50,9 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         product_workflows.extend(PRODUCT_AUTOMATION_WORKFLOWS)
         product_activities.extend(PRODUCT_AUTOMATION_ACTIVITIES)
     interceptors: list[Interceptor] = [ExecutionAuthority(runtime.database), ActivityCapacity()]
-    agent_plugins = [AgentPlugin(runtime.agent), AgentPlugin(runtime.responsibility_agent)]
+    agent_plugins = [AgentPlugin(agent) for agent in (
+        runtime.agent, runtime.responsibility_agent, runtime.attention_agent,
+    )]
     identity = settings_worker_identity()
     review = getattr(runtime, "product_memory_review", None)
     if review is not None:

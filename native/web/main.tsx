@@ -58,6 +58,8 @@ import { waitsBehindActive, type Session, type Message, type NewConversation } f
 import { ProductCredentialRequest } from "./messages/product-credentials"
 import { QuestionChoices } from "./messages/question-choices"
 import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./messages/browser-login"
+import { DotWelcome, usePersonalDot } from "./messages/personal-dot"
+import type { DotView } from "./generated/api"
 
 const ComputerPanel = React.lazy(() => import("./workspace/computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings/settings").then(module => ({ default: module.SettingsPage })))
@@ -132,6 +134,7 @@ function App() {
   const settingsOpen = selected === "settings" || selected.startsWith("settings/")
   const historical = selected.startsWith("run=")
   const scopeKey = `${me?.user.id}:${me?.user.role}:${me?.user.individual}:${me?.csrf}`
+  const personalDot = usePersonalDot(me, scopeKey, selected, setError)
   const sessionUpdates = useSessionUpdates(scopeKey)
   const {
     sessions, folders, connections, view: listView, state: inventoryState, error: refreshError,
@@ -246,7 +249,7 @@ function App() {
       <nav className="rail-destinations" aria-label="Workspace tools">
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><FileText />Skills</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
-        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("responsibilities")}><MessageSquare />Dot</Button>
+        {me.user.individual !== false && <Button variant="ghost" className="rail-button" aria-current={personalDot.dot?.session_id === nativeSelected ? "page" : undefined} disabled={personalDot.opening} onClick={() => void personalDot.open()}><MessageSquare />{personalDot.opening ? "Opening Dot…" : "Your Dot"}</Button>}
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
       <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...sessionUpdates.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
@@ -275,6 +278,7 @@ function App() {
         : nativeSelected
         ? <Conversation key={`${scopeKey}:${nativeSelected}`} id={nativeSelected} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refresh} workspaceRequest={workspaceRequest?.sessionId === nativeSelected ? workspaceRequest : null} pullRequests={prStates[nativeSelected] ?? []} onPRUpdated={() => setPrRefresh(value => value + 1)}
           originalSessionId={originalId || undefined} authorityKey={routeScope}
+          dot={personalDot.dot?.session_id === nativeSelected ? personalDot.dot : undefined}
           resolved={nativeRoute?.key === routeKey ? nativeRoute.view : undefined}
           initial={initialConversation?.scope === scopeKey && initialConversation.value.session.id === nativeSelected ? initialConversation.value : undefined}
           onSession={session => { setCurrentSession(session); setInitialConversation(previous => previous?.value.session.id === (session?.id ?? nativeSelected) ? null : previous) }} />
@@ -363,7 +367,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </section></main>
 }
 
-function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PullRequestStatus[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey, dot }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PullRequestStatus[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string; dot?: DotView }) {
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const sessionActions = useSessionActions()
   const sessionUpdates = sessionActions.updates
@@ -745,7 +749,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             followingWork.current = element.scrollHeight - element.scrollTop - element.clientHeight < 180
           }}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
-          {historyState.complete && !messages.length && <div className="empty-chat"><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
+          {historyState.complete && !messages.length && (dot
+            ? <DotWelcome dot={dot} hasDraft={Boolean(draft.trim())} onDraft={text => { setDraft(text); setComposerFocus(value => value + 1) }} />
+            : <div className="empty-chat"><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>)}
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             const segment = segments.get(message.id)

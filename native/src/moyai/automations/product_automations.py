@@ -224,6 +224,8 @@ def _digest(value: Any) -> str:
 def definition_payload(definition: Definition) -> dict[str, Any]:
     """Preserve existing receipts when new optional selections are absent."""
     payload = definition.model_dump(mode="json")
+    if payload["kind"] == "task":
+        payload.pop("kind")
     for field in ("session_id", "gitlab_project_id"):
         if payload[field] is None:
             payload.pop(field)
@@ -348,6 +350,15 @@ class ProductAutomationService:
         if definition.visibility != scope.authority.visibility:
             raise HTTPException(403, "Manage this automation from a chat with matching visibility.")
 
+    @staticmethod
+    def _attention_edit(scope: RunScope, definition: Definition, previous: Definition | None = None) -> None:
+        if definition.kind != "attention":
+            return
+        retained = set(previous.connection_ids) if previous and previous.kind == "attention" else set()
+        added = set(definition.connection_ids) - retained
+        if not added.issubset(grant.id for grant in scope.grants):
+            raise HTTPException(403, "Select each new attention account in this chat before adding it.")
+
     async def _old_active(self, db: AsyncSession, identity: str) -> bool:
         return bool(await db.scalar(text(
             f"SELECT 1 FROM {self._table('automation_runs')} a "
@@ -362,6 +373,13 @@ class ProductAutomationService:
     ) -> list[str]:
         result = []
         project_grants = []
+        if definition.kind == "attention":
+            if not definition.session_id:
+                result.append("personal_dot_required")
+            try:
+                await self.database.dots.grants(db, row["owner_id"], definition.connection_ids)
+            except HTTPException:
+                result.append("personal_read_only_connections_with_explicit_tool_allowlists_required")
         if definition.session_id:
             try:
                 await self.database.automation_session(
@@ -369,6 +387,11 @@ class ProductAutomationService:
                 )
             except HTTPException:
                 result.append("scheduled_chat_unavailable")
+            if definition.kind == "attention":
+                try:
+                    await self.database.dots.own_session(db, row["owner_id"], definition.session_id)
+                except HTTPException:
+                    result.append("personal_dot_required")
         if definition.mode != "modal":
             result.append("execution_mode_not_supported")
         if len(definition.triggers) > MAX_TRIGGERS:
@@ -434,6 +457,8 @@ class ProductAutomationService:
 
     def normalize_definition(self, definition: Definition, previous: Definition | None = None) -> Definition:
         """Preserve the canonical save contract without the old harness selector."""
+        if definition.kind == "attention" and not definition.session_id:
+            raise HTTPException(422, "Choose Your Dot as the attention delivery destination.")
         if previous is not None and definition.visibility != previous.visibility:
             raise HTTPException(409, "Automation visibility is fixed. Create a separate automation for another audience.")
         try:
@@ -498,7 +523,12 @@ class ProductAutomationService:
         if capture:
             connections = []
             grants = []
-            if definition.session_id:
+            if definition.kind == "attention":
+                from ..database import grant_fingerprint
+                grants = await self.database.dots.grants(db, binding.owner_id, definition.connection_ids)
+                connections = sorted(grant.id for grant in grants)
+                workspace = {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(grants)}
+            elif definition.session_id:
                 connections, workspace = await self._chat_context(
                     db, binding.owner_id, definition.session_id, visibility=definition.visibility,
                 )
@@ -519,7 +549,7 @@ class ProductAutomationService:
                 }) if self.workspace else {}
             if not self._repository_identity_known(workspace):
                 raise HTTPException(409, "Verify the repository's permanent identity before enabling this automation.")
-            if self.workspace is not None:
+            if self.workspace is not None and definition.kind != "attention":
                 self.workspace.authorize_project_grants(workspace, grants)
             if any(trigger.event for trigger in definition.triggers):
                 workspace = {
@@ -555,6 +585,18 @@ class ProductAutomationService:
         ):
             raise HTTPException(409, "The saved execution authority is inconsistent.")
         event_authority = {}
+        if definition.kind == "attention":
+            from ..database import grant_fingerprint
+            if not definition.session_id:
+                raise HTTPException(409, "The attention destination is missing.")
+            await self.database.dots.own_session(db, binding.owner_id, definition.session_id)
+            grants = await self.database.dots.grants(db, binding.owner_id, connections)
+            if (
+                connections != sorted(definition.connection_ids)
+                or workspace != {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(grants)}
+            ):
+                raise HTTPException(409, "The attention accounts changed. Review and enable this schedule again.")
+            return connections, workspace
         if workspace.get("format") == "moyai-automation-context-v2":
             event_authority, workspace = workspace["events"], workspace["workspace"]
         if not self._repository_identity_known(workspace):
@@ -1025,6 +1067,7 @@ class ProductAutomationService:
                     definition = identified or self.normalize_definition(Definition.model_validate(body.definition.model_dump()))
                     if scope is not None:
                         self._tool_target(scope, definition)
+                        self._attention_edit(scope, definition)
                     if definition.visibility == "private" and not principal.individual:
                         raise HTTPException(403, "Private automations require an individual account.")
                     stamp = now()
@@ -1050,9 +1093,11 @@ class ProductAutomationService:
                 if action == "update":
                     if not isinstance(body, Save):
                         raise HTTPException(422, "An update requires a complete definition.")
+                    previous = definition
                     definition = identified or self.normalize_definition(Definition.model_validate(body.definition.model_dump()), definition)
                     if scope is not None:
                         self._tool_target(scope, definition)
+                        self._attention_edit(scope, definition, previous)
                     definition.harness = CORE_IDENTITY if binding else previous_harness
                     if self.events is not None:
                         await self.events.remove_receivers(db, identity, definition)
@@ -1080,6 +1125,8 @@ class ProductAutomationService:
                     await self.database.automation_session(
                         db, principal.id, definition.session_id, visibility=definition.visibility,
                     )
+                    if definition.kind == "attention":
+                        await self.database.dots.own_session(db, principal.id, definition.session_id)
                 revision = row["revision"] + (action != "create")
                 if action != "create":
                     await db.execute(text(
@@ -1236,10 +1283,16 @@ class ProductAutomationService:
                 db, grant=original, title=f"Automation · {definition.name}",
                 prompt=definition.prompt, model=self.settings.resolve_model(definition.model or None),
                 request_key="automation-" + hashlib.sha256(key.encode()).hexdigest(),
-                connections=connections, session_id=definition.session_id,
+                connections=connections, session_id=None if definition.kind == "attention" else definition.session_id,
                 visibility=definition.visibility,
             )
-            if self.workspace is not None:
+            if definition.kind == "attention":
+                assert definition.session_id is not None
+                await self.database.dots.bind_attention(
+                    db, turn, automation_id=identity, generation=binding.generation,
+                    destination=definition.session_id, grants_key=workspace["grants_key"],
+                )
+            elif self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
             return await receipt(
                 db, row, binding, trigger_id, key, "admitted", "Admitted to the native execution core.",
@@ -1256,7 +1309,10 @@ class ProductAutomationService:
             self._owner(row, principal)
             previous = await db.get(Occurrence, key)
             if previous:
-                return {"status": previous.status, "session_id": previous.session_id, "turn_id": previous.turn_id}
+                return {
+                    "status": previous.status, "turn_id": previous.turn_id,
+                    "session_id": await self.database.dots.delivery_session(db, previous.session_id, previous.turn_id),
+                }
             binding = await db.get(Binding, identity)
             definition = _definition(row)
             if (
@@ -1281,15 +1337,22 @@ class ProductAutomationService:
                 db, grant=original, title=f"Automation · {definition.name}", prompt=definition.prompt,
                 model=self.settings.resolve_model(definition.model or None),
                 request_key="automation-" + hashlib.sha256(key.encode()).hexdigest(), connections=connections,
-                session_id=definition.session_id,
+                session_id=None if definition.kind == "attention" else definition.session_id,
                 visibility=definition.visibility,
             )
-            if self.workspace is not None:
+            if definition.kind == "attention":
+                assert definition.session_id is not None
+                await self.database.dots.bind_attention(
+                    db, turn, automation_id=identity, generation=binding.generation,
+                    destination=definition.session_id, grants_key=workspace["grants_key"],
+                )
+            elif self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
             result = await self._receipt(
                 db, row, binding, "manual", key, "admitted", "Admitted by the owner's explicit Run now request.",
                 session_id=session.id, turn_id=turn.id,
             )
+            result["session_id"] = await self.database.dots.delivery_session(db, session.id, turn.id)
         await self.identity.require_current(grant)
         return result
 
@@ -1334,7 +1397,10 @@ class ProductAutomationService:
                     ).where(ProductAutomationTurn.origin_turn_id == link.turn_id).order_by(
                         Turn.created_at.desc(), Turn.id.desc(),
                     ).limit(1)) or turn
-                session = await db.get(Session, link.session_id) if link and link.session_id else None
+                destination = await self.database.dots.delivery_session(
+                    db, link.session_id, link.turn_id,
+                ) if link else row["run_id"]
+                session = await db.get(Session, destination) if link and destination else None
                 if session and (session.deleted or (
                     session.visibility == "private"
                     and (session.owner_id != principal.id or definition.visibility != "private" or visibility == "shared")
@@ -1344,7 +1410,7 @@ class ProductAutomationService:
                     "occurrence": row["occurrence"], "revision": row["revision"], "outcome": row["outcome"],
                     "created_at": row["created_at"], "engine": CORE_IDENTITY if link else "legacy",
                     "status": turn.status if turn else link.status if link else row["legacy_status"] or row["outcome"],
-                    "session_id": link.session_id if link else row["run_id"], "turn_id": link.turn_id if link else None,
+                    "session_id": destination, "turn_id": link.turn_id if link else None,
                     "detail": link.detail if link else "",  # Historical provider diagnostics are not exported.
                 })
         await self.identity.require_current(grant)

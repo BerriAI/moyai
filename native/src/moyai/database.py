@@ -134,6 +134,8 @@ class Database:
         self.goals = Goals(self)
         from .responsibilities import Responsibilities
         self.responsibilities = Responsibilities(self)
+        from .dot import Dots
+        self.dots = Dots(self)
         self.admission = TurnAdmission(self)
         if settings.sqlalchemy_url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
@@ -826,6 +828,7 @@ class Database:
             await self.swarms.authorize(db, turn, scope=scope)
             await self.goals.authorize(db, turn)
             await self.responsibilities.authorize(db, turn, scope=scope)
+            await self.dots.authorize(db, turn, scope=scope)
             session = await self.execution_session(db, scope.session_id, actor)
             if (
                 session.active_turn != turn.id or session.status != "running" or turn.status != "running"

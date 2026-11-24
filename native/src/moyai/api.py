@@ -347,6 +347,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     app.include_router(sidebar_routes(runtime, actor))
     from .responsibility_routes import routes as responsibility_routes
     app.include_router(responsibility_routes(runtime, actor))
+    from .dot_routes import routes as dot_routes
+    app.include_router(dot_routes(runtime, actor))
     app.include_router(workspace_routes(runtime, actor))
     app.include_router(file_preview_routes(runtime, actor))
     app.include_router(pull_request_routes(runtime, actor))

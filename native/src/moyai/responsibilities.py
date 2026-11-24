@@ -52,9 +52,13 @@ CLOSED_CONTROLLER = "Responsibility workflow closed unexpectedly. Review activit
 
 
 def ordinary_session():
-    return ~select(ResponsibilityAssignment.turn_id).join(
+    from .dot_models import DotAttentionTurn
+    return (~select(ResponsibilityAssignment.turn_id).join(
         Turn, Turn.id == ResponsibilityAssignment.turn_id,
-    ).where(Turn.session_id == Session.id).correlate(Session).exists()
+    ).where(Turn.session_id == Session.id).correlate(Session).exists()) & (
+        ~select(DotAttentionTurn.turn_id).join(Turn, Turn.id == DotAttentionTurn.turn_id)
+        .where(Turn.session_id == Session.id).correlate(Session).exists()
+    )
 
 
 def due(seconds: int) -> str:
@@ -81,10 +85,14 @@ class Responsibilities:
         ).where(Turn.session_id == session_id).limit(1)))
 
     async def editable_input(self, db: AsyncSession, turn: Turn) -> None:
+        if await self.database.dots.worker_session(db, turn.session_id):
+            raise HTTPException(409, "Attention checks are immutable. Reply in Your Dot.")
         if await db.get(ResponsibilityAssignment, turn.id) is not None:
             raise HTTPException(409, "Responsibility evidence reviews are immutable. Use the responsibility controls.")
 
     async def ordinary_chat(self, db: AsyncSession, session_id: str) -> None:
+        if await self.database.dots.worker_session(db, session_id):
+            raise HTTPException(409, "Attention checks are immutable. Reply in Your Dot.")
         if await self.worker_session(db, session_id):
             raise HTTPException(409, "Use Dot review activity for this immutable responsibility review.")
 

@@ -27,6 +27,7 @@ ROUTING_VERSION = "moyai-activity-capacity-isolation-v1"
 CHAT_CONTROL_ROUTING_VERSION = "moyai-chat-control-capacity-v2"
 CHAT_CONTROL_OPERATIONS = (
     "__capability__moyai_private_instructions__load",
+    "__capability__moyai_dot_instructions__load",
     "__capability__moyai_commentary__save",
     "__toolset__planning__call_tool",
 )

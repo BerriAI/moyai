@@ -46,6 +46,7 @@ SKILL_LEARNING_VERSION = "2026-11-21-skill-learning-v26"
 PERSONAL_OAUTH_VERSION = "2026-11-23-personal-oauth-v27"
 RESPONSIBILITY_VERSION = "2026-11-23-responsibilities-v28"
 RESPONSIBILITY_WORKFLOW_VERSION = "2026-11-24-responsibility-workflows-v29"
+PERSONAL_DOT_VERSION = "2026-11-24-personal-dot-v30"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -297,6 +298,35 @@ def _responsibility_wake_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _personal_dot_tables(metadata: MetaData, schema: str) -> None:
+    Table(
+        "moyai_personal_dots", metadata,
+        Column("owner_id", String(512), ForeignKey(f"{schema}.moyai_users.id"), primary_key=True),
+        Column("session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), nullable=False, unique=True),
+        Column("checkpoint_cursor", Integer, nullable=False),
+        Column("created_at", String(40), nullable=False), schema=schema,
+    )
+    Table(
+        "moyai_dot_attention_turns", metadata,
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_turns.id"), primary_key=True),
+        Column("automation_id", String(32), ForeignKey(f"{schema}.moyai_product_automation_bindings.id"), nullable=False),
+        Column("generation", Integer, nullable=False),
+        Column("destination_session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), nullable=False),
+        Column("grants_key", String(64), nullable=False),
+        Column("outcome", String(20), nullable=True), schema=schema,
+    )
+    Table(
+        "moyai_dot_notifications", metadata,
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_dot_attention_turns.turn_id"), primary_key=True),
+        Column("session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), nullable=False, index=True),
+        Column("message_id", Integer, ForeignKey(f"{schema}.moyai_messages.id"), nullable=False, unique=True),
+        Column("fingerprint", String(64), nullable=False),
+        Column("content", Text, nullable=False),
+        Column("created_at", String(40), nullable=False),
+        UniqueConstraint("session_id", "fingerprint", name="dot_notification_evidence"), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -316,6 +346,9 @@ EXPANSIONS = (
     }), (), _responsibility_tables),
     Expansion(RESPONSIBILITY_VERSION, RESPONSIBILITY_WORKFLOW_VERSION,
               frozenset({"moyai_responsibility_wakes"}), (), _responsibility_wake_tables),
+    Expansion(RESPONSIBILITY_WORKFLOW_VERSION, PERSONAL_DOT_VERSION, frozenset({
+        "moyai_personal_dots", "moyai_dot_attention_turns", "moyai_dot_notifications",
+    }), (), _personal_dot_tables),
 )
 
 

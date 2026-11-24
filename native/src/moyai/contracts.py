@@ -66,6 +66,10 @@ class RunScope:
     goal_generation: int | None = None
     responsibility_id: str | None = None
     responsibility_generation: int | None = None
+    attention: bool = False
+    # Notifications present when an ordinary Dot turn was prepared. Settlement
+    # records this cursor; later deliveries enter the next prepared input.
+    dot_notification_cursor: int | None = None
 
     @property
     def root_run_id(self) -> str:

@@ -334,3 +334,5 @@ legend { margin-bottom: 12px; font-weight: 500; }
   .chat .composer-entry .send-actions > button { width: 44px; height: 44px; min-height: 44px; }
   .chat .composer-actions > button { min-height: 44px; height: 44px; }
 }
+.dot-starters { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.dot-starters button { height: auto; white-space: normal; text-align: left; }

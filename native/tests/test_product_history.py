@@ -25,6 +25,7 @@ from fastapi import FastAPI, HTTPException
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from moyai.dot import Dots
 from moyai.models import Base, SessionPreference, Turn, User
 from moyai.models import Message as NativeMessage
 from moyai.models import Session as NativeSession
@@ -639,6 +640,7 @@ async def unified(product, tmp_path):
     runtime.database.security = security
     runtime.database.product_identity = None
     runtime.database.product_authority_enabled = False
+    runtime.database.dots = Dots(runtime.database)
     runtime.database.responsibilities = Responsibilities(runtime.database)
     for method in (
         "allowed_session", "execution_session", "check_source_audience", "same_person", "prefetch_session_audiences",

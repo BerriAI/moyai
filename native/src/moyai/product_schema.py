@@ -73,7 +73,8 @@ SKILL_LEARNING_SCHEMA_VERSION = "2026-11-21-skill-learning-v26"
 PERSONAL_OAUTH_SCHEMA_VERSION = "2026-11-23-personal-oauth-v27"
 RESPONSIBILITY_SCHEMA_VERSION = "2026-11-23-responsibilities-v28"
 RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION = "2026-11-24-responsibility-workflows-v29"
-PRODUCT_SCHEMA_VERSION = RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION
+PERSONAL_DOT_SCHEMA_VERSION = "2026-11-24-personal-dot-v30"
+PRODUCT_SCHEMA_VERSION = PERSONAL_DOT_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -165,6 +166,9 @@ MIGRATIONS = (
         "moyai_responsibility_completions",
     })),
     (RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION, frozenset({"moyai_responsibility_wakes"})),
+    (PERSONAL_DOT_SCHEMA_VERSION, frozenset({
+        "moyai_personal_dots", "moyai_dot_attention_turns", "moyai_dot_notifications",
+    })),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing
@@ -255,6 +259,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "delegation_models",
         "goal_models",
         "responsibility_models",
+        "dot_models",
     ):
         import_module(f"{__package__}.{module}")
     included = frozenset().union(*(item[1] for item in MIGRATIONS[:versions.index(version) + 1]))
