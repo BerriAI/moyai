@@ -68,7 +68,7 @@ async def preserve_failed_workspace(runtime: Runtime, turn_id: str) -> None:
             session.last_actor_id, session.last_model = scope.actor_id, scope.model
             session.last_grants = scope.grants_key
             session.revision += 1
-            session.save_warning = WARNING
+            session.save_warning = WARNING if reference else None
             if not reference or reference.get("provider") not in {"modal", "lambda"}:
                 return
             if session.workspace_scope != scope.workspace_key:
@@ -102,7 +102,7 @@ async def preserve_failed_workspace(runtime: Runtime, turn_id: str) -> None:
         async with database.sessions.begin() as db:
             session = await db.get(Session, scope.session_id)
             if (
-                session and session.active_turn == turn_id and session.status == "running"
+                session and session.workspace and session.active_turn == turn_id and session.status == "running"
                 and maintenance_workspace(session.snapshot) is None
             ):
                 session.save_warning = WARNING

@@ -13,7 +13,7 @@ from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
+from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef, WorkspaceUnavailableError
 from sqlalchemy import select, update
 from temporalio import workflow
 from temporalio.client import WorkflowFailureError
@@ -24,7 +24,7 @@ from test_bundled_skills_startup import scripted_model
 from moyai.agent import make_agent
 from moyai.computer_startup import STARTUP_VERSION
 from moyai.contracts import NewMessage, RunScope
-from moyai.models import Effect, User
+from moyai.models import Effect, Turn, User
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
@@ -172,6 +172,70 @@ async def test_full_agent_replays_pre_lazy_startup_commands(runtime, active, mon
             interceptors=[ActivityCapacity()],
         ).replay_workflow(history)
     assert len(model_calls) == 1
+
+
+@pytest.mark.parametrize("legacy_message", [False, True])
+async def test_failed_first_allocation_is_not_reported_as_a_lost_computer(
+    runtime, active, actor, monkeypatch, legacy_message,
+):
+    session, turn, _ = active
+    directory = runtime.settings.data_dir.parent / "computer"
+
+    class UnavailableBackend(LocalWorkspaceBackend):
+        @property
+        def ref(self) -> WorkspaceRef | None:
+            return None
+
+        async def working_dir(self) -> str:
+            raise WorkspaceUnavailableError("Provider capacity unavailable; synthetic-sensitive-provider-detail")
+
+    class UnavailableComputer(LocalWorkspace[RunScope]):
+        def get_workspace(self, ctx: RunContext[RunScope], *, ref: WorkspaceRef | None):
+            assert ref is None
+            return UnavailableBackend(directory)
+
+    runtime.models = {"test": scripted_model(lambda messages, info: ModelResponse(parts=[
+        ToolCallPart("write_file", {"path": "proof.txt", "content": "not written"}, tool_call_id="first-write"),
+    ]))}
+    runtime.agent, runtime.durability = make_agent(
+        runtime.settings, runtime.database, runtime.stores, runtime.objects,
+        models=runtime.models, workspace=UnavailableComputer(directory),
+    )
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    original = workflow.patched
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        with monkeypatch.context() as old:
+            if legacy_message:
+                old.setattr(workflow, "patched", lambda identity: (
+                    False if identity == "moyai-workspace-startup-error-v1" else original(identity)
+                ))
+            async with make_worker(runtime):
+                handle = await runtime.client.start_workflow(
+                    TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+                )
+                with pytest.raises(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), 30)
+                history = await handle.fetch_history()
+        await Replayer(
+            workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            interceptors=[ActivityCapacity()],
+        ).replay_workflow(history)
+    saved = await runtime.database.session(actor, session.id)
+    assert not saved.workspace
+    assert not saved.save_warning
+    async with runtime.database.sessions() as db:
+        failed = await db.get(Turn, turn.id)
+        assert failed is not None
+        assert "synthetic-sensitive-provider-detail" not in failed.error
+        if legacy_message:
+            assert "computer is no longer available" in failed.error
+        else:
+            assert "could not start a coding computer" in failed.error
+            assert "no longer available" not in failed.error
+    assert not (directory / "proof.txt").exists()
 
 
 @pytest.mark.parametrize("tool_name", [
