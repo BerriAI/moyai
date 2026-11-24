@@ -401,7 +401,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
-        from .personal_oauth import public_oauth_landing
+        from .personal_oauth import landing, personal_callback, public_oauth_landing
 
         if not hasattr(request.state, "moyai_received_at"):
             request.state.moyai_received_at = now()
@@ -413,7 +413,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if runtime.product is not None and (
             request.url.path not in {"/health", "/healthz"}
             and not request.url.path.startswith(("/hooks/", "/broker/native/"))
-            and not (request.method == "GET" and public_oauth_landing(request.url.path))
+            and not public_oauth_landing(request)
         ):
             from .product_access import access_session
             try:
@@ -436,7 +436,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 response.raw_headers.append((b"set-cookie", access_cookie))
                 response.headers["Cache-Control"] = "no-store"
                 return response
-        response = await call_next(request)
+        if personal_callback(request):
+            try:
+                response = landing(request, runtime.settings.public_url)
+            except HTTPException as error:
+                response = JSONResponse({"detail": error.detail}, status_code=error.status_code)
+        else:
+            response = await call_next(request)
         if (
             runtime.product_identity is not None
             and getattr(request.state, "product_identity_grant", None) is not None

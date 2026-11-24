@@ -2,6 +2,7 @@
 import asyncio
 import html
 import json
+import math
 import re
 import time
 from urllib.parse import urlencode
@@ -346,6 +347,11 @@ class Connectors:
 
     async def verify(self, provider, credentials):
         if provider == 'github':
+            if credentials.get("kind") == "oauth_user":
+                user = await self.github.request("GET", "/user", token=credentials["access_token"])
+                if not user.get("id") or not user.get("login"):
+                    raise ConnectorError("GitHub did not confirm your account.", dispatched=False)
+                return user["login"]
             return await self.github.verify(credentials)
         if provider == 'gitlab':
             return await self.gitlab.verify(credentials)
@@ -666,12 +672,24 @@ class Connectors:
             parts.append({'channel': result.get('channel', channel), 'ts': result['ts']})
         return {**result, 'channel': parts[0]['channel'], 'ts': parts[0]['ts'], 'parts': parts, 'complete': True}
 
-    def authorization_url(self, provider, state):
-        client_id = getattr(self.settings, f"{provider}_client_id")
+    def oauth_client(self, provider):
+        """One deployment app, shared by organization and personal grants."""
+        if provider == "github":
+            app = self.github.app_config()
+            if app.get("client_id") and app.get("client_secret"):
+                return app["client_id"], app["client_secret"]
+        return getattr(self.settings, f"{provider}_client_id"), getattr(self.settings, f"{provider}_client_secret")
+
+    def authorization_url(self, provider, state, *, code_challenge=None):
+        client_id, _ = self.oauth_client(provider)
         params = {"client_id": client_id, "redirect_uri": self.redirect_uri(provider), "state": state, "response_type": "code"}
         if provider == "linear":
             params.update(scope="read,write", actor="user")
             base = "https://linear.app/oauth/authorize"
+        elif provider == "github":
+            # A GitHub App's user token is limited by both the app installation
+            # and the authorizing person; OAuth App scopes do not apply.
+            base = "https://github.com/login/oauth/authorize"
         elif provider == "slack":
             params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history")
             if self.settings.slack_bot_enabled:
@@ -684,21 +702,28 @@ class Connectors:
         else:
             params["owner"] = "user"
             base = "https://api.notion.com/v1/oauth/authorize"
+        if code_challenge and provider in {"linear", "github"}:
+            params.update(code_challenge=code_challenge, code_challenge_method="S256")
         return base + "?" + urlencode(params)
 
     def redirect_uri(self, provider):
         return f"{self.settings.public_url.rstrip('/')}/oauth/{provider}/callback"
 
-    async def exchange(self, provider, *, code=None, refresh_token=None):
-        client_id = getattr(self.settings, f"{provider}_client_id")
-        client_secret = getattr(self.settings, f"{provider}_client_secret")
+    async def exchange(self, provider, *, code=None, refresh_token=None, code_verifier=None):
+        client_id, client_secret = self.oauth_client(provider)
         payload = {"grant_type": "refresh_token" if refresh_token else "authorization_code"}
         if refresh_token:
             payload["refresh_token"] = refresh_token
         else:
             payload.update(code=code, redirect_uri=self.redirect_uri(provider))
+            if code_verifier and provider in {"linear", "github"}:
+                payload["code_verifier"] = code_verifier
         if provider == "notion":
             result = await self.request("POST", "https://api.notion.com/v1/oauth/token", auth=(client_id, client_secret), json=payload)
+        elif provider == "github":
+            payload.update(client_id=client_id, client_secret=client_secret)
+            result = await self.request("POST", "https://github.com/login/oauth/access_token",
+                                        headers={"Accept": "application/json"}, data=payload)
         else:
             payload.update(client_id=client_id, client_secret=client_secret)
             result = await self.request("POST", "https://api.linear.app/oauth/token" if provider == "linear" else "https://slack.com/api/oauth.v2.access", data=payload)
@@ -713,7 +738,10 @@ class Connectors:
             result = user
         if not result.get("access_token"):
             raise ConnectorError("The app did not return an access token. Reconnect with the required user scopes.", dispatched=False)
-        result["kind"] = "oauth"
-        if result.get("expires_in"):
-            result["expires_at"] = time.time() + result["expires_in"]
+        result["kind"] = "oauth_user" if provider == "github" else "oauth"
+        if "expires_in" in result:
+            lifetime = result["expires_in"]
+            if type(lifetime) not in (int, float) or not math.isfinite(lifetime) or lifetime <= 0:
+                raise ConnectorError("The app returned an invalid token lifetime. Reconnect your account.", dispatched=False)
+            result["expires_at"] = time.time() + lifetime
         return result

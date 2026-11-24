@@ -20,7 +20,7 @@ const gatewayConnection = (patch={}) => mcpConnection({
 function defaults() {
   return {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
-    personalApps: [['linear','Linear'],['notion','Notion'],['github','GitHub'],['slack','Slack']].map(([provider,name])=>({
+    personalApps: [['linear','Linear'],['notion','Notion'],['github','GitHub']].map(([provider,name])=>({
       provider,name,configured:['linear','notion'].includes(provider),connected:false,connection_id:null,
     })),
     general: {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0},

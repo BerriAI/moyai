@@ -150,9 +150,12 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
         grant, policy = connection.grant, connection.policy
         if policy.oauth:
             from .personal_oauth_tools import PersonalOAuthToolset
-            from .runtime import current
 
-            native = PersonalOAuthToolset(current().database, ctx.deps, grant).filtered(
+            service = product_service()
+            native = (
+                PersonalOAuthToolset(service, ctx.deps, grant) if grant.kind == "github"
+                else service.toolset(ctx.deps, grant)
+            ).filtered(
                 lambda _ctx, tool: not grant.read_only or read_only_tool(tool),
             )
         elif grant.kind == "litellm":

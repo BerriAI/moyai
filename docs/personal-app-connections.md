@@ -1,47 +1,141 @@
 # Personal app connections
 
-In **Settings → Connections → Your apps**, choose **Connect**, approve access on the provider’s website, and return to Moyai. No user-created developer app or pasted access token is required. The account appears in the connection picker for private chats; select it there or in General preferences. Shared chats do not receive personal credentials. Existing organization connections are independent.
+In an existing-product deployment, open **Settings → Connections → Your apps**,
+choose **Connect**, and approve the provider's consent screen. Select the account
+in a private chat. Users do not register developer apps or paste tokens.
 
-## Deployment setup
+This feature uses the deployment's existing app registrations. It does not
+create a new OAuth client for each person. Each person receives a separate grant
+and encrypted tokens. Organization connections remain independent.
 
-Set `MOYAI_PUBLIC_URL` to the externally reachable HTTPS application URL, including its path prefix if any. Local development supports HTTP on localhost. Persist the deployment encryption key and private database; OAuth credentials and client secrets are encrypted at rest with the same application encryption service. Use the normal native schema migration/online expansion process to apply `2026-11-23-personal-oauth-v27` before starting the updated existing-product deployment.
+## Existing services
 
-| Provider | One-time Moyai operator setup | Callback path |
+| Provider | Shared app configuration | Callback |
 | --- | --- | --- |
-| Linear | None: Moyai registers a public PKCE client with Linear’s official MCP server. | `/oauth/personal/linear/callback` |
-| Notion | None: Moyai registers a public PKCE client with Notion’s official MCP server. | `/oauth/personal/notion/callback` |
-| GitHub | Register a Moyai-owned OAuth app, set `MOYAI_GITHUB_CLIENT_ID` and secret `MOYAI_GITHUB_CLIENT_SECRET`. | `/oauth/personal/github/callback` |
-| Slack | Register an eligible Moyai Slack MCP app, set `MOYAI_SLACK_MCP_CLIENT_ID` and secret `MOYAI_SLACK_MCP_CLIENT_SECRET`. | `/oauth/personal/slack/callback` |
+| Linear | Existing `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `/oauth/linear/callback` |
+| Notion | Existing `NOTION_CLIENT_ID` and `NOTION_CLIENT_SECRET` | `/oauth/notion/callback` |
+| GitHub | OAuth client pair retained in the existing encrypted GitHub App registration; `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are the fallback for an already registered app | `/oauth/github/callback` |
+| Slack | Existing Personal Slack service and `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` | Existing `/oauth/slack/callback` |
 
-For configured apps, register the full callback URL: `MOYAI_PUBLIC_URL` plus the path above. These are deployment credentials, never end-user settings. Slack/GitHub remain visibly unavailable until configured; users are not routed to a developer-console setup form.
+Linear and Notion delegate authorization, code exchange, refresh, verification,
+and tool execution to `app.connectors.Connectors`. GitHub uses the same GitHub
+App registration and its user authorization flow, with the existing GitHub
+capability for personal tools. New GitHub App registrations retain the returned
+client pair encrypted in `github_app`; older registrations may need their
+operator to supply the same app's client pair.
 
-Slack currently permits MCP access for internal or directory-published apps. A broadly distributed Moyai integration therefore also requires the appropriate Slack distribution approval. Workspace app restrictions may still require an administrator to approve an installation. GitHub organization policies can similarly restrict OAuth app access. Moyai cannot override provider policies.
+Slack's existing Personal Slack component is also shown in Your apps. Its
+storage, scopes, callback, renewal, account selection, and tools remain in the
+existing service. This feature does not add a Slack MCP app or parallel Slack
+token store.
 
-The requested permissions are defined centrally in `oauth_providers.py`: Linear issue/project reads and writes; Notion’s MCP scope; GitHub repository/user access; Slack channel/conversation search, history, users and messaging. Moyai requires approval for tool writes and retains its prohibited-tool policy.
+The fresh standalone mode does not expose these deployment-managed personal
+connections. Existing-product mode uses its individual work-account sign-in;
+shared-password identities cannot authorize personal apps. These modes select
+data and identity integration, not different agent engines.
+
+## One-time operator setup
+
+Use `PUBLIC_URL` (or the deployment's existing public-URL alias) plus each callback
+path above, including any application path prefix. Reuse a Moyai-owned app.
+Only an operator creates a registration if none exists. Provider workspace or
+organization restrictions can still require an administrator's approval.
+
+Linear uses its existing `read,write` user consent and S256 PKCE. Notion retains
+the capabilities configured on the shared connection and the pages authorized
+by the person. GitHub App user access is bounded by both the app installation
+and the user's permissions; a classic GitHub OAuth App is not the intended
+replacement for the existing GitHub App.
+
+Validate recovered credentials before enabling them: confirm the app identity,
+owner, permissions and callback; complete consent through an isolated real
+Moyai deployment; verify a provider read and disconnect. An accepted client
+authentication probe alone is not a successful end-to-end consent test. Keep
+missing, empty, invalid or unverified pairs unconfigured.
+
+Persist the existing source encryption key and separate native encryption key.
+Apply native schema expansion `2026-11-23-personal-oauth-v27` using the normal
+release/migration process before starting the changed application.
+
+### Product-dev infrastructure
+
+Product-dev's configuration lives in `BerriAI/litellm-ops` under
+`helm/overlays/aws/litellm-dev/us-west-1/litellm-product-dev/moyai/`.
+Follow its ConfigMap and ExternalSecret pattern. Shared app secrets belong in
+AWS Secrets Manager, not Helm values, source control, or user settings.
+
+For example, after validating and staging a Notion pair in
+`litellm-product-dev/moyai/runtime`, a JSON6902 patch on the existing
+`moyai-runtime` ExternalSecret can add:
+
+```yaml
+- op: add
+  path: /spec/data/-
+  value:
+    secretKey: NOTION_CLIENT_ID
+    remoteRef:
+      key: litellm-product-dev/moyai/runtime
+      property: NOTION_CLIENT_ID
+- op: add
+  path: /spec/data/-
+  value:
+    secretKey: NOTION_CLIENT_SECRET
+    remoteRef:
+      key: litellm-product-dev/moyai/runtime
+      property: NOTION_CLIENT_SECRET
+```
+
+Use the same mapping for a validated Linear or GitHub pair when needed. Stage
+the referenced properties before syncing the patch: missing properties can
+prevent the ExternalSecret from reconciling. Use the usual reviewed GitOps
+rollout for every application role; publishing application code does not
+configure provider registrations or deploy these credentials automatically.
 
 ## Lifecycle and boundaries
 
-- Authorization uses S256 PKCE and a ten-minute, single-use state bound to the individual user, current login cookie and account version. A newer attempt or disconnect invalidates older callbacks, including callbacks already exchanging a code.
-- The provider callback first loads a no-store Moyai page, then navigates to the authenticated completion endpoint. This restores same-site browser context for Strict login cookies without relaxing their policy. The public landing page never redeems a code or reads account data.
-- Tokens, refresh tokens and dynamic client material are encrypted in dedicated tables. Chat grants and durable tool payloads carry the connection reference, not provider tokens.
-- Before tool discovery or execution, the worker checks the current private-chat authority and resolves a fresh token. Expiring tokens renew server-side; concurrent renewal is serialized to protect rotating refresh tokens. Providers that omit expiry keep the token until revoked. Failed renewal asks the user to reconnect.
-- Disconnect removes saved tokens and pending states and invalidates admitted grants. It does not revoke the provider-side authorization; users can also revoke Moyai in their provider settings.
-- Tool definitions are checked again before dispatch. Writes are not automatically retried after an uncertain result.
+- Ten-minute, single-use state is bound to the individual, login cookie,
+  account version, provider, app identity and connection revision. A newer
+  attempt or disconnect fences earlier callbacks, including an exchange in flight.
+- Personal state has a distinct `personal-app:` prefix at the shared callback.
+  Ordinary organization authorization and GitHub installation callbacks retain
+  their existing handlers.
+- A no-store callback landing page restores first-party browser context before
+  authenticated completion. It never redeems a code or reads account data.
+- Per-user tokens and pending PKCE material are encrypted in native tables.
+  Shared app secrets stay in the existing deployment configuration or encrypted
+  GitHub registration. Durable chat grants contain references, not tokens.
+- Linear, Notion and GitHub personal grants are admitted only in private web
+  chats, not Slack or automation surfaces. Existing Personal Slack retains its
+  own established surface rules.
+- Workers resolve current credentials before tool execution. Expiring tokens
+  renew server-side; a database row lock serializes rotating refreshes across
+  processes. Credentials without a provider expiry remain usable until revoked;
+  a failed renewal asks the person to reconnect.
+- Current workspace enabled/read-only policy is checked at dispatch. Personal
+  writes require approval, retain prohibited-tool filtering, and are not
+  automatically replayed after an uncertain result.
+- Disconnect clears saved tokens and pending states and invalidates admitted
+  grants. It does not revoke provider-side authorization; the person can also
+  revoke Moyai in provider settings.
 
 ## Verification
 
-Protocol tests use synthetic provider responses and supplement real provider verification:
+Protocol and browser-fixture tests supplement actual-app/provider proof:
 
 ```sh
-uv run pytest native/tests/test_personal_oauth.py native/tests/test_api_contract.py
+uv run pytest native/tests/test_personal_oauth.py native/tests/test_product_connections.py native/tests/test_github_publication_setup.py native/tests/test_api_contract.py
 MOYAI_TEST_POSTGRES=postgresql://... uv run pytest native/tests/test_native_online_schema.py native/tests/test_native_additive_schema.py native/tests/test_product_schema_versions.py
 npm run api:check
 npm run typecheck
 npm test
 npm run build
-npm run test:ui
+node --test --test-concurrency=1 tests/browser/native_settings.cjs
 ```
 
-For a real local test, start the application with `uv run moyai dev --host 127.0.0.1 --port 8796`, an isolated data directory, workspace login, a configured gateway and `MOYAI_PUBLIC_URL=http://127.0.0.1:8796`. Connect Linear or Notion through the actual consent page, return to Your apps, and check that a read through the selected personal connection succeeds. Repeat cancellation and disconnect. Never substitute fixture responses for provider consent evidence.
-
-Provider references: [Linear MCP](https://linear.app/docs/mcp), [Notion MCP](https://developers.notion.com/docs/get-started-with-mcp), [GitHub OAuth](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps), [GitHub MCP](https://github.com/github/github-mcp-server), [Slack MCP](https://docs.slack.dev/ai/slack-mcp-server/).
+For local before/after proof, use the supported existing-product local
+rehearsal with isolated source/native PostgreSQL schemas, source/native keys,
+an individual test identity, and `uv run moyai dev`. Run the same Connections
+workflow on the baseline and final revisions. Verify real provider consent,
+the private account appearing, a read, cancellation and disconnect. Document
+substituted identity/bootstrap data and any missing provider prerequisites;
+fixture responses do not establish successful provider authorization.

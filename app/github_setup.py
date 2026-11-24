@@ -1,4 +1,4 @@
-"""Admin-only GitHub App manifest/installation flow; no per-user GitHub OAuth."""
+"""Admin-only GitHub App registration and installation; personal grants reuse this app."""
 import html
 import json
 import re
@@ -216,6 +216,7 @@ def routes(connectors, security, store, settings):
                     'description': 'Shared Moyai integration for code, PRs and ruleset required reviewers; agents cannot approve or merge PRs.',
                     'redirect_url': origin + '/oauth/github/app-callback',
                     'setup_url': origin + '/oauth/github/callback', 'setup_on_update': True,
+                    'callback_urls': [origin + '/oauth/github/callback'],
                     'hook_attributes': {'url': origin + '/hooks/github', 'active': False},
                     'public': False, 'request_oauth_on_install': False, 'default_events': [],
                     'default_permissions': MANIFEST_PERMISSIONS}
@@ -253,6 +254,9 @@ def routes(connectors, security, store, settings):
                 raise ConnectorError('The registered GitHub App has a different owner or permissions. An administrator must inspect it.')
             require_protection_permission(data.get('permissions'))
             config = {k: data[k] for k in ('id', 'slug', 'pem')}
+            # Retain the same registered app's user-authorization credentials.
+            # They remain encrypted in github_app, never in browser responses.
+            config.update({k: data[k] for k in ('client_id', 'client_secret') if data.get(k)})
             config.update(owner_id=owner['owner_id'], owner_login=owner['owner_login'])
             store.execute('DELETE FROM github_registration WHERE state_hash=?', (digest(state),))
             github.app_jwt(config)

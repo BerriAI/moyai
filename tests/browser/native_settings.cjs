@@ -13,7 +13,6 @@ async function open(t,route='personal-slack',width=1440,theme='dark'){
   await page.addInitScript(theme=>localStorage.setItem('moyai-appearance',theme),theme);
   await page.goto(fixture.base+'/#settings/'+route);
   await page.locator('.ns-content h1').waitFor();
-  if(route==='connections'&&fixture.state.productMode==='standalone')await page.getByText('Advanced connections',{exact:true}).click();
   return page;
 }
 async function noOverflow(page){
@@ -170,13 +169,22 @@ for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Pers
   const apps=page.getByRole('region',{name:'Your apps',exact:true});
   const connect=apps.getByRole('button',{name:'Connect personal Linear',exact:true});
   await connect.waitFor();assert.equal(await connect.isEnabled(),true);
-  assert.equal(await apps.getByRole('button',{name:'Connect personal Slack',exact:true}).isEnabled(),false);
+  assert.equal(await apps.getByRole('button',{name:'Reconnect personal Slack',exact:true}).isEnabled(),true);
   assert.equal(await apps.locator('input').count(),0);
   await connect.focus();assert.equal(await connect.evaluate(el=>el===document.activeElement),true);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   await page.route('https://provider.example.test/**',route=>route.fulfill({contentType:'text/html',body:'<h1>Fixture provider consent</h1>'}));
   await connect.click();await page.waitForURL('https://provider.example.test/authorize?provider=linear');
   assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections/linear/oauth').length,1);
+});
+test('Your apps reuses the existing Personal Slack authorization',async t=>{
+  fixture.reset();fixture.state.personal.connected=false;
+  const page=await open(t,'connections');
+  const apps=page.getByRole('region',{name:'Your apps',exact:true});
+  await apps.getByRole('button',{name:'Connect personal Slack',exact:true}).click();
+  await page.waitForURL('**/?fixture-oauth=1#settings/personal-slack');
+  assert.equal(fixture.state.requests.filter(r=>r.path==='/api/connections/slack/personal/oauth'&&r.method==='POST').length,1);
+  assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections/slack/oauth').length,0);
 });
 test('Personal app errors retry and disconnect requires confirmation',async t=>{
   fixture.reset();fixture.state.personalAppsError=true;

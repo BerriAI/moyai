@@ -10513,8 +10513,7 @@
             "enum": [
               "linear",
               "notion",
-              "github",
-              "slack"
+              "github"
             ],
             "title": "Provider",
             "type": "string"
@@ -22327,8 +22326,7 @@
               "enum": [
                 "linear",
                 "notion",
-                "github",
-                "slack"
+                "github"
               ],
               "title": "Provider",
               "type": "string"
@@ -22372,8 +22370,7 @@
               "enum": [
                 "linear",
                 "notion",
-                "github",
-                "slack"
+                "github"
               ],
               "title": "Provider",
               "type": "string"

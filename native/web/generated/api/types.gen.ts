@@ -5865,7 +5865,7 @@ export type PersonalOAuthView = {
     /**
      * Provider
      */
-    provider: 'linear' | 'notion' | 'github' | 'slack';
+    provider: 'linear' | 'notion' | 'github';
 };
 
 /**
@@ -13110,7 +13110,7 @@ export type DisconnectPersonalConnectionData = {
         /**
          * Provider
          */
-        provider: 'linear' | 'notion' | 'github' | 'slack';
+        provider: 'linear' | 'notion' | 'github';
     };
     query?: never;
     url: '/api/personal-connections/{provider}';
@@ -13140,7 +13140,7 @@ export type StartPersonalConnectionData = {
         /**
          * Provider
          */
-        provider: 'linear' | 'notion' | 'github' | 'slack';
+        provider: 'linear' | 'notion' | 'github';
     };
     query?: never;
     url: '/api/personal-connections/{provider}/oauth';

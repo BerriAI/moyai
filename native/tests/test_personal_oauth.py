@@ -7,51 +7,76 @@ import html
 import json
 import time
 from dataclasses import asdict, replace
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 import pytest_asyncio
+from app.connectors import Connectors
+from app.db import Store
+from app.security import Security as ProductSecurity
 from fastapi import HTTPException
-from pydantic import SecretStr
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage
 from sqlalchemy import select
+from test_product_identity import settings_for
 
 from moyai import oauth_providers, personal_oauth
 from moyai.api import create_app
 from moyai.contracts import NewMessage, NewSession
 from moyai.models import Connection
 from moyai.oauth_models import OAuthAuthorization, OAuthCredential
-from moyai.oauth_providers import OAuthClient, OAuthTokens
 from moyai.personal_oauth_tools import PersonalOAuthToolset
+from moyai.product_connections import ProductConnections
 
 
 @pytest_asyncio.fixture
-async def oauth(runtime, monkeypatch):
+async def oauth(runtime, monkeypatch, tmp_path):
     runtime.settings.public_url = "https://moyai.test"
     exchanges = []
+    settings = settings_for(tmp_path, public_url="https://moyai.test", linear_client_id="moyai-client",
+                            linear_client_secret="shared-app-secret", notion_client_id="notion-client",
+                            notion_client_secret="shared-notion-secret")
+    store = Store(settings.data_dir, settings.agent_model)
+    service = ProductConnections(SimpleNamespace(store_proxy=store, security=ProductSecurity(settings), settings=settings), runtime.database)
+    service.connectors.github.save_app({"client_id": "github-client", "client_secret": "shared-github-secret"})
 
-    async def register(settings, provider):
-        return OAuthClient(client_id="moyai-client", redirect_uri=oauth_providers.callback_uri(settings, provider))
+    async def request(self, method, url, **kwargs):
+        if "token" in url or "access_token" in url:
+            return {"access_token": "private-provider-token", "refresh_token": "private-refresh-token", "expires_in": 3600}
+        if "linear" in url:
+            return {"data": {"viewer": {"organization": {"name": "Test workspace"}}}}
+        return {"bot": {"workspace_name": "Test workspace"}}
 
-    async def exchange(provider, client, **kwargs):
-        exchanges.append((provider, client, kwargs))
-        return OAuthTokens(
-            access_token=SecretStr("private-provider-token"), refresh_token=SecretStr("private-refresh-token"),
-            expires_at=time.time() + 3600, client=client,
-        )
-    monkeypatch.setattr(personal_oauth, "register", register)
+    async def github_request(self, method, path, **kwargs):
+        assert path == "/user"
+        return {"id": 1, "login": "test-user"}
+
+    from app.github import GitHub
+    monkeypatch.setattr(Connectors, "request", request)
+    monkeypatch.setattr(GitHub, "request", github_request)
+    real_exchange = personal_oauth.exchange
+
+    async def exchange(service, provider, identity, **kwargs):
+        exchanges.append((provider, identity, kwargs))
+        return await real_exchange(service, provider, identity, **kwargs)
+
     monkeypatch.setattr(personal_oauth, "exchange", exchange)
     app = create_app(runtime, run_dispatcher=False)
+    # The full canonical service is reused; this fixture substitutes provider I/O
+    # and login only. Existing-product deployment proof is recorded separately.
+    runtime.product_connections = service
+    runtime.database.product_connections = service
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://moyai.test") as client:
         response = await client.post("/api/login", json={"username": "admin", "password": "test-password-12345"})
         assert response.status_code == 200
         client.headers["X-Moyai-CSRF"] = response.json()["csrf"]
         yield client, exchanges
+    store.close()
 
 
 async def begin(client, provider="linear"):
@@ -60,8 +85,8 @@ async def begin(client, provider="linear"):
     return parse_qs(urlsplit(response.json()["url"]).query)
 
 
-async def finish(client, params, **extra):
-    return await client.get("/oauth/personal/linear/complete", params={
+async def finish(client, params, provider="linear", **extra):
+    return await client.get(f"/oauth/personal/{provider}/complete", params={
         "state": params["state"][0], "code": "approved-code", **extra,
     })
 
@@ -70,8 +95,10 @@ async def test_personal_consent_pkce_encrypted_tokens_and_grants(runtime, actor,
     client, exchanges = oauth
     params = await begin(client)
     assert params["code_challenge_method"] == ["S256"]
-    assert "client_secret" not in params and params["resource"] == ["https://mcp.linear.app/mcp"]
-    response = await finish(client, params, iss="https://mcp.linear.app")
+    assert "client_secret" not in params and "resource" not in params
+    assert params["client_id"] == ["moyai-client"]
+    assert params["redirect_uri"] == ["https://moyai.test/oauth/linear/callback"]
+    response = await finish(client, params)
     assert response.status_code == 303 and "personal_connection=success" in response.headers["location"]
     verifier = exchanges[0][2]["verifier"]
     assert params["code_challenge"] == [
@@ -99,7 +126,7 @@ async def test_personal_consent_pkce_encrypted_tokens_and_grants(runtime, actor,
     assert len(exchanges) == 1
 
 
-@pytest.mark.parametrize("change", ["cookie", "provider", "issuer", "expired", "cancel"])
+@pytest.mark.parametrize("change", ["cookie", "provider", "client", "expired", "cancel"])
 async def test_invalid_or_cancelled_consent_does_not_connect(runtime, oauth, change):
     client, exchanges = oauth
     params = await begin(client)
@@ -111,16 +138,17 @@ async def test_invalid_or_cancelled_consent_does_not_connect(runtime, oauth, cha
         # A new valid session for the same account still cannot consume this flow.
         response = await client.post("/api/login", json={"username": "admin", "password": "test-password-12345"})
         client.headers["X-Moyai-CSRF"] = response.json()["csrf"]
+    if change == "client":
+        runtime.product_connections.settings.linear_client_id = "replacement-app"
     if change == "provider":
         response = await client.get("/oauth/personal/notion/complete", params={"state": params["state"][0], "code": "code"})
     else:
         response = await finish(client, params, **(
-            {"iss": "https://attacker.test"} if change == "issuer"
-            else {"error": "access_denied"} if change == "cancel" else {}
+            {"error": "access_denied"} if change == "cancel" else {}
         ))
     assert response.status_code == 303
     assert "personal_connection=success" not in response.headers["location"]
-    assert exchanges == []
+    assert len(exchanges) == (1 if change == "client" else 0)
     assert not any(row["connected"] for row in (await client.get("/api/personal-connections")).json())
 
 
@@ -129,7 +157,7 @@ async def test_cross_site_landing_does_not_need_cookie_or_redeem_code(runtime, o
     params = await begin(client)
     cookies = client.cookies
     client.cookies = httpx.Cookies()
-    response = await client.get("/oauth/personal/linear/callback", params={
+    response = await client.get("/oauth/linear/callback", params={
         "state": params["state"][0], "code": 'code"><script>alert(1)</script>',
     })
     assert response.status_code == 200
@@ -192,9 +220,9 @@ async def test_refresh_keeps_grant_authority_and_disconnect_revokes(runtime, act
     account = (await client.get("/api/connections")).json()[0]
     async with runtime.database.sessions.begin() as db:
         credential = await db.get(OAuthCredential, account["id"])
-        tokens = OAuthTokens.model_validate_json(runtime.security.unseal(credential.encrypted))
-        tokens.expires_at = time.time() - 1
-        credential.encrypted = runtime.security.seal(tokens.stored())
+        tokens = json.loads(runtime.security.unseal(credential.encrypted))
+        tokens["expires_at"] = time.time() - 1
+        credential.encrypted = runtime.security.seal(tokens)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="Read my issues", request_key="oauth-refresh", connections=[account["id"]],
@@ -210,50 +238,127 @@ async def test_refresh_keeps_grant_authority_and_disconnect_revokes(runtime, act
         await personal_oauth.access_token(runtime.database, prepared.scope, grant)
 
 
-@pytest.mark.parametrize("provider", ["linear", "notion", "github", "slack"])
-async def test_provider_protocol_never_sends_secret_to_authorization_url(runtime, monkeypatch, provider):
-    runtime.settings.public_url = "https://moyai.test/prefix"
-    runtime.settings.personal_github_client_id = "github-app"
-    runtime.settings.personal_github_client_secret = SecretStr("private-client-secret")
-    runtime.settings.personal_slack_client_id = "slack-app"
-    runtime.settings.personal_slack_client_secret = SecretStr("private-client-secret")
+@pytest.mark.parametrize("provider", ["linear", "notion", "github"])
+async def test_shared_app_protocol_and_refresh(runtime, oauth, monkeypatch, provider):
+    client, _ = oauth
+    service = runtime.product_connections
+    sent = []
+    original = Connectors.request
+
+    async def request(self, method, url, **kwargs):
+        sent.append((url, kwargs))
+        return await original(self, method, url, **kwargs)
+
+    monkeypatch.setattr(Connectors, "request", request)
+    params = await begin(client, provider)
+    assert params["redirect_uri"] == [f"https://moyai.test/oauth/{provider}/callback"]
+    assert "client_secret" not in params
+    assert ("code_challenge" in params) == (provider != "notion")
+    assert "personal_connection=success" in (await finish(client, params, provider)).headers["location"]
+    token_request = sent[0][1]
+    payload = token_request.get("json", token_request.get("data"))
+    if provider == "notion":
+        assert token_request["auth"] == ("notion-client", "shared-notion-secret")
+    else:
+        assert payload["client_secret"] == ("shared-github-secret" if provider == "github" else "shared-app-secret")
+        assert payload["code_verifier"]
+    identity = await oauth_providers.client_identity(service, provider)
+    renewed = await oauth_providers.exchange(service, provider, identity, previous={"refresh_token": "old-refresh"})
+    assert renewed["expires_at"] > time.time()
+    assert renewed["refresh_token"] == "private-refresh-token"
+    assert "shared-app-secret" not in json.dumps(renewed)
+    refresh_payload = sent[2][1].get("json", sent[2][1].get("data")) if provider != "github" else sent[1][1]["data"]
+    assert refresh_payload["refresh_token"] == "old-refresh"
+    assert "code" not in refresh_payload
+
+
+async def test_slack_uses_only_the_existing_personal_service(runtime, oauth):
+    client, _ = oauth
+    rows = (await client.get("/api/personal-connections")).json()
+    assert {row["provider"] for row in rows} == {"linear", "notion", "github"}
+    assert (await client.post("/api/personal-connections/slack/oauth")).status_code == 422
+    assert not personal_oauth.personal_callback(httpx.Request("GET", "https://moyai.test/oauth/slack/callback?state=personal-slack:test"))
+
+
+@pytest.mark.parametrize("lifetime", ["3600", None, True, 0, -1, float("inf"), float("nan")])
+async def test_invalid_provider_expiry_does_not_connect(runtime, oauth, monkeypatch, lifetime):
+    client, _ = oauth
+
+    async def invalid_token(self, method, url, **kwargs):
+        return {"access_token": "unusable-token", "expires_in": lifetime}
+
+    monkeypatch.setattr(Connectors, "request", invalid_token)
+    params = await begin(client)
+    response = await finish(client, params)
+    assert "personal_connection=failed" in response.headers["location"]
+    inventory = (await client.get("/api/personal-connections")).json()
+    assert not any(row["connected"] for row in inventory)
+    async with runtime.database.sessions() as db:
+        assert all(not row.encrypted for row in await db.scalars(select(OAuthCredential)))
+
+
+@pytest.mark.parametrize("provider,tool_name", [("linear", "teams"), ("notion", "search")])
+async def test_canonical_tools_use_only_personal_token_and_live_workspace_policy(
+    runtime, actor, oauth, monkeypatch, provider, tool_name,
+):
+    client, _ = oauth
+    service = runtime.product_connections
+    service.connectors.save(provider, {"access_token": "organization-token", "kind": "oauth"}, "Shared account")
+    original = service.connectors.connection_revision(provider)
+    await finish(client, await begin(client, provider), provider)
+    account = next(row for row in (await client.get("/api/connections")).json() if row["policy"].get("oauth"))
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    turn = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Read my account", request_key=f"canonical-{provider}", connections=[account["id"]],
+    ))
+    await runtime.database.claim_next()
+    scope = (await runtime.database.prepare(turn.id)).scope
+    grant = scope.grants[0]
     sent = []
 
-    async def request(url, **kwargs):
-        sent.append((url, kwargs))
-        return {"client_id": "registered-client"} if url.endswith("/register") else {
-            "access_token": "access-token", "refresh_token": "new-refresh", "expires_in": 3600,
-            "token_type": "user" if provider == "slack" else "bearer",
-        }
-    monkeypatch.setattr(oauth_providers, "provider_request", request)
-    client = await oauth_providers.register(runtime.settings, provider)
-    assert client.redirect_uri == f"https://moyai.test/prefix/oauth/personal/{provider}/callback"
-    url = oauth_providers.authorization_url(provider, client, "state", "verifier")
-    assert "private-client-secret" not in url
-    tokens = await oauth_providers.exchange(provider, client, code="code", verifier="verifier")
-    assert sent[-1][1]["data"]["code_verifier"] == "verifier"
-    assert tokens.expires_at > time.time()
-    await oauth_providers.exchange(provider, client, previous=tokens)
-    assert sent[-1][1]["data"]["refresh_token"] == "new-refresh"
-    assert "code" not in sent[-1][1]["data"]
+    async def request(self, method, url, **kwargs):
+        sent.append(kwargs["headers"]["Authorization"])
+        if provider == "linear":
+            return {"data": {"teams": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}
+        return {"results": [], "has_more": False, "next_cursor": None}
+
+    monkeypatch.setattr(Connectors, "request", request)
+    tools = service.toolset(scope, grant)
+    ctx = RunContext(deps=scope, model=TestModel(), usage=RunUsage())
+    definition = (await tools.get_tools(ctx))[tool_name]
+    args = {"query": "proof"} if provider == "notion" else {}
+    await tools.call_tool(tool_name, args, ctx, definition)
+    assert sent == ["Bearer private-provider-token"]
+    assert service.connectors.connection_revision(provider) == original
+    service.store.execute(
+        "INSERT INTO connection_policies(provider,enabled,read_only) VALUES(?,1,1) "
+        "ON CONFLICT(provider) DO UPDATE SET read_only=1", (provider,),
+    )
+    with pytest.raises(PermissionError, match="read only"):
+        await service.credentials(scope, grant, write=True)
+    with pytest.raises(PermissionError, match="read only"):
+        await service.check(scope, grant, write=True)
+    service.store.execute("UPDATE connection_policies SET enabled=0 WHERE provider=?", (provider,))
+    with pytest.raises(PermissionError, match="disabled"):
+        await tools.call_tool(tool_name, args, ctx, definition)
+    assert sent == ["Bearer private-provider-token"]
+    assert service.connectors.connection_revision(provider) == original
 
 
-@pytest.mark.parametrize("provider,token_type", [("slack", "bot"), ("linear", "user"), ("github", "user")])
-async def test_provider_token_type_does_not_admit_a_different_credential(monkeypatch, provider, token_type):
-    async def request(url, **kwargs):
-        return {"access_token": "access-token", "token_type": token_type}
-
-    monkeypatch.setattr(oauth_providers, "provider_request", request)
-    client = OAuthClient(client_id="client", redirect_uri="https://moyai.test/callback")
-    with pytest.raises(oauth_providers.OAuthFailure, match="invalid token"):
-        await oauth_providers.exchange(provider, client, code="code", verifier="verifier")
+@pytest.mark.parametrize("surface", ["slack", "automation"])
+async def test_personal_grants_require_private_web_surface(runtime, actor, oauth, surface):
+    client, _ = oauth
+    await finish(client, await begin(client))
+    account = next(row for row in (await client.get("/api/connections")).json() if row["policy"].get("oauth"))
+    with pytest.raises(HTTPException):
+        await runtime.product_connections.resolve_grants(actor.id, [account["id"]], surface=surface)
 
 
 async def test_personal_tools_approval_live_tokens_and_revocation(runtime, actor, oauth, monkeypatch):
-    from moyai import personal_oauth_tools
+    from pydantic_ai_harness.github import GitHub
 
     client, _ = oauth
-    await finish(client, await begin(client))
+    await finish(client, await begin(client, "github"), "github")
     account = (await client.get("/api/connections")).json()[0]
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
@@ -264,8 +369,8 @@ async def test_personal_tools_approval_live_tokens_and_revocation(runtime, actor
     calls, tokens = [], []
     fail = False
 
-    def remote(config, token, allowed, **kwargs):
-        tokens.append(token)
+    def remote(self):
+        tokens.append(self.auth)
         tools = FunctionToolset(id="test-provider")
 
         def change_issue(title: str) -> str:
@@ -277,8 +382,8 @@ async def test_personal_tools_approval_live_tokens_and_revocation(runtime, actor
         tools.add_function(change_issue, metadata={"annotations": {"readOnlyHint": False}})
         return tools
 
-    monkeypatch.setattr(personal_oauth_tools, "remote_mcp_toolset", remote)
-    tools = PersonalOAuthToolset(runtime.database, scope, scope.grants[0]).prepared(
+    monkeypatch.setattr(GitHub, "get_toolset", remote)
+    tools = PersonalOAuthToolset(runtime.product_connections, scope, scope.grants[0]).prepared(
         lambda ctx, definitions: [replace(tool, kind="unapproved") for tool in definitions],
     ).approval_required()
     ctx = RunContext(deps=scope, model=TestModel(), usage=RunUsage())
@@ -294,7 +399,7 @@ async def test_personal_tools_approval_live_tokens_and_revocation(runtime, actor
         await tools.call_tool("change_issue", {"title": "Uncertain write"}, approved, definition)
     assert "private-provider-token" not in str(error.value)
     assert calls == ["Approved title", "Uncertain write"]  # Writes are never replayed.
-    await client.delete("/api/personal-connections/linear")
+    await client.delete("/api/personal-connections/github")
     count = len(tokens)
     with pytest.raises((PermissionError, ToolFailed, HTTPException)):
         await tools.call_tool("change_issue", {"title": "Revoked"}, approved, definition)
@@ -307,9 +412,9 @@ async def test_concurrent_token_refresh_rotates_once(runtime, actor, oauth, monk
     account = (await client.get("/api/connections")).json()[0]
     async with runtime.database.sessions.begin() as db:
         saved = await db.get(OAuthCredential, account["id"])
-        old = OAuthTokens.model_validate_json(runtime.security.unseal(saved.encrypted))
-        old.expires_at = time.time() - 1
-        saved.encrypted = runtime.security.seal(old.stored())
+        old = json.loads(runtime.security.unseal(saved.encrypted))
+        old["expires_at"] = time.time() - 1
+        saved.encrypted = runtime.security.seal(old)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="Read issues", request_key="oauth-concurrent", connections=[account["id"]],
@@ -318,11 +423,11 @@ async def test_concurrent_token_refresh_rotates_once(runtime, actor, oauth, monk
     scope = (await runtime.database.prepare(turn.id)).scope
     calls = []
 
-    async def rotate(provider, client, *, previous):
-        calls.append(previous.refresh_token.get_secret_value())
+    async def rotate(service, provider, identity, *, previous):
+        calls.append(previous["refresh_token"])
         await asyncio.sleep(.05)
-        return OAuthTokens(access_token=SecretStr("new-access"), refresh_token=SecretStr("new-refresh"),
-                           expires_at=time.time() + 3600, client=client)
+        return {"access_token": "new-access", "refresh_token": "new-refresh",
+                "expires_at": time.time() + 3600, "client_id": identity}
 
     monkeypatch.setattr(personal_oauth, "exchange", rotate)
     assert await asyncio.gather(*[

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowRight, Check, Github, Link2, Slack } from "lucide-react"
+import { ArrowRight, Check, Github, Link2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { csrfToken } from "./api"
@@ -12,10 +12,9 @@ const descriptions: Record<PersonalOAuthView["provider"], string> = {
   linear: "Work with your issues, projects, and teams.",
   notion: "Find and update the pages you authorize.",
   github: "Work with your repositories, issues, and pull requests.",
-  slack: "Find conversations and work in Slack as yourself.",
 }
 
-export function PersonalConnections({ userId, individual }: { userId: string; individual: boolean }) {
+export function PersonalConnections({ userId, individual, children }: { userId: string; individual: boolean; children?: React.ReactNode }) {
   const [revision, setRevision] = useState(0)
   const [state, setState] = useState<{ userId: string; rows?: PersonalOAuthView[]; error?: string }>({ userId })
   const [busy, setBusy] = useState<{ provider: PersonalOAuthView["provider"]; action: "connect" | "disconnect" } | null>(null)
@@ -87,7 +86,7 @@ export function PersonalConnections({ userId, individual }: { userId: string; in
       {state.error && <div className="ns-error" role="alert">{state.error} <Button variant="outline" onClick={() => setRevision(value => value + 1)}>Retry</Button></div>}
       {!rows && !state.error && <p role="status">Loading your apps…</p>}
       {rows && <div className="ns-records">{rows.map(row => {
-        const Icon = row.provider === "github" ? Github : row.provider === "slack" ? Slack : Link2
+        const Icon = row.provider === "github" ? Github : Link2
         return <article className="ns-record" key={row.provider}>
           <Icon className="ns-record-icon" aria-hidden="true" />
           <div className="ns-record-copy">
@@ -103,6 +102,7 @@ export function PersonalConnections({ userId, individual }: { userId: string; in
           </div>
         </article>
       })}</div>}
+      {children}
     </>}
     {disconnect && <Dialog open onOpenChange={open => { if (!open && !busy) setDisconnect(null) }}><DialogContent className="native-settings-dialog">
       <DialogHeader><DialogTitle>Disconnect {disconnect.name}?</DialogTitle><DialogDescription>Moyai will remove your saved tokens and stop using this account. You can also revoke Moyai in the provider’s settings.</DialogDescription></DialogHeader>
