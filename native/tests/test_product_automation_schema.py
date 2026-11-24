@@ -16,13 +16,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_product_authority import demote
 
-from moyai.contracts import NewMessage, NewSession
-from moyai.models import Message, ProductTurnAuthority, Session, Turn, User
-from moyai.product_automation_models import (
+from moyai.automations.product_automation_models import (
     ProductAutomationBinding,
     ProductAutomationOccurrence,
     ProductAutomationOperation,
 )
+from moyai.contracts import NewMessage, NewSession
+from moyai.models import Message, ProductTurnAuthority, Session, Turn, User
 from moyai.product_identity import ProductGrant
 from moyai.product_schema import (
     AUTHORITY_SCHEMA_VERSION,
@@ -214,7 +214,7 @@ async def test_receipt_session_turn_and_original_grant_share_one_transaction(adm
             assert (await db.get(Session, session.id)).visibility == "shared"
     if commit:
         assert (await product.database.claim_next()).id == turn.id
-        prepared = await product.database.prepare(turn.id)
+        prepared = await product.database.admission.prepare(turn.id)
         assert prepared.scope.product_grant == product.principal.grant
         assert prepared.scope.surface == "automation"
 
@@ -360,14 +360,14 @@ async def test_public_transaction_seams_reuse_native_policy_without_commit(admit
         await fence_source(db)
         session = await product.database.create_session(product.actor, NewSession(), db=db)
         session.surface = "automation"
-        turn = await product.database.submit(
+        turn = await product.database.admission.submit(
             product.actor, session.id, NewMessage(prompt="Work", request_key="seam"), db=db,
         )
-        assert await product.database.submit(
+        assert await product.database.admission.submit(
             product.actor, session.id, NewMessage(prompt="Work", request_key="seam"), db=db,
         ) is turn
         with pytest.raises(HTTPException) as conflicting:
-            await product.database.submit(
+            await product.database.admission.submit(
                 product.actor, session.id, NewMessage(prompt="Different", request_key="seam"), db=db,
             )
         assert conflicting.value.status_code == 409

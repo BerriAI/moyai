@@ -40,7 +40,7 @@ async def test_message_retry_serializes_and_completion_follows_progress(admitted
     parent.scope.agent_messages = True
     child = await DelegationService(database).start(parent.scope, "child", "Work")
     child_turn = await database.claim_next()
-    child_context = await database.prepare(child_turn.id)
+    child_context = await database.admission.prepare(child_turn.id)
     mail = AgentMessages(database)
     receipts = await asyncio.gather(*(
         mail.send(parent.scope, "same-call", child["session_id"], "Direction", parent_turn.id) for _ in range(2)
@@ -67,7 +67,7 @@ async def test_resume_mail_reconciliation_rolls_back_and_serializes_with_admissi
     mail = AgentMessages(database)
     await DelegationService(database).start(prepared.scope, "child", "Work")
     child_turn = await database.claim_next()
-    child = await database.prepare(child_turn.id)
+    child = await database.admission.prepare(child_turn.id)
     consumed, unread = [
         await mail.send(child.scope, label, "parent", label, child_turn.id)
         for label in ("consumed", "unread")
@@ -124,7 +124,7 @@ async def test_correction_committing_before_admission_fence_rejects_old_model_wo
     task = asyncio.create_task(DelegationService(database).start(prepared.scope, "stale", "Obsolete work"), name="delegation")
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        correction = await database.submit(product.actor, session.id, NewMessage(
+        correction = await database.admission.submit(product.actor, session.id, NewMessage(
             prompt="Cancel the delegation.", request_key="correction", mode="asap",
         ))
         await database.steering_receipt(correction.id, "accepted")
@@ -164,7 +164,7 @@ async def test_concurrent_retry_recovers_receipt_after_initial_lookup_misses(
         await asyncio.wait_for(entered.wait(), 5)
         first = await service.start(prepared.scope, "same", "Original work")
         if change == "guidance":
-            correction = await database.submit(product.actor, session.id, NewMessage(
+            correction = await database.admission.submit(product.actor, session.id, NewMessage(
                 prompt="Changed guidance", request_key="correction", mode="asap",
             ))
             await database.steering_receipt(correction.id, "accepted")
@@ -185,7 +185,7 @@ async def test_steering_transitions_wait_for_session_fence(admitted_product, tra
     product = admitted_product
     database = product.database
     session, _, _ = await active_turn(product)
-    correction = await database.submit(product.actor, session.id, NewMessage(
+    correction = await database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Correction", request_key="correction", mode="asap",
     ))
     if transition == "uncertain":
@@ -235,14 +235,14 @@ async def test_canonical_grants_survive_generated_resume_and_private_followup(
         (await db.get(Session, session.id)).surface = surface
     if surface == "slack":
         await fixtures.bind_slack_test_session(database, session.id, ctx.product.actor)
-    parent = await database.submit(ctx.product.actor, session.id, NewMessage(
+    parent = await database.admission.submit(ctx.product.actor, session.id, NewMessage(
         prompt="Delegate", request_key="connected", connections=["slack"],
     ))
     await database.claim_next()
-    original = await database.prepare(parent.id)
+    original = await database.admission.prepare(parent.id)
     child = await DelegationService(database).start(original.scope, "child", "Bounded work")
     first = await database.claim_next()
-    prepared = await database.prepare(first.id)
+    prepared = await database.admission.prepare(first.id)
     assert prepared.scope.grants == original.scope.grants
     await database.authorize_scope(prepared.scope)
     assert await database.save_result(
@@ -250,14 +250,14 @@ async def test_canonical_grants_survive_generated_resume_and_private_followup(
     )
     resumed = await database.resume(ctx.product.actor, child["session_id"], first.id, "answer", {"calls": {}})
     await database.claim_next()
-    continuation = await database.prepare(resumed.id)
+    continuation = await database.admission.prepare(resumed.id)
     assert continuation.scope.grants == original.scope.grants and continuation.scope.delegation_generated
     await finish(type("Runtime", (), {"database": database})(), continuation, "Result")
-    follow = await database.submit(ctx.product.actor, child["session_id"], NewMessage(
+    follow = await database.admission.submit(ctx.product.actor, child["session_id"], NewMessage(
         prompt="Explain", request_key="human", connections=[g.id for g in original.scope.grants],
     ))
     await database.claim_next()
-    human = await database.prepare(follow.id)
+    human = await database.admission.prepare(follow.id)
     assert not human.scope.delegation_generated and human.scope.grants == original.scope.grants
     async with database.sessions.begin() as db:
         await db.execute(text("DELETE FROM moyai.connections WHERE provider='slack'"))

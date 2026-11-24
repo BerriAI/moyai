@@ -15,8 +15,8 @@ let server, browser, address, cache;
 const fixture = `
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { PullRequestPanel } from '../native/web/pull-request';
-import { WorkspaceOverview } from '../native/web/workspace';
+import { PullRequestPanel } from '../native/web/workspace/pull-request';
+import { WorkspaceOverview } from '../native/web/workspace/workspace';
 import { setCsrf } from '../native/web/api';
 import '../frontend/theme.css';
 import '../native/web/style.css';

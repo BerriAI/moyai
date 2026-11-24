@@ -78,7 +78,7 @@ async def test_concurrent_product_start_lead_claim_and_original_authority(admitt
         assert len(grants) == 3
         assert all(grant.authority_version == product.principal.authority_version for grant in grants)
     turns = await product.database.claim_batch(3)
-    prepared = [await product.database.prepare(turn.id) for turn in turns if turn.session_id != one[0].id]
+    prepared = [await product.database.admission.prepare(turn.id) for turn in turns if turn.session_id != one[0].id]
     claims = await asyncio.gather(*(
         operate(service, value.scope, value.scope.turn_id, "claim", "claim", {"plan": f"Plan {index}"})
         for index, value in enumerate(prepared)

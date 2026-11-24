@@ -27,14 +27,21 @@ from temporalio.worker import Replayer
 from test_native_settings import client_for, member
 
 from moyai.agent import HarnessActivityContext
-from moyai.analytics import UsageEvent, actual_cost, cost_per_merge, daily_usage, report_range, usage_totals
-from moyai.analytics_service import inference_event, report, unique_publications
 from moyai.contracts import Grant, NewMessage, NewSession, RunScope
 from moyai.effects import EffectReceipts, effect_id
 from moyai.inference_usage import InferenceUsage
 from moyai.models import Connection, Effect, Session, SessionLink, Turn, User, new_id
 from moyai.pr_publications import PRPublication, creation_receipt, verified_status
 from moyai.pull_requests import PullRequestService
+from moyai.reporting.analytics import (
+    UsageEvent,
+    actual_cost,
+    cost_per_merge,
+    daily_usage,
+    report_range,
+    usage_totals,
+)
+from moyai.reporting.analytics_service import inference_event, report, unique_publications
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
@@ -156,11 +163,11 @@ async def native_publication(runtime, actor, *, number=1, github_id=101, created
     session = await runtime.database.create_session(actor, NewSession(
         title="PRIVATE_TITLE_DO_NOT_EXPORT", visibility="private",
     ))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="PRIVATE_PROMPT_DO_NOT_EXPORT", request_key=new_id(), connections=[connection.id],
     ))
     await runtime.database.claim_next()
-    scope = (await runtime.database.prepare(turn.id)).scope
+    scope = (await runtime.admission.prepare(turn.id)).scope
     name = f"github_{connection.id[:8]}_create_pull_request"
     args = {"owner": "example", "repo": "synthetic"}
     result = {
@@ -198,7 +205,7 @@ async def ledger(runtime, actor, session, turn, *, timestamp=START, cost="0.1", 
 
 async def test_standalone_failed_turn_without_canonical_admission_remains_unknown(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Unverified old turn", request_key="unknown-failure",
     ))
     await runtime.database.fail(turn.id, "No durable product admission evidence.")
@@ -228,10 +235,10 @@ async def test_report_uses_ledger_without_double_counting_zero_fills_and_exports
     session = await runtime.database.create_session(actor, NewSession(
         title="PRIVATE_TITLE_DO_NOT_EXPORT", visibility="private",
     ))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="PRIVATE_PROMPT_DO_NOT_EXPORT", request_key="recorded",
     ))
-    historic = await runtime.database.submit(actor, session.id, NewMessage(prompt="Old", request_key="historic"))
+    historic = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Old", request_key="historic"))
     day_two = "2026-10-02T12:00:00+00:00"
     async with runtime.database.sessions.begin() as db:
         (await db.get(Session, session.id)).created_at = "2026-09-30T00:00:00+00:00"
@@ -382,7 +389,7 @@ async def test_analytics_filter_preserves_long_canonical_product_actor_ids(runti
     async with runtime.database.sessions.begin() as db:
         db.add(canonical)
     session = await runtime.database.create_session(canonical, NewSession())
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         canonical, session.id, NewMessage(prompt="Synthetic", request_key="canonical-filter"),
     )
     async with runtime.database.sessions.begin() as db:
@@ -400,7 +407,7 @@ async def test_analytics_filter_preserves_long_canonical_product_actor_ids(runti
 
 async def test_historical_fallback_subtracts_exact_seed_and_does_not_guess_missing_baseline(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    turns = [await runtime.database.submit(actor, session.id, NewMessage(
+    turns = [await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Synthetic baseline test", request_key=f"baseline-{index}",
     )) for index in range(3)]
     current = [
@@ -428,7 +435,7 @@ async def test_historical_fallback_subtracts_exact_seed_and_does_not_guess_missi
 
 async def test_capture_gap_compares_usage_delta_to_all_attempts_and_never_invents_cost(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="gap"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="gap"))
     async with runtime.database.sessions.begin() as db:
         row = await db.get(Turn, turn.id)
         row.created_at = "2026-10-02T00:00:00+00:00"
@@ -463,7 +470,7 @@ async def test_model_filter_is_root_cohort_and_steering_inputs_do_not_invent_mis
     publication, session, parent, connection, ctx, *_ = await native_publication(runtime, actor)
     await ledger(runtime, actor, session, parent, timestamp=START, cost=".1", model="test")
     await ledger(runtime, actor, session, parent, timestamp=START, cost=".9", model="child")
-    child = await runtime.database.submit(actor, session.id, NewMessage(
+    child = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Synthetic correction", request_key="included-correction",
         mode="asap", connections=[connection.id],
     ))
@@ -511,7 +518,7 @@ async def test_confirmed_native_pr_receipt_and_pre_projection_history_replay(run
     async with runtime.database.sessions.begin() as db:
         db.add(connection)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Create the synthetic PR", request_key="synthetic-native-pr", connections=[connection.id],
     ))
     await runtime.database.claim_next()

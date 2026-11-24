@@ -22,9 +22,9 @@ from temporalio import workflow
 from .contracts import RunScope
 from .database import Database
 from .delegation_models import DelegatedSession
-from .general_preferences import GeneralPreferences, general_preferences, read_instructions
 from .goal_models import GoalTurn
 from .models import Session, SlackThread, Turn, User
+from .preferences.general_preferences import GeneralPreferences, general_preferences, read_instructions
 from .product_identity import ProductGrant
 from .swarm_models import SwarmMember, SwarmTurn
 

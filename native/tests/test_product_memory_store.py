@@ -59,12 +59,12 @@ async def memory_execution(product, *, private=False, surface="web", connections
                 session_id=session.id,
             )
     else:
-        turn = await product.database.submit(product.actor, session.id, NewMessage(
+        turn = await product.database.admission.submit(product.actor, session.id, NewMessage(
             prompt="Please remember: Prefer pytest for focused backend tests.", request_key="memory-input",
             connections=list(connections),
         ))
     assert (await product.database.claim_next()).id == turn.id
-    prepared = await product.database.prepare(turn.id)
+    prepared = await product.database.admission.prepare(turn.id)
     async with product.database.sessions() as db:
         message_id = await db.scalar(select(Message.id).where(Message.turn_id == turn.id))
     return session, turn, prepared.scope, message_id
@@ -142,10 +142,10 @@ async def test_native_operation_replay_and_changed_arguments_do_not_duplicate_no
 async def test_memory_mutations_follow_promoted_guidance_not_message_creation_time(memory_product):
     product = memory_product
     session, turn, scope, _ = await memory_execution(product)
-    older = await product.database.submit(product.actor, session.id, NewMessage(
+    older = await product.database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Please remember: Prefer pytest for focused backend tests.", request_key="older",
     ))
-    newer = await product.database.submit(product.actor, session.id, NewMessage(
+    newer = await product.database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Do not save that preference yet.", request_key="newer", mode="asap",
     ))
     await product.database.steering_receipt(newer.id, "newer")

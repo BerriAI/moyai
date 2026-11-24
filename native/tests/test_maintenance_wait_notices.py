@@ -10,9 +10,9 @@ import pytest
 from temporalio.exceptions import ApplicationError
 
 from moyai import maintenance_workspace as module
+from moyai.continuations.product_continuation_errors import preparation_blocked
 from moyai.contracts import PreparedTurn, RunScope
 from moyai.history_handoff import AgentCheckpoint
-from moyai.product_continuation_errors import preparation_blocked
 
 
 def graph():

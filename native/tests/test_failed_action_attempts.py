@@ -42,7 +42,7 @@ async def test_failed_turn_needs_no_review_and_accepts_follow_up(runtime, active
         })
         assert submitted.status_code == 202
     await runtime.database.claim_next()
-    follow_up = await runtime.database.prepare(submitted.json()["id"])
+    follow_up = await runtime.admission.prepare(submitted.json()["id"])
     await receipts.reserve(follow_up.scope, "independent-coding", "shell", {"command": "inspect the code"})
     async with runtime.database.sessions() as db:
         effect = await db.get(Effect, "failed-browser")

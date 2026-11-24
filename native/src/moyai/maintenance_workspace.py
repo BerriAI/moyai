@@ -20,10 +20,10 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from .answer_settlement import transient_checkpoint_error
+from .continuations.product_continuation_errors import preparation_blocked
 from .contracts import PreparedTurn
 from .history_handoff import AgentCheckpoint, CheckpointSave, save_history_checkpoint
 from .models import Event, Session, Turn, now
-from .product_continuation_errors import preparation_blocked
 from .product_drain import DrainDecision
 from .product_drain_models import ProductDrainReceipt, ProductDrainState
 from .workspace_recovery import (

@@ -40,7 +40,7 @@ async def test_three_delegates_are_real_private_sessions_and_retries_are_idempot
     for turn in claimed:
         child = await runtime.database.session(actor, turn.session_id)
         assert child.visibility == "private"
-        context = await runtime.database.prepare(turn.id)
+        context = await runtime.admission.prepare(turn.id)
         assert context.scope.delegation_depth == 1 and context.scope.delegation_generated
         assert context.scope.conversation_id != prepared.scope.conversation_id
         assert context.conversation is None
@@ -56,8 +56,8 @@ async def test_direct_followups_and_steering_target_only_the_child(runtime, acto
     service = DelegationService(runtime.database)
     child = await service.start(prepared.scope, "one", "Original assignment")
     initial = await runtime.database.claim_next()
-    context = await runtime.database.prepare(initial.id)
-    steer = await runtime.database.submit(actor, child["session_id"], NewMessage(
+    context = await runtime.admission.prepare(initial.id)
+    steer = await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Use the corrected approach", request_key="correction", mode="asap",
     ))
     assert steer.status == "steering" and steer.parent_turn == initial.id
@@ -66,11 +66,11 @@ async def test_direct_followups_and_steering_target_only_the_child(runtime, acto
     await runtime.database.steering_receipt(steer.id, "accepted-correction")
     await finish(runtime, context, "Corrected result")
     assert (await runtime.database.session(actor, parent.id)).active_turn == parent_turn.id
-    follow = await runtime.database.submit(actor, child["session_id"], NewMessage(
+    follow = await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Explain the result", request_key="followup",
     ))
     await runtime.database.claim_next()
-    next_context = await runtime.database.prepare(follow.id)
+    next_context = await runtime.admission.prepare(follow.id)
     assert next_context.conversation is not None
     assert not next_context.scope.delegation_generated
     assert next_context.scope.conversation_id == context.scope.conversation_id
@@ -81,23 +81,23 @@ async def test_private_followups_never_replace_the_original_parent_handoff(runti
     service = DelegationService(runtime.database)
     child = await service.start(prepared.scope, "one", "Compute the result")
     initial = await runtime.database.claim_next()
-    context = await runtime.database.prepare(initial.id)
+    context = await runtime.admission.prepare(initial.id)
     assert await service.report(prepared.scope, child["session_id"]) is None
-    follow = await runtime.database.submit(actor, child["session_id"], NewMessage(
+    follow = await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Include units", request_key="follow",
     ))
     await finish(runtime, context, "42")
     result = await service.report(prepared.scope, child["session_id"])
     assert result["output"] == "42" and result["status"] == "completed"
     await runtime.database.claim_next()
-    follow_context = await runtime.database.prepare(follow.id)
+    follow_context = await runtime.admission.prepare(follow.id)
     await finish(runtime, follow_context, "42 metres")
     assert await service.report(prepared.scope, child["session_id"]) == result
-    later = await runtime.database.submit(actor, child["session_id"], NewMessage(
+    later = await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Change to feet", request_key="later",
     ))
     await runtime.database.claim_next()
-    await finish(runtime, await runtime.database.prepare(later.id), "138 feet")
+    await finish(runtime, await runtime.admission.prepare(later.id), "138 feet")
     assert await service.report(prepared.scope, child["session_id"]) == result
 
 
@@ -112,10 +112,10 @@ async def test_requester_isolation_stop_and_depth_limit(runtime, actor, active):
         await runtime.database.session(other, child["session_id"])
     assert error.value.status_code == 404
     initial = await runtime.database.claim_next()
-    context = await runtime.database.prepare(initial.id)
+    context = await runtime.admission.prepare(initial.id)
     grandchild = await service.start(context.scope, "two", "Grandchild work")
     grandturn = await runtime.database.claim_next()
-    grandcontext = await runtime.database.prepare(grandturn.id)
+    grandcontext = await runtime.admission.prepare(grandturn.id)
     with pytest.raises(PermissionError, match="another level"):
         await service.start(grandcontext.scope, "three", "Too deep")
     await runtime.database.stop(actor, child["session_id"])
@@ -141,7 +141,7 @@ async def test_admitted_swarm_members_cannot_bypass_roster_through_direct_child_
     turns = await runtime.database.claim_batch(10)
     assert len(turns) == 3
     for turn in turns:
-        prepared = await runtime.database.prepare(turn.id)
+        prepared = await runtime.admission.prepare(turn.id)
         assert prepared.scope.swarm_id
         with pytest.raises(PermissionError, match="another level"):
             await DelegationService(runtime.database).start(prepared.scope, "extra-agent", "Unadmitted work")
@@ -205,10 +205,10 @@ async def test_question_continuations_keep_their_original_input_provenance(runti
         )
 
     initial = await runtime.database.claim_next()
-    await pause(await runtime.database.prepare(initial.id))
+    await pause(await runtime.admission.prepare(initial.id))
     resumed = await runtime.database.resume(actor, child["session_id"], initial.id, "answer", {"calls": {}})
     await runtime.database.claim_next()
-    context = await runtime.database.prepare(resumed.id)
+    context = await runtime.admission.prepare(resumed.id)
     assert context.scope.delegation_generated
     assert await service.report(prepared.scope, child["session_id"]) is None
     await finish(runtime, context, "Original assignment completed with the answer.")
@@ -216,14 +216,14 @@ async def test_question_continuations_keep_their_original_input_provenance(runti
     assert report["status"] == "completed"
     assert report["output"] == "Original assignment completed with the answer."
 
-    human = await runtime.database.submit(actor, child["session_id"], NewMessage(
+    human = await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Ask me a new question", request_key="human-question",
     ))
     await runtime.database.claim_next()
-    await pause(await runtime.database.prepare(human.id))
+    await pause(await runtime.admission.prepare(human.id))
     answered = await runtime.database.resume(actor, child["session_id"], human.id, "human-answer", {"calls": {}})
     await runtime.database.claim_next()
-    human_context = await runtime.database.prepare(answered.id)
+    human_context = await runtime.admission.prepare(answered.id)
     assert not human_context.scope.delegation_generated
     assert await service.report(prepared.scope, child["session_id"]) == report
 
@@ -242,7 +242,7 @@ async def test_child_question_replies_preserve_authority_and_precede_queued_foll
     service = DelegationService(database)
     child = await service.start(parent.scope, "question", "Ask which color to use.")
     initial = await database.claim_next()
-    prepared = await database.prepare(initial.id)
+    prepared = await database.admission.prepare(initial.id)
     call = ToolCallPart("ask_user_question", {"questions": [{
         "header": "Color", "question": "Blue or green?",
         "options": [{"label": "Blue"}, {"label": "Green"}],
@@ -255,7 +255,7 @@ async def test_child_question_replies_preserve_authority_and_precede_queued_foll
             conversation_id=prepared.scope.conversation_id, deferred_tool_requests=pending,
         )).decode(), output="", workspace=None, usage={}, deferred=True,
     )
-    follow = await database.submit(actor, child["session_id"], NewMessage(
+    follow = await database.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Private follow-up after the assignment.", request_key="queued-followup",
     ))
     if answer == "timeout":
@@ -265,12 +265,12 @@ async def test_child_question_replies_preserve_authority_and_precede_queued_foll
         await expire_deadline(runtime, initial)
         await expire_optional_questions(database)
     else:
-        await database.submit(actor, child["session_id"], NewMessage(
+        await database.admission.submit(actor, child["session_id"], NewMessage(
             prompt="Blue, please.", request_key="typed-answer", reply_to=initial.id,
         ))
     [resumed] = await database.claim_batch(10)
     assert resumed.id != follow.id
-    continuation = await database.prepare(resumed.id)
+    continuation = await database.admission.prepare(resumed.id)
     assert continuation.scope.delegation_generated
     assert continuation.scope.authority == parent.scope.authority
     assert continuation.deferred_results is not None
@@ -278,7 +278,7 @@ async def test_child_question_replies_preserve_authority_and_precede_queued_foll
     report = await service.report(parent.scope, child["session_id"])
     assert report["status"] == "completed" and report["output"] == "Assignment completed."
     assert (await database.claim_next()).id == follow.id
-    human = await database.prepare(follow.id)
+    human = await database.admission.prepare(follow.id)
     assert not human.scope.delegation_generated
     await finish(runtime, human, "Private follow-up result.")
     assert await service.report(parent.scope, child["session_id"]) == report

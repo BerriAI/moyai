@@ -32,9 +32,9 @@ from moyai.gateway_config import (
 )
 from moyai.gateway_tools import gateway_toolset
 from moyai.models import Connection, User
+from moyai.preferences.settings_models import SettingAutomation
+from moyai.preferences.settings_runtime import admit_automation
 from moyai.runtime import Runtime, configure
-from moyai.settings_models import SettingAutomation
-from moyai.settings_runtime import admit_automation
 from moyai.skill_mentions import marker
 
 
@@ -136,9 +136,9 @@ async def test_skill_requires_explicit_invocation_and_downloads_only_at_executio
     prompt = marker(f"gateway-{row['id']}:incident-review") + " Summarize this incident."
     normalized = await runtime.skill_invocations.normalize(prompt, actor, session)
     assert calls == []
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt=normalized, request_key="skill"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt=normalized, request_key="skill"))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     assert await runtime.skill_invocations.expand("Summarize this incident.", prepared.scope) == "Summarize this incident."
     assert calls == []
     expanded = await runtime.skill_invocations.expand(normalized, prepared.scope)
@@ -188,11 +188,11 @@ async def test_gateway_skills_use_deferred_connection_tools(runtime, actor, monk
 
     row = await connect(runtime, actor, monkeypatch)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Find a skill", request_key="tools", connections=[row["id"]],
     ))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     configure(runtime)
     ctx = RunContext(deps=prepared.scope, model=runtime.models["test"], usage=RunUsage())
     capability = connection_tools(runtime.security)
@@ -211,11 +211,11 @@ async def test_gateway_skills_use_deferred_connection_tools(runtime, actor, monk
 
 async def gateway_turn(runtime: Runtime, actor: User, connection_id: str, *, prompt: str = "Inspect the hub.") -> PreparedTurn:
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt=prompt, request_key="gateway-regression", connections=[connection_id],
     ))
     await runtime.database.claim_next()
-    return await runtime.database.prepare(turn.id)
+    return await runtime.admission.prepare(turn.id)
 
 
 def stub_gateway_client(monkeypatch: pytest.MonkeyPatch, **methods: Any) -> None:
@@ -303,7 +303,7 @@ async def test_prepared_gateway_rechecks_access_before_download_and_before_relea
     assert downloads == (["incident-review"] if when == "during-download" else [])
     # Replaying the persisted preparation must also reject the old grant.
     with pytest.raises((PermissionError, HTTPException)):
-        await runtime.database.prepare(prepared.scope.turn_id)
+        await runtime.admission.prepare(prepared.scope.turn_id)
 
 
 async def test_gateway_prefix_preserves_canonical_picker_pages_and_metadata(
@@ -452,7 +452,7 @@ async def test_queued_edit_admits_the_gateway_selected_by_the_new_skill(
 ) -> None:
     row = await connect(runtime, actor, monkeypatch)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Inspect later.", request_key="edit-gateway-selection",
     ))
     async with client_for(runtime, actor) as client:
@@ -461,7 +461,7 @@ async def test_queued_edit_admits_the_gateway_selected_by_the_new_skill(
         })
         assert response.status_code == 200, response.text
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     assert [grant.id for grant in prepared.scope.grants] == [row["id"]]
 
 
@@ -477,7 +477,7 @@ async def test_native_scheduled_gateway_upload_requires_a_direct_human_turn(
     admitted = await admit_automation(runtime, schedule.id, "gateway-upload")
     assert admitted["status"] == "admitted"
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(admitted["turn_id"])
+    prepared = await runtime.admission.prepare(admitted["turn_id"])
     calls: list[str] = []
 
     async def request(method: str, path: str, **kwargs: Any) -> httpx2.Response:

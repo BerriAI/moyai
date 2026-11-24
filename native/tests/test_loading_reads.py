@@ -51,7 +51,7 @@ async def test_combined_reference_read_uses_real_current_product_identity(runtim
 
 async def test_session_bootstrap_returns_the_authorized_transcript(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    await runtime.database.submit(
+    await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Keep this saved message.", request_key="bootstrap"),
     )
     path = f"/api/sessions/{session.id}?include_activity=false"
@@ -71,7 +71,7 @@ async def test_session_bootstrap_returns_the_authorized_transcript(runtime, acto
 
 async def test_transcript_snapshot_skips_optional_store_and_heavy_turn_columns(runtime, actor, monkeypatch):
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Saved prompt", request_key="one"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Saved prompt", request_key="one"))
     async with runtime.database.sessions.begin() as db:
         saved = await db.get(Turn, turn.id)
         saved.status = "completed"

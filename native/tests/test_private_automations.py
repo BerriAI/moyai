@@ -13,10 +13,10 @@ from pydantic_ai_harness.memory import MemoryOperation
 from sqlalchemy import text
 from test_product_memory import MEMORY_SCHEMA, note
 
+from moyai.automations.product_automation_models import ProductAutomationTurn
+from moyai.automations.product_automation_tools import TargetRequest, toolset
+from moyai.automations.product_automations import Mutation, Save
 from moyai.models import Connection, Session
-from moyai.product_automation_models import ProductAutomationTurn
-from moyai.product_automation_tools import TargetRequest, toolset
-from moyai.product_automations import Mutation, Save
 from moyai.product_memory import ProductMemoryService
 from moyai.product_memory_store import ProductMemoryStore
 
@@ -122,7 +122,7 @@ async def test_private_schedules_retain_personal_connections_and_recheck_revocat
     first = await fixtures.occurrence(ctx, saved, binding)
     assert first["status"] == "admitted"
     assert (await ctx.product.database.claim_next()).id == first["turn_id"]
-    prepared = await ctx.product.database.prepare(first["turn_id"])
+    prepared = await ctx.product.database.admission.prepare(first["turn_id"])
     assert prepared.scope.authority.visibility == "private" and prepared.scope.authority.surface == "automation"
     assert [grant.id for grant in prepared.scope.grants] == [connection_id]
     async with ctx.product.database.sessions() as db:
@@ -152,7 +152,7 @@ async def test_private_scheduled_run_recalls_private_memory_but_cannot_write_it(
     saved, binding = await fixtures.activate(ctx, visibility="private")
     admitted = await fixtures.occurrence(ctx, saved, binding)
     await ctx.product.database.claim_next()
-    prepared = await ctx.product.database.prepare(admitted["turn_id"])
+    prepared = await ctx.product.database.admission.prepare(admitted["turn_id"])
     store = ProductMemoryStore(memory, prepared.scope, admitted["turn_id"])
     assert "Maple brief" in (await store.read(store.prefix + "MEMORY.md", max_chars=10000)).content
     with pytest.raises(ToolFailed, match="cannot mutate"):

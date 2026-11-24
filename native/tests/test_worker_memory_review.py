@@ -11,8 +11,8 @@ from pydantic_ai import Agent
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurability
 from temporalio.testing import WorkflowEnvironment
 
+from moyai.preferences.settings_runtime import SETTINGS_WORKER_PREFIX
 from moyai.product_memory_review import MemoryReviewWorkflow
-from moyai.settings_runtime import SETTINGS_WORKER_PREFIX
 from moyai.storage import encrypted_converter
 from moyai.worker import dispatch_once, make_worker
 
@@ -46,7 +46,7 @@ async def test_review_failure_preserves_manual_dispatch(runtime, actor, failure)
     from moyai.contracts import NewMessage, NewSession
 
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="manual", request_key="manual-before-review"),
     )
     client = SimpleNamespace(start_workflow=AsyncMock())

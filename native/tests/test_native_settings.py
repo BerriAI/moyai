@@ -32,11 +32,9 @@ from moyai.agent import make_agent
 from moyai.api import COOKIE, create_app
 from moyai.contracts import NewMessage, NewSession
 from moyai.models import Connection, Turn, User, new_id
-from moyai.runtime import configure
-from moyai.security import check_password, password_hash
-from moyai.settings_api import routes
-from moyai.settings_models import SettingAutomation, SettingAutomationRun, SettingSecret
-from moyai.settings_runtime import (
+from moyai.preferences.settings_api import routes
+from moyai.preferences.settings_models import SettingAutomation, SettingAutomationRun, SettingSecret
+from moyai.preferences.settings_runtime import (
     SETTINGS_ACTIVITIES,
     SETTINGS_WORKFLOWS,
     SettingsAutomationWorkflow,
@@ -47,6 +45,8 @@ from moyai.settings_runtime import (
     schedule_id,
     settings_worker_identity,
 )
+from moyai.runtime import configure
+from moyai.security import check_password, password_hash
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
@@ -336,11 +336,11 @@ async def test_mcp_concurrent_updates_cannot_reuse_revision_or_forward_a_new_tok
             assert runtime.security.unseal(row.credential).decode() == "first-token"
             assert json.loads(row.policy)["mcp"]["url"] == "https://mcp.example.test/mcp"
         session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-        turn = await runtime.database.submit(actor, session.id, NewMessage(
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Synthetic selected scope", request_key="after-first-edit", connections=[identity],
         ))
         await runtime.database.claim_next()
-        prepared = await runtime.database.prepare(turn.id)
+        prepared = await runtime.admission.prepare(turn.id)
         retried = await client.put(f"/api/connections/{identity}", json=second_body)
         if concurrent_change == "credential":
             assert retried.status_code == 200 and retried.json()["revision"] == created["revision"] + 2
@@ -658,9 +658,9 @@ async def test_saved_skills_are_native_deferred_capabilities_with_correct_scopes
         # authorize_scope verifies the genuine persisted scope. A shared session
         # needs its own native turn, not a caller-mutated authority.
         session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-        turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="shared"))
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Synthetic", request_key="shared"))
         await runtime.database.claim_next()
-        shared_scope = (await runtime.database.prepare(turn.id)).scope
+        shared_scope = (await runtime.admission.prepare(turn.id)).scope
         assert {row["id"] for row in await capability.catalog(shared_scope)} == {shared["id"]}
 
         captured = []
@@ -686,12 +686,12 @@ async def test_analytics_uses_actual_rows_and_never_private_content_or_fabricate
     session = await runtime.database.create_session(other, NewSession(
         title="Never disclose this private title", visibility="private",
     ))
-    first = await runtime.database.submit(other, session.id, NewMessage(
+    first = await runtime.admission.submit(other, session.id, NewMessage(
         prompt="Never disclose this private prompt", request_key="analytics-first",
     ))
     await runtime.database.claim_next()
-    await runtime.database.prepare(first.id)
-    second = await runtime.database.submit(other, session.id, NewMessage(prompt="Secret second", request_key="analytics-second"))
+    await runtime.admission.prepare(first.id)
+    second = await runtime.admission.submit(other, session.id, NewMessage(prompt="Secret second", request_key="analytics-second"))
     start = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
     async with runtime.database.sessions.begin() as db:
         one, two = await db.get(Turn, first.id), await db.get(Turn, second.id)
@@ -783,7 +783,7 @@ async def test_automation_revocation_between_owner_lookup_and_native_submit_deni
 async def test_automation_mutation_does_not_return_prompt_after_revocation_during_rpc(
     runtime, actor, monkeypatch, create,
 ):
-    from moyai import settings_api
+    from moyai.preferences import settings_api
 
     owner = await member(runtime)
     row = await automation(runtime, owner)
@@ -915,7 +915,7 @@ async def test_long_read_rechecks_revoked_actor_before_returning(runtime, actor,
 
 
 async def test_memory_write_rechecks_authorization_after_namespace_lookup(runtime, actor, monkeypatch):
-    from moyai import settings_api
+    from moyai.preferences import settings_api
     entered, release = asyncio.Event(), asyncio.Event()
     original = settings_api.memory_path
 

@@ -46,7 +46,7 @@ async def goal(runtime, session_id):
 async def finish(runtime, *, decision=None, evidence="Verified", usage=None, deferred=False):
     turn = await runtime.database.claim_next()
     assert turn is not None
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     if decision:
         async with runtime.database.sessions.begin() as db:
             binding = await db.get(GoalTurn, turn.id)
@@ -123,7 +123,7 @@ async def test_pending_answer_does_not_earn_continuation(runtime, actor):
 async def test_controls_fence_work_and_never_restart(runtime, actor, control):
     session, _ = await start(runtime, actor)
     turn = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     if control == "stop":
         await runtime.database.stop(actor, session.id)
     elif control == "delete":
@@ -184,7 +184,7 @@ async def test_revoked_requester_cannot_gain_new_authority_on_continuation(runti
 async def test_user_followup_runs_before_next_generated_turn(runtime, actor):
     session, _ = await start(runtime, actor)
     await finish(runtime)
-    followup = await runtime.database.submit(actor, session.id, NewMessage(
+    followup = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Also verify the output checksum.", request_key="followup",
     ))
     await runtime.database.goals.tick(session.id)
@@ -197,7 +197,7 @@ async def test_user_followup_runs_before_next_generated_turn(runtime, actor):
 async def test_followup_invalidates_completion_based_on_older_input(runtime, actor):
     session, _ = await start(runtime, actor)
     await finish(runtime, decision="complete")
-    followup = await runtime.database.submit(actor, session.id, NewMessage(
+    followup = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Before finishing, also verify the checksum.", request_key="new-criterion",
     ))
     await runtime.database.goals.tick(session.id)
@@ -222,8 +222,8 @@ async def test_included_steering_allows_verified_completion_but_queued_work_does
 ):
     session, _ = await start(runtime, actor, "/goal --budget 100 Finish the verified task.")
     parent = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(parent.id)
-    correction = await runtime.database.submit(actor, session.id, NewMessage(
+    prepared = await runtime.admission.prepare(parent.id)
+    correction = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Also verify the checksum.", request_key="correction",
         mode="asap" if mode == "asap" else "when_idle",
     ))
@@ -236,7 +236,7 @@ async def test_included_steering_allows_verified_completion_but_queued_work_does
     await runtime.database.steer_queued(actor, correction.id)
     followup = None
     if queued_followup:
-        followup = await runtime.database.submit(actor, session.id, NewMessage(
+        followup = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Then verify a separate output.", request_key="later-input",
         ))
     assert await runtime.database.save_result(
@@ -260,15 +260,15 @@ async def test_included_steering_allows_verified_completion_but_queued_work_does
 async def test_new_steering_invalidates_an_earlier_completion_until_reverified(runtime, actor, mode, reverify):
     session, _ = await start(runtime, actor)
     parent = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(parent.id)
+    prepared = await runtime.admission.prepare(parent.id)
     correction = None
     if mode == "send_now":
-        correction = await runtime.database.submit(actor, session.id, NewMessage(
+        correction = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Verify the changed requirement.", request_key="queued-correction",
         ))
     await report_complete(runtime, prepared)
     if correction is None:
-        correction = await runtime.database.submit(actor, session.id, NewMessage(
+        correction = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Verify the changed requirement.", request_key="new-correction", mode="asap",
         ))
     else:
@@ -318,7 +318,7 @@ async def test_paused_goal_keeps_question_available_on_resume(runtime, actor):
 async def test_explicit_resume_can_recover_a_failed_execution(runtime, actor):
     session, initial = await start(runtime, actor)
     await runtime.database.claim_next()
-    await runtime.database.prepare(initial)
+    await runtime.admission.prepare(initial)
     await runtime.database.fail(initial, "Temporary model outage.")
     await runtime.database.goals.tick(session.id)
     assert (await goal(runtime, session.id))["status"] == "blocked"
@@ -341,16 +341,16 @@ async def test_already_queued_continuation_cannot_use_revoked_native_identity(ru
         await db.execute(update(User).where(User.id == actor.id).values(auth_version=User.auth_version + 1))
     queued = await runtime.database.claim_next()
     with pytest.raises(PermissionError, match="requester authority"):
-        await runtime.database.prepare(queued.id)
+        await runtime.admission.prepare(queued.id)
 
 
 async def test_clearing_completed_goal_leaves_later_ordinary_work_running(runtime, actor):
     session, _ = await start(runtime, actor)
     await finish(runtime, decision="complete")
     await runtime.database.goals.tick(session.id)
-    later = await runtime.database.submit(actor, session.id, NewMessage(prompt="Independent task.", request_key="later"))
+    later = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Independent task.", request_key="later"))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(later.id)
+    prepared = await runtime.admission.prepare(later.id)
     await command(runtime, actor, session.id, "/goal clear")
     await runtime.database.authorize_scope(prepared.scope)
     assert (await runtime.database.session(actor, session.id)).status == "running"
@@ -359,7 +359,7 @@ async def test_clearing_completed_goal_leaves_later_ordinary_work_running(runtim
 async def test_dispatch_inspects_only_idle_goal_sessions(runtime, actor, monkeypatch):
     session, _ = await start(runtime, actor)
     turn = await runtime.database.claim_next()
-    await runtime.database.prepare(turn.id)
+    await runtime.admission.prepare(turn.id)
     tick = AsyncMock()
     monkeypatch.setattr(runtime.database.goals, "tick", tick)
     await runtime.database.goals.reconcile()
@@ -387,7 +387,7 @@ async def mismatched_followup(runtime, actor, session_id, mismatch):
             db.add(connection)
             await db.flush()
             options["connections"] = [connection.id]
-    return await runtime.database.submit(selected_actor, session_id, NewMessage(
+    return await runtime.admission.submit(selected_actor, session_id, NewMessage(
         prompt="Queue separate follow-up work.", request_key=f"followup-{mismatch}", **options,
     ))
 
@@ -398,10 +398,10 @@ async def test_context_mismatch_pauses_continuation_without_revoking_admitted_tu
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
     await command(runtime, actor, session.id, "/goal Verify the original task.")
     original = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(original.id) if phase == "running" else None
+    prepared = await runtime.admission.prepare(original.id) if phase == "running" else None
     await mismatched_followup(runtime, actor, session.id, mismatch)
     assert (await goal(runtime, session.id))["status"] == "paused"
-    prepared = prepared or await runtime.database.prepare(original.id)
+    prepared = prepared or await runtime.admission.prepare(original.id)
     await runtime.database.authorize_scope(prepared.scope)
     tools = GoalCapability(runtime.database.goals).tools.tools
     ctx = RunContext(
@@ -428,7 +428,7 @@ async def test_context_mismatch_pauses_continuation_without_revoking_admitted_tu
 async def test_resume_preserves_live_turn_generation_but_explicit_pause_revokes_it(runtime, actor):
     session, _ = await start(runtime, actor)
     original = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(original.id)
+    prepared = await runtime.admission.prepare(original.id)
     followup = await mismatched_followup(runtime, actor, session.id, "model")
     resumed = await command(runtime, actor, session.id, "/goal resume")
     assert resumed["goal"]["generation"] == prepared.scope.goal_generation
@@ -469,7 +469,7 @@ async def test_resume_preserves_queued_initial_goal_and_its_attachments_behind_o
     assert resumed["goal"]["generation"] == admitted["goal"]["generation"]
     queued = await runtime.database.claim_next()
     assert queued.id == admitted["id"]
-    goal_input = await runtime.database.prepare(queued.id)
+    goal_input = await runtime.admission.prepare(queued.id)
     await runtime.database.authorize_scope(goal_input.scope)
     assert goal_input.prompt == "Verify this specific attached input."
     async with runtime.database.sessions() as db:
@@ -492,7 +492,7 @@ async def test_resume_preserves_queued_clarification_reply_already_owning_sessio
     resumed = await command(runtime, actor, session.id, "/goal resume")
     assert resumed["goal"]["generation"] == 1
     assert (await runtime.database.claim_next()).id == reply.id
-    prepared = await runtime.database.prepare(reply.id)
+    prepared = await runtime.admission.prepare(reply.id)
     await runtime.database.authorize_scope(prepared.scope)
     assert prepared.deferred_results == results
 
@@ -500,8 +500,8 @@ async def test_resume_preserves_queued_clarification_reply_already_owning_sessio
 async def test_resume_retains_queued_user_work_after_current_turn_was_explicitly_paused(runtime, actor):
     session, original = await start(runtime, actor)
     await runtime.database.claim_next()
-    await runtime.database.prepare(original)
-    queued = await runtime.database.submit(actor, session.id, NewMessage(
+    await runtime.admission.prepare(original)
+    queued = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Include the additional acceptance criterion.", request_key="queued-human",
     ))
     await command(runtime, actor, session.id, "/goal pause")
@@ -511,7 +511,7 @@ async def test_resume_retains_queued_user_work_after_current_turn_was_explicitly
     await runtime.database.goals.reconcile()
     assert (await goal(runtime, session.id))["status"] == "active"
     assert (await runtime.database.claim_next()).id == queued.id
-    await runtime.database.authorize_scope((await runtime.database.prepare(queued.id)).scope)
+    await runtime.database.authorize_scope((await runtime.admission.prepare(queued.id)).scope)
 
 
 async def test_answering_a_paused_goal_preserves_the_reply_without_implicitly_resuming(runtime, actor):
@@ -524,7 +524,7 @@ async def test_answering_a_paused_goal_preserves_the_reply_without_implicitly_re
     assert await runtime.database.claim_next() is None
     await command(runtime, actor, session.id, "/goal resume")
     assert (await runtime.database.claim_next()).id == reply.id
-    prepared = await runtime.database.prepare(reply.id)
+    prepared = await runtime.admission.prepare(reply.id)
     assert prepared.deferred_results == results
     assert prepared.scope.goal_generation == 1
 
@@ -551,7 +551,7 @@ async def test_context_hold_cancels_queued_automatic_work_and_resume_does_not_re
 async def test_context_hold_does_not_bypass_revoked_requester_authority(runtime, actor):
     session, _ = await start(runtime, actor)
     original = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(original.id)
+    prepared = await runtime.admission.prepare(original.id)
     await mismatched_followup(runtime, actor, session.id, "model")
     async with runtime.database.sessions.begin() as db:
         await db.execute(update(User).where(User.id == actor.id).values(auth_version=User.auth_version + 1))
@@ -602,7 +602,7 @@ async def test_edit_retains_undelivered_initial_files_but_does_not_repeat_delive
     original = await command(runtime, actor, session.id, "/goal Read the input.", attachments=[upload.id])
     if started:
         await runtime.database.claim_next()
-        await runtime.database.prepare(original["id"])
+        await runtime.admission.prepare(original["id"])
     await command(runtime, actor, session.id, "/goal edit Verify the original input with the new criterion.")
     if started:
         await runtime.database.stopped(original["id"])
@@ -674,7 +674,7 @@ async def test_goal_controls_cancel_immediately_and_durable_stop_releases_owners
 ):
     session, original = await start(runtime, actor)
     await runtime.database.claim_next()
-    await runtime.database.prepare(original)
+    await runtime.admission.prepare(original)
     handle = SimpleNamespace(
         cancel=AsyncMock(side_effect=RuntimeError("Temporal unavailable.") if unavailable else None),
         describe=AsyncMock(return_value=SimpleNamespace(status=WorkflowExecutionStatus.COMPLETED)),
@@ -711,7 +711,7 @@ async def test_goal_controls_cancel_immediately_and_durable_stop_releases_owners
 async def test_goal_tools_are_builtin_and_complete_via_native_agent(runtime, actor):
     session, _ = await start(runtime, actor)
     turn = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     offered = set()
     calls = 0
 
@@ -788,7 +788,7 @@ async def test_new_goal_replaces_existing_work_and_rejects_old_completion(runtim
     session, original = await start(runtime, actor, "/goal --budget 100 Original objective.")
     if phase in {"running", "saving"}:
         await runtime.database.claim_next()
-        prepared = await runtime.database.prepare(original)
+        prepared = await runtime.admission.prepare(original)
         if phase == "saving":
             await runtime.database.save_result(
                 prepared.scope, conversation='{"messages":[]}', output="Old result.", workspace=None, usage={},
@@ -831,7 +831,7 @@ async def test_new_goal_replaces_existing_work_and_rejects_old_completion(runtim
 async def test_failed_replacement_keeps_the_original_goal_and_execution(runtime, actor):
     session, original = await start(runtime, actor)
     await runtime.database.claim_next()
-    await runtime.database.prepare(original)
+    await runtime.admission.prepare(original)
     with pytest.raises(HTTPException):
         await command(runtime, actor, session.id, "/goal Replacement.", attachments=["missing-upload"])
     assert (await goal(runtime, session.id))["objective"] == "Finish the verified task."
@@ -853,7 +853,7 @@ async def test_clear_stops_a_waiting_goal_and_releases_it(runtime, actor):
 
 async def test_goal_marker_is_server_authored_and_does_not_mark_followups(runtime, actor):
     session, _ = await start(runtime, actor)
-    await runtime.database.submit(actor, session.id, NewMessage.model_validate({
+    await runtime.admission.submit(actor, session.id, NewMessage.model_validate({
         "prompt": "A normal follow-up", "request_key": "follow-up", "sent_as_goal": True,
         "source": {"sent_as_goal": True},
     }))

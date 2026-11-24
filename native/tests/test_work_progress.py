@@ -322,7 +322,7 @@ async def test_interactive_child_progress_excludes_later_private_conversations(r
     _, root, prepared = active
     child = await DelegationService(runtime.database).start(prepared.scope, "one", "Inspect the assigned task.")
     initial = await runtime.database.claim_next()
-    context = await runtime.database.prepare(initial.id)
+    context = await runtime.admission.prepare(initial.id)
     await Commentary(runtime.database).save(context.scope, 1, [{
         "id": "unused", "text": "Inspecting the delegated task.", "created_at": initial.created_at,
     }])
@@ -334,11 +334,11 @@ async def test_interactive_child_progress_excludes_later_private_conversations(r
     assert agent["status"] == "running"
     assert agent["messages"][-1]["text"] == "Inspecting the delegated task."
     await finish(runtime, context, "The assignment is verified.")
-    follow = await runtime.database.submit(actor, child["session_id"], NewMessage(
+    follow = await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Unrelated private follow-up", request_key="later",
     ))
     await runtime.database.claim_next()
-    await finish(runtime, await runtime.database.prepare(follow.id), "private-followup-answer")
+    await finish(runtime, await runtime.admission.prepare(follow.id), "private-followup-answer")
     value = await reader.read(root)
     assert value["subagents"][0]["messages"][-1]["text"] == "The assignment is verified."
     assert "private-followup" not in json.dumps(value)

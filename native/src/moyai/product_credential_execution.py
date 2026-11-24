@@ -103,7 +103,7 @@ class ProductCredentialExecution:
 
     async def visible(self, db: AsyncSession, secret: dict, actor_id: str, session_id: str) -> bool:
         if secret["lifetime"] == "session" and secret["root_id"] != "native:" + session_id:
-            from .product_continuation_models import ProductContinuation
+            from .continuations.product_continuation_models import ProductContinuation
             continuation = await db.scalar(select(ProductContinuation).where(
                 ProductContinuation.native_session_id == session_id,
                 ProductContinuation.source_schema == self.identity.schema,

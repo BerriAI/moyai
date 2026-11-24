@@ -13,8 +13,8 @@ from sqlalchemy import text
 from test_product_authority import active_turn, demote
 
 from moyai.models import Session, User
+from moyai.preferences.settings_api import routes
 from moyai.private_instructions import PrivateInstructions, preferences_for_user
-from moyai.settings_api import routes
 
 admitted_product = authority_fixtures.admitted_product
 
@@ -118,5 +118,5 @@ async def test_canonical_verified_approval_resume_retains_private_preferences(ad
     )
     resumed = await product.database.resume(product.actor, session.id, turn.id, "approval", {})
     assert (await product.database.claim_next()).id == resumed.id
-    scope = (await product.database.prepare(resumed.id)).scope
+    scope = (await product.database.admission.prepare(resumed.id)).scope
     assert await PrivateInstructions(product.database).load(scope) == "PRIVATE_CANONICAL_TEST"

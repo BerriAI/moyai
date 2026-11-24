@@ -20,12 +20,12 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .automations.product_automation_models import ProductAutomationTurn
 from .contracts import ExecutionContext, NewMessage, PreparedTurn, RunScope
 from .delegation_authority import DelegatedAuthority, saved_authority
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .failed_action_attempts import settle_failed_action_attempts
 from .models import Event, Message, ProductTurnAuthority, Session, Turn, TurnImage, Upload, User, new_id, now
-from .product_automation_models import ProductAutomationTurn
 
 if TYPE_CHECKING:
     from .database import Database

@@ -276,7 +276,7 @@ class DelegationService:
                 TurnImage.turn_id == scope.turn_id,
             ).order_by(TurnImage.position)))
             attachments = await database.swarms.copy_uploads(db, actor, uploads, child.id)
-            turn = await database.submit(actor, child.id, NewMessage(
+            turn = await database.admission.submit(actor, child.id, NewMessage(
                 prompt="Delegated assignment within the original human request (not new human authorization):\n\n" + task,
                 request_key="delegation:" + hashlib.sha256(f"{scope.turn_id}:{call_id}".encode()).hexdigest(),
                 model=scope.model, connections=[item.id for item in scope.grants],
@@ -305,8 +305,8 @@ class DelegationService:
             # Copy the exact admitted selection, not the parent's later selection
             # or mutable workspace. Existing preparation validates its build and
             # repository authority before allocating the child's own computer.
-            from .product_continuation_models import ProductExecutionContext
-            from .product_continuation_workspace import fingerprint as context_fingerprint
+            from .continuations.product_continuation_models import ProductExecutionContext
+            from .continuations.product_continuation_workspace import fingerprint as context_fingerprint
             project = await db.get(ProductExecutionContext, scope.turn_id) if database.product_authority_enabled else None
             if project is not None:
                 descriptor = json.loads(database.security.unseal(project.descriptor))

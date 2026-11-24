@@ -70,11 +70,11 @@ conflict in a separate transaction. Product authority still precedes the user,
 swarm and session fences. Audience prefetch stays outside an owned transaction;
 final authorization and the commit-bound dispatch notification stay inside it.
 
-`Database.submit` and `prepare` temporarily forward for generated-input modules
-and existing integrations. Remove those forwarding methods once those callers
-and their tests use `database.admission` or `Runtime.admission`. Session creation,
-authority helpers, continuation/resume and dispatch remain on Database; answer
-settlement and read projections keep their existing owners.
+All callers, including automations, Slack, historical continuation, delegation,
+swarms, goals and their tests, use `database.admission` or `Runtime.admission`.
+`Database` no longer forwards `submit` or `prepare`; admission has one interface.
+Session creation, authority helpers, continuation/resume and dispatch remain on
+Database; answer settlement and read projections keep their existing owners.
 
 ## Connector execution and answer settlement
 
@@ -93,7 +93,29 @@ existing locks. `Database` and Temporal activities forward settlement calls;
 `workspace_recovery.py` owns checkpoint formats, validation and cold restoration.
 Activity identities, ordering and historical snapshot formats remain compatible.
 
-## Roles and data
+## Backend feature ownership
+
+`moyai.preferences` owns user-facing Settings, its wire and persistence models,
+composer defaults and standalone automation integration. Root `settings.py`
+continues to own process configuration. `moyai.reporting` owns analytics and
+timing projections; `moyai.billing` owns canonical accounting and ledger
+maintenance. Their package initializers perform no imports or I/O, and callers
+import individual interfaces. The existing billing maintenance command remains
+available as `python -m moyai.billing_storage`.
+
+The feature guides map responsibilities to existing test suites.
+`test_feature_packages.py` prevents eager package initialization and keeps
+arithmetic and model modules independent of command composition.
+
+`moyai.automations` co-locates product automation commands, schedule
+reconciliation, access, event ingestion, tools and persistence models.
+`moyai.continuations` co-locates historical handoff, HTTP bindings, workspace
+collection/restoration, its guest script and records. Their initializers do not
+register or load execution. Model registration uses qualified package paths;
+the migration registries, frozen expansions, Temporal identities, canonical
+`app` package and historical formats retain their existing values.
+
+## Runtime roles and data
 
 Production retains API, coordinator, broker and worker roles. They use the same
 image and environment installation, but own different leases and responsibilities.
@@ -143,8 +165,18 @@ the application retains the Settings lazy entrypoint. Their module guides and
 `tests/settings` / `tests/analytics` document and enforce this dependency
 direction, including JavaScript helpers and declarations.
 
-Consolidate features around established interfaces, retaining direct imports
-and the existing lazy-loading behavior.
+`native/web/workspace` owns resource and side-panel rendering, including the
+lazy computer panel. `native/web/navigation` owns the sidebar, palette and
+session actions. `native/web/messages` owns message rendering and input.
+Conversation state remains independent of these renderers. Their module guides
+list the existing cross-feature interfaces; `tests/test_native_feature_imports.cjs`
+keeps application composition out of those modules and prevents shared
+transport/controls from importing features.
+
+The remaining root files are application composition (`main.tsx`, `home.tsx`),
+branding/appearance, build entrypoints and shared transport/file helpers.
+There are no feature barrels. Consolidation retains direct imports and the
+existing lazy-loading behavior.
 
 See [deployment](pydantic-deployment.md) for the exact ownership and migration
 contracts, [usage](usage.md) for supported behavior, and [scope](consolidation.md)

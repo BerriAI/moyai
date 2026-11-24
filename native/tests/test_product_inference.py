@@ -29,7 +29,14 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import ExecuteActivityInput
 from test_inference_usage import WireStream, payload
 
-from moyai.analytics import ReportRange
+from moyai.billing.product_billing import (
+    BillingReader,
+    GatewayKeyScope,
+    IdentityMappings,
+    LegacyBillingRules,
+    RecoveryPolicy,
+    read_product_billing,
+)
 from moyai.execution import AuthorizedActivity
 from moyai.inference_usage import (
     INFERENCE_ACTIVITY,
@@ -39,17 +46,10 @@ from moyai.inference_usage import (
 )
 from moyai.models import Event, Session, Turn
 from moyai.performance import PREFIX
-from moyai.product_billing import (
-    BillingReader,
-    GatewayKeyScope,
-    IdentityMappings,
-    LegacyBillingRules,
-    RecoveryPolicy,
-    read_product_billing,
-)
 from moyai.product_inference import InferenceAdmissionError, ProductInferenceRequest, ProductInferenceService
 from moyai.product_inference_routes import product_inference_routes
 from moyai.product_inference_transport import BrokerUpstream
+from moyai.reporting.analytics import ReportRange
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
 product_database = authority.product_database
@@ -530,18 +530,18 @@ async def test_repaired_receipt_permission_recovers_previously_parked_charge(inf
 
 @pytest.mark.parametrize("prepared", [False, True])
 async def test_failed_product_preparation_does_not_make_recorded_costs_partial(inference, prepared):
-    from moyai.analytics_service import report
     from moyai.contracts import NewMessage, NewSession
+    from moyai.reporting.analytics_service import report
 
     ctx = inference
     await perform(ctx)
     session = await ctx.product.database.create_session(ctx.product.actor, NewSession())
-    failed = await ctx.product.database.submit(
+    failed = await ctx.product.database.admission.submit(
         ctx.product.actor, session.id, NewMessage(prompt="Never dispatched", request_key="preflight"),
     )
     if prepared:
         assert (await ctx.product.database.claim_next()).id == failed.id
-        await ctx.product.database.prepare(failed.id)
+        await ctx.product.database.admission.prepare(failed.id)
     await ctx.product.database.fail(failed.id, "Synthetic pre-dispatch preparation failure.")
     async with ctx.product.database.sessions.begin() as db:
         paid = await db.get(Turn, ctx.turn.id)
@@ -558,7 +558,7 @@ async def test_failed_product_preparation_does_not_make_recorded_costs_partial(i
 
 @pytest.mark.parametrize("missing_usage_row", [False, True])
 async def test_failed_product_turn_with_observed_attempt_remains_unpriced(inference, missing_usage_row):
-    from moyai.analytics_service import report
+    from moyai.reporting.analytics_service import report
 
     ctx = inference
     await perform(ctx, cost=None)
@@ -578,7 +578,7 @@ async def test_failed_product_turn_with_observed_attempt_remains_unpriced(infere
 
 
 async def test_proven_unsent_product_failure_does_not_invent_missing_cost(inference):
-    from moyai.analytics_service import report
+    from moyai.reporting.analytics_service import report
 
     ctx = inference
 

@@ -228,7 +228,7 @@ async def test_snapshot_activity_failure_preserves_native_temporal_result(runtim
 @pytest.mark.parametrize("runtime", ["question"], indirect=True)
 async def test_shared_snapshot_only_exposes_deferred_requests_to_requester(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Ask a question.", request_key="shared-question"),
     )
     await runtime.database.claim_next()

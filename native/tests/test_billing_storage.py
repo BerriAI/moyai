@@ -13,8 +13,7 @@ from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
 from test_product_billing import CLOCK, MAPPINGS, PERIOD, SCOPE, new_row, old_row
 
-from moyai.analytics import report_range
-from moyai.billing_storage import (
+from moyai.billing.billing_storage import (
     BillingStorageError,
     Storage,
     activate,
@@ -24,16 +23,17 @@ from moyai.billing_storage import (
     rollback,
     status,
 )
-from moyai.inference_usage import InferenceUsage
-from moyai.product_billing import (
+from moyai.billing.product_billing import (
     BillingReader,
     BillingReadError,
     LegacyBillingRules,
     RecoveryPolicy,
     read_product_billing,
 )
-from moyai.product_billing_routes import ProductBillingService, accounting_failure
+from moyai.billing.product_billing_routes import ProductBillingService, accounting_failure
+from moyai.inference_usage import InferenceUsage
 from moyai.product_inference import ProductInferenceRequest
+from moyai.reporting.analytics import report_range
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("MOYAI_TEST_POSTGRES"), reason="Set a disposable local PostgreSQL URL.",

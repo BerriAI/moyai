@@ -23,9 +23,9 @@ from .agent_messages import MailDispatch, dispatch_mail
 from .dispatch_wakeups import DispatchWakeups
 from .execution import ExecutionAuthority
 from .models import Turn
+from .preferences.settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
 from .product_drain import ProductDrainError, drain_checkpoint
 from .runtime import Runtime, configure
-from .settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
 from .swarm_runtime import SWARM_ACTIVITIES, SwarmWorkflow, dispatch_missions
 from .worker_capacity import ActivityCapacity, WorkerPools
 from .workflow import TurnWorkflow
@@ -41,7 +41,10 @@ def make_worker(runtime: Runtime) -> WorkerPools:
     product_workflows = []
     product_activities = []
     if runtime.product_automations is not None:
-        from .product_automations import PRODUCT_AUTOMATION_ACTIVITIES, PRODUCT_AUTOMATION_WORKFLOWS
+        from .automations.product_automations import (
+            PRODUCT_AUTOMATION_ACTIVITIES,
+            PRODUCT_AUTOMATION_WORKFLOWS,
+        )
         product_workflows.extend(PRODUCT_AUTOMATION_WORKFLOWS)
         product_activities.extend(PRODUCT_AUTOMATION_ACTIVITIES)
     interceptors: list[Interceptor] = [ExecutionAuthority(runtime.database), ActivityCapacity()]

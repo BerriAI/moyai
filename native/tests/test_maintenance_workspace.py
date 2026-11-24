@@ -558,8 +558,8 @@ async def test_changed_grant_cannot_be_reclassified_as_a_temporary_refusal(maint
 @pytest.mark.parametrize("expired", [False, True])
 async def test_stop_retains_image_and_graph_and_new_turn_reports_recovery_required(maintenance, actor, monkeypatch, expired):
     from moyai.activities import prepare_turn
+    from moyai.continuations.product_continuation_errors import MESSAGES
     from moyai.contracts import NewMessage
-    from moyai.product_continuation_errors import MESSAGES
 
     case = maintenance
     reference = await save(case)
@@ -570,7 +570,7 @@ async def test_stop_retains_image_and_graph_and_new_turn_reports_recovery_requir
     await case.runtime.database.stopped(case.turn.id)
     await unpause(case)
     monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=not expired))
-    followup = await case.runtime.database.submit(
+    followup = await case.runtime.admission.submit(
         actor, case.session.id, NewMessage(prompt="Inspect my preserved files.", request_key="after-stop"),
     )
     assert (await case.runtime.database.claim_next()).id == followup.id

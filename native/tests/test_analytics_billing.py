@@ -24,9 +24,9 @@ from test_native_settings import client_for, member
 from test_product_billing import SCOPE, old_row, seed
 
 from moyai.api import COOKIE
+from moyai.billing.product_billing import IdentityMappings, NativeBinding, RequestIdentity, SourceRef
+from moyai.billing.product_billing_routes import ProductBillingService
 from moyai.models import Session, User
-from moyai.product_billing import IdentityMappings, NativeBinding, RequestIdentity, SourceRef
-from moyai.product_billing_routes import ProductBillingService
 
 historical_store = billing_fixtures.store
 
@@ -210,7 +210,7 @@ async def test_private_activity_ids_are_omitted_without_erasing_accounting(runti
 
 
 async def test_activity_uses_supplied_accounting_snapshot_during_cost_recovery(runtime, actor, shared):
-    from moyai.analytics_service import report
+    from moyai.reporting.analytics_service import report
 
     financial = await shared.service.report(**params(), viewer_id=actor.id, include_root_cohorts=True)
     async with shared.source.begin() as db:

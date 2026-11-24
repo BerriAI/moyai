@@ -69,7 +69,7 @@ def test_open_computer_use_is_a_workspace_tool() -> None:
 
 
 def test_restored_project_images_include_locked_desktop_tools() -> None:
-    from moyai.product_continuation_restore import runtime_image
+    from moyai.continuations.product_continuation_restore import runtime_image
 
     image = FakeImage()
     assert runtime_image(image) is image

@@ -14,13 +14,13 @@ from pydantic_ai.capabilities import LocalWorkspace
 from sqlalchemy import func, select
 from test_native_settings import automation, client_for, member
 
-from moyai import settings_api
 from moyai.contracts import NewMessage
 from moyai.models import Message, Turn, User
+from moyai.preferences import settings_api
+from moyai.preferences.settings_models import SettingAutomationRun
+from moyai.preferences.settings_runtime import admit_automation
 from moyai.runtime import Runtime
 from moyai.settings import Settings
-from moyai.settings_models import SettingAutomationRun
-from moyai.settings_runtime import admit_automation
 
 
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
@@ -119,11 +119,11 @@ async def test_stale_automation_owner_is_denied_before_any_native_turn_is_writte
                 f"/api/settings/users/{owner.id}", json={"enabled": True},
             )).status_code == 200
         fresh = await original_user(owner.id)
-        following = await runtime.database.submit(fresh, schedule.session_id, NewMessage(
+        following = await runtime.admission.submit(fresh, schedule.session_id, NewMessage(
             prompt="New explicitly authorized task.", request_key="fresh-authority",
         ))
         assert (await runtime.database.claim_next()).id == following.id
-        assert (await runtime.database.prepare(following.id)).scope.actor_id == owner.id
+        assert (await runtime.admission.prepare(following.id)).scope.actor_id == owner.id
 
 
 async def test_revocation_waits_for_admission_commit_then_stops_the_admitted_turn(review_runtime, monkeypatch):

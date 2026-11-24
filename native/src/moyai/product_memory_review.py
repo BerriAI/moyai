@@ -50,10 +50,10 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 from temporalio.worker import ActivityInboundInterceptor, ExecuteActivityInput, Interceptor
 
+from .automations.product_automation_models import ProductAutomationTurn
 from .contracts import PreparedTurn, RunScope
 from .inference_usage import INFERENCE_ACTIVITY, InferenceActivity, UsageCapture
 from .models import Message, Session, Turn, User, now
-from .product_automation_models import ProductAutomationTurn
 from .product_drain_models import ProductDrainState
 from .product_memory import ProductMemoryService
 from .product_memory_models import ProductMemoryBarrier

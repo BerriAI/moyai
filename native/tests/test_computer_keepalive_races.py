@@ -49,9 +49,9 @@ async def race(tmp_path, monkeypatch):
         async with database.sessions() as db:
             actor = await db.scalar(select(User).where(User.username == "admin"))
         session = await database.create_session(actor, NewSession())
-        turn = await database.submit(actor, session.id, NewMessage(prompt="Save my work.", request_key="race"))
+        turn = await database.admission.submit(actor, session.id, NewMessage(prompt="Save my work.", request_key="race"))
         await database.claim_next()
-        prepared = await database.prepare(turn.id)
+        prepared = await database.admission.prepare(turn.id)
         await database.save_workspace_reference(prepared.scope, REFERENCE)
         process = SimpleNamespace(wait=SimpleNamespace(aio=AsyncMock(return_value=0)))
         sandbox = SimpleNamespace(

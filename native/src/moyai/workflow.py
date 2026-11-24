@@ -49,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from .computer_keepalive import VERSION as COMPUTER_KEEPALIVE_VERSION
     from .computer_keepalive import Keepalive
+    from .continuations.product_continuation_errors import public_preparation_message
     from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
     from .deployment_handoff import VERSION as DEPLOYMENT_HANDOFF_VERSION
     from .deployment_handoff import DeploymentHandoff
@@ -60,7 +61,6 @@ with workflow.unsafe.imports_passed_through():
     from .live_events import public_event_sink
     from .maintenance_workspace import VERSION as MAINTENANCE_WORKSPACE_VERSION
     from .maintenance_workspace import MaintenanceResume, wait_reason
-    from .product_continuation_errors import public_preparation_message
     from .product_drain import DRAIN_VERSION, DrainDecision
     from .request_limits import unlimited_model_requests
     from .runtime import current

@@ -71,7 +71,7 @@ async def audience(slack_admission):
         provenance={'team_id': 'TLOCAL001', 'channel_id': 'GPRIVATE1',
                     'thread_ts': '1792255700.001', 'message_ts': '1792255700.001', 'user_id': 'UACTUAL01'},
     ))
-    await product.database.submit(sender, session.id, body)
+    await product.database.admission.submit(sender, session.id, body)
     del sender.slack_channel_evidence
     runtime = SimpleNamespace(database=product.database, security=product.database.security,
                               product_identity=product.adapter)
@@ -214,12 +214,12 @@ async def test_revocation_blocks_file_export_and_live_endpoints(audience, runtim
 async def test_worker_keeps_saved_authority_while_new_reads_and_inputs_require_membership(audience):
     database = audience.database
     turn = await database.claim_next()
-    prepared = await database.prepare(turn.id)
+    prepared = await database.admission.prepare(turn.id)
     await database.authorize_scope(prepared.scope)
     audience.state['members'] = []
     await database.authorize_scope(prepared.scope)
     with pytest.raises(HTTPException) as denied:
-        await database.submit(audience.actor, audience.session_id, NewMessage(prompt='New input', request_key='new-input'))
+        await database.admission.submit(audience.actor, audience.session_id, NewMessage(prompt='New input', request_key='new-input'))
     assert denied.value.status_code == 404
     with pytest.raises(HTTPException):
         await database.messages(audience.actor, audience.session_id)
@@ -322,7 +322,7 @@ async def connected_audience(audience, monkeypatch):
     async with product.database.sessions.begin() as db:
         sender = await product.adapter.project_native_user(db, product.raw_principal)
     sender.slack_channel_evidence = ('TLOCAL001', 'GPRIVATE1')
-    product.turn = await product.database.submit(sender, product.session_id, NewMessage.from_event(InboundEvent(
+    product.turn = await product.database.admission.submit(sender, product.session_id, NewMessage.from_event(InboundEvent(
         source='slack', sender_id=sender.id, deduplication_key='connected-slack', text='Hello from Slack',
         provenance={'team_id': 'TLOCAL001', 'channel_id': 'GPRIVATE1',
                     'thread_ts': '1792255700.001', 'message_ts': '1792255700.002', 'user_id': 'UACTUAL01'},
@@ -347,7 +347,7 @@ async def test_slack_turn_reaches_model_with_parallel_repository_discovery_durin
     from moyai.connections import connection_tools
 
     product = connected_audience
-    prepared = await product.database.prepare(product.turn.id)
+    prepared = await product.database.admission.prepare(product.turn.id)
     product.state['failure'] = failure
     assert len(prepared.scope.grants) == 8
     barrier, credentials = asyncio.Barrier(8), []
@@ -382,7 +382,7 @@ async def test_slack_turn_reaches_model_with_parallel_repository_discovery_durin
 @pytest.mark.parametrize('revoke', ['installation', 'sender', 'connection', 'policy', 'stopped', 'deleted'])
 async def test_slack_execution_still_rejects_saved_authority_changes(connected_audience, revoke):
     product = connected_audience
-    prepared = await product.database.prepare(product.turn.id)
+    prepared = await product.database.admission.prepare(product.turn.id)
     await product.database.authorize_scope(prepared.scope)
     if revoke in {'installation', 'connection', 'policy'}:
         async with product.source.begin() as db:

@@ -13,14 +13,14 @@ import test_product_continuation
 from fastapi import FastAPI, HTTPException
 from pydantic import TypeAdapter
 
-from moyai.contracts import Grant, NewMessage, NewSession, PreparedTurn
-from moyai.models import Session, Turn
-from moyai.product_continuation_restore import ProductWorkspaceRestorer
-from moyai.product_continuation_routes import ProductEnvironment, continuation_routes
-from moyai.product_continuation_workspace import (
+from moyai.continuations.product_continuation_restore import ProductWorkspaceRestorer
+from moyai.continuations.product_continuation_routes import ProductEnvironment, continuation_routes
+from moyai.continuations.product_continuation_workspace import (
     ProductWorkspaceCompatibility,
     gitlab_recipe_identity,
 )
+from moyai.contracts import Grant, NewMessage, NewSession, PreparedTurn
+from moyai.models import Session, Turn
 
 ENV, BUILD = "c" * 32, "d" * 32
 ORIGIN = "https://gitlab.example.test"
@@ -215,13 +215,13 @@ async def admitted_image(product, choices=None):
     async with product.database.sessions.begin() as db:
         context = await workspace.capture_workspace_context(db, product.principal, choices or selection())
     session = await product.database.create_session(product.actor, NewSession())
-    turn = await product.database.submit(product.actor, session.id, NewMessage(
+    turn = await product.database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Use the validated project", request_key="image", connections=[selected.id],
     ))
     async with product.database.sessions.begin() as db:
         await workspace.bind_automation_turn(db, session, turn, context)
     await product.database.claim_next()
-    prepared = await product.database.prepare(turn.id)
+    prepared = await product.database.admission.prepare(turn.id)
     return prepared, context, connections
 
 
@@ -350,7 +350,7 @@ async def test_legacy_github_environment_context_and_fingerprints_are_byte_compa
 
 @PG
 async def test_gitlab_continuation_retains_exact_pinned_environment_and_provider(continuation):
-    from moyai.product_continuation_models import ProductContinuation
+    from moyai.continuations.product_continuation_models import ProductContinuation
 
     product = continuation
     await seed(product)

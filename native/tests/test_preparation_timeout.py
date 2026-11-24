@@ -10,8 +10,8 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
+from moyai.continuations.product_continuation_errors import MESSAGES, PREPARATION_BLOCKED_TYPE
 from moyai.models import Turn
-from moyai.product_continuation_errors import MESSAGES, PREPARATION_BLOCKED_TYPE
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity

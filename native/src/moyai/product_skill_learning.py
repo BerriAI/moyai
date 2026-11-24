@@ -34,11 +34,11 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
+from .automations.product_automation_models import ProductAutomationTurn
 from .contracts import PreparedTurn, RunScope
 from .inference_usage import UsageCapture
 from .message_sources import memory_text, public_message
 from .models import Message, Session, Turn, User, now
-from .product_automation_models import ProductAutomationTurn
 from .product_drain_models import ProductDrainState
 from .product_identity import ProductGrant, ProductPrincipal
 from .product_memory_review import ReviewDeferred, ReviewInput, fingerprint

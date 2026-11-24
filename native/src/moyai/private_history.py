@@ -17,14 +17,14 @@ from pydantic_ai.toolsets import FunctionToolset
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .automations.product_automation_models import ProductAutomationTurn
 from .contracts import RunScope
 from .database import Database
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .goal_models import GoalTurn
 from .input_identity import input_identity
 from .models import Message, MessageSource, Session, SlackThread, Turn, User
-from .product_automation_models import ProductAutomationTurn
-from .settings_models import SettingAutomationRun
+from .preferences.settings_models import SettingAutomationRun
 from .swarm_models import SwarmMember, SwarmTurn
 
 MAX_CHATS = 30

@@ -238,11 +238,11 @@ async def test_cancel_waiting_children_preserves_evidence_and_allows_follow_up(r
         # The cancelled attempt retains its evidence and cannot be replayed.
         async with runtime.database.sessions() as db:
             actor = await db.get(User, prepared.scope.actor_id)
-        following = await runtime.database.submit(actor, session.id, NewMessage(
+        following = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Do not replay the unknown effect.", request_key="after-cancel",
         ))
         await runtime.database.claim_next()
-        admitted = await runtime.database.prepare(following.id)
+        admitted = await runtime.admission.prepare(following.id)
         receipts = EffectReceipts(runtime.database)
         settled = await effect_rows(runtime, session.id)
         assert [row.id for row in settled] == [row.id for row in rows]
@@ -269,7 +269,7 @@ async def test_cancel_waiting_children_preserves_evidence_and_allows_follow_up(r
 async def test_independent_workflows_execute_guarded_tools_in_parallel(runtime, active, actor):
     first_session, first_turn, _ = active
     second_session = await runtime.database.create_session(actor, NewSession())
-    second_turn = await runtime.database.submit(actor, second_session.id, NewMessage(
+    second_turn = await runtime.admission.submit(actor, second_session.id, NewMessage(
         prompt="Independent parallel workspace.", request_key="second-workflow",
     ))
     await runtime.database.claim_next()
@@ -320,11 +320,11 @@ async def test_five_children_with_real_postgres_uncertainty_index(tmp_path):
         async with runtime.database.sessions() as db:
             actor = await db.scalar(select(User))
         session = await runtime.database.create_session(actor, NewSession())
-        turn = await runtime.database.submit(actor, session.id, NewMessage(
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Five native children.", request_key="postgres-effects",
         ))
         await runtime.database.claim_next()
-        prepared = await runtime.database.prepare(turn.id)
+        prepared = await runtime.admission.prepare(turn.id)
         await qualify_parallel_children(runtime, (session, turn, prepared))
     finally:
         await runtime.close()

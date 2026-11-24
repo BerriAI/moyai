@@ -16,13 +16,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from test_native_analytics import END, START, ledger
 from test_product_identity import settings_for
 
-from moyai.analytics import utc
-from moyai.analytics_identity import report_identities
-from moyai.analytics_service import report
 from moyai.inference_usage import InferenceUsage
 from moyai.models import Effect, Session, Turn, User, new_id
 from moyai.pr_publications import PRPublication
 from moyai.product_identity import ProductIdentityAdapter
+from moyai.reporting.analytics import utc
+from moyai.reporting.analytics_identity import report_identities
+from moyai.reporting.analytics_service import report
 
 WEB, SLACK, OTHER, UNLINKED = "google:person", "slack:team:person", "google:other", "slack:team:other"
 
@@ -147,7 +147,7 @@ async def test_pr_costs_combine_linked_actor_contributions_but_preserve_original
             row.id: {"state": "merged", "created_at": utc(START), "merged_at": utc("2026-10-03T00:00:00Z")}
             for row in publications
         }, len(publications)
-    monkeypatch.setattr("moyai.analytics_service.publication_statuses", statuses)
+    monkeypatch.setattr("moyai.reporting.analytics_service.publication_statuses", statuses)
     for selected in (WEB, SLACK):
         result = await read(runtime, actor, selected)
         person = result["by_user"][0]

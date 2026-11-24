@@ -34,7 +34,7 @@ async def test_child_and_grandchild_send_copied_images_once_and_keep_other_evide
             "prompt": "Inspect the evidence.", "attachments": [upload["id"]], "request_key": "images",
         })
         turn = await runtime.database.claim_next()
-        parent = await runtime.database.prepare(turn.id)
+        parent = await runtime.admission.prepare(turn.id)
         parent.images = await runtime.database.input_images(turn.id, session_id=session["id"])
         await hydrate(runtime, parent)
         history = [
@@ -50,7 +50,7 @@ async def test_child_and_grandchild_send_copied_images_once_and_keep_other_evide
                 scope, f"image-child-{depth}", "Inspect the evidence.", messages=history,
             )
             turn = await runtime.database.claim_next()
-            saved = await runtime.database.prepare(turn.id)
+            saved = await runtime.admission.prepare(turn.id)
             saved.images = await runtime.database.input_images(turn.id, session_id=child["session_id"])
             assert saved.scope.delegation_generated
             assert len(saved.images) == 1 and saved.images[0].upload_id != previous_upload
@@ -113,7 +113,7 @@ async def test_child_model_receives_frozen_parent_evidence_without_reexecuting_p
         prepared.scope, "delegate", "Check the setting.", messages=messages, ctx=ctx,
     ) == child
     turn = await runtime.database.claim_next()
-    saved = await runtime.database.prepare(turn.id)
+    saved = await runtime.admission.prepare(turn.id)
     assert saved.conversation is not None
     conversation = ConversationTypeAdapter.validate_json(saved.conversation)
     assert is_provider_valid(conversation.messages)
@@ -138,7 +138,7 @@ async def test_failure_before_first_response_is_visible_in_parent_report_and_pro
     _, parent, prepared = active
     child = await DelegationService(runtime.database).start(prepared.scope, "fails", "Inspect the repository.")
     turn = await runtime.database.claim_next()
-    await runtime.database.prepare(turn.id)
+    await runtime.admission.prepare(turn.id)
     await runtime.database.fail(turn.id, "Activity task failed", diagnostics={"exception_chain": [
         {"type": "ActivityError", "activity_type": "agent__moyai__capability__memory__load_snapshot"},
         {"type": "PermissionError", "message": "SECRET_DIAGNOSTIC_MUST_NOT_LEAK"},

@@ -87,6 +87,7 @@ from .models import (
     new_id,
     now,
 )
+from .preferences.settings_api import routes as settings_routes
 from .presentation import public_event, redact
 from .private_instructions import preferences_for_user
 from .product_identity import ProductAuthorityBusy
@@ -97,7 +98,6 @@ from .runtime import Runtime
 from .security import check_password
 from .session_reads import SessionReads
 from .settings import Settings
-from .settings_api import routes as settings_routes
 from .sidebar import folders_for, lock_sidebar
 from .sidebar import routes as sidebar_routes
 from .slack import dispatcher as slack_dispatcher
@@ -369,10 +369,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         from .product_skill_learning import routes as skill_learning_routes
         app.include_router(skill_learning_routes(runtime.product_skill_learning))
     if runtime.product_billing is not None:
-        from .product_billing_routes import routes as product_billing_routes
+        from .billing.product_billing_routes import routes as product_billing_routes
         app.include_router(product_billing_routes(runtime.product_billing, runtime=runtime))
     if runtime.product_automations is not None:
-        from .product_automations import routes as product_automation_routes
+        from .automations.product_automations import routes as product_automation_routes
         app.include_router(product_automation_routes(runtime.product_automations))
     from .product_routes import routes as product_routes
     app.include_router(product_routes(runtime, actor))

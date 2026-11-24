@@ -14,7 +14,7 @@ let server, browser, address, cache;
 const fixture = `
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SwarmPanel, SwarmSetup } from '../native/web/swarm';
+import { SwarmPanel, SwarmSetup } from '../native/web/workspace/swarm';
 import { Home } from '../native/web/home';
 import { setCsrf } from '../native/web/api';
 import '../frontend/theme.css';

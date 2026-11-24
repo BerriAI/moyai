@@ -18,12 +18,12 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .analytics import utc
 from .contracts import Grant, RunScope
 from .gitlab_reviews import mr_identity, project_reference
 from .links import gitlab_link
 from .models import Base, Effect, Turn
 from .pull_requests import parse_pr_url
+from .reporting.analytics import utc
 
 SHARED_CREATIONS = frozenset({
     "github_create_pull_request", "github_open_pull_request",

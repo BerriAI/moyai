@@ -12,13 +12,13 @@ from fastapi import HTTPException
 from pydantic_ai.exceptions import ToolFailed
 from sqlalchemy import func, select, text
 
+from moyai.automations.product_automation_context_models import ProductAutomationExecutionContext as Context
+from moyai.automations.product_automation_models import ProductAutomationBinding as Binding
+from moyai.automations.product_automation_models import ProductAutomationOperation as Operation
+from moyai.automations.product_automation_tools import CreateRequest
+from moyai.automations.product_automations import Mutation, Save, definition_digest
 from moyai.contracts import Grant
 from moyai.models import Effect, Turn
-from moyai.product_automation_context_models import ProductAutomationExecutionContext as Context
-from moyai.product_automation_models import ProductAutomationBinding as Binding
-from moyai.product_automation_models import ProductAutomationOperation as Operation
-from moyai.product_automation_tools import CreateRequest
-from moyai.product_automations import Mutation, Save, definition_digest
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
 product_database = fixtures.product_database

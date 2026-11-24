@@ -26,13 +26,13 @@ from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness import ModalSandbox
 from sqlalchemy import delete, literal, select, update
 
+from .continuations.product_continuation_errors import preparation_blocked
 from .contracts import PreparedTurn, RunScope
 from .failed_action_attempts import settle_failed_action_attempts
 from .failure_diagnostics import FAILURE_KIND, safe_failure_metadata
 from .lifecycle_tracing import operation as operation_span
 from .lifecycle_tracing import scope_attributes, workspace_attributes
 from .models import ComputerOperation, Event, Message, Session, Turn, now
-from .product_continuation_errors import preparation_blocked
 from .workspace_recovery import (
     checkpoint,
     locked_scope,
