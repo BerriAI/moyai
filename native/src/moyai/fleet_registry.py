@@ -170,10 +170,13 @@ class FleetRegistry:
         The shared role-row lock orders registration before or after an operator's
         exclusive seal. A seal captures all earlier members; later starts fail.
         """
+        uuid = r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+        render = bool(re.fullmatch(r"srv-[a-z0-9]{10,40}", service_id))
+        kubernetes = bool(re.fullmatch("k8s-" + uuid, service_id))
         if (
-            not re.fullmatch(r"srv-[a-z0-9]{10,40}", service_id)
+            not (render or kubernetes)
             or not instance_id.startswith(service_id + "-")
-            or not re.fullmatch("[a-z0-9]{5}", instance_id.removeprefix(service_id + "-"))
+            or not re.fullmatch(uuid if kubernetes else "[a-z0-9]{5}", instance_id.removeprefix(service_id + "-"))
             or not re.fullmatch("[a-f0-9]{32}", identity["instance"])
             or type(identity["owner_pid"]) is not int or identity["owner_pid"] <= 0
         ):
