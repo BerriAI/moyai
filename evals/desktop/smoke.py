@@ -137,6 +137,8 @@ def main():
             time.sleep(.1)
         else:
             raise AssertionError("The GTK application did not start.")
+        recording = "b" * 64
+        assert request({"action": "record", "recording": recording, "seconds": 30})["status"] == "recording"
         old, _ = action("set_value", "text", "Employee name", value="Ada")
         assert not request({"action": "click", "app": "apps.py", "observation": old["observation"],
                             "element_index": target(old, "button", "Submit")})["action_executed"]
@@ -172,8 +174,25 @@ def main():
             ocu.process.terminate()
             ocu.process.wait(timeout=5)
         input_checks = check_native_input()
+        request({"action": "stop_recording", "recording": recording})
+        for _ in range(100):
+            captured = request({"action": "recording_status", "recording": recording})
+            if captured["status"] == "ready":
+                break
+            assert captured["status"] in {"recording", "stopping"}, captured
+            time.sleep(.1)
+        else:
+            raise AssertionError("The recording did not finalize.")
+        assert captured["width"] == 1280 and captured["height"] == 800
+        decoded = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", captured["path"], "-f", "framemd5", "-"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        frames = [line.rsplit(",", 1)[-1] for line in decoded.stdout.splitlines() if not line.startswith("#")]
+        assert len(set(frames)) > 1, "A playable recording must contain the real desktop changes."
         print(json.dumps({"passed": ["form_values", "checkbox", "submit", "stale_observation", "worker_restart",
                                      "screenshot", "failed_browser_navigation", "full_text_preserved",
+                                     "bounded_recording", "recording_decodes", "changing_video_frames",
                                      *input_checks], **sizes}))
     finally:
         app.terminate()

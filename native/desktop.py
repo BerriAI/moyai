@@ -12,6 +12,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -24,6 +25,8 @@ from pathlib import Path
 WIDTH, HEIGHT = 1280, 800
 DISPLAY = ":99"
 STATE = Path("/tmp/moyai-native-desktop")
+RECORDINGS = Path("/workspace/.moyai/desktop-recordings")
+RECORDING_BYTES = 32 * 1024 * 1024
 ENV = {**os.environ, "DISPLAY": DISPLAY, "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/moyai-dbus",
        "XDG_RUNTIME_DIR": "/tmp/moyai-xdg", "NO_AT_BRIDGE": "0", "GTK_A11Y": "always"}
 KEYS = {
@@ -57,6 +60,130 @@ def remaining(deadline, limit):
     if duration <= 0:
         raise TimeoutError("This desktop action expired before dispatch.")
     return duration
+
+
+def recording_directory(identity):
+    if not isinstance(identity, str) or not re.fullmatch(r"[a-f0-9]{64}", identity):
+        raise ValueError("Invalid recording identity.")
+    return RECORDINGS / identity
+
+
+def boot_id():
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def recording_status(identity):
+    directory = recording_directory(identity)
+    try:
+        result = json.loads((directory / "result.json").read_text())
+        return {"recording": identity, **result}
+    except FileNotFoundError:
+        pass
+    try:
+        state = json.loads((directory / "state.json").read_text())
+    except FileNotFoundError:
+        return {"recording": identity, "status": "missing"}
+    if (
+        state["boot"] != boot_id()
+        or time.time() > state["deadline"]
+    ):
+        return {"recording": identity, "status": "interrupted",
+                "message": "The bounded capture did not produce a verified video. It was not restarted."}
+    return {"recording": identity, "status": "stopping" if (directory / "stop").exists() else "recording",
+            "max_seconds": state["seconds"]}
+
+
+def start_recording(identity, seconds):
+    directory = recording_directory(identity)
+    if type(seconds) is not int or not 5 <= seconds <= 120:
+        raise ValueError("Recording duration must be between 5 and 120 seconds.")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return {"status": "unavailable", "message": "This computer needs ffmpeg. Restart desktop setup before recording."}
+    RECORDINGS.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        return recording_status(identity)
+    (directory / "state.json").write_text(json.dumps({
+        "seconds": seconds, "deadline": time.time() + seconds + 20,
+        "boot": boot_id(),
+    }))
+    launch(sys.executable, str(Path(__file__).resolve()), "--record-worker", identity, str(seconds))
+    return {"recording": identity, "status": "recording", "max_seconds": seconds,
+            "message": "Capture started. Inspect this identity after the demo; start is not proof of a finished video."}
+
+
+def stop_recording(identity):
+    directory = recording_directory(identity)
+    result = recording_status(identity)
+    if result["status"] in {"recording", "stopping"}:
+        (directory / "stop").touch()
+        result["status"] = "stopping"
+    return result
+
+
+def record_worker(identity, seconds):
+    """Bounded passive X11 capture. No input, credentials, or network endpoint."""
+    directory = recording_directory(identity)
+    if type(seconds) is not int or not 5 <= seconds <= 120:
+        raise ValueError("Invalid recording duration.")
+    output = directory / "capture.mp4"
+    result = {"status": "failed", "message": "Recording did not produce a verified playable video."}
+    process = None
+    try:
+        # A per-computer lock prevents overlapping captures, even across turns.
+        # No PID signaling: an old snapshot cannot kill a reused process ID.
+        with (STATE / "recording.lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                result["message"] = "Another desktop capture is running. Inspect its identity instead."
+                return
+            process = subprocess.Popen([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-n",
+                "-f", "x11grab", "-video_size", f"{WIDTH}x{HEIGHT}", "-framerate", "8",
+                "-i", DISPLAY, "-t", str(seconds), "-an", "-c:v", "libx264",
+                "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+                "-fs", str(RECORDING_BYTES - 1024 * 1024), "-movflags", "+faststart", str(output),
+            ], env=ENV, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.monotonic() + seconds + 10
+            while process.poll() is None:
+                if (directory / "stop").exists():
+                    try:
+                        process.communicate(b"q\n", timeout=5)
+                    except BrokenPipeError:
+                        pass
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Capture exceeded its bound.")
+                time.sleep(.1)
+            if process.wait(timeout=5) != 0 or not 0 < output.stat().st_size <= RECORDING_BYTES:
+                raise ValueError("Capture failed or exceeded its size limit.")
+            probe = subprocess.run([
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height:format=duration",
+                "-of", "json", str(output),
+            ], capture_output=True, text=True, check=True, timeout=5)
+            metadata = json.loads(probe.stdout)
+            stream = metadata["streams"][0]
+            duration = float(metadata["format"]["duration"])
+            if (stream["codec_name"] != "h264" or stream["width"] != WIDTH or stream["height"] != HEIGHT
+                    or not 0 < duration <= seconds + 2):
+                raise ValueError("Capture metadata did not verify.")
+            result = {"status": "ready", "path": str(output), "media_type": "video/mp4",
+                      "duration_seconds": duration, "bytes": output.stat().st_size,
+                      "width": WIDTH, "height": HEIGHT}
+    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
+        result["status"] = "failed"  # Keep captured contents and encoder diagnostics private.
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        if result["status"] != "ready":
+            output.unlink(missing_ok=True)
+        temporary = directory / "result.tmp"
+        temporary.write_text(json.dumps(result))
+        temporary.replace(directory / "result.json")
 
 
 def browser(url="about:blank"):
@@ -195,6 +322,7 @@ def start(deadline):
     packages = {
         "Xvfb": "xvfb", "openbox": "openbox", "xterm": "xterm", "xdotool": "xdotool",
         "chromium": "chromium", "xsetroot": "x11-xserver-utils", "tint2": "tint2", "x11vnc": "x11vnc",
+        "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg",
     }
     missing = [package for command, package in packages.items() if not shutil.which(command)]
     if missing:
@@ -347,9 +475,16 @@ def command(body):
         if action == "start":
             start(deadline)
         if action == "desktop":
+            command = body["command"]
+            if command["action"] == "recording_status":
+                return recording_status(command["recording"])
+            if command["action"] == "stop_recording":
+                return stop_recording(command["recording"])
             if not display_alive():
                 return {"available": False, "action_executed": False,
                         "message": "The display stopped. Use desktop_action with action=start."}
+            if command["action"] == "record":
+                return start_recording(command["recording"], command["seconds"])
             driver = body.get("browser_driver", str(Path(__file__).with_name("browser_driver.py")))
             driver_spec = importlib.util.spec_from_file_location("moyai_desktop_driver", driver)
             driver_runtime = importlib.util.module_from_spec(driver_spec)
@@ -409,6 +544,8 @@ if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["--vnc-disconnect"]:
             release_vnc_input()
+        elif len(sys.argv) == 4 and sys.argv[1] == "--record-worker":
+            record_worker(sys.argv[2], int(sys.argv[3]))
         else:
             print(json.dumps(command(json.loads(sys.argv[1]))))
     except Exception:  # noqa: BLE001 - sanitize page/provider errors at the guest boundary

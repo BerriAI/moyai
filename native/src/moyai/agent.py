@@ -335,7 +335,7 @@ def workspace_image() -> modal.Image:
         modal.Image.debian_slim(python_version="3.13")
         .apt_install("git", "ripgrep", "curl", "jq", "util-linux",
                      "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
-                     "x11-xserver-utils", "fonts-dejavu-core")
+                     "x11-xserver-utils", "fonts-dejavu-core", "ffmpeg")
         .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
     )
     image = with_node(image)
