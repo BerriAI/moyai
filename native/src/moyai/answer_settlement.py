@@ -170,6 +170,10 @@ class AnswerSettlement:
                     raise ValueError("The completed result for this turn is immutable.")
                 return bool(turn.result_accepted)
             product_allowed = True
+            try:
+                await self.database.responsibilities.authorize(db, turn, scope=scope, publication=True)
+            except (PermissionError, HTTPException):
+                product_allowed = False
             if self.database.product_authority_enabled:
                 try:
                     await self.database._check_product_turn(db, turn, scope.product_grant)
@@ -234,16 +238,16 @@ class AnswerSettlement:
             await db.execute(update(Turn).where(
                 Turn.parent_turn == turn.id, Turn.status == "accepted"
             ).values(status="included", finished_at=now()))
-            if not deferred:
+            if not deferred and scope.responsibility_id is None:
                 existing = await db.scalar(select(Message.id).where(Message.identity == f"answer:{turn.id}"))
                 if existing is None:
                     db.add(Message(
                         session_id=session.id, turn_id=turn.id, role="assistant",
                         content=self.database.security.seal(output), identity=f"answer:{turn.id}",
                     ))
-                if self.database.product_memory_review is not None:
+                if self.database.product_memory_review is not None and scope.responsibility_id is None:
                     await self.database.product_memory_review.enqueue_in(db, turn, session)
-                if self.database.product_skill_learning is not None:
+                if self.database.product_skill_learning is not None and scope.responsibility_id is None:
                     await self.database.product_skill_learning.enqueue_in(db, turn, session)
                 await db.flush()
                 await settle_failed_action_attempts(db, session.id, accepted_turn_id=turn.id)
@@ -307,7 +311,7 @@ class AnswerSettlement:
                 ):
                     raise PermissionError("The computer's project context changed during capture.")
                 session.snapshot = saved.model_copy(update={"image_id": image}).model_dump_json()
-                self._settle_answer(turn, session)
+                await self._settle_answer(db, turn, session)
             return True
         finally:
             async with database.sessions.begin() as db:
@@ -332,10 +336,10 @@ class AnswerSettlement:
             session = await db.get(Session, turn.session_id)
             if session is None or session.active_turn != turn.id or turn.status != "saving":
                 return
-            self._settle_answer(turn, session, snapshot=snapshot, warning=warning)
+            await self._settle_answer(db, turn, session, snapshot=snapshot, warning=warning)
 
-    def _settle_answer(
-        self, turn: Turn, session: Session | None, *, snapshot: str | None = None, warning: str | None = None,
+    async def _settle_answer(
+        self, db, turn: Turn, session: Session | None, *, snapshot: str | None = None, warning: str | None = None,
     ) -> None:
         """Later cleanup cannot downgrade a published answer to failure or Stop."""
         prepared = TypeAdapter(PreparedTurn).validate_json(
@@ -360,6 +364,7 @@ class AnswerSettlement:
             # clear a later Stop/deletion or publish a late computer image.
             session.status = "stopped" if stopped else "idle"
             session.active_turn = None
+        await self.database.responsibilities.completed(db, turn, session)
 
     async def fail(
         self, turn_id: str, message: str, *, only_unsettled: bool = False,
@@ -386,8 +391,8 @@ class AnswerSettlement:
                 return
             session = await db.get(Session, session_id)
             if turn.status == "saving" and turn.result_accepted:
-                self._settle_answer(
-                    turn, session,
+                await self._settle_answer(
+                    db, turn, session,
                     warning="The answer was saved, but computer snapshot settlement was interrupted.",
                 )
                 return
@@ -423,8 +428,8 @@ class AnswerSettlement:
             if session is None or session.active_turn != turn.id:
                 return
             if turn.status == "saving" and turn.result_accepted:
-                self._settle_answer(
-                    turn, session,
+                await self._settle_answer(
+                    db, turn, session,
                     warning="The answer was saved before Stop interrupted computer snapshot settlement.",
                 )
                 return

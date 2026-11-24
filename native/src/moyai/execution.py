@@ -35,7 +35,7 @@ class AuthorizedActivity(ActivityInboundInterceptor):
             }
         )
         scope = None
-        if name.startswith("agent__moyai__") and not evidence:
+        if name.startswith(("agent__moyai__", "agent__moyai_responsibility__")) and not evidence:
             scope = next((arg for arg in input.args if isinstance(arg, RunScope)), None)
             if scope is None:
                 raise ApplicationError(

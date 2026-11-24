@@ -132,6 +132,8 @@ class Database:
         self.answers = AnswerSettlement(self)
         self.swarms = SwarmService(self)
         self.goals = Goals(self)
+        from .responsibilities import Responsibilities
+        self.responsibilities = Responsibilities(self)
         self.admission = TurnAdmission(self)
         if settings.sqlalchemy_url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
@@ -311,6 +313,7 @@ class Database:
         session = await db.get(Session, session_id, options=SESSION_METADATA if metadata_only else ())
         if session is None or session.deleted:
             raise HTTPException(404, "Conversation not found.")
+        await self.responsibilities.read_authority(db, actor, session)
         if session.visibility == "private" and session.owner_id != actor.id:
             link = await db.get(DelegatedSession, session.id)
             if link is None or not await self.same_person(db, actor, session.owner_id):
@@ -372,9 +375,11 @@ class Database:
         return session
 
     async def list_sessions(self, actor: User, *, archived: bool = False, deleted: bool = False) -> list[Session]:
+        from .responsibilities import ordinary_session
         async with self.sessions() as db:
             query = select(Session).where(
                 Session.deleted.is_(deleted),
+                ordinary_session(),
                 or_(Session.owner_id == actor.id, Session.visibility == "shared"),
             ).order_by(Session.updated_at.desc()).limit(100)
             if not deleted:
@@ -817,6 +822,7 @@ class Database:
             cast(Any, actor).product_grant = scope.product_grant
             await self.swarms.authorize(db, turn, scope=scope)
             await self.goals.authorize(db, turn)
+            await self.responsibilities.authorize(db, turn, scope=scope)
             session = await self.execution_session(db, scope.session_id, actor)
             if (
                 session.active_turn != turn.id or session.status != "running" or turn.status != "running"
@@ -1095,6 +1101,8 @@ class Database:
         if transaction is None:
             await self.prefetch_session_audiences(actor, [session_id])
         async with self._admission_session(transaction) as db:
+            if await self.responsibilities.worker_session(db, session_id):
+                raise HTTPException(409, "Responsibility evidence reviews cannot be resumed as conversations.")
             product_grant = await self._actor_product_grant(db, actor)
             locked_actor = await db.scalar(update(User).where(
                 User.id == actor.id, User.enabled.is_(True), User.auth_version == actor.auth_version,

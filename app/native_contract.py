@@ -9,9 +9,9 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Every role must preserve private automation definitions and admitted visibility.
-# Older readers assume that all definitions and scheduled executions are shared.
-NATIVE_PROTOCOL_REVISION = 8
+# Every role must understand responsibility assignments and the restricted reviewer.
+# Older workers would prepare these generated turns as ordinary tool-enabled work.
+NATIVE_PROTOCOL_REVISION = 9
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

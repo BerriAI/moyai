@@ -39,6 +39,7 @@ class TurnAdmission:
         self, actor: User, session_id: str, body: NewMessage, *, db: AsyncSession | None = None,
         swarm_generated: bool = False,
         automation_generated: bool = False,
+        responsibility_generated: bool = False,
         delegated_authority: DelegatedAuthority | None = None,
         received_at: str | None = None,
     ) -> Turn:
@@ -55,10 +56,11 @@ class TurnAdmission:
             return await self._submit(
                 actor, session_id, body, fingerprint, db=db, swarm_generated=swarm_generated,
                 automation_generated=automation_generated,
+                responsibility_generated=responsibility_generated,
                 delegated_authority=delegated_authority,
                 received_at=received_at, admitted_at=admitted_at,
             )
-        if swarm_generated or automation_generated or delegated_authority is not None:
+        if swarm_generated or automation_generated or responsibility_generated or delegated_authority is not None:
             raise ValueError("Generated input requires its admission transaction.")
         try:
             return await self._submit(
@@ -84,11 +86,14 @@ class TurnAdmission:
         *, db: AsyncSession | None = None, received_at: str | None = None,
         swarm_generated: bool = False, admitted_at: str | None = None,
         automation_generated: bool = False,
+        responsibility_generated: bool = False,
         delegated_authority: DelegatedAuthority | None = None,
     ) -> Turn:
         if db is None and not swarm_generated and not automation_generated and delegated_authority is None:
             await self.database.prefetch_session_audiences(actor, [session_id])
         async with self.database._admission_session(db) as transaction:
+            if not responsibility_generated and await self.database.responsibilities.worker_session(transaction, session_id):
+                raise HTTPException(409, "This chat is an immutable responsibility review. Open the source chat to follow up.")
             product_grant = await self.database._actor_product_grant(transaction, actor)
             # Account changes and admission must serialize across API/worker
             # processes. An authorization check before this transaction can
@@ -132,9 +137,11 @@ class TurnAdmission:
                     "Slack account export policies are not configured."
                 )
             from .skill_invocations import gateway_connection_ids
-            selections = list(dict.fromkeys([
-                *body.connections, *gateway_connection_ids(body.prompt),
+            selections: list[str] = list(dict.fromkeys([
+                *body.connections, *(gateway_connection_ids(body.prompt) if not responsibility_generated else []),
             ]))
+            if responsibility_generated and selections:
+                raise PermissionError("Responsibility reviews cannot select connected accounts.")
             grants = await self.database.resolve_grants(
                 transaction, actor.id, selections, shared_session=context.visibility == "shared",
                 surface=context.surface,
@@ -220,7 +227,7 @@ class TurnAdmission:
                     turn_id=turn.id, requester_id=raw.user_id, authority_version=raw.authority_version,
                 ))
             await self.database.swarms.bind(transaction, mission, turn, generated=swarm_generated)
-            if not automation_generated:
+            if not automation_generated and not responsibility_generated:
                 await self.database.goals.bind(transaction, turn)
             for position, image_id in enumerate(body.attachments):
                 # Reserve the upload's destination atomically before publishing
@@ -233,12 +240,14 @@ class TurnAdmission:
                     raise HTTPException(404, "A file is unavailable in this conversation.")
                 transaction.add(TurnImage(turn_id=turn.id, upload_id=image_id, position=position))
             transaction.add(Message(
-                session_id=session_id, turn_id=turn_id, author_id=None if swarm_generated or automation_generated else actor.id,
-                role="system" if swarm_generated or automation_generated else "user", content=self.database.security.seal(body.authored_text),
-                identity=f"{'automation' if automation_generated else 'swarm' if swarm_generated else 'user'}:{turn_id}",
+                session_id=session_id, turn_id=turn_id,
+                author_id=None if swarm_generated or automation_generated or responsibility_generated else actor.id,
+                role="system" if swarm_generated or automation_generated or responsibility_generated else "user",
+                content=self.database.security.seal(body.authored_text),
+                identity=f"{'responsibility' if responsibility_generated else 'automation' if automation_generated else 'swarm' if swarm_generated else 'user'}:{turn_id}",
             ))
             from .message_sources import record_source
-            if not automation_generated:
+            if not automation_generated and not responsibility_generated:
                 await record_source(self.database, transaction, f"{'swarm' if swarm_generated else 'user'}:{turn_id}", body)
             session.updated_at = now()
             if session.title == "New conversation":
@@ -307,6 +316,10 @@ class TurnAdmission:
             goal = await self.database.goals.authorize(db, turn)
             if goal is not None:
                 scope.goal_generation = goal.generation
+            responsibility = await self.database.responsibilities.authorize(db, turn)
+            if responsibility is not None:
+                scope.responsibility_id = responsibility.responsibility_id
+                scope.responsibility_generation = responsibility.generation
             if scope.delegation_generated and delegation is not None:
                 inherited = (await saved_authority(self.database, db, delegation)).grants
                 if inherited != grants:
@@ -329,6 +342,17 @@ class TurnAdmission:
                     raise PermissionError("Connection access changed during preparation.")
                 if delegation or context.surface == "automation":
                     prepared.scope.execution_context = context
+                return prepared
+            if responsibility is not None:
+                if session.workspace or session.conversation or turn.deferred_results or grants:
+                    raise PermissionError("Responsibility reviews require an isolated empty worker session.")
+                turn.status, session.status = "running", "running"
+                turn.accepted_at = turn.accepted_at or now()
+                prepared = PreparedTurn(
+                    scope=scope, prompt=self.database.security.unseal(turn.prompt).decode(),
+                    conversation=None, workspace=None,
+                )
+                turn.preparation = self.database.security.seal(TypeAdapter(PreparedTurn).dump_json(prepared))
                 return prepared
             if turn.deferred_results:
                 from .delegation import resumed_agents

@@ -200,8 +200,9 @@ class ProductReadService:
         return or_(ownership if private else false(), and_(child, or_(ownership, linked)))
 
     def visible(self, reader: Reader, *, deleted: bool = False):
+        from .responsibilities import ordinary_session
         access = or_(self.private_candidate(reader), Session.visibility == "shared")
-        clauses = [Session.deleted.is_(deleted), access]
+        clauses = [Session.deleted.is_(deleted), access, ordinary_session()]
         if not deleted:
             root = aliased(Session)
             membership = select(SwarmMember.session_id).where(SwarmMember.session_id == Session.id)

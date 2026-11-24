@@ -268,6 +268,7 @@ class ProductInferenceService:
                     or (session.visibility == "private" and session.owner_id != actor.id)
                 ):
                     raise InferenceAdmissionError("Inference authority changed before dispatch.")
+                await self.database.responsibilities.authorize(db, turn, scope=scope)
                 grants = await self.database.scope_grants(db, scope, session)
                 if [(g.id, g.revision) for g in grants] != [(g.id, g.revision) for g in scope.grants]:
                     raise InferenceAdmissionError("Connection access changed before inference dispatch.")

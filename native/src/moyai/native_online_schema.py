@@ -44,6 +44,7 @@ PRIVATE_AUTOMATION_VERSION = "2026-11-21-private-automations-v24"
 SLACK_WEB_VERSION = "2026-11-21-slack-web-v25"
 SKILL_LEARNING_VERSION = "2026-11-21-skill-learning-v26"
 PERSONAL_OAUTH_VERSION = "2026-11-23-personal-oauth-v27"
+RESPONSIBILITY_VERSION = "2026-11-23-responsibilities-v28"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -230,6 +231,61 @@ def _personal_oauth_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _responsibility_tables(metadata: MetaData, schema: str) -> None:
+    Table(
+        "moyai_responsibility_completions", metadata,
+        Column("sequence", Integer, primary_key=True, autoincrement=False),
+        Column("session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), primary_key=True, index=True),
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_turns.id"), nullable=False, unique=True),
+        Column("message_id", Integer, ForeignKey(f"{schema}.moyai_messages.id"), nullable=False), schema=schema,
+    )
+    Table(
+        "moyai_responsibilities", metadata,
+        Column("id", String(36), primary_key=True),
+        Column("owner_id", String(512), ForeignKey(f"{schema}.moyai_users.id"), nullable=False, index=True),
+        Column("auth_version", Integer, nullable=False),
+        Column("product_grant", Text, nullable=True),
+        Column("request_key", String(100), nullable=False),
+        Column("fingerprint", String(64), nullable=False),
+        Column("source_session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), nullable=False),
+        Column("objective", Text, nullable=False),
+        Column("model", String(200), nullable=False),
+        Column("status", String(30), nullable=False),
+        Column("generation", Integer, nullable=False),
+        Column("watermark", Integer, nullable=False),
+        Column("interval_seconds", Integer, nullable=False),
+        Column("max_evaluations", Integer, nullable=False),
+        Column("evaluations", Integer, nullable=False),
+        Column("active_turn_id", String(36), nullable=True),
+        Column("reason", Text, nullable=False),
+        Column("next_check_at", String(40), nullable=False),
+        Column("created_at", String(40), nullable=False),
+        Column("updated_at", String(40), nullable=False),
+        UniqueConstraint("owner_id", "request_key", name="responsibility_request"),
+        Index("moyai_responsibility_due", "status", "next_check_at"), schema=schema,
+    )
+    Table(
+        "moyai_responsibility_assignments", metadata,
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_turns.id"), primary_key=True),
+        Column("responsibility_id", String(36), ForeignKey(f"{schema}.moyai_responsibilities.id"), nullable=False, index=True),
+        Column("generation", Integer, nullable=False),
+        Column("through_sequence", Integer, nullable=False),
+        Column("evidence", Text, nullable=False),
+        Column("reconciled", Boolean, nullable=False),
+        Column("expires_at", String(40), nullable=False), schema=schema,
+    )
+    Table(
+        "moyai_responsibility_findings", metadata,
+        Column("turn_id", String(36), ForeignKey(f"{schema}.moyai_responsibility_assignments.turn_id"), primary_key=True),
+        Column("responsibility_id", String(36), ForeignKey(f"{schema}.moyai_responsibilities.id"), nullable=False, index=True),
+        Column("decision", Text, nullable=False),
+        Column("fingerprint", String(64), nullable=False),
+        Column("created_at", String(40), nullable=False),
+        Column("read_at", String(40), nullable=True),
+        UniqueConstraint("responsibility_id", "fingerprint", name="responsibility_finding_evidence"), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -243,6 +299,10 @@ EXPANSIONS = (
     }), (), _skill_learning_tables),
     Expansion(SKILL_LEARNING_VERSION, PERSONAL_OAUTH_VERSION,
               frozenset({"moyai_oauth_credentials", "moyai_oauth_authorizations"}), (), _personal_oauth_tables),
+    Expansion(PERSONAL_OAUTH_VERSION, RESPONSIBILITY_VERSION, frozenset({
+        "moyai_responsibilities", "moyai_responsibility_assignments", "moyai_responsibility_findings",
+        "moyai_responsibility_completions",
+    }), (), _responsibility_tables),
 )
 
 
