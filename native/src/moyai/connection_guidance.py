@@ -126,7 +126,11 @@ class ConnectionGuide:
         return ConnectionGuidance(
             status="private_chat_required",
             guidance="Open your own private web chat to see available accounts and their selection status. "
-            "Manage connections in Settings > Connections. This view does not connect or select accounts.",
+            "Manage connections in Settings > Connections. For GitHub, connect your personal account "
+            "under Your apps while signed in with the same verified work email as Slack. "
+            "Slack requests use the requesting person's linked GitHub account; results are visible to "
+            "the conversation. An unlinked account cannot borrow another person's GitHub access. "
+            "This view does not connect or select accounts.",
         )
 
     async def read(self, scope: RunScope, run_id: str | None) -> ConnectionGuidance:

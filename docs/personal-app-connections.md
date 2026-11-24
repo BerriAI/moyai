@@ -4,9 +4,11 @@ In an existing-product deployment, open **Settings → Connections → Your apps
 choose **Connect**, and approve the provider's consent screen. Select the account
 in a private chat. Users do not register developer apps or paste tokens.
 
-This feature uses the deployment's existing app registrations. It does not
-create a new OAuth client for each person. Each person receives a separate grant
-and encrypted tokens. Organization connections remain independent.
+Each provider has one deployment-owned app registration, reused by every user.
+Each person receives a separate grant and encrypted tokens. GitHub uses a
+classic OAuth App so the person can authorize their repositories without an
+organization GitHub App installation. Moyai does not copy a developer's local
+`gh` credentials to the server.
 
 ## Existing services
 
@@ -14,15 +16,15 @@ and encrypted tokens. Organization connections remain independent.
 | --- | --- | --- |
 | Linear | Existing `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `/oauth/linear/callback` |
 | Notion | Existing `NOTION_CLIENT_ID` and `NOTION_CLIENT_SECRET` | `/oauth/notion/callback` |
-| GitHub | OAuth client pair retained in the existing encrypted GitHub App registration; `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are the fallback for an already registered app | `/oauth/github/callback` |
+| GitHub | `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET` from a classic OAuth App | `/oauth/github/callback` |
 | Slack | Existing Personal Slack service and `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` | Existing `/oauth/slack/callback` |
 
 Linear and Notion delegate authorization, code exchange, refresh, verification,
-and tool execution to `app.connectors.Connectors`. GitHub uses the same GitHub
-App registration and its user authorization flow, with the existing GitHub
-capability for personal tools. New GitHub App registrations retain the returned
-client pair encrypted in `github_app`; older registrations may need their
-operator to supply the same app's client pair.
+and tool execution to `app.connectors.Connectors`. GitHub uses its personal
+OAuth App pair and the existing GitHub capability for repository, commit, issue
+and PR tools. The encrypted `github_app` registration and `GITHUB_CLIENT_ID` /
+`GITHUB_CLIENT_SECRET` remain separate installation-based configuration for
+organization workflows. They are never a fallback for personal consent.
 
 Slack's existing Personal Slack component is also shown in Your apps. Its
 storage, scopes, callback, renewal, account selection, and tools remain in the
@@ -43,9 +45,27 @@ organization restrictions can still require an administrator's approval.
 
 Linear uses its existing `read,write` user consent and S256 PKCE. Notion retains
 the capabilities configured on the shared connection and the pages authorized
-by the person. GitHub App user access is bounded by both the app installation
-and the user's permissions; a classic GitHub OAuth App is not the intended
-replacement for the existing GitHub App.
+by the person. GitHub requests `repo read:org` and S256 PKCE. `repo` grants broad
+read/write access across public and private repositories the person can
+authorize; it does not offer a repository picker or bypass organization OAuth
+approval and SSO restrictions. It does not grant the separate `workflow` scope
+for editing GitHub Actions workflows.
+
+Register or reuse one classic OAuth App for the deployment. Configure its
+homepage and exact callback using the deployment URL, and store its client pair
+under `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`. Users only click
+Connect; they never create an app. A local test registration can use a loopback
+callback and should remain separate from production.
+
+Setting either personal GitHub configuration field enables personal GitHub
+selection for private web chats and Slack. Neither an absent personal grant,
+a disconnect, nor a partially configured pair falls back to the organization's
+GitHub bot on those surfaces. Shared web/automation installation workflows
+remain independent. Existing personal GitHub grants created with a GitHub App
+client must reconnect: dispatch fences the changed client identity.
+Start a new Slack conversation if an existing computer was created with the
+organization GitHub account: its stored account boundary remains enforced
+when the deployment switches to personal GitHub.
 
 Validate recovered credentials before enabling them: confirm the app identity,
 owner, permissions and callback; complete consent through an isolated real
@@ -104,9 +124,19 @@ configure provider registrations or deploy these credentials automatically.
 - Per-user tokens and pending PKCE material are encrypted in native tables.
   Shared app secrets stay in the existing deployment configuration or encrypted
   GitHub registration. Durable chat grants contain references, not tokens.
-- Linear, Notion and GitHub personal grants are admitted only in private web
-  chats, not Slack or automation surfaces. Existing Personal Slack retains its
-  own established surface rules.
+- Linear and Notion personal grants stay in private web chats. Personal GitHub
+  also works for direct human requests in Slack, using the requesting person's
+  individual account, resolved through a current, unambiguous verified work
+  email. Stale, conflicting or disabled identity links grant no access.
+  Accounting/manual links alone are insufficient. Personal Slack keeps its
+  existing service and surface rules.
+- Slack admission selects GitHub again for each sender, including replies in
+  an existing computer session. Tokens never enter the shared computer.
+  Results and files requested in Slack are visible to that conversation.
+  The shared computer retains its organization account context; personal
+  GitHub does not pin it to the first participant. Tool catalogs, history and
+  memory still use the sender's full grant identity. Automated and delegated
+  Slack runs cannot acquire this personal access.
 - Workers resolve current credentials before tool execution. Expiring tokens
   renew server-side; a database row lock serializes rotating refreshes across
   processes. Credentials without a provider expiry remain usable until revoked;
@@ -139,3 +169,8 @@ workflow on the baseline and final revisions. Verify real provider consent,
 the private account appearing, a read, cancellation and disconnect. Document
 substituted identity/bootstrap data and any missing provider prerequisites;
 fixture responses do not establish successful provider authorization.
+
+Also test two verified people taking turns in the same Slack thread: each
+request must use that sender's GitHub grant, and an unconnected sender must
+receive connection guidance without borrowing the previous sender's account
+or the organization bot.

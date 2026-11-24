@@ -20,7 +20,7 @@ PROVIDERS: dict[OAuthProvider, str] = {"linear": "Linear", "notion": "Notion", "
 
 async def client_identity(service: ProductConnections, provider: OAuthProvider) -> str:
     def read():
-        identity, secret = service.connectors.oauth_client(provider)
+        identity, secret = service.connectors.oauth_client(provider, personal=True)
         return identity if identity and secret else ""
     return await source_database(read)
 
@@ -30,7 +30,7 @@ async def authorization_url(
 ) -> str:
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     return await source_database(
-        service.connectors.authorization_url, provider, state, code_challenge=challenge,
+        service.connectors.authorization_url, provider, state, code_challenge=challenge, personal=True,
     )
 
 
@@ -48,6 +48,7 @@ async def exchange(
         value = await connectors.exchange(
             provider, code=code or None, code_verifier=verifier or None,
             refresh_token=previous["refresh_token"] if previous else None,
+            personal=True,
         )
         if (
             not isinstance(value.get("access_token"), str) or not value["access_token"].strip()

@@ -552,27 +552,32 @@ class Database:
             )
         if self.product_authority_enabled and ids:
             raise HTTPException(503, "Canonical product connections are not configured.")
-        return await self.native_grants(db, actor_id, ids, shared_session=shared_session)
+        return await self.native_grants(db, actor_id, ids, shared_session=shared_session, surface=surface)
 
     async def native_grants(
         self, db: AsyncSession, actor_id: str, ids: list[str], *, shared_session: bool = False,
-        kinds: frozenset[str] | None = None,
+        kinds: frozenset[str] | None = None, surface: str = "web",
     ) -> list[Grant]:
         """Resolve stored native grants on the caller's admission transaction."""
         grants: list[Grant] = []
         for connection_id in dict.fromkeys(ids):
             row = await db.get(Connection, connection_id)
+            policy = json.loads(row.policy) if row is not None else {}
+            owner = actor_id
+            if row is not None and policy.get("oauth"):
+                from .personal_oauth import connection_owner
+                owner = await connection_owner(self, db, actor_id, row.kind, surface)
             if (
-                row is None or not row.enabled or (not row.shared and row.owner_id != actor_id)
+                row is None or not row.enabled or (not row.shared and row.owner_id != owner)
                 or (kinds is not None and row.kind not in kinds)
                 or (row.kind == "litellm" and (row.shared or row.owner_id != actor_id))
             ):
                 raise HTTPException(403, "A selected connection is no longer available.")
-            if shared_session and not row.shared:
+            slack_github = surface == "slack" and row.kind == "github" and policy.get("oauth") and owner
+            if shared_session and not row.shared and not slack_github:
                 raise HTTPException(403, "Use a private conversation for a personal connection.")
-            policy = json.loads(row.policy)
             if policy.get("oauth") and (
-                row.shared or row.owner_id != actor_id
+                row.shared or owner is None or row.owner_id != owner
                 or await db.get(OAuthCredential, row.id) is None
             ):
                 raise HTTPException(403, "This personal OAuth connection is unavailable.")
@@ -645,6 +650,14 @@ class Database:
     async def scope_grants(self, db: AsyncSession, scope: RunScope, session: Session) -> list[Grant]:
         """Resolve under persisted execution policy, never private-child presentation."""
         context = await self.execution_context(db, session, turn_id=scope.turn_id)
+        if (
+            context.surface == "slack" and any(grant.policy.get("oauth") for grant in scope.grants)
+            and (
+                scope.delegation_depth or scope.delegation_generated or scope.swarm_id
+                or scope.goal_generation is not None or await self.human_origin(db, scope) is None
+            )
+        ):
+            raise PermissionError("Personal GitHub in Slack requires a direct request from its owner.")
         if scope.execution_context is not None and scope.execution_context != context:
             raise PermissionError("This execution's original policy context changed.")
         if context != ExecutionContext(session.visibility, session.surface):

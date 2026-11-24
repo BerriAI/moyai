@@ -340,6 +340,10 @@ class Settings(BaseSettings):
     linear_client_secret: str = ""
     github_client_id: str = ""
     github_client_secret: str = ""
+    # Personal user access uses a classic OAuth App, independently of the
+    # installation-based GitHub App used by organization automation.
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = Field(default="", repr=False)
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_signing_secret: str = ""

@@ -12,10 +12,11 @@ from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from app.db import database as source_database
 from app.slack_format import ASIDE_PREFIXES
 from fastapi import HTTPException
+from pydantic import TypeAdapter
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from .contracts import ExecutionContext, NewMessage
+from .contracts import ExecutionContext, NewMessage, PreparedTurn
 from .inbound_events import InboundEvent
 from .models import Session, SlackThread, Turn, User
 from .product_identity import ProductPrincipal
@@ -204,13 +205,28 @@ class SlackEvents:
                 # Continue the computer's existing account selection, including
                 # older bot-only threads. Admission still checks every grant
                 # against this sender's current authority and workspace scope.
-                query = select(Turn.connections).join(Session, Session.id == Turn.session_id).where(
+                query = select(Turn).join(Session, Session.id == Turn.session_id).where(
                     Turn.session_id == thread.session_id,
                 )
                 if getattr(actor, "slack_web_grant", None) is None:
                     query = query.where(Turn.preparation.is_not(None), Session.workspace.is_not(None))
                 saved = await db.scalar(query.order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
-                submission = body.model_copy(update={"connections": json.loads(saved)}) if saved is not None else body
+                submission = body
+                if saved is not None:
+                    selections = json.loads(saved.connections)
+                    if getattr(actor, "slack_web_grant", None) is None and self.slack.connections.personal_github:
+                        # The shared computer retains organization accounts,
+                        # but a previous participant never lends GitHub access.
+                        assert saved.preparation is not None
+                        prepared = TypeAdapter(PreparedTurn).validate_json(
+                            self.slack.runtime.security.unseal(saved.preparation),
+                        )
+                        github_ids = {grant.id for grant in prepared.scope.grants if grant.kind == "github"}
+                        selections = [identity for identity in selections if identity not in github_ids]
+                        account = await self.slack.connections.slack_github_account(db, actor.id)
+                        if account is not None:
+                            selections.append(account.id)
+                    submission = body.model_copy(update={"connections": selections})
                 turn = await self.slack.runtime.admission.submit(
                     actor, thread.session_id, submission, db=db,
                 )

@@ -40,14 +40,16 @@ async def oauth(runtime, monkeypatch, tmp_path):
     exchanges = []
     settings = settings_for(tmp_path, public_url="https://moyai.test", linear_client_id="moyai-client",
                             linear_client_secret="shared-app-secret", notion_client_id="notion-client",
-                            notion_client_secret="shared-notion-secret")
+                            notion_client_secret="shared-notion-secret", github_oauth_client_id="personal-github",
+                            github_oauth_client_secret="personal-github-secret")
     store = Store(settings.data_dir, settings.agent_model)
     service = ProductConnections(SimpleNamespace(store_proxy=store, security=ProductSecurity(settings), settings=settings), runtime.database)
     service.connectors.github.save_app({"client_id": "github-client", "client_secret": "shared-github-secret"})
 
     async def request(self, method, url, **kwargs):
         if "token" in url or "access_token" in url:
-            return {"access_token": "private-provider-token", "refresh_token": "private-refresh-token", "expires_in": 3600}
+            return {"access_token": "private-provider-token", "refresh_token": "private-refresh-token",
+                    "expires_in": 3600, "scope": "repo,read:org"}
         if "linear" in url:
             return {"data": {"viewer": {"organization": {"name": "Test workspace"}}}}
         return {"bot": {"workspace_name": "Test workspace"}}
@@ -260,7 +262,7 @@ async def test_shared_app_protocol_and_refresh(runtime, oauth, monkeypatch, prov
     if provider == "notion":
         assert token_request["auth"] == ("notion-client", "shared-notion-secret")
     else:
-        assert payload["client_secret"] == ("shared-github-secret" if provider == "github" else "shared-app-secret")
+        assert payload["client_secret"] == ("personal-github-secret" if provider == "github" else "shared-app-secret")
         assert payload["code_verifier"]
     identity = await oauth_providers.client_identity(service, provider)
     renewed = await oauth_providers.exchange(service, provider, identity, previous={"refresh_token": "old-refresh"})
@@ -278,6 +280,94 @@ async def test_slack_uses_only_the_existing_personal_service(runtime, oauth):
     assert {row["provider"] for row in rows} == {"linear", "notion", "github"}
     assert (await client.post("/api/personal-connections/slack/oauth")).status_code == 422
     assert not personal_oauth.personal_callback(httpx.Request("GET", "https://moyai.test/oauth/slack/callback?state=personal-slack:test"))
+
+
+async def test_github_oauth_app_needs_no_installation_and_never_uses_app_client(runtime, oauth):
+    client, _ = oauth
+    params = await begin(client, "github")
+    assert params["client_id"] == ["personal-github"]
+    assert set(params["scope"][0].split()) == {"repo", "read:org"}
+    assert "personal_connection=success" in (await finish(client, params, "github")).headers["location"]
+    # An existing registered GitHub App is not a personal OAuth fallback.
+    runtime.product_connections.settings.github_oauth_client_id = ""
+    runtime.product_connections.settings.github_oauth_client_secret = ""
+    assert (await client.post("/api/personal-connections/github/oauth")).status_code == 409
+    assert await oauth_providers.client_identity(runtime.product_connections, "github") == ""
+
+
+@pytest.mark.parametrize("scope", ["", "repo", "read:org", "public_repo,read:org"])
+async def test_github_insufficient_consent_is_not_saved(runtime, oauth, monkeypatch, scope):
+    client, _ = oauth
+
+    async def token(self, *args, **kwargs):
+        return {"access_token": "insufficient-token", "scope": scope}
+
+    monkeypatch.setattr(Connectors, "request", token)
+    result = await finish(client, await begin(client, "github"), "github")
+    assert "personal_connection=failed" in result.headers["location"]
+    assert not any(row["connected"] for row in (await client.get("/api/personal-connections")).json())
+
+
+@pytest.mark.parametrize("scope", ["repo,write:org", "repo admin:org"])
+async def test_github_normalized_organization_scope_can_connect(runtime, oauth, monkeypatch, scope):
+    client, _ = oauth
+
+    async def token(self, *args, **kwargs):
+        return {"access_token": "private-provider-token", "scope": scope}
+
+    monkeypatch.setattr(Connectors, "request", token)
+    result = await finish(client, await begin(client, "github"), "github")
+    assert "personal_connection=success" in result.headers["location"]
+
+
+async def test_personal_github_does_not_fall_back_to_installed_bot(runtime, actor, oauth):
+    from test_product_connections import github_accounts
+
+    client, _ = oauth
+    service = runtime.product_connections
+    github_accounts(service, 42)
+    # The installation remains usable for explicit shared/automated work.
+    assert await service.resolve_grants(actor.id, ["github"], shared_session=True, surface="automation")
+    for surface in ("web", "slack"):
+        assert not any(row["kind"] == "github" for row in await service.catalog(
+            actor.id, surface=surface, shared_session=surface == "slack",
+        ))
+        with pytest.raises(HTTPException):
+            await service.resolve_grants(actor.id, ["github"], surface=surface)
+    await finish(client, await begin(client, "github"), "github")
+    await client.delete("/api/personal-connections/github")
+    assert not any(row["kind"] == "github" for row in await service.catalog(actor.id, surface="slack"))
+    service.settings.github_oauth_client_secret = ""  # Partial config is also fail-closed.
+    with pytest.raises(HTTPException):
+        await service.resolve_grants(actor.id, ["github"])
+
+
+async def test_slack_alias_requires_current_verified_owner_for_every_token(runtime, actor, oauth, monkeypatch):
+    client, _ = oauth
+    await finish(client, await begin(client, "github"), "github")
+    identity = personal_oauth.connection_id(actor.id, "github")
+    linked = {"owner": actor.id}
+
+    async def owner(db, requester):
+        assert requester == "slack:TLOCAL001:UALICE01"
+        return linked["owner"]
+
+    monkeypatch.setattr(runtime.database, "product_identity", SimpleNamespace(personal_memory_owner=owner))
+    async with runtime.database.sessions() as db:
+        grants = await runtime.database.native_grants(
+            db, "slack:TLOCAL001:UALICE01", [identity], shared_session=True, surface="slack",
+        )
+        assert len(grants) == 1
+        linked["owner"] = "another-work-account"
+        with pytest.raises(HTTPException):
+            await runtime.database.native_grants(
+                db, "slack:TLOCAL001:UALICE01", [identity], shared_session=True, surface="slack",
+            )
+        linked["owner"] = None
+        with pytest.raises(HTTPException):
+            await runtime.database.native_grants(
+                db, "slack:TLOCAL001:UALICE01", [identity], shared_session=True, surface="slack",
+            )
 
 
 @pytest.mark.parametrize("lifetime", ["3600", None, True, 0, -1, float("inf"), float("nan")])
