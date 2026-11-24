@@ -358,14 +358,12 @@ async def test_audit_is_never_a_pull_request_helper_target(runtime, actor):
 
 
 async def test_active_assignment_reconciles_before_long_source_interval(runtime, actor):
-    from datetime import datetime
-
     source, row = await enroll(runtime, actor, interval_seconds=3600)
     await source_answer(runtime, actor, source)
     await tick(runtime, row.id)
     binding = await assignment(runtime, row.id)
-    running = (await runtime.database.responsibilities.list(actor))[0]
-    assert datetime.fromisoformat(running.next_check_at) < datetime.fromisoformat(binding.expires_at)
+    waiting = await runtime.database.responsibilities.tick(row.id, generation=row.generation)
+    assert waiting.wake_at == binding.expires_at and not waiting.finished
     async with runtime.database.sessions.begin() as db:
         await db.execute(update(ResponsibilityAssignment).where(
             ResponsibilityAssignment.turn_id == binding.turn_id,

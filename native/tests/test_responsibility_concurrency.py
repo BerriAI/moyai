@@ -15,7 +15,6 @@ from test_responsibilities import assignment, enroll, source_answer, tick, worke
 from moyai.contracts import NewMessage
 from moyai.models import Session, Turn
 from moyai.product_role_authority import ProductOwnershipLost
-from moyai.responsibility_contracts import ResponsibilityControl
 from moyai.responsibility_models import Responsibility, ResponsibilityAssignment
 
 __all__ = ["admitted_product", "inference", "postgres_database", "role"]
@@ -68,90 +67,27 @@ async def test_source_submission_and_review_share_user_before_source_lock(postgr
     assert await assignment(runtime, row.id)
 
 
-async def test_locked_due_page_cannot_starve_later_responsibility(postgres_database):
+@pytest.mark.parametrize("kind", ["source", "reviewer"])
+async def test_settlement_wake_never_waits_for_responsibility_lock(postgres_database, kind):
     database, actor = postgres_database
     runtime = harness(database)
-    source, first = await enroll(runtime, actor)
-    rows = [first]
-    for _ in range(10):
-        _, row = await enroll(runtime, actor, source)
-        rows.append(row)
-    await source_answer(runtime, actor, source)
-    async with database.sessions.begin() as db:
-        for index, row in enumerate(rows):
-            await db.execute(update(Responsibility).where(Responsibility.id == row.id).values(next_check_at=f"2000-{index:02}"))
+    source, row = await enroll(runtime, actor)
+    if kind == "reviewer":
+        await source_answer(runtime, actor, source)
+        await tick(runtime, row.id)
+        _, prepared, decision = await worker(runtime, row.id)
+        assert await database.save_result(
+            prepared.scope, conversation='{"messages":[]}', output=decision, workspace=None, usage={},
+        )
+        turn_id = prepared.scope.turn_id
+    else:
+        turn = await source_answer(runtime, actor, source, settle=False)
+        turn_id = turn.id
     async with database.sessions.begin() as holder:
-        await holder.execute(select(Responsibility).where(
-            Responsibility.id.in_([row.id for row in rows[:10]]),
-        ).with_for_update())
-        for _ in range(3):
-            await asyncio.wait_for(database.responsibilities.reconcile(), 3)
-        assert await assignment(runtime, rows[-1].id)
-    assert all([await assignment(runtime, row.id) is None for row in rows[:10]])
-
-
-async def test_failed_page_backs_off_so_later_page_progresses(postgres_database, monkeypatch):
-    database, actor = postgres_database
-    runtime = harness(database)
-    bad_source, first = await enroll(runtime, actor)
-    rows = [first]
-    for _ in range(9):
-        _, row = await enroll(runtime, actor, bad_source)
-        rows.append(row)
-    good_source, good = await enroll(runtime, actor)
-    await source_answer(runtime, actor, good_source)
-    async with database.sessions.begin() as db:
-        for index, row in enumerate([*rows, good]):
-            await db.execute(update(Responsibility).where(Responsibility.id == row.id).values(next_check_at=f"2000-{index:02}"))
-    original = database.responsibilities.source
-
-    async def unavailable(db, owner, identity, **kwargs):
-        if identity == bad_source.id:
-            raise RuntimeError("Temporary source read failure")
-        return await original(db, owner, identity, **kwargs)
-
-    monkeypatch.setattr(database.responsibilities, "source", unavailable)
-    await database.responsibilities.reconcile()
-    await database.responsibilities.reconcile()
-    assert await assignment(runtime, good.id)
-    async with database.sessions() as db:
-        assert all(row.next_check_at > "2000" for row in await db.scalars(
-            select(Responsibility).where(Responsibility.id.in_([row.id for row in rows])),
-        ))
-
-
-@pytest.mark.parametrize("newer", ["successful_tick", "pause_resume"])
-async def test_delayed_failure_cannot_overwrite_newer_schedule(postgres_database, monkeypatch, newer):
-    database, actor = postgres_database
-    runtime = harness(database)
-    _, row = await enroll(runtime, actor)
-    async with database.sessions.begin() as db:
-        await db.execute(update(Responsibility).values(next_check_at="2000"))
-    failing, release = asyncio.Event(), asyncio.Event()
-    original = database.responsibilities.tick
-
-    async def delayed_failure(*args, **kwargs):
-        failing.set()
-        await release.wait()
-        raise RuntimeError("Late transient failure")
-
-    monkeypatch.setattr(database.responsibilities, "tick", delayed_failure)
-    scanning = asyncio.create_task(database.responsibilities.reconcile())
-    try:
-        await asyncio.wait_for(failing.wait(), 3)
-        if newer == "successful_tick":
-            await original(row.id)
-        else:
-            for action, generation in [("pause", 1), ("resume", 2)]:
-                await database.responsibilities.control(actor, row.id, ResponsibilityControl(
-                    action=action, generation=generation,
-                ))
-        current = (await database.responsibilities.list(actor))[0]
-    finally:
-        release.set()
-        await asyncio.wait_for(scanning, 3)
-    after = (await database.responsibilities.list(actor))[0]
-    assert after.next_check_at == current.next_check_at and after.generation == current.generation
+        await holder.execute(select(Responsibility).where(Responsibility.id == row.id).with_for_update())
+        # Settlement already holds its Session. Its outbox insert must commit
+        # without an implicit parent FK lock or a colliding control-event key.
+        await asyncio.wait_for(database.settle(turn_id), 3)
 
 
 @pytest.mark.parametrize("role_kind", ["api", "worker", "coordinator", "broker"])

@@ -31,6 +31,7 @@ from moyai.product_schema import (
     PERSONAL_OAUTH_SCHEMA_VERSION,
     PRIVATE_AUTOMATION_SCHEMA_VERSION,
     RESPONSIBILITY_SCHEMA_VERSION,
+    RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION,
     SKILL_LEARNING_SCHEMA_VERSION,
     SLACK_WEB_SCHEMA_VERSION,
     _manifest,
@@ -183,6 +184,7 @@ async def test_slack_web_expansion_preserves_existing_receipts(product_database)
     (SLACK_WEB_SCHEMA_VERSION, SKILL_LEARNING_SCHEMA_VERSION),
     (SKILL_LEARNING_SCHEMA_VERSION, PERSONAL_OAUTH_SCHEMA_VERSION),
     (PERSONAL_OAUTH_SCHEMA_VERSION, RESPONSIBILITY_SCHEMA_VERSION),
+    (RESPONSIBILITY_SCHEMA_VERSION, RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION),
 ])
 async def test_latest_expansions_match_runtime_and_preserve_receipts(product_database, before, target):
     product = product_database

@@ -72,7 +72,8 @@ SLACK_WEB_SCHEMA_VERSION = "2026-11-21-slack-web-v25"
 SKILL_LEARNING_SCHEMA_VERSION = "2026-11-21-skill-learning-v26"
 PERSONAL_OAUTH_SCHEMA_VERSION = "2026-11-23-personal-oauth-v27"
 RESPONSIBILITY_SCHEMA_VERSION = "2026-11-23-responsibilities-v28"
-PRODUCT_SCHEMA_VERSION = RESPONSIBILITY_SCHEMA_VERSION
+RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION = "2026-11-24-responsibility-workflows-v29"
+PRODUCT_SCHEMA_VERSION = RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -163,6 +164,7 @@ MIGRATIONS = (
         "moyai_responsibilities", "moyai_responsibility_assignments", "moyai_responsibility_findings",
         "moyai_responsibility_completions",
     })),
+    (RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION, frozenset({"moyai_responsibility_wakes"})),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing

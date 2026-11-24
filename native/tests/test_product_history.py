@@ -634,9 +634,12 @@ async def unified(product, tmp_path):
     from types import MethodType
 
     from moyai.database import Database
+    from moyai.responsibilities import Responsibilities
+
     runtime.database.security = security
     runtime.database.product_identity = None
     runtime.database.product_authority_enabled = False
+    runtime.database.responsibilities = Responsibilities(runtime.database)
     for method in (
         "allowed_session", "execution_session", "check_source_audience", "same_person", "prefetch_session_audiences",
     ):

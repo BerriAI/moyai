@@ -17,27 +17,47 @@ external actions, or enable a watch by default.
 
 ## Execution and persistence
 
-- `Responsibilities` owns enrollment, controls, due checks and reconciliation.
-  There is no process-local timer or long-running model session per person.
+- `Responsibilities` owns enrollment, controls, review admission and
+  reconciliation. One Temporal entity workflow owns the lifecycle of each
+  responsibility generation. There is no process-local responsibility timer,
+  due-row scanner or long-running model session per person.
 - A completion sequence is appended under native answer settlement's session
   fence. Enrollment takes the same fence before establishing its baseline.
   A turn that was still saving at enrollment cannot disappear behind a
   message-ID watermark. Only completed accepted answers from owner-authored,
   direct web requests are eligible. Generated turns and approval chains are
   excluded. Imported, delegated, swarm and evaluator chats cannot be sources.
-- An owned background loop alongside the existing dispatcher scans indexed
-  due rows, transactionally reserves a
-  review, creates a new private audit session and admits a native turn.
-  `TurnWorkflow` and its deterministic workflow ID still own execution and
-  recovery from an unacknowledged start. Each responsibility has independent
-  active work and due state.
-  PostgreSQL scans skip locked rows. Each wake has a two-second deadline;
-  failures receive a persisted 30-second backoff so later pages can progress.
-  Backoff only applies to the original generation and due time. Running reviews
-  are reconciled every five seconds, independently of the source check cadence.
+- Enrollment, source completion, review settlement and controls append wake
+  intents in the same transaction as their domain changes. The existing native
+  dispatcher delivers the outbox using Temporal Signal-With-Start, deterministic
+  IDs (`moyai-responsibility-<id>-<generation>`) and `REJECT_DUPLICATE`.
+  It acknowledges only the event IDs sent in that RPC. Unacknowledged intents
+  remain saved; bounded scan rounds prevent an unavailable head from starving
+  later delivery. Delivery has a two-second coordinator budget after manual
+  input and Stop handling. This is transactional transport, not a second
+  scheduler or workflow engine.
+- The workflow executes a domain step, then waits for a signal or a Temporal
+  durable timer. Source cadence is a not-before time when new evidence exists;
+  an unchanged source waits indefinitely without model calls or recurring
+  step activities. Native settlement signals reconcile finished reviews
+  independently of source cadence. An assignment-expiry timer remains in
+  place. Transient step failures use the SDK's Activity RetryPolicy, and
+  Continue-As-New bounds workflow history. Signals are coalesced hints: every
+  step, including the first step after rollover, reads committed database state.
+- Each step transactionally reserves a review, creates a private audit session
+  and admits a native turn. The existing native dispatcher remains the sole
+  starter of its `TurnWorkflow`; its deterministic identity and native
+  settlement own review execution and recovery. Controller arguments and
+  signals carry identity and generation, not evidence, prompts or results.
   An on-time accepted result retains its native settlement path after assignment
   expiry; expiry prevents new work, not completion of an already accepted save.
-  Reconciliation cannot block the manual-input/Stop dispatcher.
+  The controller waits for settlement without admitting another review.
+  A stuck accepted save relies on existing native recovery and operational
+  monitoring; this slice does not add a new pending-save-age alert.
+- A closed current controller cannot be silently restarted with the same
+  identity. A rejected wake marks the responsibility blocked with a recovery
+  reason; explicit Resume advances its generation. Stale generations cannot
+  admit work or publish findings.
 - `moyai_responsibility` is a separate `NativeOutput` agent. Its input contains
   the objective and at most five new messages, each capped at 6,000 characters.
   It has no functional tools, account selection, conversation history, skills,
@@ -83,8 +103,20 @@ native User, responsibility, source Session, worker Session order. Source
 deletion/archival cannot commit between the protected source check and the
 broker inference receipt.
 
-The v28 application migration and frozen online expansion add four tables.
-Runtime protocol 9 changes the production runtime fingerprint. The existing
+The v28 application migration and frozen online expansion add four domain
+tables. The additive v29 migration adds the wake outbox without changing the
+frozen v28 identity. The outbox has no responsibility foreign key: settlement
+hooks must not acquire an implicit parent lock while holding a source or
+worker Session fence. Hook keys are disjoint from control/start keys.
+
+At coordinator startup, waiting/running generations receive idempotent wake
+intents. This adopts existing v28 rows and also deliberately rechecks committed
+state after a restart. It preserves assignments, evidence cursors, budgets and
+inbox receipts. A stale seed is harmless because step checks the generation;
+concurrent enroll/resume already commits its own wake. Deterministic
+Signal-With-Start prevents a second chain for the same generation.
+
+Runtime protocol 10 changes the production runtime fingerprint. The existing
 production role session factory checks that policy at each transaction: a
 stale participant cannot admit, claim or prepare responsibility work, including
 cached preparation. Protocol numbering alone does not isolate Temporal queues.
@@ -130,13 +162,24 @@ uv run moyai dev --host 127.0.0.1 --port 8793
    configured checks; do not prompt Dot. Confirm two independent findings
    with exact source quotes. Inspect each review's saved native usage: real
    model requests, zero tools, and a bounded selected evidence packet.
-5. Wait another check cycle. Confirm no duplicate findings or extra reviews.
+5. Inspect the actual Temporal workflow histories: enrollment creates a
+   responsibility controller; source completion wakes it; review settlement
+   wakes reconciliation; unchanged sources schedule no recurring activities.
+   Wait another check interval. Confirm no duplicate findings or extra reviews.
    Exercise Pause, Resume and Mark reviewed. Verify source access loss hides
    evidence and blocks future work.
 6. Record the real UI and inspect the page and enrollment dialog at 1440, 768
    and 320 pixels. Fixture browser checks are supplementary.
 
-Regression checks include `test_responsibilities.py`, the API contract,
+Upgrade verification also starts the actual app against isolated v28 data,
+checks v29 adoption without resetting saved work, and restarts the final app.
+Real Temporal integration tests exercise durable timers across worker restart,
+accepted-start/lost-ack recovery, retries, closed-controller recovery, and
+Continue-As-New with concurrent evidence; their model fixtures are supplementary
+to the actual-app proof.
+
+Regression checks include `test_responsibilities.py`,
+`test_responsibility_temporal.py`, the API contract,
 admission/history/settlement coverage, the three PostgreSQL schema suites,
 `npm run api:check`, `npm run typecheck`, `npm test`, `npm run build` and
 `npm run test:ui`.

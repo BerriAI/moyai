@@ -1,15 +1,13 @@
 """Private responsibilities: durable observation, bounded assignment and inbox receipts.
 
-The dispatcher reconciles database intent; it never runs a model. Each assignment
-uses native admission/Temporal/settlement, independently of every other source.
+Temporal owns wake-ups. Each step applies domain rules under the native authority
+fence, and each review uses native admission/Temporal/settlement.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -35,18 +33,19 @@ from .responsibility_contracts import (
     ResponsibilityReview,
     ResponsibilityView,
 )
+from .responsibility_dispatch import request_wake
 from .responsibility_models import (
     Responsibility,
     ResponsibilityAssignment,
     ResponsibilityCompletion,
     ResponsibilityFinding,
 )
+from .responsibility_workflow import ResponsibilityStep
 from .swarm_models import SwarmMember
 
 if TYPE_CHECKING:
     from .database import Database
 
-logger = logging.getLogger(__name__)
 GRANT = TypeAdapter(ProductGrant)
 BUSY = ("queued", "starting", "running", "waiting", "saving")
 
@@ -65,14 +64,7 @@ class Responsibilities:
     def __init__(self, database: Database):
         self.database = database
 
-    async def lock(self, db: AsyncSession, identity: str, *, skip_locked: bool = False) -> Responsibility | None:
-        if skip_locked and db.get_bind().dialect.name == "postgresql":
-            row = await db.scalar(select(Responsibility).where(
-                Responsibility.id == identity,
-            ).with_for_update(skip_locked=True).execution_options(populate_existing=True))
-            if row is not None:
-                row.updated_at = now()
-            return row
+    async def lock(self, db: AsyncSession, identity: str) -> Responsibility:
         found = await db.scalar(update(Responsibility).where(
             Responsibility.id == identity,
         ).values(updated_at=now()).returning(Responsibility.id))
@@ -204,6 +196,8 @@ class Responsibilities:
                 )
                 db.add(row)
                 await db.flush()
+                await request_wake(db, row.id, row.generation, "start")
+                await notify_dispatch(db, self.database.settings)
                 return self.view(row)
         except IntegrityError:
             async with self.database.sessions() as db:
@@ -217,6 +211,8 @@ class Responsibilities:
 
     async def completed(self, db: AsyncSession, turn: Turn, session: Session | None) -> None:
         """Called inside the native completion transaction, holding its session fence."""
+        if await self.worker_changed(db, turn):
+            return
         if (
             session is None or session.visibility != "private" or session.surface != "web"
             or session.owner_id != turn.actor_id or turn.status != "completed" or not turn.result_accepted
@@ -244,7 +240,25 @@ class Responsibilities:
             db.add(ResponsibilityCompletion(
                 sequence=sequence, session_id=session.id, turn_id=turn.id, message_id=answer,
             ))
+            # Append-only wake intents do not lock the responsibility or owner
+            # while settlement holds the source Session.
+            rows = (await db.execute(select(Responsibility.id, Responsibility.generation).where(
+                Responsibility.source_session_id == session.id,
+                Responsibility.status.in_(["waiting", "running"]),
+            ))).all()
+            for identity, generation in rows:
+                await request_wake(db, identity, generation, f"source:{turn.id}")
             await notify_dispatch(db, self.database.settings)
+
+    async def worker_changed(self, db: AsyncSession, turn: Turn) -> bool:
+        assignment = await db.get(ResponsibilityAssignment, turn.id)
+        if assignment is None:
+            return False
+        await request_wake(
+            db, assignment.responsibility_id, assignment.generation, f"worker:{turn.id}:{turn.status}",
+        )
+        await notify_dispatch(db, self.database.settings)
+        return True
 
     async def list(self, actor: User) -> list[ResponsibilityView]:
         async with self.database.sessions() as db:
@@ -294,10 +308,14 @@ class Responsibilities:
             if request.action == "resume" and row.status not in {"paused", "blocked"}:
                 raise HTTPException(409, "Only a paused or blocked responsibility can resume.")
             await self.cancel_assignment(db, row)
+            if row.status in {"waiting", "running"}:
+                await request_wake(db, row.id, row.generation, "stop")
             row.generation += 1
             row.status = "paused" if request.action == "pause" else "waiting"
             row.reason = "Paused by you." if request.action == "pause" else ""
             row.next_check_at = now()
+            if request.action == "resume":
+                await request_wake(db, row.id, row.generation, "start")
             await notify_dispatch(db, self.database.settings)
             return self.view(row)
 
@@ -333,38 +351,6 @@ class Responsibilities:
             await self.authority(db, row)
         return assignment
 
-    async def reconcile(self, limit: int = 10) -> None:
-        async with self.database.sessions.begin() as db:
-            attempts = (await db.execute(select(
-                Responsibility.id, Responsibility.generation, Responsibility.next_check_at,
-            ).where(
-                Responsibility.status.in_(["waiting", "running"]), Responsibility.next_check_at <= now(),
-            ).order_by(Responsibility.next_check_at, Responsibility.id).limit(limit).with_for_update(skip_locked=True))).all()
-        slots = asyncio.Semaphore(4)
-
-        async def reconcile_one(identity: str, generation: int, scheduled: str) -> None:
-            async with slots:
-                try:
-                    async with asyncio.timeout(2):
-                        await self.tick(identity, skip_locked=True)
-                    return
-                except Exception:
-                    logger.warning("Responsibility reconciliation remains pending.", exc_info=True)
-            # Scheduling-only backoff never admits work or reads protected
-            # content. Failed rows must leave room for later pages.
-            try:
-                async with asyncio.timeout(1), self.database.sessions.begin() as db:
-                    row = await self.lock(db, identity, skip_locked=True)
-                    if (
-                        row is not None and row.status in {"waiting", "running"}
-                        and row.generation == generation and row.next_check_at == scheduled
-                    ):
-                        row.next_check_at = due(30)
-            except Exception:
-                logger.warning("Responsibility backoff remains pending.", exc_info=True)
-
-        await asyncio.gather(*(reconcile_one(identity, generation, scheduled) for identity, generation, scheduled in attempts))
-
     def validated_decision(self, assignment: ResponsibilityAssignment, turn: Turn) -> ResponsibilityDecision:
         decision = ResponsibilityDecision.model_validate_json(self.database.security.unseal(turn.result or ""))
         evidence = json.loads(self.database.security.unseal(assignment.evidence))
@@ -374,24 +360,23 @@ class Responsibilities:
             raise ValueError("The worker cited evidence outside its assignment.")
         return decision
 
-    async def tick(self, identity: str, *, skip_locked: bool = False) -> None:
+    async def tick(self, identity: str, *, generation: int | None = None) -> ResponsibilityStep:
         async with self.database._admission_session(None) as db:
             original = await db.get(Responsibility, identity)
-            if original is None:
-                return
+            if original is None or (generation is not None and original.generation != generation):
+                return ResponsibilityStep(finished=True)
             actor = None
             try:
                 actor = await self.owner_authority(db, original, lock=True)
             except (PermissionError, HTTPException):
                 pass
-            row = await self.lock(db, identity, skip_locked=skip_locked)
-            if row is None:
-                return
-            if row.status not in {"waiting", "running"} or row.next_check_at > now():
-                return
+            row = await self.lock(db, identity)
+            if row.status not in {"waiting", "running"} or (generation is not None and row.generation != generation):
+                return ResponsibilityStep(finished=True)
             if self.database.product_drain is not None and not await self.database.product_drain.admit(db):
-                return
-            row.next_check_at = due(row.interval_seconds)
+                # Temporal's Activity RetryPolicy owns the wait. No persisted
+                # scanner backoff or scheduling mutation during maintenance.
+                raise RuntimeError("Responsibility admission is waiting for maintenance to finish.")
             try:
                 if actor is None:
                     raise PermissionError("The original requester authority changed.")
@@ -399,13 +384,13 @@ class Responsibilities:
             except (PermissionError, HTTPException):
                 await self.cancel_assignment(db, row)
                 row.status, row.reason = "blocked", "Source access or the original requester authority changed."
-                return
+                return ResponsibilityStep(finished=True)
             if row.active_turn_id:
                 turn = await db.get(Turn, row.active_turn_id)
                 assignment = await db.get(ResponsibilityAssignment, row.active_turn_id)
                 if turn is None or assignment is None:
                     row.status, row.reason = "blocked", "The saved assignment is unavailable."
-                    return
+                    return ResponsibilityStep(finished=True)
                 # Settlement owns the worker session before changing Turn.
                 # Observe its committed result under that same fence.
                 await db.execute(update(Session).where(Session.id == turn.session_id).values(
@@ -415,23 +400,21 @@ class Responsibilities:
                 if turn.status == "saving" and turn.result_accepted:
                     # Expiry gates new model work and result acceptance. An
                     # on-time accepted result keeps its native settlement path.
-                    row.next_check_at = due(5)
-                    return
+                    return ResponsibilityStep()
                 if turn.status in BUSY and assignment.expires_at > now():
-                    row.next_check_at = min(due(5), assignment.expires_at)
-                    return
+                    return ResponsibilityStep(wake_at=assignment.expires_at)
                 if turn.status != "completed" or not turn.result_accepted:
                     await self.cancel_assignment(db, row)
                     assignment.reconciled = True
                     row.status, row.reason = "blocked", "Worker did not finish. Review its activity before resuming."
-                    return
+                    return ResponsibilityStep(finished=True)
                 try:
                     decision = self.validated_decision(assignment, turn)
                 except (ValueError, ValidationError):
                     assignment.reconciled = True
                     row.active_turn_id = None
                     row.status, row.reason = "blocked", "Worker returned an invalid or unsupported finding."
-                    return
+                    return ResponsibilityStep(finished=True)
                 if decision.action == "notify":
                     evidence = json.loads(self.database.security.unseal(assignment.evidence))
                     fingerprint = hashlib.sha256(json.dumps(
@@ -451,7 +434,7 @@ class Responsibilities:
                 row.status = "waiting"
             if row.evaluations >= row.max_evaluations:
                 row.status, row.reason = "budget_limited", "Evaluation budget exhausted."
-                return
+                return ResponsibilityStep(finished=True)
             completed = (await db.execute(select(ResponsibilityCompletion.sequence, Message).join(
                 Message, Message.id == ResponsibilityCompletion.message_id,
             ).where(
@@ -459,7 +442,9 @@ class Responsibilities:
                 ResponsibilityCompletion.sequence > row.watermark,
             ).order_by(ResponsibilityCompletion.sequence).limit(5))).all()
             if not completed:
-                return
+                return ResponsibilityStep()
+            if row.next_check_at > now():
+                return ResponsibilityStep(wake_at=row.next_check_at)
             evidence = [{
                 "message_id": message.id,
                 "text": self.database.security.unseal(message.content).decode()[:6000],
@@ -479,16 +464,18 @@ class Responsibilities:
                 prompt=prompt, request_key=f"responsibility:{row.id}:{row.generation}:{completed[-1][0]}",
                 model=row.model,
             ), db=db, responsibility_generated=True)
-            db.add(ResponsibilityAssignment(
+            assignment = ResponsibilityAssignment(
                 turn_id=turn.id, responsibility_id=row.id, generation=row.generation,
                 through_sequence=completed[-1][0], evidence=self.database.security.seal(json.dumps(evidence)),
                 expires_at=due(300),
-            ))
+            )
+            db.add(assignment)
             row.active_turn_id = turn.id
-            row.next_check_at = due(5)
+            row.next_check_at = due(row.interval_seconds)
             row.evaluations += 1
             row.status, row.reason = "running", ""
             await notify_dispatch(db, self.database.settings)
+            return ResponsibilityStep(wake_at=assignment.expires_at)
 
     async def inbox(self, actor: User) -> list[ResponsibilityInboxItem]:
         async with self.database.sessions() as db:

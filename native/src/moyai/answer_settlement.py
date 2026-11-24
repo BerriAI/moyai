@@ -412,6 +412,7 @@ class AnswerSettlement:
                 session.active_turn = None
                 session.status = "failed"
                 session.updated_at = turn.finished_at or now()
+            await self.database.responsibilities.worker_changed(db, turn)
 
     async def stopped(self, turn_id: str, conversation: str | None = None) -> None:
         async with self.database._admission_session(None) as db:
@@ -447,3 +448,4 @@ class AnswerSettlement:
             session.active_turn = None
             session.status = "stopped"
             session.updated_at = turn.finished_at or now()
+            await self.database.responsibilities.worker_changed(db, turn)

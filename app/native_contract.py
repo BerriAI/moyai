@@ -9,9 +9,9 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Every role must understand responsibility assignments and the restricted reviewer.
-# Older workers would prepare these generated turns as ordinary tool-enabled work.
-NATIVE_PROTOCOL_REVISION = 9
+# Every participant must support the responsibility wake outbox and entity
+# workflows. Drain old pollers before routing the new workflow type.
+NATIVE_PROTOCOL_REVISION = 10
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

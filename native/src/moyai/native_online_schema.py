@@ -45,6 +45,7 @@ SLACK_WEB_VERSION = "2026-11-21-slack-web-v25"
 SKILL_LEARNING_VERSION = "2026-11-21-skill-learning-v26"
 PERSONAL_OAUTH_VERSION = "2026-11-23-personal-oauth-v27"
 RESPONSIBILITY_VERSION = "2026-11-23-responsibilities-v28"
+RESPONSIBILITY_WORKFLOW_VERSION = "2026-11-24-responsibility-workflows-v29"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -286,6 +287,16 @@ def _responsibility_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _responsibility_wake_tables(metadata: MetaData, schema: str) -> None:
+    Table(
+        "moyai_responsibility_wakes", metadata,
+        Column("id", String(200), primary_key=True),
+        Column("responsibility_id", String(36), nullable=False, index=True),
+        Column("generation", Integer, nullable=False),
+        Column("created_at", String(40), nullable=False), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -303,6 +314,8 @@ EXPANSIONS = (
         "moyai_responsibilities", "moyai_responsibility_assignments", "moyai_responsibility_findings",
         "moyai_responsibility_completions",
     }), (), _responsibility_tables),
+    Expansion(RESPONSIBILITY_VERSION, RESPONSIBILITY_WORKFLOW_VERSION,
+              frozenset({"moyai_responsibility_wakes"}), (), _responsibility_wake_tables),
 )
 
 

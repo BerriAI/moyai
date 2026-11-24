@@ -62,3 +62,13 @@ class ResponsibilityFinding(Base):
     fingerprint: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[str] = mapped_column(String(40), default=now)
     read_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class ResponsibilityWake(Base):
+    """Transactional outbox; no parent FK lock while a source/worker is settling."""
+
+    __tablename__ = "moyai_responsibility_wakes"
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    responsibility_id: Mapped[str] = mapped_column(String(36), index=True)
+    generation: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
