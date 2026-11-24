@@ -33,6 +33,7 @@ from moyai.product_files import routes as file_routes
 from moyai.product_history import MAX_MESSAGE_CHARS, ProductHistoryAdapter, routes
 from moyai.product_routes import ProductReadService, Reader, merge_session_lists
 from moyai.product_routes import routes as unified_routes
+from moyai.responsibilities import Responsibilities
 from moyai.security import Security
 
 ROOT = "1" * 32
@@ -634,7 +635,6 @@ async def unified(product, tmp_path):
     from types import MethodType
 
     from moyai.database import Database
-    from moyai.responsibilities import Responsibilities
 
     runtime.database.security = security
     runtime.database.product_identity = None
