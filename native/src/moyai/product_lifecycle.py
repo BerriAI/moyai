@@ -150,6 +150,10 @@ class ProductRoleLifecycle:
         )
         maintenance = BrokerMaintenance(
             product.store, None, ReceiptMaintenance(spend.recovery, inference.recovery),
+            repository_context=(
+                self.runtime.product_connections.connectors.github.context_index
+                if self.runtime.product_connections is not None else None
+            ),
         )
         self.broker = BrokerRequests(work, inference.slots, maintenance)
         await self.broker.start()
