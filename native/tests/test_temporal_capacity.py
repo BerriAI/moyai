@@ -202,6 +202,7 @@ async def test_blocked_tool_cannot_consume_model_or_control_capacity_and_new_his
                         "agent__moyai__capability__moyai_authority__check",
                         "agent__moyai__capability__memory__load_snapshot",
                         "agent__moyai__capability__moyai_private_instructions__load",
+                        "agent__moyai__capability__moyai_dot_instructions__load",
                         "agent__moyai__capability__moyai_commentary__save",
                         "agent__moyai__toolset__planning__call_tool",
                     ):
@@ -236,9 +237,11 @@ def test_workspace_receipt_and_no_computer_settlement_use_control_capacity():
 
 
 class PriorSplitOutbound(CapacityOutbound):
+    operations = CHAT_CONTROL_OPERATIONS
+
     def start_activity(self, input: StartActivityInput) -> workflow.ActivityHandle[object]:
-        if input.activity.endswith(CHAT_CONTROL_OPERATIONS):
-            # Record both pre-fix split queues, without the new patch marker.
+        if input.activity.endswith(self.operations):
+            # Record the selected operations on their prior tool queue.
             # Explicit queues bypass both versions of the routing decision.
             input = replace(input, task_queue=workflow.info().task_queue + "-tools")
         return super().start_activity(input)
@@ -254,9 +257,14 @@ class PriorSplitCapacity(ActivityCapacity):
         return PriorSplitInbound
 
 
+@pytest.mark.parametrize("operations,has_control_marker", [
+    (CHAT_CONTROL_OPERATIONS, False),
+    (("__capability__moyai_dot_instructions__load",), True),
+])
 async def test_existing_split_chat_control_history_replays_before_and_after_completion(
-    runtime, actor, monkeypatch,
+    runtime, actor, monkeypatch, operations, has_control_marker,
 ):
+    monkeypatch.setattr(PriorSplitOutbound, "operations", operations)
     scenario = CapacityScenario()
     scenario.install(runtime, default_capabilities=True)
     runtime.settings.temporal_workflow_cache_size = 0
@@ -291,14 +299,14 @@ async def test_existing_split_chat_control_history_replays_before_and_after_comp
                 event.activity_task_scheduled_event_attributes.activity_type.name:
                 event.activity_task_scheduled_event_attributes.task_queue.name
                 for event in history.events if event.HasField("activity_task_scheduled_event_attributes")
-                and event.activity_task_scheduled_event_attributes.activity_type.name.endswith(CHAT_CONTROL_OPERATIONS)
+                and event.activity_task_scheduled_event_attributes.activity_type.name.endswith(operations)
             }
             assert control_queues == {
                 "agent__moyai" + operation: runtime.settings.temporal_queue + "-tools"
-                for operation in CHAT_CONTROL_OPERATIONS
+                for operation in operations
             }
             assert routed_marker(history)
-            assert not routed_marker(history, CHAT_CONTROL_ROUTING_VERSION)
+            assert routed_marker(history, CHAT_CONTROL_ROUTING_VERSION) is has_control_marker
         calls = scenario.model_calls
         await Replayer(
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
