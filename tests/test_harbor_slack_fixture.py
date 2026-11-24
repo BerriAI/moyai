@@ -95,6 +95,11 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
     runner = harbor_runner
     network_calls = []
 
+    async def parked_dispatcher(_runtime):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner, "dispatcher", parked_dispatcher)
+
     async def network(_transport, request):
         # Catch all underlying HTTP, including environment proxy transports.
         assert request.url.host != "slack.com", "Synthetic token reached production Slack transport"
@@ -202,6 +207,32 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_trial_dispatch_runs_and_settles_on_exit(monkeypatch, harbor_runner, failed):
+    started, settled = asyncio.Event(), asyncio.Event()
+    runtime = object()
+
+    async def dispatch(received):
+        assert received is runtime
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            settled.set()
+
+    monkeypatch.setattr(harbor_runner, "dispatcher", dispatch)
+    try:
+        async with harbor_runner.trial_dispatch(runtime):
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert not settled.is_set()
+            if failed:
+                raise ValueError("Trial failed")
+    except ValueError:
+        assert failed
+    assert settled.is_set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change,allowed,provider_reads", [
     ("none", True, 1),
     ("unknown_channel", False, 1),
@@ -214,10 +245,11 @@ async def test_fixture_metadata_obeys_native_audience_assertion(
     monkeypatch, harbor_runner, change, allowed, provider_reads,
 ):
     from fastapi import HTTPException
-
     from moyai.database import Database
     from moyai.product_slack_models import ProductSlackBinding
-    from moyai.slack_audience import can_read
+    from moyai.slack_audience import audience_context, can_read, prefetch_context
+
+    from app.connector_errors import ConnectorError
 
     runner = harbor_runner
     principal = SimpleNamespace(
@@ -254,7 +286,10 @@ async def test_fixture_metadata_obeys_native_audience_assertion(
         async with httpx.AsyncClient() as client:
             response = await client.request(method, url, **kwargs)
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
+            if not payload.get("ok"):
+                raise ConnectorError("Synthetic Slack denial", code=payload["error"])
+            return payload
 
     async def reject_network(_transport, request):
         network_calls.append(request)
@@ -263,10 +298,10 @@ async def test_fixture_metadata_obeys_native_audience_assertion(
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_network)
     slack = SimpleNamespace(
         runtime=SimpleNamespace(database=database),
-        installation=lambda: {
+        installation_in=AsyncMock(return_value={
             "team_id": runner.TEAM,
             "authority": ("b" if change == "replaced_installation" else "a") * 64,
-        },
+        }),
         connectors=SimpleNamespace(
             slack_bot_token=AsyncMock(return_value=(
                 "invalid-synthetic-token" if change == "invalid_token" else runner.SLACK_BOT_TOKEN
@@ -276,16 +311,24 @@ async def test_fixture_metadata_obeys_native_audience_assertion(
     )
     database.slack_access = lambda db, session, actor: can_read(slack, db, session, actor)
     with fixture.route_slack_clients(runner.slack_transport([], [])):
+        # Production prefetches provider facts before opening the admission
+        # transaction, then rechecks local identity and installation authority.
+        context = await audience_context(slack, db, binding, actor)
+        if not isinstance(context, bool):
+            await prefetch_context(slack, context)
+        prefetched_reads = len(reads)
         if allowed:
             await database.check_source_audience(db, session, actor)
         else:
             with pytest.raises(HTTPException, match="Conversation unavailable") as error:
                 await database.check_source_audience(db, session, actor)
             assert error.value.status_code == 404
-    identity.authorize_admission.assert_awaited_once_with(db, actor.product_grant)
+    identity.authorize_admission.assert_awaited_with(db, actor.product_grant)
+    assert identity.authorize_admission.await_count == 2
+    assert len(reads) == prefetched_reads  # Admission never performs provider I/O.
     assert len(reads) == provider_reads
     assert not network_calls
     if reads:
         assert reads[0][0:2] == ("GET", "https://slack.com/api/conversations.info")
         assert reads[0][2]["params"] == {"channel": binding.channel_id}
-    assert db.execute.await_count == (1 if change == "unlinked_person" else 0)
+    assert db.execute.await_count == (2 if change == "unlinked_person" else 0)

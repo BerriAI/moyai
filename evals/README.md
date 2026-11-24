@@ -55,8 +55,58 @@ View the saved runs with:
 uv run --project native --python 3.13 --with harbor==0.24.0 harbor view evals/jobs
 ```
 
+## CI configuration and qualification
+
+The workflow runs on main pushes, same-repository pull requests and manual
+dispatch. Configure these repository settings:
+
+| Setting | Kind | Purpose |
+| --- | --- | --- |
+| `MOYAI_EVAL_GATEWAY_URL` | Variable | Evaluation gateway base URL |
+| `MOYAI_EVAL_GATEWAY_KEY` | Secret | Scoped evaluation gateway credential |
+| `MOYAI_EVAL_MODEL` | Variable | Default agent and judge model |
+| `MOYAI_EVAL_AGENT_MODEL` | Optional variable | Override the agent model |
+| `MOYAI_EVAL_JUDGE_MODEL` | Optional variable | Override the judge model |
+
+For installations already using `MOYAI_EVAL_LITELLM_API_BASE` and
+`MOYAI_EVAL_LITELLM_API_KEY` secrets, those remain fallbacks. A judge-specific
+model takes precedence, then the shared model, then an agent-only configuration.
+The runner and judges normalize gateway URLs to `/v1`.
+
+Missing required settings fail the trusted model-evaluation job. Configuration
+also checks gateway DNS/TCP reachability before starting the trial containers.
+The gateway must be reachable from the GitHub runner; a development endpoint
+reachable only on a private network is insufficient for `ubuntu-latest`.
+This preflight does not establish authentication, model availability or quality.
+Configuration
+success alone is not qualification: every task must produce at least two passing
+trials out of three, and missing trial results fail the report. Saved Harbor jobs
+include the replies, tool traces, judgments and usage; inspect execution errors
+separately from task failures. The run summary records the commit and selected
+agent/judge models without printing credentials.
+
+Fork pull requests explicitly skip the model job and show a separate unavailable
+notice. Do not give unreviewed fork code access to credentials through
+`pull_request_target`. A maintainer can review it and run the reviewed revision
+on a trusted branch. A green desktop job or an unavailable notice is not model
+quality approval.
+
 ## Add a task
 
 Create a directory under `evals/tasks/` containing `task.toml`, `instruction.md`, an `environment/` with its Dockerfile and fixtures, and `tests/` with a `test.sh` verifier. Keep task-specific fixtures in that task's environment. The `moyai_harbor` package provides the Moyai agent and turn runner shared by tasks.
 
 `evals/moyai_harbor/workspace.py` contains an eval-only `WorkspaceRef(provider="modal")` shim. It presents Harbor's isolated environment as the Modal workspace reference expected by credential execution, while forwarding commands to Harbor's environment. It is not a production workspace backend.
+
+`moyai_harbor.lifecycle` routes that exact synthetic reference's lifecycle reads
+to the Harbor container. Liveness and the fixed keepalive probe execute
+`/bin/true` there; unknown references fail closed. Filesystem snapshots explicitly
+report unsupported, so these trials do not qualify Modal checkpoint/recovery
+behavior. Run one trial at a time per process (`-n 1`) because this scoped fixture
+replaces the external Modal lookup while the trial's worker is active. Actual-app
+E2E with real Modal remains separate evidence; do not add production Modal keys
+to make this Docker adapter pass.
+
+The native dispatcher runs while the trial is active, so admitted child agents
+can execute and deliver their results. The trial stops and awaits the dispatcher
+before tearing down its worker and database. The Docker adapter shares the
+trial container; it does not qualify production isolation between agent computers.
