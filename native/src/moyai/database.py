@@ -36,7 +36,7 @@ from .contracts import (
     RunScope,
     SteeringInput,
 )
-from .delegation_authority import DelegatedAuthority, session_context
+from .delegation_authority import session_context
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .dispatch_wakeups import notify_dispatch
 from .goal_models import Goal
@@ -484,20 +484,6 @@ class Database:
             return await self.product_identity.personal_memory_owner(db, actor.id) == author_id
         return False
 
-    async def submit(
-        self, actor: User, session_id: str, body: NewMessage, *, db: AsyncSession | None = None,
-        swarm_generated: bool = False,
-        automation_generated: bool = False,
-        delegated_authority: DelegatedAuthority | None = None,
-        received_at: str | None = None,
-    ) -> Turn:
-        """Compatibility entrypoint; new callers use TurnAdmission directly."""
-        return await self.admission.submit(
-            actor, session_id, body, db=db, swarm_generated=swarm_generated,
-            automation_generated=automation_generated, delegated_authority=delegated_authority,
-            received_at=received_at,
-        )
-
     async def admit_automation(
         self, db: AsyncSession, *, grant: ProductGrant, title: str, prompt: str,
         model: str, request_key: str, connections: list[str] | None = None, session_id: str | None = None,
@@ -536,7 +522,7 @@ class Database:
                     title=title, model=model, visibility=visibility,
                 ), db=db)
                 session.surface = "automation"
-            turn = await self.submit(actor, session.id, NewMessage(
+            turn = await self.admission.submit(actor, session.id, NewMessage(
                 prompt=prompt, model=model, request_key=request_key, connections=connections or [],
             ), db=db, automation_generated=True)
             await db.flush()
@@ -794,10 +780,6 @@ class Database:
             return list((await db.scalars(select(Turn).where(
                 Turn.status.in_(["starting", "running", "saving"])
             ).order_by(Turn.created_at).limit(100))).all())
-
-    async def prepare(self, turn_id: str, *, picked_up_at: str | None = None) -> PreparedTurn:
-        """Compatibility entrypoint; new callers use TurnAdmission directly."""
-        return await self.admission.prepare(turn_id, picked_up_at=picked_up_at)
 
     async def authorize_scope(
         self, scope: RunScope, *, input_id: str | None = None, db: AsyncSession | None = None,

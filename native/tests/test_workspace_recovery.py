@@ -70,9 +70,9 @@ async def test_failed_first_turn_restores_files_without_claiming_an_accepted_ans
         assert current.conversation == source.conversation and current.conversation
         assert current.updated_at == source.finished_at
     capture.assert_awaited_once()
-    followup = await runtime.database.submit(actor, session.id, NewMessage(prompt="Inspect and finish the saved edits.", request_key="after-failure"))
+    followup = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Inspect and finish the saved edits.", request_key="after-failure"))
     assert (await runtime.database.claim_next()).id == followup.id
-    prepared = await runtime.database.prepare(followup.id)
+    prepared = await runtime.admission.prepare(followup.id)
     monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=False))
     create = AsyncMock(return_value=SimpleNamespace(object_id=RESTORED["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None))))
     monkeypatch.setattr("moyai.workspace_recovery.restored_sandbox", create)
@@ -138,11 +138,11 @@ async def resumed(runtime, actor, active, monkeypatch, *, waiting=True):
             actor, session.id, turn.id, "approved-once", {"approvals": {"original-call": True}},
         )
     else:
-        followup = await runtime.database.submit(
+        followup = await runtime.admission.submit(
             actor, session.id, NewMessage(prompt="Continue with the same files.", request_key="cold-followup"),
         )
     assert (await runtime.database.claim_next()).id == followup.id
-    return session, turn, await runtime.database.prepare(followup.id), capture
+    return session, turn, await runtime.admission.prepare(followup.id), capture
 
 
 async def test_pending_approval_is_not_exposed_until_checkpoint_settlement(runtime, actor, active, monkeypatch):
@@ -199,7 +199,7 @@ async def test_expired_resume_preserves_approval_and_effect_receipts(runtime, ac
     # A lost activity acknowledgment loads the published reference; it does not
     # create another computer or roll it back to the prior savepoint.
     monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=True))
-    replay = await runtime.database.prepare(prepared.scope.turn_id)
+    replay = await runtime.admission.prepare(prepared.scope.turn_id)
     assert (await prepare_workspace(runtime, replay)).workspace == RESTORED
     create.assert_awaited_once()
 
@@ -544,9 +544,9 @@ async def checkpoint_postgres(tmp_path):
         async with database.sessions() as db:
             actor = await db.scalar(select(User).where(User.username == "admin"))
         session = await database.create_session(actor, NewSession())
-        turn = await database.submit(actor, session.id, NewMessage(prompt="Pause safely.", request_key="race"))
+        turn = await database.admission.submit(actor, session.id, NewMessage(prompt="Pause safely.", request_key="race"))
         await database.claim_next()
-        prepared = await database.prepare(turn.id)
+        prepared = await database.admission.prepare(turn.id)
         await database.save_result(
             prepared.scope,
             conversation=ConversationTypeAdapter.dump_json(Conversation()).decode(),
@@ -606,9 +606,9 @@ async def test_checkpoint_fallback_serializes_with_stop(checkpoint_postgres, mon
 async def test_postgres_final_answer_settles_failed_action_before_backup(checkpoint_postgres, monkeypatch):
     database, actor, *_ = checkpoint_postgres
     session = await database.create_session(actor, NewSession())
-    turn = await database.submit(actor, session.id, NewMessage(prompt="Save the result.", request_key="final"))
+    turn = await database.admission.submit(actor, session.id, NewMessage(prompt="Save the result.", request_key="final"))
     assert (await database.claim_next()).id == turn.id
-    prepared = await database.prepare(turn.id)
+    prepared = await database.admission.prepare(turn.id)
     await EffectReceipts(database).reserve(prepared.scope, "publication", "github_publish_branch", {})
     await database.save_result(
         prepared.scope, conversation=ConversationTypeAdapter.dump_json(Conversation()).decode(),

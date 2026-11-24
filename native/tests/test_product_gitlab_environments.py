@@ -215,13 +215,13 @@ async def admitted_image(product, choices=None):
     async with product.database.sessions.begin() as db:
         context = await workspace.capture_workspace_context(db, product.principal, choices or selection())
     session = await product.database.create_session(product.actor, NewSession())
-    turn = await product.database.submit(product.actor, session.id, NewMessage(
+    turn = await product.database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Use the validated project", request_key="image", connections=[selected.id],
     ))
     async with product.database.sessions.begin() as db:
         await workspace.bind_automation_turn(db, session, turn, context)
     await product.database.claim_next()
-    prepared = await product.database.prepare(turn.id)
+    prepared = await product.database.admission.prepare(turn.id)
     return prepared, context, connections
 
 

@@ -70,11 +70,11 @@ conflict in a separate transaction. Product authority still precedes the user,
 swarm and session fences. Audience prefetch stays outside an owned transaction;
 final authorization and the commit-bound dispatch notification stay inside it.
 
-`Database.submit` and `prepare` temporarily forward for generated-input modules
-and existing integrations. Remove those forwarding methods once those callers
-and their tests use `database.admission` or `Runtime.admission`. Session creation,
-authority helpers, continuation/resume and dispatch remain on Database; answer
-settlement and read projections keep their existing owners.
+All callers, including automations, Slack, historical continuation, delegation,
+swarms, goals and their tests, use `database.admission` or `Runtime.admission`.
+`Database` no longer forwards `submit` or `prepare`; admission has one interface.
+Session creation, authority helpers, continuation/resume and dispatch remain on
+Database; answer settlement and read projections keep their existing owners.
 
 ## Connector execution and answer settlement
 

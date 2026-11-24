@@ -102,7 +102,7 @@ async def test_parent_works_while_child_runs_and_collects_report(runtime, actor,
     if rollover:
         runtime.settings.history_continue_bytes = 16384
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Do independent work alongside a child." + (" Context." * 3000 if rollover else ""),
         request_key="parallel-parent",
     ))
@@ -191,11 +191,11 @@ async def test_status_report_is_parent_scoped_and_does_not_export_followups(runt
     )
     assert unavailable[0]["status"] == "unavailable"
     initial = await runtime.database.claim_next()
-    context = await runtime.database.prepare(initial.id)
+    context = await runtime.admission.prepare(initial.id)
     await finish(runtime, context, "Original evidence")
     report = (await capability.reports(prepared.scope, [child["session_id"]]))[0]
     assert report["status"] == "completed" and report["output"] == "Original evidence"
-    await runtime.database.submit(actor, child["session_id"], NewMessage(
+    await runtime.admission.submit(actor, child["session_id"], NewMessage(
         prompt="Private human follow-up", request_key="private-followup",
     ))
     assert (await capability.reports(prepared.scope, [child["session_id"]]))[0] == report
@@ -268,14 +268,14 @@ async def test_parent_question_resumes_preserve_children_without_granting_ordina
     resumed = await runtime.database.resume(actor, parent.id, original_turn.id, "answer-one", {"calls": {}})
     claimed = await runtime.database.claim_batch(10)
     child_turn = next(turn for turn in claimed if turn.session_id == child["session_id"])
-    child_context = await runtime.database.prepare(child_turn.id)
-    context = await runtime.database.prepare(resumed.id)
+    child_context = await runtime.admission.prepare(child_turn.id)
+    context = await runtime.admission.prepare(resumed.id)
     assert context.scope.background_agents == [child["session_id"]]
     assert (await capability.reports(context.scope, [child["session_id"]]))[0]["status"] == "running"
     await pause(context)
     resumed_again = await runtime.database.resume(actor, parent.id, resumed.id, "answer-two", {"calls": {}})
     await runtime.database.claim_next()
-    context = await runtime.database.prepare(resumed_again.id)
+    context = await runtime.admission.prepare(resumed_again.id)
     assert context.scope.background_agents == [child["session_id"]]
     await finish(runtime, child_context, "Child completed during the question.")
     reports = await capability.reports(context.scope, [child["session_id"]])
@@ -287,10 +287,10 @@ async def test_parent_question_resumes_preserve_children_without_granting_ordina
         # Resume access never rewrites the identity of the original admission.
         link = await db.get(DelegatedSession, child["session_id"])
         assert link.parent_turn_id == original_turn.id
-    followup = await runtime.database.submit(actor, parent.id, NewMessage(
+    followup = await runtime.admission.submit(actor, parent.id, NewMessage(
         prompt="An unrelated later task", request_key="ordinary-followup",
     ))
     await runtime.database.claim_next()
-    later = await runtime.database.prepare(followup.id)
+    later = await runtime.admission.prepare(followup.id)
     assert not later.scope.background_agents
     assert (await capability.reports(later.scope, [child["session_id"]]))[0]["status"] == "unavailable"

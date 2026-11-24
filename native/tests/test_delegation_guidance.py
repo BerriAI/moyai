@@ -77,7 +77,7 @@ async def test_accepted_steering_prevents_stale_child_admission(
             )
             try:
                 await asyncio.wait_for(entered.wait(), 20)
-                correction = await runtime.database.submit(actor, session.id, NewMessage(
+                correction = await runtime.admission.submit(actor, session.id, NewMessage(
                     prompt="NEW GUIDANCE: do not create any subagents.", mode="asap", request_key="correction",
                 ))
                 await handle.signal(TurnWorkflow.steer, correction.id)
@@ -102,7 +102,7 @@ async def test_admission_without_input_identity_cannot_bypass_new_guidance(
     runtime, actor, active, accepted, boundary,
 ):
     session, turn, prepared = active
-    correction = await runtime.database.submit(actor, session.id, NewMessage(
+    correction = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Do not create a child.", request_key="correction", mode="asap",
     ))
     if accepted:
@@ -124,14 +124,14 @@ async def test_admission_without_input_identity_cannot_bypass_new_guidance(
 
 async def test_admission_uses_latest_input_but_reporting_can_settle_older_work(runtime, actor, active):
     session, turn, prepared = active
-    first = await runtime.database.submit(actor, session.id, NewMessage(
+    first = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="First correction.", request_key="first", mode="asap",
     ))
     await runtime.database.prepare_steering(turn.id, first.id)
     await runtime.database.steering_receipt(first.id, "first-accepted")
     service = DelegationService(runtime.database)
     child = await service.start(prepared.scope, "current-call", "Current work", input_id=first.id)
-    latest = await runtime.database.submit(actor, session.id, NewMessage(
+    latest = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="A newer correction.", request_key="latest", mode="asap",
     ))
     await runtime.database.prepare_steering(turn.id, latest.id)
@@ -205,7 +205,7 @@ async def test_corrected_delegation_survives_activity_formats_and_replays(runtim
             )
             try:
                 await asyncio.wait_for(entered.wait(), 20)
-                correction = await runtime.database.submit(actor, session.id, NewMessage(
+                correction = await runtime.admission.submit(actor, session.id, NewMessage(
                     prompt="NEW GUIDANCE: delegate the corrected work.", mode="asap", request_key="correction",
                 ))
                 await handle.signal(TurnWorkflow.steer, correction.id)

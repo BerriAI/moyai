@@ -68,7 +68,8 @@ async def linked(slack_admission):
 
     from moyai.skill_invocations import SkillInvocations
     runtime = SimpleNamespace(
-        database=product.database, slack_activity=SimpleNamespace(wake=asyncio.Event()),
+        database=product.database, admission=product.database.admission,
+        slack_activity=SimpleNamespace(wake=asyncio.Event()),
         product_identity=product.adapter, product_skill_catalog=None, security=product.database.security,
     )
     runtime.skill_invocations = SkillInvocations(runtime)
@@ -82,7 +83,7 @@ async def linked(slack_admission):
     session = await product.database.create_session(product.actor, NewSession(
         title="Release checklist", visibility="private",
     ))
-    await product.database.submit(product.actor, session.id, NewMessage(
+    await product.database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Review the launch checklist before Friday.", request_key="web",
     ))
     product.service, product.session, product.sent, product.state = service, session, sent, state

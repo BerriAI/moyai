@@ -536,12 +536,12 @@ async def test_failed_product_preparation_does_not_make_recorded_costs_partial(i
     ctx = inference
     await perform(ctx)
     session = await ctx.product.database.create_session(ctx.product.actor, NewSession())
-    failed = await ctx.product.database.submit(
+    failed = await ctx.product.database.admission.submit(
         ctx.product.actor, session.id, NewMessage(prompt="Never dispatched", request_key="preflight"),
     )
     if prepared:
         assert (await ctx.product.database.claim_next()).id == failed.id
-        await ctx.product.database.prepare(failed.id)
+        await ctx.product.database.admission.prepare(failed.id)
     await ctx.product.database.fail(failed.id, "Synthetic pre-dispatch preparation failure.")
     async with ctx.product.database.sessions.begin() as db:
         paid = await db.get(Turn, ctx.turn.id)

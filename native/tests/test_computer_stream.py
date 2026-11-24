@@ -219,11 +219,11 @@ async def test_stream_rechecks_connection_grants(runtime, actor):
         )
         db.add(connection)
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Prepare", connections=[connection.id], request_key=new_id(),
     ))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     await runtime.database.save_workspace_reference(prepared.scope, {"provider": "modal", "id": "scoped-computer"})
     await runtime.database.stopped(turn.id)
     async with runtime.database.sessions.begin() as db:

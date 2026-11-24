@@ -211,7 +211,7 @@ class SlackEvents:
                     query = query.where(Turn.preparation.is_not(None), Session.workspace.is_not(None))
                 saved = await db.scalar(query.order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
                 submission = body.model_copy(update={"connections": json.loads(saved)}) if saved is not None else body
-                turn = await self.slack.runtime.database.submit(
+                turn = await self.slack.runtime.admission.submit(
                     actor, thread.session_id, submission, db=db,
                 )
                 source = await db.get(SlackTurnSource, turn.id)

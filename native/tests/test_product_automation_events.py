@@ -202,12 +202,12 @@ async def test_event_queue_and_hourly_limit_wait_durably_without_receipts(events
 async def test_session_events_start_now_and_recheck_private_sink_at_admission(events):
     ctx = events
     old = await ctx.product.database.create_session(ctx.product.actor, NewSession(visibility="shared"))
-    await ctx.product.database.submit(ctx.product.actor, old.id, NewMessage(prompt="old history", request_key="before"))
+    await ctx.product.database.admission.submit(ctx.product.actor, old.id, NewMessage(prompt="old history", request_key="before"))
     await event_automation(ctx, provider="session")
     shared = await ctx.product.database.create_session(ctx.product.actor, NewSession(visibility="shared"))
     private = await ctx.product.database.create_session(ctx.product.actor, NewSession(visibility="private"))
-    await ctx.product.database.submit(ctx.product.actor, shared.id, NewMessage(prompt="new shared", request_key="shared"))
-    await ctx.product.database.submit(ctx.product.actor, private.id, NewMessage(prompt="private input", request_key="private"))
+    await ctx.product.database.admission.submit(ctx.product.actor, shared.id, NewMessage(prompt="new shared", request_key="shared"))
+    await ctx.product.database.admission.submit(ctx.product.actor, private.id, NewMessage(prompt="private input", request_key="private"))
     await ctx.events.capture_sessions()
     inbox = await pending(ctx)
     assert len(inbox) == 1 and "new shared" in inbox[0]["context"]
@@ -231,8 +231,8 @@ async def test_specific_native_session_trigger_uses_exact_uuid_without_legacy_id
         revision=1, request_key="specific-session", activate=True,
     ))
     await ctx.service.reconcile(row["id"])
-    await ctx.product.database.submit(ctx.product.actor, other.id, NewMessage(prompt="Other source", request_key="other"))
-    await ctx.product.database.submit(ctx.product.actor, selected.id, NewMessage(prompt="Selected source", request_key="selected"))
+    await ctx.product.database.admission.submit(ctx.product.actor, other.id, NewMessage(prompt="Other source", request_key="other"))
+    await ctx.product.database.admission.submit(ctx.product.actor, selected.id, NewMessage(prompt="Selected source", request_key="selected"))
     await ctx.events.capture_sessions()
     inbox = await pending(ctx)
     assert len(inbox) == 1
@@ -246,11 +246,11 @@ async def test_specific_native_session_trigger_uses_exact_uuid_without_legacy_id
 async def test_session_context_is_bounded_and_marks_large_reference_truncation(events):
     ctx = events
     session = await ctx.product.database.create_session(ctx.product.actor, NewSession(visibility="shared"))
-    await ctx.product.database.submit(ctx.product.actor, session.id, NewMessage(
+    await ctx.product.database.admission.submit(ctx.product.actor, session.id, NewMessage(
         prompt="界" * 200_000, request_key="large-reference",
     ))
     await event_automation(ctx, provider="session")
-    await ctx.product.database.submit(ctx.product.actor, session.id, NewMessage(
+    await ctx.product.database.admission.submit(ctx.product.actor, session.id, NewMessage(
         prompt="New shared message", request_key="small-new",
     ))
     await ctx.events.capture_sessions()
@@ -405,7 +405,7 @@ async def test_event_runs_continue_chat_without_reexporting_scheduled_messages(e
     await run_turn(ctx, first["turn_id"], lambda *_: ModelResponse(parts=[TextPart("Event answer")]))
     await ctx.events.capture_sessions()
     assert not [item for item in await pending(ctx) if item["automation_id"] == watcher["id"]]
-    await database.submit(ctx.product.actor, session.id, NewMessage(prompt="A real follow-up", request_key="human-followup"))
+    await database.admission.submit(ctx.product.actor, session.id, NewMessage(prompt="A real follow-up", request_key="human-followup"))
     await ctx.events.capture_sessions()
     captured = [item for item in await pending(ctx) if item["automation_id"] == watcher["id"]]
     assert len(captured) == 1 and "A real follow-up" in captured[0]["context"]
@@ -422,7 +422,7 @@ async def test_event_queue_tracks_resumed_run_in_shared_chat(events):
     first, second = await pending(ctx)
     admitted = await ctx.events.admit(first["occurrence"])
     await database.claim_next()
-    await database.prepare(admitted["turn_id"])
+    await database.admission.prepare(admitted["turn_id"])
     async with database.sessions.begin() as db:
         (await db.get(Turn, admitted["turn_id"])).status = "waiting"
         (await db.get(Session, session.id)).status = "waiting"

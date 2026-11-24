@@ -327,7 +327,7 @@ class Goals:
     ) -> Turn:
         if generated and attachments is None:
             attachments = await self.initial_attachments(db, goal)
-        turn = await self.database.submit(actor, goal.session_id, NewMessage(
+        turn = await self.database.admission.submit(actor, goal.session_id, NewMessage(
             prompt=prompt, request_key=key, model=goal.model, connections=json.loads(goal.connections),
             attachments=attachments or [],
         ), db=db)

@@ -220,7 +220,7 @@ async def test_unexpected_attachment_read_error_is_logged_and_does_not_drop_turn
         **context_tests.mention_message(), "files": [{"id": "FTEST0001"}],
     }))
     turn = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
 
     assert "file_unavailable" in prepared.prompt
     assert any(
@@ -484,7 +484,7 @@ async def test_signed_edits_update_queued_input_but_never_rerun_started_work(ing
         assert runtime.security.unseal(fresh.prompt).decode().startswith('updated task')
         assert len(list(await db.scalars(select(Turn)))) == count_before
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     changed['text'] = '<@UBOT00001> second edit after starting'
     changed['edited']['ts'] = '1792255910.001'
     assert (await service.receive_payload(payload))['updated']

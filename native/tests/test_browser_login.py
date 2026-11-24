@@ -72,7 +72,7 @@ async def test_login_tool_rejects_non_web_or_embedded_credentials(runtime, activ
 async def test_request_survives_reload_and_does_not_expire_or_accept_chat(runtime, actor):
     session, turn_id = await waiting_login(runtime, actor)
     await expire_optional_questions(runtime.database)
-    queued = await runtime.database.submit(actor, session.id, NewMessage(
+    queued = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="I signed in", mode="asap", request_key="chat-is-not-completion",
     ))
     assert queued.deferred_results is None

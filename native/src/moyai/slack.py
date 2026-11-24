@@ -161,7 +161,7 @@ async def admit_one(runtime: Runtime, inbox: SlackInbox) -> None:
             provenance={"team_id": team, "channel_id": channel, "thread_ts": thread_ts,
                         "message_ts": event["ts"], "user_id": event["user"]},
         ))
-        await runtime.database.submit(actor, thread.session_id, body)
+        await runtime.admission.submit(actor, thread.session_id, body)
     except HTTPException as error:
         if error.status_code not in (401, 403, 404):
             raise

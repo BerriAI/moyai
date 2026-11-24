@@ -287,7 +287,7 @@ async def run_runtime_turn(
 async def offered_tool_names(
     runtime: Runtime, turn_id: str, workspace: HarborWorkspace,
 ) -> list[str]:
-    prepared = await runtime.database.prepare(turn_id)
+    prepared = await runtime.admission.prepare(turn_id)
     context = RunContext(
         deps=prepared.scope,
         model=runtime.models[prepared.scope.model],

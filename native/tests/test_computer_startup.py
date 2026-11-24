@@ -115,7 +115,7 @@ async def test_cold_computer_starts_at_tool_use_and_reuses_warm_reference(
             history = await handle.fetch_history()
             saved = await runtime.database.session(actor, session.id)
             assert json.loads(saved.workspace) == {"provider": "local", "id": str(directory)}
-            followup = await runtime.database.submit(
+            followup = await runtime.admission.submit(
                 actor, session.id, NewMessage(prompt="FOLLOWUP_WITHOUT_TOOLS", request_key="warm-followup"),
             )
             await runtime.database.claim_next()

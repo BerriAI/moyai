@@ -72,7 +72,7 @@ async def ingress(slack, actor, bridge, monkeypatch):
 
 
 async def render_source(ingress, turn_id: str) -> str:
-    prepared = await ingress.runtime.database.prepare(turn_id)
+    prepared = await ingress.runtime.admission.prepare(turn_id)
     return await SlackThread(make_slack_thread_reader(ingress.service)).render(prepared.scope)
 
 
@@ -276,7 +276,7 @@ async def test_thread_reference_reaches_model_instructions_without_transcript_le
     if not adapter_receipt:
         async with ingress.runtime.database.sessions.begin() as db:
             await db.execute(delete(SlackTurnSource).where(SlackTurnSource.turn_id == turn.id))
-    prepared = await ingress.runtime.database.prepare(turn.id)
+    prepared = await ingress.runtime.admission.prepare(turn.id)
     context = SessionContext([SlackThread(make_slack_thread_reader(ingress.service))])
     model = FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart("done")]))
     agent = Agent(model, deps_type=RunScope, capabilities=[context])

@@ -120,7 +120,7 @@ async def test_second_participant_reaches_execution_in_existing_slack_workspace(
     else:
         await service.receive_payload(context_tests.envelope(context_tests.mention_message()))
     initial = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(initial.id)
+    prepared = await runtime.admission.prepare(initial.id)
     async with runtime.database.sessions.begin() as db:
         session = await db.get(Session, initial.session_id)
         session.workspace, session.workspace_scope = json.dumps({"id": "retained-computer"}), prepared.scope.workspace_key
@@ -144,7 +144,7 @@ async def test_second_participant_reaches_execution_in_existing_slack_workspace(
         session = await db.get(Session, initial.session_id)
         session.active_turn, session.status = None, "idle"
     assert (await runtime.database.claim_next()).id == followup.id
-    continuation = await runtime.database.prepare(followup.id)
+    continuation = await runtime.admission.prepare(followup.id)
     assert continuation.prompt == "Add the requested text to the existing image."
     assert continuation.scope.actor_id == second.id
     assert continuation.scope.workspace_key == prepared.scope.workspace_key

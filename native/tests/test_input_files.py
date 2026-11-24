@@ -69,9 +69,9 @@ async def test_file_size_and_filename_validation(runtime):
 
 async def test_generic_hydration_carries_metadata_without_reading_entire_files(runtime, actor, monkeypatch):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Read files.", request_key="hydrate"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Read files.", request_key="hydrate"))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     prepared.images = [InputImage("digest", "application/zip", "archive.zip", upload_id="upload", size=1234)]
 
     async def unexpected_read(_digest):

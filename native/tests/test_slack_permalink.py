@@ -23,7 +23,7 @@ async def test_source_link_validates_destination_and_never_returns_credentials(r
         provenance={'team_id': 'TTEST001', 'channel_id': 'CTEST001',
                     'thread_ts': '1792255740.000', 'message_ts': '1792255741.001', 'user_id': 'UTEST001'},
     ))
-    await runtime.database.submit(actor, session.id, body)
+    await runtime.admission.submit(actor, session.id, body)
     message = (await runtime.database.messages(actor, session.id))[0]
     async def token():
         return 'synthetic-token'

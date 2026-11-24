@@ -54,7 +54,7 @@ async def saved_file(
         "digest": digest, "size": len(raw) if size is None else size,
     }
     if kind == "artifact":
-        turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Save file.", request_key=new_id()))
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Save file.", request_key=new_id()))
         row = Artifact(**fields, turn_id=turn.id, content_hash=hashlib.sha256(raw).hexdigest())
     else:
         row = Upload(**fields, owner_id=actor.id)

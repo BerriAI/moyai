@@ -46,7 +46,7 @@ async def test_authority_failure_is_not_evidence_of_consumption(runtime, actor, 
     mail = AgentMessages(runtime.database)
     await DelegationService(runtime.database).start(parent.scope, "child", "Work")
     child_turn = await runtime.database.claim_next()
-    child = await runtime.database.prepare(child_turn.id)
+    child = await runtime.admission.prepare(child_turn.id)
     receipt = await mail.send(child.scope, "update", "parent", "Private evidence", child_turn.id)
     authorize = runtime.database.authorize_scope
 
@@ -119,7 +119,7 @@ async def test_unavailable_read_preserves_mail_across_lifecycle(runtime, actor, 
     runtime.settings.worker_shutdown_seconds = 1
     if lifecycle == "rollover":
         runtime.settings.history_continue_bytes = 16384
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Coordinate with one child." + (" Reference." * 3000 if lifecycle == "rollover" else ""),
         request_key="delivery-recovery",
     ))

@@ -134,7 +134,7 @@ async def test_delegated_details_exclude_later_chat_and_deleted_session(runtime,
     session, root, prepared = active
     child = await DelegationService(runtime.database).start(prepared.scope, "one", "Inspect the task.")
     initial = await runtime.database.claim_next()
-    context = await runtime.database.prepare(initial.id)
+    context = await runtime.admission.prepare(initial.id)
     await saved_action(runtime, initial.id)
     async with runtime.database.sessions.begin() as db:
         (await db.get(Session, session.id)).visibility = "shared"
@@ -145,7 +145,7 @@ async def test_delegated_details_exclude_later_chat_and_deleted_session(runtime,
         assert response.status_code == 200, response.text
         assert (await member.get(f"/api/sessions/{child['session_id']}")).status_code == 404
         await finish(runtime, context, "Done.")
-        follow = await runtime.database.submit(actor, child["session_id"], NewMessage(prompt="Private followup", request_key="later"))
+        follow = await runtime.admission.submit(actor, child["session_id"], NewMessage(prompt="Private followup", request_key="later"))
         await runtime.database.claim_next()
         await saved_action(runtime, follow.id)
         assert (await client.get(path + f"{follow.id}:call", params={"agent_id": initial.id})).status_code == 404

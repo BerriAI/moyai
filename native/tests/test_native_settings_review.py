@@ -119,11 +119,11 @@ async def test_stale_automation_owner_is_denied_before_any_native_turn_is_writte
                 f"/api/settings/users/{owner.id}", json={"enabled": True},
             )).status_code == 200
         fresh = await original_user(owner.id)
-        following = await runtime.database.submit(fresh, schedule.session_id, NewMessage(
+        following = await runtime.admission.submit(fresh, schedule.session_id, NewMessage(
             prompt="New explicitly authorized task.", request_key="fresh-authority",
         ))
         assert (await runtime.database.claim_next()).id == following.id
-        assert (await runtime.database.prepare(following.id)).scope.actor_id == owner.id
+        assert (await runtime.admission.prepare(following.id)).scope.actor_id == owner.id
 
 
 async def test_revocation_waits_for_admission_commit_then_stops_the_admitted_turn(review_runtime, monkeypatch):

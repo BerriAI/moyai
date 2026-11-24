@@ -209,9 +209,9 @@ async def publication(admitted_product):
         return [grant] if selections else []
     product.database.product_connections = SimpleNamespace(resolve_grants=resolve)
     session = await product.database.create_session(product.actor, NewSession())
-    turn = await product.database.submit(product.actor, session.id, NewMessage(prompt="Local protocol test", request_key="publication", connections=[grant.id]))
+    turn = await product.database.admission.submit(product.actor, session.id, NewMessage(prompt="Local protocol test", request_key="publication", connections=[grant.id]))
     await product.database.claim_next()
-    prepared = await product.database.prepare(turn.id)
+    prepared = await product.database.admission.prepare(turn.id)
     provider = Provider()
     async def check(scope, selected):
         assert selected == grant

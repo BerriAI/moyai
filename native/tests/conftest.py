@@ -87,9 +87,9 @@ async def actor(runtime):
 @pytest_asyncio.fixture
 async def active(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Perform the task.", request_key="request-one")
     )
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     return session, turn, prepared

@@ -54,7 +54,7 @@ async def admit(runtime, actor):
         provenance={'team_id': TEAM, 'channel_id': 'CTEST0001', 'user_id': 'UAUTHOR01',
                     'thread_ts': '1792255700.001', 'message_ts': '1792255700.001'},
     ))
-    turn = await runtime.database.submit(actor, session.id, body)
+    turn = await runtime.admission.submit(actor, session.id, body)
     return session, turn
 
 

@@ -136,7 +136,7 @@ async def test_reply_and_steer_reassert_without_changing_segments(activity, acto
         row.status, row.receipt = "sent", activity.runtime.security.seal({"ok": True, "ts": "123.456"})
     await activity.service.sync(activity.client)
     assert len(activity.calls) == 3  # The actual reply arrived after the previous status request.
-    steer = await activity.runtime.database.submit(actor, activity.thread.session_id, NewMessage(
+    steer = await activity.runtime.admission.submit(actor, activity.thread.session_id, NewMessage(
         prompt="Include the count.", request_key=new_id(), mode="asap",
     ))
     assert steer.parent_turn == activity.active[1].id

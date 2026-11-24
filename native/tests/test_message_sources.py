@@ -26,7 +26,7 @@ def test_clients_cannot_supply_authored_text_or_provenance():
 async def test_transcript_cache_version_changes_when_a_senders_name_is_refreshed(runtime, actor):
     from test_application_boundaries import sign_in
     session = await runtime.database.create_session(actor, NewSession())
-    await runtime.database.submit(actor, session.id, NewMessage(prompt='Saved message', request_key='name-cache'))
+    await runtime.admission.submit(actor, session.id, NewMessage(prompt='Saved message', request_key='name-cache'))
     async with sign_in(runtime) as client:
         path = f'/api/sessions/{session.id}?include_messages=true'
         before = (await client.get(path)).json()
@@ -47,9 +47,9 @@ async def test_separate_text_context_and_source_survive_real_admission(runtime, 
         provenance={'team_id': 'TTEST001', 'channel_id': 'CTEST001',
                     'thread_ts': '1792255740.000', 'message_ts': '1792255741.001', 'user_id': 'UTEST001'},
     ))
-    turn = await runtime.database.submit(actor, session.id, body)
+    turn = await runtime.admission.submit(actor, session.id, body)
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     assert 'Third party says' in prepared.prompt
     messages = await runtime.database.messages(actor, session.id)
     assert messages[0]['content'] == literal
@@ -71,7 +71,7 @@ async def test_legacy_cleanup_requires_matching_receipt_and_preserves_frozen_pro
               'message_ts': '1792255741.001', 'messages': [], 'status': 'complete'}
     key = hashlib.sha256(json.dumps([origin[k] for k in ('team_id', 'channel_id', 'message_ts')]).encode()).hexdigest()
     prompt = 'test' + _render(origin)
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt=prompt, request_key='slack-message:' + key))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt=prompt, request_key='slack-message:' + key))
     async with runtime.database.sessions.begin() as db:
         db.add(SlackThread(session_id=session.id, team_id=origin['team_id'], channel_id=origin['channel_id'], thread_ts=origin['thread_ts']))
         await db.execute(delete(MessageSource))  # simulate the old writer
@@ -80,7 +80,7 @@ async def test_legacy_cleanup_requires_matching_receipt_and_preserves_frozen_pro
     assert messages[0]['source'] == 'slack'
     assert runtime.security.unseal(turn.prompt).decode() == prompt
     # Literal marker-looking text cannot be stripped using another receipt.
-    other = await runtime.database.submit(actor, session.id, NewMessage(prompt=prompt, request_key='human-example'))
+    other = await runtime.admission.submit(actor, session.id, NewMessage(prompt=prompt, request_key='human-example'))
     async with runtime.database.sessions.begin() as db:
         await db.execute(delete(MessageSource).where(MessageSource.message_identity == f'user:{other.id}'))
     assert (await runtime.database.messages(actor, session.id))[-1]['content'] == prompt
@@ -98,7 +98,7 @@ async def test_repair_is_idempotent_keeps_frozen_input_and_quarantines_context_e
               'message_ts': '1792255741.001', 'messages': [{'text': 'Third-party preference'}], 'status': 'complete'}
     key = hashlib.sha256(json.dumps([origin[k] for k in ('team_id', 'channel_id', 'message_ts')]).encode()).hexdigest()
     prompt = 'My own request' + REFERENCE + json.dumps(origin) + REFERENCE_END
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt=prompt, request_key='slack-message:' + key))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt=prompt, request_key='slack-message:' + key))
     async with runtime.database.sessions.begin() as db:
         db.add(SlackThread(session_id=session.id, team_id=origin['team_id'], channel_id=origin['channel_id'], thread_ts=origin['thread_ts']))
         await db.execute(delete(MessageSource))
