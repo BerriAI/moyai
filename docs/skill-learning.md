@@ -32,6 +32,16 @@ verified repository and authorized scope while learning is enabled. This recall
 uses keyword relevance and a bounded number of procedures; it is not a code index
 or DeepWiki-style repository documentation.
 
+Direct Slack channel turns can also recall enabled organization procedures for
+the same verified repository. Recall requires the current signed Slack identity,
+matching turn/channel provenance, a current installation binding, and Slack's
+confirmation that the channel is internal. Shared-channel audience metadata uses
+the existing 60-second cache; expired metadata is not reused after provider
+failure. DMs, Slack Connect or unknown audiences, delegates, swarms and linked
+web-chat continuations do not receive this automatic recall. Personal procedures
+are never included in Slack recall. Slack content still cannot publish new
+organization lessons.
+
 Only automatically learned, unchanged skills may be automatically updated.
 Manual edits, renames, archiving or deletion freeze a learned topic; background
 work will not overwrite or recreate it. Updates retain revisioned source files.
@@ -69,6 +79,7 @@ Run the policy and migration checks with disposable PostgreSQL:
 ```sh
 MOYAI_TEST_POSTGRES=postgresql://localhost/moyai_test uv run pytest \
   native/tests/test_skill_learning.py \
+  native/tests/test_slack_learned_skills.py \
   native/tests/test_native_online_schema.py \
   native/tests/test_native_additive_schema.py \
   native/tests/test_product_schema_versions.py

@@ -76,7 +76,7 @@ async def learning(memory_product, monkeypatch):
     product.adapter.settings.skill_learning_idle_seconds = 0
     runtime = SimpleNamespace(
         database=product.database, product_skill_catalog=catalog, product_memory=product.memory,
-        product_workspace=None,
+        product_workspace=None, product_slack=None,
     )
     product.learning = SkillLearningService(runtime)
     product.learning.configure({"test": TestModel()})
