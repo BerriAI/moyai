@@ -373,3 +373,23 @@ async def test_active_assignment_reconciles_before_long_source_interval(runtime,
     await tick(runtime, row.id)
     blocked = (await runtime.database.responsibilities.list(actor))[0]
     assert blocked.status == "blocked" and blocked.active_turn_id is None
+
+
+async def test_accepted_result_waits_for_settlement_after_expiry(runtime, actor):
+    source, row = await enroll(runtime, actor)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    binding, prepared, decision = await worker(runtime, row.id)
+    assert await runtime.database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output=decision, workspace=None, usage={},
+    )
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(ResponsibilityAssignment).where(
+            ResponsibilityAssignment.turn_id == binding.turn_id,
+        ).values(expires_at="2000"))
+    await tick(runtime, row.id)
+    assert (await assignment(runtime, row.id)).turn_id == binding.turn_id
+    assert await runtime.database.responsibilities.inbox(actor) == []
+    await runtime.database.settle(binding.turn_id)
+    await tick(runtime, row.id)
+    assert len(await runtime.database.responsibilities.inbox(actor)) == 1

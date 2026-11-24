@@ -264,12 +264,17 @@ class Responsibilities:
         if not row.active_turn_id:
             return
         turn = await db.get(Turn, row.active_turn_id)
-        if turn is not None and turn.status in BUSY:
+        if turn is not None:
             await db.execute(update(Session).where(Session.id == turn.session_id).values(
-                status="stopped", revision=Session.revision + 1,
+                revision=Session.revision,
             ))
-            turn.status = "stopped"
-            turn.finished_at = now()
+            await db.refresh(turn)
+            if turn.status in BUSY:
+                await db.execute(update(Session).where(Session.id == turn.session_id).values(
+                    status="stopped", revision=Session.revision + 1,
+                ))
+                turn.status = "stopped"
+                turn.finished_at = now()
         row.active_turn_id = None
 
     async def control(self, actor: User, identity: str, request: ResponsibilityControl) -> ResponsibilityView:
@@ -400,6 +405,17 @@ class Responsibilities:
                 assignment = await db.get(ResponsibilityAssignment, row.active_turn_id)
                 if turn is None or assignment is None:
                     row.status, row.reason = "blocked", "The saved assignment is unavailable."
+                    return
+                # Settlement owns the worker session before changing Turn.
+                # Observe its committed result under that same fence.
+                await db.execute(update(Session).where(Session.id == turn.session_id).values(
+                    revision=Session.revision,
+                ))
+                await db.refresh(turn)
+                if turn.status == "saving" and turn.result_accepted:
+                    # Expiry gates new model work and result acceptance. An
+                    # on-time accepted result keeps its native settlement path.
+                    row.next_check_at = due(5)
                     return
                 if turn.status in BUSY and assignment.expires_at > now():
                     row.next_check_at = min(due(5), assignment.expires_at)

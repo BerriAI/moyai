@@ -35,6 +35,8 @@ external actions, or enable a watch by default.
   failures receive a persisted 30-second backoff so later pages can progress.
   Backoff only applies to the original generation and due time. Running reviews
   are reconciled every five seconds, independently of the source check cadence.
+  An on-time accepted result retains its native settlement path after assignment
+  expiry; expiry prevents new work, not completion of an already accepted save.
   Reconciliation cannot block the manual-input/Stop dispatcher.
 - `moyai_responsibility` is a separate `NativeOutput` agent. Its input contains
   the objective and at most five new messages, each capped at 6,000 characters.

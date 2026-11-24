@@ -16,7 +16,7 @@ from moyai.contracts import NewMessage
 from moyai.models import Session, Turn
 from moyai.product_role_authority import ProductOwnershipLost
 from moyai.responsibility_contracts import ResponsibilityControl
-from moyai.responsibility_models import Responsibility
+from moyai.responsibility_models import Responsibility, ResponsibilityAssignment
 
 __all__ = ["admitted_product", "inference", "postgres_database", "role"]
 
@@ -235,3 +235,57 @@ async def test_source_deletion_waits_for_broker_receipt_and_then_denies_new_infe
     with pytest.raises(Exception, match="Conversation not found|active private conversation"):
         await perform(ctx, logical="responsibility-after-delete")
     assert len(ctx.calls) == calls_before
+
+
+async def test_settlement_winning_expiry_race_publishes_once(postgres_database, monkeypatch):
+    database, actor = postgres_database
+    runtime = harness(database)
+    source, row = await enroll(runtime, actor)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    binding, prepared, decision = await worker(runtime, row.id)
+    assert await database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output=decision, workspace=None, usage={},
+    )
+    async with database.sessions.begin() as db:
+        await db.execute(update(Responsibility).values(next_check_at="2000"))
+        await db.execute(update(ResponsibilityAssignment).where(
+            ResponsibilityAssignment.turn_id == binding.turn_id,
+        ).values(expires_at="2000"))
+    pids = asyncio.Queue()
+    original_admission = database._admission_session
+
+    @asynccontextmanager
+    async def admission_barrier(db):
+        async with original_admission(db) as transaction:
+            await pids.put(await transaction.scalar(text("SELECT pg_backend_pid()")))
+            yield transaction
+
+    monkeypatch.setattr(database, "_admission_session", admission_barrier)
+
+    async def wait_for_lock():
+        pid = await asyncio.wait_for(pids.get(), 3)
+        async with database.sessions() as db:
+            for _ in range(100):
+                if await db.scalar(text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"), {"pid": pid}):
+                    return
+                await asyncio.sleep(0.01)
+        pytest.fail("The contender did not reach the actual session lock.")
+
+    settling = waking = None
+    try:
+        async with database.sessions.begin() as holder:
+            await holder.execute(select(Session).where(
+                Session.id == prepared.scope.session_id,
+            ).with_for_update())
+            settling = asyncio.create_task(database.settle(binding.turn_id))
+            await wait_for_lock()
+            waking = asyncio.create_task(database.responsibilities.tick(row.id))
+            await wait_for_lock()
+    finally:
+        await asyncio.wait_for(asyncio.gather(*(task for task in [settling, waking] if task)), 5)
+    async with database.sessions() as db:
+        assert (await db.get(Turn, binding.turn_id)).status == "completed"
+    assert len(await database.responsibilities.inbox(actor)) == 1
+    await tick(runtime, row.id)
+    assert len(await database.responsibilities.inbox(actor)) == 1
