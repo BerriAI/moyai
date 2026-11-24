@@ -11,6 +11,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import cast
+
+from pydantic_settings import BaseSettings
 
 from .deployment_config import InstallationError, configuration, read_state
 
@@ -30,11 +33,11 @@ def qualification(role: str) -> dict:
     from .product_schema import MIGRATIONS, _manifest, application_metadata
 
     config = load_product_config()
-    if config is None or config.role != role:
+    if config is None or config.role != role or config.native_schema is None:
         raise InstallationError("The qualification role does not match the configured role.")
     require_startable(config)
     versions = check_runtime_dependencies()
-    settings = Settings(_env_file=None)
+    settings = cast(Settings, cast(type[BaseSettings], Settings)(_env_file=None))
     return {
         "capabilities": capabilities(config),
         "contract": {
