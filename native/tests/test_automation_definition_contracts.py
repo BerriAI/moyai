@@ -50,6 +50,9 @@ def test_json_schema_matches_original_public_contract(name):
     # Chat continuation adds one optional destination; retain the original contract otherwise.
     definition = schema if name == "Definition" else schema.get("$defs", {}).get("Definition")
     if definition is not None:
+        kind = definition["properties"].pop("kind")
+        assert kind["enum"] == ["task", "attention"] and kind["default"] == "task"
+        assert "kind" not in definition.get("required", [])
         destination = definition["properties"].pop("session_id")
         assert destination["default"] is None
         assert "session_id" not in definition.get("required", [])
@@ -136,7 +139,7 @@ def test_optional_gitlab_fields_preserve_old_automation_digest():
         }}],
     )
     old_payload = definition.model_dump(
-        mode="json", exclude={"session_id", "gitlab_project_id", "visibility", "connection_ids"},
+        mode="json", exclude={"session_id", "gitlab_project_id", "visibility", "connection_ids", "kind"},
     )
     old_payload["triggers"][0]["event"].pop("gitlab_origin")
     assert definition_payload(definition) == old_payload

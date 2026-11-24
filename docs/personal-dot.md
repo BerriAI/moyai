@@ -23,12 +23,15 @@ computer, the accounts selected in a later reply, skills, memory-writing tools,
 automation tools or delegation. Model execution is bounded to eight requests.
 
 The observer returns a typed **quiet** or **notify** decision. Notify requires a
-current connected-tool result with an exact source identity, provider version or
-last-modified timestamp, and quotation. Tool discovery results cannot serve as
+current connected-tool result with an exact account, source identity, provider
+version or last-modified timestamp, and quotation from one structured record.
+The host chooses a canonical URL/ID from that record and includes the account in
+the deduplication key; changing a citation from an ID to its URL cannot bypass it.
+Unsupported record shapes fail closed. Tool discovery results cannot serve as
 evidence. Publication rechecks the owner, automation generation, original account
 revisions and current private destination under the relevant transaction locks.
 The assistant message and delivery receipt commit together. Repeated primary
-source/version pairs are suppressed across occurrences; this is deterministic
+account/source/version pairs are suppressed across occurrences; this is deterministic
 item-version deduplication, not a claim of arbitrary semantic deduplication.
 
 Quiet and duplicate checks leave the Dot's messages, activity, timestamps,
@@ -36,6 +39,8 @@ checkpoint and account selection unchanged. The observer's encrypted transcript
 stays on its own execution turn. Normal replies use ordinary native admission
 and action policies; generated notifications never become human authorization.
 Delivery never mutates the saved SDK conversation or computer recovery digest.
+It also leaves the computer revision unchanged, so delivery during a snapshot
+cannot invalidate the capture. The message ID updates the transcript projection.
 Pending notifications enter the next ordinary reply's prepared input. A cursor
 saved atomically with each resulting checkpoint records which notifications it
 contains, so overlapping deliveries survive a reply and enter the following
@@ -55,6 +60,8 @@ Ordinary chat connections and canonical organization connections do not
 implicitly grant background monitoring access. Changing connection revisions
 requires reviewing and enabling the schedule again. The same account may remain
 selected for ordinary conversation without changing the captured observer scope.
+Conversational setup preserves the requested account subset. With multiple
+selected accounts it requires an explicit subset rather than defaulting to all.
 
 ## Verification
 

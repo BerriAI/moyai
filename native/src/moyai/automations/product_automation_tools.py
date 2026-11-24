@@ -137,12 +137,20 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
     async def mutate_checked(ctx, action, request, grant, receipt, attempt):
         identity = getattr(request, "automation_id", None)
         if action == "create":
+            connections = sorted(grant.id for grant in ctx.deps.grants)
+            if request.definition.kind == "attention":
+                chosen = request.definition.connection_ids
+                if not chosen and len(connections) == 1:
+                    chosen = connections
+                if not chosen or not set(chosen).issubset(connections):
+                    raise ToolFailed("Choose the explicit attention account subset from this chat's selected accounts.")
+                connections = sorted(chosen)
             request = request.model_copy(update={"definition": request.definition.model_copy(update={
                 "session_id": ctx.deps.session_id if request.destination == "current_chat" else None,
                 "visibility": ctx.deps.authority.visibility,
                 **({
                     "plugins": [],
-                    "connection_ids": sorted(grant.id for grant in ctx.deps.grants)
+                    "connection_ids": connections
                     if request.destination == "new_chat" or request.definition.kind == "attention" else [],
                 } if ctx.deps.authority.visibility == "private" else {}),
             })})

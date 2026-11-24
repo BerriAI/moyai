@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -13,12 +15,12 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolRetu
 from sqlalchemy import select, update
 
 from moyai.automations.product_automation_models import ProductAutomationBinding, ProductAutomationTurn
-from moyai.contracts import NewMessage, NewSession
+from moyai.contracts import Grant, NewMessage, NewSession
 from moyai.database import grant_fingerprint
 from moyai.dot import validate_decision
 from moyai.dot_models import DotAttentionTurn, DotNotification, PersonalDot
 from moyai.models import Connection, Message, Session, Turn, User
-from moyai.workspace_recovery import WorkspaceCheckpoint, validate_checkpoint
+from moyai.workspace_recovery import WorkspaceCheckpoint, checkpoint, validate_checkpoint
 
 
 async def observer(runtime, actor, destination=None, connection=None, automation=None):
@@ -54,15 +56,16 @@ async def observer(runtime, actor, destination=None, connection=None, automation
 
 
 def decision(prepared, *, action="notify", version="2026-11-24T19:00:00Z", quote="Review is due tomorrow."):
-    item = {"source": "event-123", "source_version": version, "quote": quote}
+    grant = prepared.scope.grants[0]
+    item = {"connection_id": grant.id, "source": "event-123", "source_version": version, "quote": quote}
     output = json.dumps({
         "action": action, "message": "Your review is due tomorrow. Shall I prepare the notes?" if action == "notify" else "",
         "evidence": [item] if action == "notify" else [],
     })
-    grant = prepared.scope.grants[0]
     conversation = ConversationTypeAdapter.dump_json(Conversation(messages=[
         ModelRequest(parts=[ToolReturnPart(
-            tool_name=f"mcp_{grant.id[:8]}_read_item", tool_call_id="source", content=item,
+            tool_name=f"mcp_{grant.id[:8]}_read_item", tool_call_id="source",
+            content={"id": item["source"], "updated_at": version, "title": quote},
         )]),
     ])).decode()
     return output, conversation
@@ -213,6 +216,34 @@ async def test_notification_preserves_saved_computer_checkpoint_and_enters_next_
         )).image_id == "saved-image"
 
 
+async def test_notification_during_computer_capture_does_not_cancel_checkpoint(runtime, actor, monkeypatch):
+    destination, _, _, observed = await observer(runtime, actor)
+    turn = await runtime.database.admission.submit(actor, destination, NewMessage(
+        prompt="Save my work.", request_key=uuid4().hex,
+    ))
+    await runtime.database.claim_batch(10)
+    prepared = await runtime.database.admission.prepare(turn.id)
+    reference = {"provider": "modal", "id": "sb-original"}
+    conversation = ConversationTypeAdapter.dump_json(Conversation()).decode()
+    assert await runtime.database.save_result(
+        prepared.scope, conversation=conversation, output="Saved.", workspace=reference, usage={},
+        checkpoint_workspace=True,
+    )
+
+    async def capture(*_args, **_kwargs):
+        assert await finish(runtime, observed)
+        return "im-checkpoint-with-concurrent-notice"
+
+    monkeypatch.setattr(runtime.database.answers, "snapshots", SimpleNamespace(capture=AsyncMock(side_effect=capture)))
+    await runtime.database.answers.save_computer(turn.id, reference, product=False)
+    async with runtime.database.sessions() as db:
+        session = await db.get(Session, destination)
+        assert session.status == "idle" and session.save_warning is None
+        assert checkpoint(session.snapshot).image_id == "im-checkpoint-with-concurrent-notice"
+        assert await db.scalar(select(DotNotification.message_id).where(DotNotification.session_id == destination))
+        assert (await db.get(PersonalDot, actor.id)).checkpoint_cursor == 0
+
+
 @pytest.mark.parametrize("change", ["pause", "connection", "archived", "owner", "deleted", "mapping"])
 async def test_publication_rechecks_authority(runtime, actor, change):
     destination, connection, automation, prepared = await observer(runtime, actor)
@@ -240,7 +271,7 @@ async def test_publication_rechecks_authority(runtime, actor, change):
 async def test_attention_evidence_and_worker_input_are_restricted(runtime, actor):
     _, _, _, prepared = await observer(runtime, actor)
     output, conversation = decision(prepared)
-    assert validate_decision(output, conversation, prepared.scope.grants).action == "notify"
+    assert validate_decision(output, conversation, prepared.scope.grants)[0].action == "notify"
     with pytest.raises(ValueError):
         validate_decision(output, conversation.replace("_read_item", "_write_item"), prepared.scope.grants)
     with pytest.raises(ValueError):
@@ -249,6 +280,30 @@ async def test_attention_evidence_and_worker_input_are_restricted(runtime, actor
         await runtime.database.admission.submit(actor, prepared.scope.session_id, NewMessage(
             prompt="Broaden access", request_key=uuid4().hex,
         ))
+
+
+def test_evidence_uses_one_record_and_canonical_account_identity():
+    accounts = [Grant(id=str(uuid4()), kind="mcp", revision=1, credential="", policy={"allowed_tools": ["read_item"]})
+                for _ in range(2)]
+    record = {"id": "item-1", "html_url": "https://provider.test/items/1", "updated_at": "v1", "title": "Review due."}
+
+    def resolve(account, *, source="item-1", content=record):
+        return validate_decision(json.dumps({
+            "action": "notify", "message": "Prepare the review.", "evidence": [{
+                "connection_id": account.id, "source": source, "source_version": "v1", "quote": "Review due.",
+            }],
+        }), ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=[ToolReturnPart(
+            tool_name=f"mcp_{account.id[:8]}_read_item", tool_call_id="read",
+            content={"content": [{"type": "text", "text": json.dumps(content)}]},
+        )])])).decode(), accounts)[1]
+
+    assert resolve(accounts[0]) == resolve(accounts[0], source=record["html_url"])
+    assert resolve(accounts[0]) != resolve(accounts[1])
+    with pytest.raises(ValueError, match="one connected account"):
+        resolve(accounts[0], content=[
+            {"id": "item-1", "updated_at": "v1", "title": "Nothing due."},
+            {"id": "item-2", "updated_at": "v2", "title": "Review due."},
+        ])
 
 
 @pytest.mark.parametrize("patch", [{"read_only": False}, {"shared": True}, {"policy": "{}"}])

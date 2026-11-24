@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 from pydantic_ai import Conversation, ConversationTypeAdapter
-from pydantic_ai.messages import ModelResponse, TextPart, ToolReturnPart
+from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import func, select, update
 
 from .automations.product_automation_models import ProductAutomationBinding, ProductAutomationTurn
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant, NewSession, RunScope
-from .dot_contracts import DotDecision
+from .dot_evidence import validate_decision
 from .dot_models import DotAttentionTurn, DotNotification, PersonalDot
 from .models import Connection, Message, Session, Turn, User, now
 from .private_instructions import individual
@@ -23,37 +22,6 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from .database import Database
-
-
-def evidence_text(value: object) -> str:
-    """Keep string leaves literal so structured MCP content can be quoted."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return "\n".join(evidence_text(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return "\n".join(evidence_text(item) for item in value)
-    return str(value)
-
-
-def validate_decision(output: str, conversation: str, grants: list[Grant]) -> DotDecision:
-    decision = DotDecision.model_validate_json(output)
-    allowed = {
-        f"{grant.kind}_{grant.id[:8]}_{name}"
-        for grant in grants
-        for name in (ConnectionPolicy.model_validate(grant.policy).allowed_tools or [])
-    }
-    returns = [
-        evidence_text(part.content)
-        for message in ConversationTypeAdapter.validate_json(conversation).messages
-        for part in message.parts
-        if isinstance(part, ToolReturnPart) and part.tool_name in allowed
-    ]
-    if any(not any(
-        item.source in text and item.source_version in text and item.quote in text for text in returns
-    ) for item in decision.evidence):
-        raise ValueError("Dot cited evidence outside the connected tools' results.")
-    return decision
 
 
 class Dots:
@@ -78,6 +46,11 @@ class Dots:
         return bool(await db.scalar(select(DotAttentionTurn.turn_id).join(
             Turn, Turn.id == DotAttentionTurn.turn_id,
         ).where(Turn.session_id == session_id).limit(1)))
+
+    async def delivery_session(self, db: AsyncSession, session_id: str | None, turn_id: str | None) -> str | None:
+        """Public run links open the conversation, never the immutable observer."""
+        record = await db.get(DotAttentionTurn, turn_id) if turn_id else None
+        return record.destination_session_id if record else session_id
 
     async def own_session(self, db: AsyncSession, owner: str, session_id: str) -> Session:
         dot = await db.get(PersonalDot, owner)
@@ -185,6 +158,7 @@ class Dots:
         ).order_by(Message.id.desc()).limit(30)))
         return json.dumps({
             "instructions": self.database.security.unseal(turn.prompt).decode(),
+            "connection_ids": json.loads(turn.connections),
             "current_time": now(),
             "conversation": [
                 {"role": message.role, "text": self.database.security.unseal(message.content).decode()[:3000]}
@@ -200,15 +174,13 @@ class Dots:
         record = await db.get(DotAttentionTurn, turn.id)
         if record is None:
             raise PermissionError("The attention occurrence is unavailable.")
-        decision = validate_decision(output, conversation, scope.grants)
+        decision, fingerprint = validate_decision(output, conversation, scope.grants)
         if decision.action == "quiet":
             record.outcome = "quiet"
             return
         session = await self.own_session(db, turn.actor_id, record.destination_session_id)
         primary = decision.evidence[0]
-        fingerprint = hashlib.sha256(json.dumps(
-            [primary.source.strip(), primary.source_version.strip()], ensure_ascii=False,
-        ).encode()).hexdigest()
+        assert fingerprint is not None
         if await db.scalar(select(DotNotification.turn_id).where(
             DotNotification.session_id == session.id, DotNotification.fingerprint == fingerprint,
         )):
@@ -228,7 +200,8 @@ class Dots:
         record.outcome = "notified"
         # Public delivery must not change the SDK checkpoint or its computer
         # recovery digest. The next normal preparation incorporates this mail.
-        session.revision += 1
+        # Message IDs already invalidate the transcript projection. Computer
+        # capture uses Session.revision as a fence, so delivery must not bump it.
         session.updated_at = now()
 
     async def cursor(self, db: AsyncSession, session_id: str) -> int | None:

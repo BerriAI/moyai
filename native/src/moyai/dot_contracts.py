@@ -15,6 +15,7 @@ class DotView(BaseModel):
 class DotEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    connection_id: str = Field(min_length=1, max_length=36, description="Exact selected account ID supplied by the host.")
     source: str = Field(min_length=1, max_length=1000, description="Exact source URL or item ID returned by a connected tool.")
     source_version: str = Field(
         min_length=1, max_length=200,
@@ -36,6 +37,6 @@ class DotDecision(BaseModel):
             raise ValueError("A notification needs a useful message and connected-source evidence.")
         if self.action == "quiet" and (self.message or self.evidence):
             raise ValueError("A quiet check has no notification or evidence.")
-        if any(not item.source.strip() or not item.source_version.strip() or not item.quote.strip() for item in self.evidence):
+        if any(not item.connection_id.strip() or not item.source.strip() or not item.source_version.strip() or not item.quote.strip() for item in self.evidence):
             raise ValueError("Use nonblank source evidence.")
         return self

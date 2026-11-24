@@ -1297,7 +1297,10 @@ class ProductAutomationService:
             self._owner(row, principal)
             previous = await db.get(Occurrence, key)
             if previous:
-                return {"status": previous.status, "session_id": previous.session_id, "turn_id": previous.turn_id}
+                return {
+                    "status": previous.status, "turn_id": previous.turn_id,
+                    "session_id": await self.database.dots.delivery_session(db, previous.session_id, previous.turn_id),
+                }
             binding = await db.get(Binding, identity)
             definition = _definition(row)
             if (
@@ -1337,6 +1340,7 @@ class ProductAutomationService:
                 db, row, binding, "manual", key, "admitted", "Admitted by the owner's explicit Run now request.",
                 session_id=session.id, turn_id=turn.id,
             )
+            result["session_id"] = await self.database.dots.delivery_session(db, session.id, turn.id)
         await self.identity.require_current(grant)
         return result
 
@@ -1381,7 +1385,10 @@ class ProductAutomationService:
                     ).where(ProductAutomationTurn.origin_turn_id == link.turn_id).order_by(
                         Turn.created_at.desc(), Turn.id.desc(),
                     ).limit(1)) or turn
-                session = await db.get(Session, link.session_id) if link and link.session_id else None
+                destination = await self.database.dots.delivery_session(
+                    db, link.session_id, link.turn_id,
+                ) if link else row["run_id"]
+                session = await db.get(Session, destination) if link and destination else None
                 if session and (session.deleted or (
                     session.visibility == "private"
                     and (session.owner_id != principal.id or definition.visibility != "private" or visibility == "shared")
@@ -1391,7 +1398,7 @@ class ProductAutomationService:
                     "occurrence": row["occurrence"], "revision": row["revision"], "outcome": row["outcome"],
                     "created_at": row["created_at"], "engine": CORE_IDENTITY if link else "legacy",
                     "status": turn.status if turn else link.status if link else row["legacy_status"] or row["outcome"],
-                    "session_id": link.session_id if link else row["run_id"], "turn_id": link.turn_id if link else None,
+                    "session_id": destination, "turn_id": link.turn_id if link else None,
                     "detail": link.detail if link else "",  # Historical provider diagnostics are not exported.
                 })
         await self.identity.require_current(grant)
