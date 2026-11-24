@@ -471,7 +471,7 @@ class ProductSlack:
             pass
 
     async def stage(self):
-        from app.slack_format import slack_text
+        from .slack_mentions import format_reply
 
         await self.stage_web_inputs()
 
@@ -510,7 +510,7 @@ class ProductSlack:
                     text_value = "Task completed."
             url = session_url(self.settings.public_url, turn.session_id, binding.source_run_id or "")
             cards = pr_cards(text_value, url) if turn.status == "completed" else []
-            content: dict[str, Any] = {"text": slack_text(text_value)}
+            content: dict[str, Any] = {"text": await format_reply(self.runtime, thread, text_value, product=self)}
             controls = []
             question_blocks: list[dict[str, Any]] | None = None
             if turn.status == "waiting" and turn.conversation:
@@ -556,9 +556,8 @@ class ProductSlack:
 
     async def stage_web_inputs(self):
         """Mirror only new, authored web input, with a durable per-message identity."""
-        from app.slack_format import slack_text
-
         from .skill_mentions import display_text
+        from .slack_mentions import format_reply
 
         async with self.runtime.database.sessions() as db:
             rows = (await db.execute(select(Message, MessageSource, Turn, SlackThread, User).join(
@@ -583,7 +582,9 @@ class ProductSlack:
             origin = json.loads(self.runtime.security.unseal(source.data))
             if origin.get("kind") != "web" and origin.get("edited_in") != "web":
                 continue
-            content = slack_text(display_text(self.runtime.security.unseal(message.content).decode()))
+            content = await format_reply(
+                self.runtime, thread, display_text(self.runtime.security.unseal(message.content).decode()), product=self,
+            )
             from app.slack_format import split_reply
             async with self.runtime.database.sessions() as db:
                 from .models import TurnImage, Upload

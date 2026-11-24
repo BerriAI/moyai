@@ -120,3 +120,61 @@ class SlackMentionNames:
             for message, ids in entries:
                 message['slack_mentions'] = {user: names[user] for user in ids if user in names}
         return bool(groups)
+
+
+async def format_reply(runtime, thread, text: str, *, product=None) -> str:
+    """One policy for final replies, commentary and mirrored web messages.
+
+    A profile lookup grants display only. Only accepted human Slack text in this
+    exact destination can authorize a ping, and never the installation's bot.
+    Without a verified installation identity, keep the standalone no-ping policy.
+    """
+    import json
+
+    from app.slack_format import mention_ids, slack_text
+    from sqlalchemy import select
+
+    from .models import Message, MessageSource, User
+
+    users = mention_ids(text, escaped=True)
+    if not users:
+        return slack_text(text)
+    mentions: set[str] = set()
+    names: dict[str, str] = {}
+    if product is not None:
+        try:
+            installed = await source_database(product.installation)
+        except Exception as error:  # noqa: BLE001 - formatting must not block durable delivery
+            logger.debug('Slack mention installation unavailable (%s)', type(error).__name__)
+            installed = {}
+        if installed.get('team_id') == thread.team_id and installed.get('user_id'):
+            async with runtime.database.sessions() as db:
+                rows = (await db.execute(select(Message.content, MessageSource.data).join(
+                    MessageSource, MessageSource.message_identity == Message.identity,
+                ).where(Message.session_id == thread.session_id, Message.role == 'user',
+                        MessageSource.kind == 'slack'))).all()
+            for content, data in rows:
+                source = json.loads(runtime.security.unseal(data))
+                if (source.get('kind') == 'slack' and not source.get('deleted')
+                        and source.get('edited_in') != 'web'
+                        and all(source.get(key) == getattr(thread, key)
+                                for key in ('team_id', 'channel_id', 'thread_ts'))):
+                    mentions.update(mention_ids(runtime.security.unseal(content).decode()) & users)
+            mentions.discard(installed['user_id'])
+            try:
+                # Bounded, workspace-scoped cache already handles provider failure,
+                # missing users:read, retry windows and installation rotation.
+                unresolved = sorted(users - mentions)[:MAX_MENTIONS]
+                if unresolved:
+                    names = await product.mention_names.names(thread.team_id, unresolved)
+            except Exception as error:  # noqa: BLE001 - unresolved references stay literal
+                logger.debug('Slack reply names unavailable (%s)', type(error).__name__)
+    elif runtime.settings.slack_team_id == thread.team_id:
+        # Standalone has no product directory or verified bot identity. Display
+        # already-linked accounts without introducing new provider calls or pings.
+        async with runtime.database.sessions() as db:
+            rows = (await db.execute(select(User.slack_user_id, User.display_name).where(
+                User.slack_user_id.in_(users), User.enabled.is_(True),
+            ))).all()
+        names = {user: name for user, value in rows if (name := profile_name(value, user))}
+    return slack_text(text, frozenset(mentions), mention_names=names)

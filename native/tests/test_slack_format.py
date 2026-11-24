@@ -72,3 +72,41 @@ def test_formatting_keeps_mentions_literal_and_file_links_authenticated():
     assert "<https://moyai.example/#run=" + "a" * 32 + "&amp;file=report.md|Report>" in value
     assert "<https://moyai.example/#run=" + "a" * 32 + "&amp;file=notes.md|notes.md>" in value
     assert value.endswith("```\n# **raw** &lt;@U12345678&gt; [Report](report.md)\n```")
+
+
+@pytest.mark.parametrize('reference', [
+    '<@U12345678>', '<@U12345678|untrusted label>',
+    '&lt;@U12345678&gt;', '&lt;@U12345678|untrusted label&gt;',
+])
+def test_user_references_separate_readable_names_from_permission_to_ping(reference):
+    assert slack_text(reference, {'U12345678'}) == '<@U12345678>'
+    assert slack_text(reference, mention_names={'U12345678': 'Jordan Lee'}) == '@Jordan Lee'
+    assert slack_text(reference) not in {'<@U12345678>', '@untrusted label'}
+    assert slack_text('`' + reference + '`', {'U12345678'}, mention_names={'U12345678': 'Jordan'}) != '`@Jordan`'
+
+
+def test_names_cannot_inject_mentions_broadcasts_links_or_markdown_conversion():
+    value = slack_text('<@U12345678>', mention_names={
+        'U12345678': '<!channel> <@U87654321> [click](https://evil.example) & team',
+    })
+    assert value == '@&lt;!channel&gt; &lt;@U87654321&gt; [click](https://evil.example) &amp; team'
+    assert slack_text('&lt;!channel&gt; <!here>', {'U12345678'}) == '&amp;lt;!channel&amp;gt; &lt;!here&gt;'
+
+
+def test_reference_lookup_and_rendering_skip_code_and_do_not_nest_slack_links():
+    from app.slack_format import mention_ids
+    text = '<@U12345678|label> `<@U87654321>` ```\n<@UCODE0001>\n``` &lt;@UESCAPED1&gt;'
+    assert mention_ids(text) == {'U12345678'}
+    assert mention_ids(text, escaped=True) == {'U12345678', 'UESCAPED1'}
+    assert mention_ids('no mentions') == set()
+    assert slack_text('[<@U12345678>](https://example.com)', {'U12345678'}) == (
+        '<https://example.com|&lt;@U12345678&gt;>'
+    )
+
+
+def test_malformed_labeled_mentions_do_not_consume_later_mentions():
+    # Opening delimiters terminate a malformed label too. Otherwise each prefix
+    # scans the remaining input, making a long web message quadratic to format.
+    malformed = '<@U12345678|' * 2000
+    value = slack_text(malformed + '<@U87654321>', {'U87654321'})
+    assert value == '&lt;@U12345678|' * 2000 + '<@U87654321>'
