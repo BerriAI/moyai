@@ -20,6 +20,7 @@ async function open(t,width){
    if(url.pathname.endsWith('/read')){item={...item,read_at:'2026-11-24T05:02:00Z'};return route.fulfill({json:{read:true}});}
    return route.fulfill({status:503,json:{detail:'Please retry the saved draft.'}});
   }
+  if(url.pathname.endsWith('/reviews'))return route.fulfill({json:{items:[{turn_id:'failed-review',generation:1,through_sequence:1,status:'failed',reconciled:true,accepted:false,created_at:'2026-11-24T05:01:00Z',finished_at:'2026-11-24T05:02:00Z',error:'The gateway could not finish this review.',decision:null}]}});
   return route.fulfill({json:{items:url.pathname.includes('inbox')?[item]:[row]}});
  });
  await page.route('**/api/sessions',route=>route.fulfill({json:[{id:'source',owner_id:'viewer',title:'Launch readiness',visibility:'private',surface:'web'}]}));
@@ -32,6 +33,9 @@ for(const width of [1440,768,320])test(`Dot inbox, evidence and controls fit ${w
  await page.getByRole('button',{name:'Pause',exact:true}).click();await page.getByRole('button',{name:'Resume',exact:true}).waitFor();
  assert.deepEqual(writes[0].body,{generation:1,action:'pause'});assert.equal(writes[0].csrf,'fixture-csrf');
  await page.getByRole('button',{name:'Mark reviewed',exact:true}).click();await page.getByText('Reviewed',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'Review activity',exact:true}).last().click();
+ await page.getByRole('dialog').getByText('The gateway could not finish this review.',{exact:true}).waitFor();
+ await page.keyboard.press('Escape');await page.getByRole('dialog').waitFor({state:'hidden'});
  await page.getByRole('button',{name:'Add responsibility'}).click();const dialog=page.getByRole('dialog');
  const box=await dialog.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=width);
  await page.getByLabel('What should Moyai pay attention to?').fill('Retain this draft');

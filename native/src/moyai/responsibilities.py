@@ -6,6 +6,7 @@ uses native admission/Temporal/settlement, independently of every other source.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -31,6 +32,7 @@ from .responsibility_contracts import (
     ResponsibilityControl,
     ResponsibilityDecision,
     ResponsibilityInboxItem,
+    ResponsibilityReview,
     ResponsibilityView,
 )
 from .responsibility_models import (
@@ -63,7 +65,14 @@ class Responsibilities:
     def __init__(self, database: Database):
         self.database = database
 
-    async def lock(self, db: AsyncSession, identity: str) -> Responsibility:
+    async def lock(self, db: AsyncSession, identity: str, *, skip_locked: bool = False) -> Responsibility | None:
+        if skip_locked and db.get_bind().dialect.name == "postgresql":
+            row = await db.scalar(select(Responsibility).where(
+                Responsibility.id == identity,
+            ).with_for_update(skip_locked=True).execution_options(populate_existing=True))
+            if row is not None:
+                row.updated_at = now()
+            return row
         found = await db.scalar(update(Responsibility).where(
             Responsibility.id == identity,
         ).values(updated_at=now()).returning(Responsibility.id))
@@ -81,6 +90,10 @@ class Responsibilities:
     async def editable_input(self, db: AsyncSession, turn: Turn) -> None:
         if await db.get(ResponsibilityAssignment, turn.id) is not None:
             raise HTTPException(409, "Responsibility evidence reviews are immutable. Use the responsibility controls.")
+
+    async def ordinary_chat(self, db: AsyncSession, session_id: str) -> None:
+        if await self.worker_session(db, session_id):
+            raise HTTPException(409, "Use Dot review activity for this immutable responsibility review.")
 
     async def read_authority(self, db: AsyncSession, actor: User, session: Session) -> None:
         row = await db.scalar(select(Responsibility).join(
@@ -114,8 +127,8 @@ class Responsibilities:
     def grant(self, row: Responsibility) -> ProductGrant | None:
         return GRANT.validate_json(self.database.security.unseal(row.product_grant)) if row.product_grant else None
 
-    async def authority(
-        self, db: AsyncSession, row: Responsibility, actor: User | None = None, *, lock_source: bool = False,
+    async def owner_authority(
+        self, db: AsyncSession, row: Responsibility, actor: User | None = None, *, lock: bool = False,
     ) -> User:
         saved = await db.get(User, row.owner_id, populate_existing=True)
         if saved is None or not saved.enabled or saved.auth_version != row.auth_version:
@@ -130,7 +143,19 @@ class Responsibilities:
             principal = await self.database._identity().authorize_admission(db, grant)
             if not principal.individual or principal.id != row.owner_id:
                 raise PermissionError("Responsibilities require their original individual sign-in.")
+        if lock:
+            found = await db.scalar(update(User).where(
+                User.id == row.owner_id, User.enabled.is_(True), User.auth_version == row.auth_version,
+            ).values(auth_version=User.auth_version).returning(User.id))
+            if found is None:
+                raise PermissionError("The responsibility's original requester authority changed.")
         cast(Any, saved).product_grant = grant
+        return saved
+
+    async def authority(
+        self, db: AsyncSession, row: Responsibility, actor: User | None = None, *, lock_source: bool = False,
+    ) -> User:
+        saved = await self.owner_authority(db, row, actor)
         await self.source(db, saved, row.source_session_id, lock=lock_source)
         return saved
 
@@ -149,6 +174,11 @@ class Responsibilities:
                     principal = await self.database._identity().authorize_admission(db, grant)
                     if not principal.individual:
                         raise HTTPException(403, "Responsibilities require an individual sign-in.")
+                current = await db.scalar(update(User).where(
+                    User.id == actor.id, User.enabled.is_(True), User.auth_version == actor.auth_version,
+                ).values(auth_version=User.auth_version).returning(User.id))
+                if current is None:
+                    raise HTTPException(401, "Your access changed. Sign in again.")
                 await self.source(db, actor, request.source_session_id, lock=True)
                 previous = await db.scalar(select(Responsibility).where(
                     Responsibility.owner_id == actor.id, Responsibility.request_key == request.request_key,
@@ -244,8 +274,14 @@ class Responsibilities:
 
     async def control(self, actor: User, identity: str, request: ResponsibilityControl) -> ResponsibilityView:
         async with self.database._admission_session(None) as db:
+            original = await db.get(Responsibility, identity)
+            if original is None:
+                raise HTTPException(404, "Responsibility not found.")
+            await self.owner_authority(db, original, actor, lock=True)
             row = await self.lock(db, identity)
-            await self.authority(db, row, actor, lock_source=True)
+            assert row is not None
+            if request.action == "resume":
+                await self.source(db, actor, row.source_session_id, lock=True)
             if row.generation != request.generation:
                 raise HTTPException(409, "The responsibility changed. Refresh before controlling it.")
             if request.action == "resume" and row.evaluations >= row.max_evaluations:
@@ -268,8 +304,13 @@ class Responsibilities:
             if scope is not None and scope.responsibility_id is not None:
                 raise PermissionError("The responsibility assignment is unavailable.")
             return None
-        row = (await self.lock(db, assignment.responsibility_id) if publication
-               else await db.get(Responsibility, assignment.responsibility_id, populate_existing=True))
+        row = await db.get(Responsibility, assignment.responsibility_id, populate_existing=True)
+        actor = None
+        if publication and row is not None:
+            # Same order as ordinary submission: canonical authority, User,
+            # responsibility, source Session, then the caller's worker Session.
+            actor = await self.owner_authority(db, row, lock=True)
+            row = await self.lock(db, assignment.responsibility_id)
         if row is None or (
             row.status != "running" or row.generation != assignment.generation
             or row.active_turn_id != turn.id or row.owner_id != turn.actor_id
@@ -281,31 +322,61 @@ class Responsibilities:
             or scope.grants or scope.product_grant != self.grant(row)
         ):
             raise PermissionError("The worker's responsibility authority changed.")
-        await self.authority(db, row, lock_source=publication)
+        if actor is not None:
+            await self.source(db, actor, row.source_session_id, lock=True)
+        else:
+            await self.authority(db, row)
         return assignment
 
     async def reconcile(self, limit: int = 10) -> None:
-        async with self.database.sessions() as db:
+        async with self.database.sessions.begin() as db:
             ids = list(await db.scalars(select(Responsibility.id).where(
                 Responsibility.status.in_(["waiting", "running"]), Responsibility.next_check_at <= now(),
-            ).order_by(Responsibility.next_check_at, Responsibility.id).limit(limit)))
-        for identity in ids:
-            try:
-                await self.tick(identity)
-            except Exception:
-                # One unavailable source must not starve unrelated responsibilities.
-                logger.warning("Responsibility reconciliation remains pending.", exc_info=True)
+            ).order_by(Responsibility.next_check_at, Responsibility.id).limit(limit).with_for_update(skip_locked=True)))
+        slots = asyncio.Semaphore(4)
 
-    async def tick(self, identity: str) -> None:
+        async def reconcile_one(identity: str) -> None:
+            async with slots:
+                try:
+                    async with asyncio.timeout(2):
+                        await self.tick(identity, skip_locked=True)
+                    return
+                except Exception:
+                    logger.warning("Responsibility reconciliation remains pending.", exc_info=True)
+            # Scheduling-only backoff never admits work or reads protected
+            # content. Failed rows must leave room for later pages.
+            try:
+                async with asyncio.timeout(1), self.database.sessions.begin() as db:
+                    row = await self.lock(db, identity, skip_locked=True)
+                    if row is not None and row.status in {"waiting", "running"}:
+                        row.next_check_at = due(30)
+            except Exception:
+                logger.warning("Responsibility backoff remains pending.", exc_info=True)
+
+        await asyncio.gather(*(reconcile_one(identity) for identity in ids))
+
+    async def tick(self, identity: str, *, skip_locked: bool = False) -> None:
         async with self.database._admission_session(None) as db:
-            row = await self.lock(db, identity)
+            original = await db.get(Responsibility, identity)
+            if original is None:
+                return
+            actor = None
+            try:
+                actor = await self.owner_authority(db, original, lock=True)
+            except (PermissionError, HTTPException):
+                pass
+            row = await self.lock(db, identity, skip_locked=skip_locked)
+            if row is None:
+                return
             if row.status not in {"waiting", "running"} or row.next_check_at > now():
                 return
             if self.database.product_drain is not None and not await self.database.product_drain.admit(db):
                 return
             row.next_check_at = due(row.interval_seconds)
             try:
-                actor = await self.authority(db, row, lock_source=True)
+                if actor is None:
+                    raise PermissionError("The original requester authority changed.")
+                await self.source(db, actor, row.source_session_id, lock=True)
             except (PermissionError, HTTPException):
                 await self.cancel_assignment(db, row)
                 row.status, row.reason = "blocked", "Source access or the original requester authority changed."
@@ -321,7 +392,7 @@ class Responsibilities:
                 if turn.status != "completed" or not turn.result_accepted:
                     await self.cancel_assignment(db, row)
                     assignment.reconciled = True
-                    row.status, row.reason = "blocked", "Worker did not finish. Review its chat before resuming."
+                    row.status, row.reason = "blocked", "Worker did not finish. Review its activity before resuming."
                     return
                 try:
                     decision = ResponsibilityDecision.model_validate_json(
@@ -338,9 +409,9 @@ class Responsibilities:
                     row.status, row.reason = "blocked", "Worker returned an invalid or unsupported finding."
                     return
                 if decision.action == "notify":
-                    fingerprint = hashlib.sha256(json.dumps(sorted({
-                        item.quote.strip() for item in decision.evidence
-                    }), ensure_ascii=False).encode()).hexdigest()
+                    fingerprint = hashlib.sha256(json.dumps(
+                        [item["text"] for item in evidence], ensure_ascii=False,
+                    ).encode()).hexdigest()
                     if not await db.scalar(select(ResponsibilityFinding.turn_id).where(
                         ResponsibilityFinding.responsibility_id == row.id,
                         ResponsibilityFinding.fingerprint == fingerprint,
@@ -423,3 +494,34 @@ class Responsibilities:
                 raise HTTPException(404, "Finding not found.")
             await self.authority(db, row, actor)
             finding.read_at = finding.read_at or now()
+
+    async def history(self, actor: User, identity: str) -> list[ResponsibilityReview]:
+        """A bounded audit surface; no generic chat tools or raw reasoning export."""
+        async with self.database.sessions.begin() as db:
+            row = await db.get(Responsibility, identity)
+            if row is None:
+                raise HTTPException(404, "Responsibility not found.")
+            await self.owner_authority(db, row, actor, lock=True)
+            row = await self.lock(db, identity)
+            assert row is not None
+            await self.source(db, actor, row.source_session_id, lock=True)
+            reviews = (await db.execute(select(ResponsibilityAssignment, Turn).join(
+                Turn, Turn.id == ResponsibilityAssignment.turn_id,
+            ).where(ResponsibilityAssignment.responsibility_id == identity).order_by(
+                Turn.created_at.desc(), Turn.id,
+            ).limit(100))).all()
+            result = []
+            for assignment, turn in reviews:
+                decision = None
+                if turn.result_accepted and turn.result:
+                    try:
+                        decision = ResponsibilityDecision.model_validate_json(self.database.security.unseal(turn.result))
+                    except ValueError:
+                        pass
+                result.append(ResponsibilityReview.model_validate({
+                    "turn_id": turn.id, "generation": assignment.generation, "through_sequence": assignment.through_sequence,
+                    "status": turn.status, "reconciled": assignment.reconciled, "accepted": bool(turn.result_accepted),
+                    "created_at": turn.created_at, "finished_at": turn.finished_at, "error": turn.error,
+                    "usage": json.loads(turn.usage), "decision": decision,
+                }))
+            return result

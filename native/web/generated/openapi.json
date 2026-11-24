@@ -15668,6 +15668,40 @@
         "title": "ResponsibilityControl",
         "type": "object"
       },
+      "ResponsibilityDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "wait",
+              "notify"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/ResponsibilityEvidence"
+            },
+            "maxItems": 5,
+            "title": "Evidence",
+            "type": "array"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "summary",
+          "evidence"
+        ],
+        "title": "ResponsibilityDecision",
+        "type": "object"
+      },
       "ResponsibilityEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -15688,6 +15722,23 @@
           "quote"
         ],
         "title": "ResponsibilityEvidence",
+        "type": "object"
+      },
+      "ResponsibilityHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResponsibilityReview"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ResponsibilityHistory",
         "type": "object"
       },
       "ResponsibilityInbox": {
@@ -15800,6 +15851,103 @@
           "read"
         ],
         "title": "ResponsibilityReadResult",
+        "type": "object"
+      },
+      "ResponsibilityReview": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponsibilityDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "reconciled": {
+            "title": "Reconciled",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "starting",
+              "running",
+              "waiting",
+              "saving",
+              "completed",
+              "failed",
+              "stopped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "through_sequence": {
+            "title": "Through Sequence",
+            "type": "integer"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          },
+          "usage": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Usage",
+            "type": "object"
+          }
+        },
+        "required": [
+          "turn_id",
+          "generation",
+          "through_sequence",
+          "status",
+          "reconciled",
+          "accepted",
+          "created_at",
+          "finished_at",
+          "error",
+          "usage",
+          "decision"
+        ],
+        "title": "ResponsibilityReview",
         "type": "object"
       },
       "ResponsibilityView": {
@@ -24622,6 +24770,45 @@
           }
         },
         "summary": "Control"
+      }
+    },
+    "/api/responsibilities/{responsibility_id}/reviews": {
+      "get": {
+        "operationId": "listResponsibilityReviews",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "responsibility_id",
+            "required": true,
+            "schema": {
+              "title": "Responsibility Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsibilityHistory"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reviews"
       }
     },
     "/api/responsibility-inbox": {

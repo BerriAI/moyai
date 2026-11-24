@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class ResponsibilityInput(BaseModel):
@@ -30,6 +30,13 @@ class ResponsibilityOutput(BaseModel):
 class ResponsibilityEvidence(ResponsibilityOutput):
     message_id: int = Field(gt=0)
     quote: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("quote")
+    @classmethod
+    def usable_quote(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Quote nonblank source evidence.")
+        return value
 
 
 class ResponsibilityDecision(ResponsibilityOutput):
@@ -79,3 +86,21 @@ class ResponsibilityInbox(ResponsibilityOutput):
 
 class ResponsibilityList(ResponsibilityOutput):
     items: list[ResponsibilityView]
+
+
+class ResponsibilityReview(ResponsibilityOutput):
+    turn_id: str
+    generation: int
+    through_sequence: int
+    status: Literal["queued", "starting", "running", "waiting", "saving", "completed", "failed", "stopped"]
+    reconciled: bool
+    accepted: bool
+    created_at: str
+    finished_at: str | None
+    error: str | None
+    usage: dict[str, JsonValue]
+    decision: ResponsibilityDecision | None
+
+
+class ResponsibilityHistory(ResponsibilityOutput):
+    items: list[ResponsibilityReview]

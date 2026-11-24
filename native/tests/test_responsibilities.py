@@ -6,12 +6,13 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import func, select, update
 
 from moyai.contracts import NewMessage, NewSession
 from moyai.models import Session, User
 from moyai.responsibilities import Responsibilities
-from moyai.responsibility_contracts import NewResponsibility, ResponsibilityControl
+from moyai.responsibility_contracts import NewResponsibility, ResponsibilityControl, ResponsibilityEvidence
 from moyai.responsibility_models import Responsibility, ResponsibilityAssignment
 
 
@@ -226,3 +227,106 @@ async def test_identical_evidence_is_not_notified_again(runtime, actor):
         await tick(runtime, responsibility.id)
     assert len(await runtime.database.responsibilities.inbox(actor)) == 1
     assert (await runtime.database.responsibilities.list(actor))[0].evaluations == 2
+
+
+def test_whitespace_is_not_source_evidence():
+    with pytest.raises(ValidationError):
+        ResponsibilityEvidence(message_id=1, quote=" \n\t")
+
+
+async def test_dedupe_uses_captured_packet_not_model_chosen_excerpt(runtime, actor):
+    source, row = await enroll(runtime, actor)
+    for answer, quote in [
+        ("Release ready. QA approved.", "Release ready."),
+        ("Release ready. QA approved.", "QA approved."),
+        ("Release ready. Documentation incomplete.", "Release ready."),
+    ]:
+        await source_answer(runtime, actor, source, answer)
+        await tick(runtime, row.id)
+        _, prepared, decision = await worker(runtime, row.id)
+        parsed = json.loads(decision)
+        parsed["evidence"][0]["quote"] = quote
+        await finish(runtime, prepared, json.dumps(parsed))
+        await tick(runtime, row.id)
+    assert len(await runtime.database.responsibilities.inbox(actor)) == 2
+
+
+async def test_failed_reviews_remain_readable_after_active_pointer_is_cleared(runtime, actor):
+    source, row = await enroll(runtime, actor)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    binding, _, _ = await worker(runtime, row.id)
+    await runtime.database.fail(binding.turn_id, "The gateway could not finish this review.")
+    await tick(runtime, row.id)
+    assert await assignment(runtime, row.id) is None
+    history = await runtime.database.responsibilities.history(actor, row.id)
+    assert len(history) == 1 and history[0].status == "failed"
+    assert history[0].error == "The gateway could not finish this review."
+    await runtime.database.delete_session(actor, source.id)
+    with pytest.raises(HTTPException):
+        await runtime.database.responsibilities.history(actor, row.id)
+
+
+async def test_audit_session_has_no_generic_chat_or_export_controls(runtime, actor):
+    from moyai.debug_trace import debug_trace
+
+    source, row = await enroll(runtime, actor)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    binding = await assignment(runtime, row.id)
+    from moyai.models import Turn
+    async with runtime.database.sessions() as db:
+        review = await db.get(Turn, binding.turn_id)
+        review_id = review.session_id
+    operations = [
+        runtime.database.steer_queued(actor, binding.turn_id),
+        runtime.database.stop(actor, review_id),
+        runtime.database.delete_session(actor, review_id),
+        runtime.database.restore_session(actor, review_id),
+        debug_trace(runtime, actor, review_id),
+    ]
+    for operation in operations:
+        with pytest.raises(HTTPException) as error:
+            await operation
+        assert error.value.status_code == 409
+    async with runtime.database.sessions.begin() as db:
+        with pytest.raises(HTTPException):
+            await runtime.database.automation_session(db, actor.id, review_id, visibility="private")
+
+
+async def test_http_audit_controls_are_rejected_and_typed_history_survives_failure(runtime, actor):
+    from test_application_boundaries import sign_in
+    from test_sidebar import member_client
+
+    from moyai.models import Turn
+
+    source, row = await enroll(runtime, actor)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    binding = await assignment(runtime, row.id)
+    async with runtime.database.sessions() as db:
+        review_id = (await db.get(Turn, binding.turn_id)).session_id
+    path = f"/api/sessions/{review_id}"
+    async with sign_in(runtime) as client:
+        for method, route, body in [
+            ("GET", f"{path}/debug-trace", None),
+            ("PATCH", path, {"archived": True}),
+            ("POST", f"{path}/stop", None),
+            ("DELETE", path, None),
+            ("POST", f"{path}/links", {"kind": "source", "url": "https://example.com"}),
+            ("POST", f"/api/turns/{binding.turn_id}/steer", None),
+            ("DELETE", f"/api/turns/{binding.turn_id}", None),
+        ]:
+            response = await client.request(method, route, **({"json": body} if body else {}))
+            assert response.status_code == 409, (method, route, response.text)
+        await runtime.database.fail(binding.turn_id, "Temporary model failure.")
+        await tick(runtime, row.id)
+        result = await client.get(f"/api/responsibilities/{row.id}/reviews")
+        assert result.status_code == 200
+        assert result.json()["items"][0]["error"] == "Temporary model failure."
+        assert result.json()["items"][0]["status"] == "failed"
+    async with member_client(runtime) as (other, _):
+        assert (await other.get(f"/api/responsibilities/{row.id}/reviews")).status_code == 404
+    await runtime.database.delete_session(actor, source.id)
+    async with sign_in(runtime) as client:
+        assert (await client.get(f"/api/responsibilities/{row.id}/reviews")).status_code == 404

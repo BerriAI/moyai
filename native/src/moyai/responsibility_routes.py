@@ -1,11 +1,12 @@
 """Authenticated private responsibility controls and inbox."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from .models import User
 from .responsibility_contracts import (
     NewResponsibility,
     ResponsibilityControl,
+    ResponsibilityHistory,
     ResponsibilityInbox,
     ResponsibilityList,
     ResponsibilityOutput,
@@ -34,6 +35,13 @@ def routes(runtime, actor) -> APIRouter:
         responsibility_id: str, body: ResponsibilityControl, user: User = Depends(actor),
     ) -> ResponsibilityView:
         return await service.control(user, responsibility_id, body)
+
+    @router.get("/api/responsibilities/{responsibility_id}/reviews", operation_id="listResponsibilityReviews")
+    async def reviews(responsibility_id: str, user: User = Depends(actor)) -> ResponsibilityHistory:
+        try:
+            return ResponsibilityHistory(items=await service.history(user, responsibility_id))
+        except PermissionError:
+            raise HTTPException(404, "Responsibility not found.") from None
 
     @router.get("/api/responsibility-inbox", operation_id="listResponsibilityInbox")
     async def inbox(user: User = Depends(actor)) -> ResponsibilityInbox:

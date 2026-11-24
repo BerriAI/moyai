@@ -284,6 +284,7 @@ class Database:
         self, db: AsyncSession, session_id: str, actor: User, *, metadata_only: bool = False,
     ) -> Session:
         """Authorize a fresh reader or input, including its current source audience."""
+        await self.responsibilities.ordinary_chat(db, session_id)
         session = await self.execution_session(db, session_id, actor, metadata_only=metadata_only)
         await self.check_source_audience(db, session, actor, metadata_only=metadata_only)
         member = await db.get(SwarmMember, session_id)
@@ -537,6 +538,7 @@ class Database:
     async def automation_session(
         self, db: AsyncSession, owner_id: str, session_id: str, *, visibility: str = "shared",
     ) -> Session:
+        await self.responsibilities.ordinary_chat(db, session_id)
         session = await db.scalar(select(Session).where(Session.id == session_id).with_for_update())
         if (
             session is None or session.deleted or session.archived or session.owner_id != owner_id
@@ -736,6 +738,7 @@ class Database:
             turn = await db.get(Turn, turn_id)
             if turn is None or turn.actor_id != actor.id:
                 raise HTTPException(404, "Message not found.")
+            await self.responsibilities.editable_input(db, turn)
             await self._check_product_turn(db, turn, actor_grant)
             await db.execute(update(Session).where(
                 Session.id == turn.session_id,
@@ -923,6 +926,7 @@ class Database:
         """Hide a session and fence work atomically; the existing Stop dispatcher cancels execution."""
         await self.prefetch_session_audiences(actor, [session_id])
         async with self._admission_session(None) as db:
+            await self.responsibilities.ordinary_chat(db, session_id)
             member = await self.swarms.member(db, session_id)
             # Keep the mission-before-session lock order and commit the deletion
             # together with its team-wide attention fence.
@@ -960,6 +964,7 @@ class Database:
     async def restore_session(self, actor: User, session_id: str) -> None:
         await self.prefetch_session_audiences(actor, [session_id], deleted=True)
         async with self.sessions.begin() as db:
+            await self.responsibilities.ordinary_chat(db, session_id)
             owned = await db.get(Session, session_id)
             if owned is None or not await self.same_person(db, actor, owned.owner_id):
                 raise HTTPException(404, "Conversation not found.")

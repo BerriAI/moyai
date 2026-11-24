@@ -8,6 +8,7 @@ import { ApiError } from "../api"
 import {
   controlResponsibility, createResponsibility, getMe, listResponsibilities,
   listResponsibilityInbox, listSessions, markResponsibilityFindingRead,
+  listResponsibilityReviews, type ResponsibilityReview,
   type ResponsibilityInboxItem, type ResponsibilityView, type SessionListItem,
 } from "../generated/api"
 import "./responsibilities.css"
@@ -22,6 +23,7 @@ export function ResponsibilitiesPage({ userId }: { userId: string }) {
   const [objective, setObjective] = useState("")
   const [budget, setBudget] = useState("10")
   const [open, setOpen] = useState(false)
+  const [review, setReview] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
@@ -51,7 +53,7 @@ export function ResponsibilitiesPage({ userId }: { userId: string }) {
         setError(reason instanceof Error ? reason.message : "Could not load your responsibilities.")
         // Never retain protected data after an access failure.
         if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) {
-          setItems([]); setInbox([]); setSources([]); setOpen(false)
+          setItems([]); setInbox([]); setSources([]); setOpen(false); setReview(null)
         }
       } finally {
         running = false
@@ -86,6 +88,7 @@ export function ResponsibilitiesPage({ userId }: { userId: string }) {
           <p className="dot-objective">{item.objective}</p><p className="dot-summary">{item.summary}</p>
           <details><summary>Source evidence</summary>{item.evidence.map((evidence, index) => <blockquote key={index}>{evidence.quote}</blockquote>)}</details>
           <div className="dot-actions"><a href={`#${item.source_session_id}`}>Open source chat</a>
+            <Button variant="ghost" size="sm" onClick={() => setReview(item.responsibility_id)}>Review activity</Button>
             {!item.read_at && <Button variant="ghost" size="sm" disabled={busy} onClick={() => void act(() => markResponsibilityFindingRead({ path: { turn_id: item.turn_id } }))}>Mark reviewed</Button>}</div>
         </article>)}
       </section>
@@ -96,6 +99,7 @@ export function ResponsibilitiesPage({ userId }: { userId: string }) {
           <p>{item.evaluations} of {item.max_evaluations} reviews used · Checks every {item.interval_seconds} seconds</p>
           {item.reason && <p>{item.reason}</p>}
           <div className="dot-actions"><a href={`#${item.source_session_id}`}>Open source chat</a>
+            <Button variant="ghost" size="sm" onClick={() => setReview(item.id)}>Review activity</Button>
             {item.status !== "budget_limited" && <Button variant="outline" size="sm" disabled={busy} onClick={() => void act(() => controlResponsibility({
               path: { responsibility_id: item.id },
               body: { generation: item.generation, action: ["paused", "blocked"].includes(item.status) ? "resume" : "pause" },
@@ -135,5 +139,50 @@ export function ResponsibilitiesPage({ userId }: { userId: string }) {
         </form>
       </DialogContent>
     </Dialog>
+    <Dialog open={review !== null} onOpenChange={value => { if (!value) setReview(null) }}>
+      <DialogContent className="dot-dialog"><DialogHeader><DialogTitle>Review activity</DialogTitle>
+        <DialogDescription>Saved reviews, including failed attempts. Each attempt uses one review from your limit.</DialogDescription></DialogHeader>
+        {review && <ReviewActivity key={`${userId}:${review}`} identity={review} />}
+      </DialogContent>
+    </Dialog>
+  </div>
+}
+
+function ReviewActivity({ identity }: { identity: string }) {
+  const [items, setItems] = useState<ResponsibilityReview[]>([])
+  const [error, setError] = useState("")
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    const controller = new AbortController()
+    let running = false
+    const load = async () => {
+      if (running) return
+      running = true
+      try {
+        const { data } = await listResponsibilityReviews({ path: { responsibility_id: identity }, signal: controller.signal })
+        if (!controller.signal.aborted) { setItems(data.items); setError("") }
+      } catch (reason) {
+        if (!controller.signal.aborted) {
+          setItems([])
+          setError(reason instanceof Error ? reason.message : "Could not load review activity.")
+        }
+      } finally {
+        running = false
+        if (!controller.signal.aborted) setLoading(false)
+      }
+    }
+    void load()
+    const timer = setInterval(() => { if (!document.hidden) void load() }, 10000)
+    return () => { controller.abort(); clearInterval(timer) }
+  }, [identity])
+  return <div>
+    {error && <p role="alert">{error}</p>}
+    {loading ? <p role="status">Loading reviews…</p> : !error && !items.length && <p>No reviews yet.</p>}
+    {items.map(item => <article className="dot-card" key={item.turn_id}>
+      <div className="dot-row"><strong>{item.status}</strong><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></div>
+      <p>Generation {item.generation} · Source through completion {item.through_sequence}</p>
+      {item.error && <p>{item.error}</p>}
+      {item.decision && <><p>{item.decision.summary}</p>{item.decision.evidence.map((evidence, index) => <blockquote key={index}>{evidence.quote}</blockquote>)}</>}
+    </article>)}
   </div>
 }

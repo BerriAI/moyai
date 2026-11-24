@@ -143,13 +143,6 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
     batch_size = runtime.settings.temporal_dispatch_batch_size
     try:
         async with asyncio.timeout(2):
-            await runtime.database.responsibilities.reconcile()
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.warning("Responsibility reconciliation remains pending.", exc_info=True)
-    try:
-        async with asyncio.timeout(2):
             await runtime.database.goals.reconcile()
     except asyncio.CancelledError:
         raise
@@ -278,9 +271,13 @@ async def dispatcher(
     slack = getattr(runtime, "product_slack", None)
     # Answer settlement already commits a dispatch hint. Fan it out on the
     # coordinator's existing listener; Slack retains its own durable scan/event.
-    async with wakeups or DispatchWakeups(
-        runtime.settings, observers=(slack.delivery_wakeup,) if slack is not None else (),
-    ) as listener:
+    async with (
+        asyncio.TaskGroup() as background,
+        wakeups or DispatchWakeups(
+            runtime.settings, observers=(slack.delivery_wakeup,) if slack is not None else (),
+        ) as listener,
+    ):
+        background.create_task(reconcile_responsibilities(runtime, stop=stop))
         while stop is None or not stop.is_set():
             # Clear before reading durable rows, so a commit during/after the
             # scan cannot be lost between deciding to wait and actually waiting.
@@ -298,6 +295,20 @@ async def dispatcher(
                 await asyncio.sleep(0)  # Yield to HTTP/owner monitoring, without a polling delay.
             else:
                 await listener.wait()
+
+
+async def reconcile_responsibilities(runtime: Runtime, *, stop: asyncio.Event | None = None) -> None:
+    """Independent bounded scans cannot delay ordinary input or Stop dispatch."""
+    from .background_stop import pause
+
+    while stop is None or not stop.is_set():
+        try:
+            await runtime.database.responsibilities.reconcile()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Responsibility scanning remains pending.", exc_info=True)
+        await pause(0.5, stop)
 
 
 async def reconcile_workflows(runtime: Runtime, *, stop: asyncio.Event | None = None) -> None:

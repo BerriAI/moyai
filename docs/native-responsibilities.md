@@ -25,11 +25,15 @@ external actions, or enable a watch by default.
   message-ID watermark. Only completed accepted answers from owner-authored,
   direct web requests are eligible. Generated turns and approval chains are
   excluded. Imported, delegated, swarm and evaluator chats cannot be sources.
-- The existing dispatcher scans indexed due rows, transactionally reserves a
+- An owned background loop alongside the existing dispatcher scans indexed
+  due rows, transactionally reserves a
   review, creates a new private audit session and admits a native turn.
   `TurnWorkflow` and its deterministic workflow ID still own execution and
   recovery from an unacknowledged start. Each responsibility has independent
   active work and due state.
+  PostgreSQL scans skip locked rows. Each wake has a two-second deadline;
+  failures receive a persisted 30-second backoff so later pages can progress.
+  Reconciliation cannot block the manual-input/Stop dispatcher.
 - `moyai_responsibility` is a separate `NativeOutput` agent. Its input contains
   the objective and at most five new messages, each capped at 6,000 characters.
   It has no functional tools, account selection, conversation history, skills,
@@ -45,7 +49,9 @@ external actions, or enable a watch by default.
   This verifies quotation provenance; it does not verify the source's claims
   against an external system. `wait` advances the cursor silently. `notify`
   writes an inbox receipt in the same transaction as advancing the cursor.
-  Repeated identical quoted evidence is deduplicated per responsibility.
+  Repeated identical captured message packets are deduplicated per
+  responsibility, independently of the model's chosen quotation. This is
+  exact packet deduplication, not semantic deduplication across different text.
 
 ## Authority
 
@@ -58,15 +64,27 @@ native session fence. A late result cannot advance the responsibility or
 publish a finding.
 
 Audit sessions are excluded from ordinary chat lists and private history
-recall. They cannot accept new messages, queued edits or approval resumptions.
+recall. Generic chat reads, debug export, message/control mutations, archive,
+delete, link attachment and automation destinations reject audit sessions.
+The private **Review activity** dialog reads saved assignments through a
+dedicated API, including failed attempts after the active pointer is cleared.
+That read holds the original authority and source fences through its transaction.
 Their saved answers do not enqueue personal memory or skill learning. The
 source itself must remain accessible even when reading a copied audit result.
 
+Publication and inference admission acquire locks in canonical-authority,
+native User, responsibility, source Session, worker Session order. Source
+deletion/archival cannot commit between the protected source check and the
+broker inference receipt.
+
 The v28 application migration and frozen online expansion add four tables.
-Runtime protocol 9 prevents older production participants from interpreting a
-responsibility assignment as an ordinary tool-enabled turn. This release must
-use the existing coordinated release boundary; do not mix incompatible workers
-on a standalone queue.
+Runtime protocol 9 changes the production runtime fingerprint. The existing
+production role session factory checks that policy at each transaction: a
+stale participant cannot admit, claim or prepare responsibility work, including
+cached preparation. Protocol numbering alone does not isolate Temporal queues.
+Use the existing coordinated release boundary: fence/drain old production
+owners before enabling this version. Standalone queues must not mix incompatible
+workers; stop every old poller before starting this release.
 
 ## API
 
@@ -77,6 +95,7 @@ are Pydantic models; the TypeScript client is generated from OpenAPI.
 | --- | --- |
 | Enroll / list | `POST` / `GET /api/responsibilities` |
 | Pause / resume with expected generation | `POST /api/responsibilities/{id}/control` |
+| Private review activity | `GET /api/responsibilities/{id}/reviews` |
 | Private inbox | `GET /api/responsibility-inbox` |
 | Mark reviewed | `POST /api/responsibility-inbox/{turn_id}/read` |
 

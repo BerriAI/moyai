@@ -8756,6 +8756,24 @@ export type ResponsibilityControl = {
 };
 
 /**
+ * ResponsibilityDecision
+ */
+export type ResponsibilityDecision = {
+    /**
+     * Action
+     */
+    action: 'wait' | 'notify';
+    /**
+     * Evidence
+     */
+    evidence: Array<ResponsibilityEvidence>;
+    /**
+     * Summary
+     */
+    summary: string;
+};
+
+/**
  * ResponsibilityEvidence
  */
 export type ResponsibilityEvidence = {
@@ -8767,6 +8785,16 @@ export type ResponsibilityEvidence = {
      * Quote
      */
     quote: string;
+};
+
+/**
+ * ResponsibilityHistory
+ */
+export type ResponsibilityHistory = {
+    /**
+     * Items
+     */
+    items: Array<ResponsibilityReview>;
 };
 
 /**
@@ -8839,6 +8867,55 @@ export type ResponsibilityReadResult = {
      * Read
      */
     read: boolean;
+};
+
+/**
+ * ResponsibilityReview
+ */
+export type ResponsibilityReview = {
+    /**
+     * Accepted
+     */
+    accepted: boolean;
+    /**
+     * Created At
+     */
+    created_at: string;
+    decision: ResponsibilityDecision | null;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Reconciled
+     */
+    reconciled: boolean;
+    /**
+     * Status
+     */
+    status: 'queued' | 'starting' | 'running' | 'waiting' | 'saving' | 'completed' | 'failed' | 'stopped';
+    /**
+     * Through Sequence
+     */
+    through_sequence: number;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+    /**
+     * Usage
+     */
+    usage: {
+        [key: string]: JsonValue;
+    };
 };
 
 /**
@@ -14588,6 +14665,36 @@ export type ControlResponsibilityResponses = {
 };
 
 export type ControlResponsibilityResponse = ControlResponsibilityResponses[keyof ControlResponsibilityResponses];
+
+export type ListResponsibilityReviewsData = {
+    body?: never;
+    path: {
+        /**
+         * Responsibility Id
+         */
+        responsibility_id: string;
+    };
+    query?: never;
+    url: '/api/responsibilities/{responsibility_id}/reviews';
+};
+
+export type ListResponsibilityReviewsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListResponsibilityReviewsError = ListResponsibilityReviewsErrors[keyof ListResponsibilityReviewsErrors];
+
+export type ListResponsibilityReviewsResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponsibilityHistory;
+};
+
+export type ListResponsibilityReviewsResponse = ListResponsibilityReviewsResponses[keyof ListResponsibilityReviewsResponses];
 
 export type ListResponsibilityInboxData = {
     body?: never;
