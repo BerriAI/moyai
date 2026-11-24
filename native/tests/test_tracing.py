@@ -11,6 +11,7 @@ from opentelemetry.trace import get_tracer_provider
 from pydantic import SecretStr, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import Instrumentation, LocalWorkspace
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import (
     BinaryContent,
     ModelRequest,
@@ -22,6 +23,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.workspaces import WorkspaceUnavailableError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
@@ -143,7 +145,7 @@ async def test_native_temporal_trace_content_policy_and_replay_emits_no_duplicat
     assert get_tracer_provider() is global_provider
 
 
-async def test_opt_in_captures_conversation_but_not_private_context_or_tool_data(monkeypatch):
+async def test_opt_in_captures_conversation_but_not_private_context_or_private_tools(monkeypatch):
     exporter = InMemorySpanExporter()
     monkeypatch.setattr(tracing, "OTLPSpanExporter", lambda **kwargs: exporter)
     capture = tracing.LensTracing(Settings(
@@ -156,18 +158,18 @@ async def test_opt_in_captures_conversation_but_not_private_context_or_tool_data
     def respond(messages, info):
         observed.append(messages)
         if not any(isinstance(m, ModelResponse) for m in messages):
-            return ModelResponse(parts=[ToolCallPart("credential_tool", {"credential": "private-tool-argument"})])
+            return ModelResponse(parts=[ToolCallPart("read_memory", {"query": "private-tool-argument"})])
         return ModelResponse(parts=[
             ThinkingPart("private-reasoning"),
             TextPart("Visible reply synthetic-gateway-key"),
         ])
 
-    def credential_tool(credential: str) -> str:
+    def read_memory(query: str) -> str:
         return "private-tool-result"
 
     session_id = "01234567-89ab-4cde-8f01-23456789abcd"
     agent = Agent(
-        FunctionModel(respond), tools=[credential_tool], name="moyai",
+        FunctionModel(respond), tools=[read_memory], name="moyai",
         instructions="private-system-instruction",
         capabilities=[Instrumentation(settings=capture.instrumentation)],
         metadata={
@@ -193,7 +195,7 @@ async def test_opt_in_captures_conversation_but_not_private_context_or_tool_data
         serialized = json.dumps([dict(span.attributes or {}) for span in spans])
         assert "Visible user prompt" in serialized
         assert "Visible reply [redacted]" in serialized
-        assert "credential_tool" in serialized
+        assert "read_memory" in serialized
         assert session_id in serialized
         for excluded in (
             "private-preference", "private-memory", "private-binary", "private-system-instruction",
@@ -207,7 +209,7 @@ async def test_opt_in_captures_conversation_but_not_private_context_or_tool_data
         assert "private-memory" in str(observed[0])
         assert "private-tool-result" in str(observed[1])
         assert history[0].parts[0].content[0].content == "private-preference"
-        assert capture.instrumentation.include_content is False
+        assert capture.instrumentation.include_content is True
     finally:
         await capture.close()
 
@@ -227,5 +229,88 @@ async def test_session_scrubbing_exception_rejects_non_uuid_values(monkeypatch, 
         assert capture.logfire.force_flush()
         metadata = json.loads(exporter.get_finished_spans()[0].attributes["metadata"])
         assert metadata["moyai_session_id"] == "[Scrubbed due to 'session']"
+    finally:
+        await capture.close()
+
+
+@pytest.mark.parametrize("include_content", [False, True])
+@pytest.mark.parametrize("failure", [None, ToolFailed, ModelRetry, WorkspaceUnavailableError])
+async def test_tool_content_and_diagnostics_follow_flag(monkeypatch, include_content, failure):
+    """Exercise the SDK's actual tool spans, message summaries and exception paths."""
+    exporter = InMemorySpanExporter()
+    monkeypatch.setattr(tracing, "OTLPSpanExporter", lambda **kwargs: exporter)
+    capture = tracing.LensTracing(Settings(
+        _env_file=None, trace_endpoint="http://127.0.0.1:4318/v1/traces",
+        trace_api_key="synthetic-export-key", gateway_key="synthetic-gateway-key",
+        trace_include_content=include_content,
+    ))
+    arguments = {
+        "query": "trace-diagnostic-query",
+        "options": {"api_key": "unconfigured-sensitive-value", "token_count": 4},
+    }
+    detail = (
+        "Search unavailable: missing_scope channels:history. "
+        "Authorization: Bearer unconfigured-bearer-value; key synthetic-gateway-key"
+    )
+    observed = []
+
+    def search(query: str, options: dict) -> dict:
+        observed.append((query, options))
+        if failure:
+            raise failure(detail)
+        return {"text": "Authentication guide found", "api_key": "unconfigured-sensitive-result",
+                "gateway": "synthetic-gateway-key", "token_count": 4}
+
+    def respond(messages, info):
+        if not any(isinstance(message, ModelResponse) for message in messages):
+            return ModelResponse(parts=[ToolCallPart("search", arguments, tool_call_id="trace-proof-call")])
+        return ModelResponse(parts=[TextPart("Trace review completed.")])
+
+    agent = Agent(FunctionModel(respond), tools=[search], instructions="private-system-instruction",
+                  capabilities=[Instrumentation(settings=capture.instrumentation)])
+    try:
+        if failure is WorkspaceUnavailableError:
+            with pytest.raises(WorkspaceUnavailableError, match="missing_scope"):
+                await agent.run("Review this trace.")
+        else:
+            await agent.run("Review this trace.")
+        assert capture.logfire.force_flush()
+        spans = exporter.get_finished_spans()
+        tools = [span for span in spans if span.attributes.get("gen_ai.tool.name") == "search"]
+        assert len(tools) == 1
+        tool = tools[0]
+        payload = json.dumps([{
+            "attributes": dict(span.attributes or {}), "status": span.status.description,
+            "events": [dict(event.attributes or {}) for event in span.events],
+        } for span in spans])
+        assert ("trace-diagnostic-query" in payload) is include_content
+        if include_content:
+            exported_args = json.loads(tool.attributes["gen_ai.tool.call.arguments"])
+            assert exported_args["query"] == arguments["query"]
+            assert exported_args["options"]["token_count"] == 4
+            assert exported_args["options"]["api_key"] != arguments["options"]["api_key"]
+            if failure:
+                assert "missing_scope channels:history" in tool.attributes["exception.message"]
+                assert any("missing_scope" in event.attributes.get("exception.message", "")
+                           for event in tool.events)
+                assert any("exception.stacktrace" in event.attributes for event in tool.events)
+                if failure is not WorkspaceUnavailableError:
+                    assert "missing_scope" in tool.attributes["gen_ai.tool.call.result"]
+            else:
+                output = json.loads(tool.attributes["gen_ai.tool.call.result"])
+                assert output["text"] == "Authentication guide found"
+                assert output["token_count"] == 4
+        else:
+            assert "gen_ai.tool.call.arguments" not in tool.attributes
+            assert "gen_ai.tool.call.result" not in tool.attributes
+            assert "missing_scope" not in payload
+            assert "Authentication guide found" not in payload
+        for excluded in (
+            "synthetic-gateway-key", "synthetic-export-key", "unconfigured-sensitive-value",
+            "unconfigured-sensitive-result", "unconfigured-bearer-value", "private-system-instruction",
+        ):
+            assert excluded not in payload
+        assert observed == [(arguments["query"], arguments["options"])]
+        assert arguments["options"]["api_key"] == "unconfigured-sensitive-value"
     finally:
         await capture.close()

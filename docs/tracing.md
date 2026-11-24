@@ -30,11 +30,17 @@ conversation text in Lens, explicitly set this on the API, coordinator and worke
 export LITELLM_TRACE_INCLUDE_CONTENT=true
 ```
 
-This records user text and assistant text on model and agent spans for new
-runs. It excludes system instructions, injected memory and saved private
-preferences, tool arguments and results, reasoning, media, and full model
-request parameters. Configured application credentials are redacted from the
-recorded text. User-supplied text is still conversation data: enable this only
+This records user and assistant text, tool-call arguments and results, and
+failure details for new runs. Tool content appears in both the conversation
+and the tool's span. Failed calls retain their error message and stack trace;
+the exception type and message are also span attributes for receivers that
+do not retain events.
+
+System instructions, injected memory and saved private preferences, private
+memory/credential tool payloads, reasoning, media, deferral metadata, and full
+model request parameters remain excluded. Configured application credentials,
+credential fields in structured payloads, and recognizable credentials in text
+are redacted. User-supplied text and tool results are still conversation data: enable this only
 where the Lens access and retention policy is appropriate for that content.
 This does not change the gateway's independent logging policy or backfill old
 traces.
@@ -46,9 +52,9 @@ other credential fields through.
 
 HTTP tracing uses the official OpenTelemetry FastAPI instrumentation. It keeps
 route templates, methods and response status, without request/response bodies,
-headers or raw URLs. Exception types and error status are retained; exception
-messages, stack traces and status descriptions are excluded, including when
-conversation-text capture is enabled. Static assets and health endpoints are
+headers or raw URLs. Exception types and error status are always retained.
+Exception messages, stack traces and status descriptions follow the content
+flag and credential redaction policy above. Static assets and health endpoints are
 excluded, as are internal ASGI send/receive spans.
 
 ## Computer and task lifecycle
