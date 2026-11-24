@@ -280,9 +280,8 @@ def connection_tools(security: Security, *, read_only: bool = False) -> Toolset[
     # selected accounts inside its get-tools/call-tool activities instead:
     # credential decryption and canonical provider imports are not replay-safe.
     # Provider schemas, transport, calls and deferred approvals stay SDK-owned.
+    dynamic = DynamicToolset(resolve, id="moyai_connections", per_run_step=True)
     return ConnectionTools(
-        DynamicToolset(resolve, id="moyai_connections", per_run_step=True).filtered(
-            lambda _ctx, tool: not read_only or read_only_tool(tool),
-        ),
+        dynamic.filtered(lambda _ctx, tool: read_only_tool(tool)) if read_only else dynamic,
         id="moyai_connections",
     )
