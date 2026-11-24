@@ -224,11 +224,11 @@ async def test_refresh_keeps_grant_authority_and_disconnect_revokes(runtime, act
         tokens["expires_at"] = time.time() - 1
         credential.encrypted = runtime.security.seal(tokens)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.database.admission.submit(actor, session.id, NewMessage(
         prompt="Read my issues", request_key="oauth-refresh", connections=[account["id"]],
     ))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.database.admission.prepare(turn.id)
     grant = prepared.scope.grants[0]
     assert await personal_oauth.access_token(runtime.database, prepared.scope, grant) == "private-provider-token"
     assert exchanges[-1][2]["previous"] is not None
@@ -308,11 +308,11 @@ async def test_canonical_tools_use_only_personal_token_and_live_workspace_policy
     await finish(client, await begin(client, provider), provider)
     account = next(row for row in (await client.get("/api/connections")).json() if row["policy"].get("oauth"))
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.database.admission.submit(actor, session.id, NewMessage(
         prompt="Read my account", request_key=f"canonical-{provider}", connections=[account["id"]],
     ))
     await runtime.database.claim_next()
-    scope = (await runtime.database.prepare(turn.id)).scope
+    scope = (await runtime.database.admission.prepare(turn.id)).scope
     grant = scope.grants[0]
     sent = []
 
@@ -361,11 +361,11 @@ async def test_personal_tools_approval_live_tokens_and_revocation(runtime, actor
     await finish(client, await begin(client, "github"), "github")
     account = (await client.get("/api/connections")).json()[0]
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.database.admission.submit(actor, session.id, NewMessage(
         prompt="Update an issue", request_key="oauth-tools", connections=[account["id"]],
     ))
     await runtime.database.claim_next()
-    scope = (await runtime.database.prepare(turn.id)).scope
+    scope = (await runtime.database.admission.prepare(turn.id)).scope
     calls, tokens = [], []
     fail = False
 
@@ -416,11 +416,11 @@ async def test_concurrent_token_refresh_rotates_once(runtime, actor, oauth, monk
         old["expires_at"] = time.time() - 1
         saved.encrypted = runtime.security.seal(old)
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.database.admission.submit(actor, session.id, NewMessage(
         prompt="Read issues", request_key="oauth-concurrent", connections=[account["id"]],
     ))
     await runtime.database.claim_next()
-    scope = (await runtime.database.prepare(turn.id)).scope
+    scope = (await runtime.database.admission.prepare(turn.id)).scope
     calls = []
 
     async def rotate(service, provider, identity, *, previous):
