@@ -51,6 +51,7 @@ from .browser_login import BrowserLogin
 from .bundled_skills import bundled_skill_catalog
 from .coding_image import with_node
 from .commentary import Commentary
+from .completion import CompletionReview
 from .computer_startup import OnDemandDurability, on_demand_coder
 from .connection_catalog import ConnectionToolSearch, connection_search
 from .connection_guidance import connection_guidance
@@ -408,6 +409,7 @@ def make_agent(
             SwarmCapability(database.swarms),
             GoalCapability(database.goals),
             Commentary(database),
+            CompletionReview(stores),
             EffectReceipts(database),
             *product_capabilities,
             connection_tools(database.security),
