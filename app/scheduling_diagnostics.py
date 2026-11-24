@@ -49,15 +49,3 @@ def slow_database(started, *, backend):
              for frame in traceback.extract_stack(limit=8)[:-1]]
     log.warning(json.dumps({'event': 'slow_database', 'version': 1, 'backend': backend, 'duration_ms': duration,
                            'on_event_loop': on_event_loop, 'stack': stack}))
-
-
-async def watch_event_loop(*, interval=1.0, threshold=0.5):
-    while True:
-        started, cpu = time.monotonic(), time.process_time()
-        await asyncio.sleep(interval)
-        elapsed = time.monotonic() - started
-        if elapsed - interval >= threshold:
-            log.warning(json.dumps({'event': 'event_loop_lag', 'version': 1,
-                'lag_ms': round((elapsed - interval) * 1000, 2),
-                'interval_ms': round(elapsed * 1000, 2),
-                'process_cpu_ms': round((time.process_time() - cpu) * 1000, 2)}))

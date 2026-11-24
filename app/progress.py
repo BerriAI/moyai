@@ -35,18 +35,6 @@ def active_input(conn: Connection, run_id: str, turn_id: int) -> int:
     return receipt['input_id'] if receipt else turn_id
 
 
-def current_focus(conn: Connection, run_id: str) -> str:
-    turn_id = active_turn(conn, run_id)
-    if turn_id is None:
-        return ''
-    input_id = active_input(conn, run_id, turn_id)
-    row = conn.execute("""SELECT message FROM events WHERE run_id=? AND kind='status'
-        AND json_number(data,'live_status')=1 AND json_number(data,'turn_id')=?
-        AND json_number(data,'input_id')=? ORDER BY id DESC LIMIT 1""",
-        (run_id, turn_id, input_id)).fetchone()
-    return row['message'] if row else ''
-
-
 def record_focus(conn: Connection, run_id: str, message: str, data: dict[str, object], stamp: str) -> None:
     """Admit task focus independently of public commentary."""
     turn_id = active_turn(conn, run_id)

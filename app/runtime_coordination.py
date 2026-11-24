@@ -25,19 +25,6 @@ class LeaseLost(RuntimeError):
     pass
 
 
-def require_shared_artifacts(store):
-    """Refuse a cutover that would leave known local payloads on one machine."""
-    root = store.artifacts.root
-    if root.is_symlink():
-        raise ValueError('Distributed roles require migrated artifact storage, without local symlinks.')
-    manifested = {row['name'] for row in store.rows("SELECT name FROM artifact_objects WHERE reference!=''")}
-    if root.exists():
-        for path in root.rglob('*'):
-            if path.is_symlink() or (path.is_file() and not path.name.startswith('.upload-')
-                                     and path.relative_to(root).as_posix() not in manifested):
-                raise ValueError('Migrate and verify legacy artifact files before enabling distributed roles. See docs/object-storage.md.')
-
-
 class WorkerRoleMiddleware:
     """Workers expose readiness only, including when a client attempts WebSocket."""
     def __init__(self, app):

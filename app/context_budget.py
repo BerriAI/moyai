@@ -38,17 +38,6 @@ class ContextPressure(HTTPException):
         }, headers={'X-Moyai-Context': 'compact'})
 
 
-def provider_context_rejection(status, raw):
-    """Only a structured, definite pre-generation context rejection can recover."""
-    if status not in {400, 413}:
-        return False
-    try:
-        error = json.loads(raw)['error']
-        return error.get('code') in {'context_length_exceeded', 'prompt_too_long', 'input_too_long'} or error.get('type') == 'context_length_exceeded'
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return False
-
-
 def positive(value):
     return value if type(value) is int and value > 0 else None
 

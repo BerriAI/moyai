@@ -1,5 +1,4 @@
 """Content-free web-chat milestones and bounded admin latency projections."""
-from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import math
@@ -9,16 +8,6 @@ from statistics import median
 request_received = ContextVar('performance_request_received', default=None)
 SAMPLE_LIMIT = 10000
 TERMINAL = {'failed', 'cancelled', 'interrupted', 'deleted', 'completed', 'steered'}
-
-
-@contextmanager
-def web_request(received_at):
-    # Scope only the synchronous enqueue call, never background execution tasks.
-    token = request_received.set(received_at)
-    try:
-        yield
-    finally:
-        request_received.reset(token)
 
 
 from .schema_initializers import initialize_performance as initialize_schema
@@ -35,18 +24,6 @@ def submitted_in(conn, run_id, message_id, kind, persisted_at, *, received_at=No
         (message_id, run_id, kind, received_at, persisted_at,
          received_at if send_now or immediate else None,
          'explicit' if send_now else 'automatic' if immediate else None))
-
-
-def prioritized_in(conn, run_id, message_id, requested_at):
-    # Old queued messages have no trustworthy startup sample. They can still
-    # receive a new, accurately timed Send now request after instrumentation.
-    conn.execute('''INSERT INTO performance_samples
-        (message_id,run_id,kind,persisted_at,send_now_at,send_now_kind)
-        SELECT id,run_id,'follow_up',created_at,?,'explicit' FROM messages
-        WHERE id=? AND run_id=? ON CONFLICT(message_id) DO UPDATE SET
-        send_now_at=COALESCE(performance_samples.send_now_at,excluded.send_now_at),
-        send_now_kind=COALESCE(performance_samples.send_now_kind,excluded.send_now_kind)''',
-        (requested_at, message_id, run_id))
 
 
 def picked_up_in(conn, message_id, stamp, kind):
@@ -71,16 +48,6 @@ def model_dispatched(store, run, received_at, dispatched_at, request_id):
         WHERE message_id=? AND run_id=? AND (dispatch_at IS NULL OR dispatch_at>?)''',
         (dispatched_at, received_at, request_id, run['active_message_id'], run['id'], dispatched_at),
         write_scope=run['id'])
-
-
-def computer_requested_in(conn, run, state, stamp):
-    computer = state.get('computer', {})
-    kind = ('reuse' if computer.get('phase') == 'ready' else
-            'snapshot_restore' if run.get('snapshot_id') else 'cold_start')
-    conn.execute('''UPDATE performance_samples SET
-        computer_requested_at=?,computer_start_kind=?
-        WHERE message_id=? AND run_id=? AND computer_requested_at IS NULL''',
-        (stamp, kind, run['active_message_id'], run['id']))
 
 
 def computer_ready(store, run_id, message_id, stamp):

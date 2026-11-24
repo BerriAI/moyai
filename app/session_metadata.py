@@ -1,29 +1,7 @@
 """Answer unambiguous requests for this session's ID without an agent turn."""
 import json
-import re
 
 from .database import Connection
-
-
-_SESSION = r"(?:session|chat|conversation|run)"
-_SUBJECT = rf"(?:(?:this|current|my|your|our|the|this current|the current) )?{_SESSION}"
-_ID = rf"(?:{_SUBJECT}(?:'s)? (?:id|identifier)|(?:the )?(?:id|identifier) (?:of|for) {_SUBJECT})"
-_REQUEST = re.compile(
-    rf"(?:{_ID}|what(?: is|'s) {_ID}|"
-    rf"(?:(?:can|could|would) you )?(?:show|give|tell|send)(?: me| us)? {_ID}|"
-    rf"(?:get|return|copy) {_ID})"
-)
-
-
-def is_session_id_request(content: str) -> bool:
-    # Full-string matching is deliberate: quoted examples, other sessions and
-    # requests that include real work must still reach the agent.
-    text = ' '.join(content.lower().replace('’', "'").split()).rstrip('?.!')
-    if text in {'/session-id', '/session_id'}:
-        return True
-    text = re.sub(r'^please[, ]+', '', text)
-    text = re.sub(r',? please$', '', text)
-    return _REQUEST.fullmatch(text) is not None
 
 
 def session_id_response(run_id: str) -> str:
