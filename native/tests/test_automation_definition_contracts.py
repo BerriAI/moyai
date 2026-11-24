@@ -127,7 +127,7 @@ def test_gitlab_definitions_retain_origin_and_separate_project_identity():
 
 
 def test_optional_gitlab_fields_preserve_old_automation_digest():
-    from moyai.product_automations import _digest, definition_digest, definition_payload
+    from moyai.automations.product_automations import _digest, definition_digest, definition_payload
 
     definition = definitions.Definition(
         name="Existing GitHub", prompt="Read the issue",

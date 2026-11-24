@@ -30,8 +30,12 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.client import Client
     from temporalio.exceptions import ApplicationError
 
-    from .contracts import RunScope
-    from .models import Effect, Session, Turn, User, now
+    from ..continuations.product_continuation_models import ProductContinuation, ProductExecutionContext
+    from ..continuations.product_continuation_workspace import fingerprint as workspace_fingerprint
+    from ..contracts import RunScope
+    from ..models import Effect, Session, Turn, User, now
+    from ..product_config import CORE_IDENTITY
+    from ..product_identity import ProductGrant
     from .product_automation_context_models import ProductAutomationExecutionContext as ExecutionContext
     from .product_automation_models import (
         ProductAutomationBinding as Binding,
@@ -43,10 +47,6 @@ with workflow.unsafe.imports_passed_through():
         ProductAutomationOperation as Operation,
     )
     from .product_automation_models import ProductAutomationTurn
-    from .product_config import CORE_IDENTITY
-    from .product_continuation_models import ProductContinuation, ProductExecutionContext
-    from .product_continuation_workspace import fingerprint as workspace_fingerprint
-    from .product_identity import ProductGrant
 
 MAX_TRIGGERS = 16
 TERMINAL = ("completed", "failed", "stopped", "included")
@@ -1356,7 +1356,7 @@ class ProductAutomationService:
 
 @activity.defn(name="moyai_product_automation_reconcile_v1")
 async def reconcile_product_automation(identity: str) -> dict[str, Any]:
-    from .runtime import current
+    from ..runtime import current
     service = getattr(current(), "product_automations", None)
     if not isinstance(service, ProductAutomationService):
         raise TypeError("The product automation service is not configured.")
@@ -1367,7 +1367,7 @@ async def reconcile_product_automation(identity: str) -> dict[str, Any]:
 async def admit_product_automation(
     identity: str, generation: int, revision: int, trigger_id: str, occurrence: str, scheduled_at: str,
 ) -> dict[str, Any]:
-    from .runtime import current
+    from ..runtime import current
     service = getattr(current(), "product_automations", None)
     if not isinstance(service, ProductAutomationService):
         raise TypeError("The product automation service is not configured.")
@@ -1378,7 +1378,7 @@ async def admit_product_automation(
 
 @activity.defn(name="moyai_product_automation_refused_v1")
 async def refuse_product_automation(scope: RunScope, effect: str, name: str) -> str:
-    from .runtime import current
+    from ..runtime import current
     service = current().product_automations
     if service is None:
         raise RuntimeError("The product automation service is not configured.")

@@ -137,7 +137,7 @@ async def test_local_publication_reduces_history_and_preserves_visible_stream_an
                 False if version == PUBLIC_STREAM_VERSION and not enabled else original_patched(version)
             ))
             session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-            turn = await runtime.database.submit(actor, session.id, NewMessage(
+            turn = await runtime.admission.submit(actor, session.id, NewMessage(
                 prompt="Perform the task.", request_key=f"projection-{enabled}",
             ))
             await runtime.database.claim_next()

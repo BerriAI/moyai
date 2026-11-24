@@ -31,7 +31,7 @@ async def test_query_scoped_catalog_prewarms_cold_and_expired_audiences(audience
     session_id = product.session_id
     if delegated:
         turn = await product.database.claim_next()
-        prepared = await product.database.prepare(turn.id)
+        prepared = await product.database.admission.prepare(turn.id)
         child = await DelegationService(product.database).start(
             prepared.scope, "catalog-child", "Inspect inherited catalog permissions",
         )
@@ -298,12 +298,12 @@ async def test_caller_owned_admission_uses_only_prefetched_current_facts(audienc
     body = NewMessage(prompt="Caller-owned admission", request_key="caller-owned-admission")
     if facts == "ready":
         async with product.database.sessions.begin() as db:
-            turn = await product.database.submit(product.actor, product.session_id, body, db=db)
+            turn = await product.database.admission.submit(product.actor, product.session_id, body, db=db)
         assert turn.status == "queued"
     else:
         with pytest.raises(HTTPException) as unavailable:
             async with product.database.sessions.begin() as db:
-                await product.database.submit(product.actor, product.session_id, body, db=db)
+                await product.database.admission.submit(product.actor, product.session_id, body, db=db)
         assert unavailable.value.status_code == 503
         async with product.database.sessions() as db:
             assert not await db.scalar(text(
@@ -353,7 +353,7 @@ async def test_expired_prefetch_cannot_be_used_by_a_mutation(audience):
     async with product.database.sessions() as db:
         before = await db.scalar(text("SELECT count(*) FROM moyai_turns"))
     with pytest.raises(HTTPException) as unavailable:
-        await product.database.submit(
+        await product.database.admission.submit(
             product.actor, product.session_id, NewMessage(prompt="Do not admit", request_key="expired-facts"),
         )
     assert unavailable.value.status_code == 503
@@ -363,9 +363,9 @@ async def test_expired_prefetch_cannot_be_used_by_a_mutation(audience):
 
 @pytest.mark.parametrize("signed_ingress", [False, True])
 async def test_cold_legacy_continuation_prewarms_or_uses_verified_ingress(continuation, signed_ingress):
+    from moyai.continuations.product_continuation import ContinuationRequest
     from moyai.contracts import NewMessage
     from moyai.models import User
-    from moyai.product_continuation import ContinuationRequest
     from moyai.product_slack_conversations import SlackConversations
     from moyai.slack_audience import historical_access, prefetch_historical
 
@@ -433,12 +433,12 @@ async def test_http_contention_is_503_and_rolls_back_mark_read_and_send_now(read
 
     product = read_product
     database = product.runtime.database
-    parent = await database.submit(
+    parent = await database.admission.submit(
         product.actor, product.session_id, NewMessage(prompt="Active parent", request_key="busy-parent"),
     )
     assert (await database.claim_next()).id == parent.id
-    await database.prepare(parent.id)
-    turn = await database.submit(
+    await database.admission.prepare(parent.id)
+    turn = await database.admission.submit(
         product.actor, product.session_id, NewMessage(prompt="Queued input", request_key="busy-input"),
     )
     me = (await product.client.get("/api/me")).json()
@@ -596,7 +596,7 @@ async def test_http_role_insert_during_prefetch_denies_old_grant_without_mutatio
     product = audience
     original_database = runtime.database
     runtime.database = product.database
-    turn = await product.database.submit(
+    turn = await product.database.admission.submit(
         product.actor, product.session_id,
         NewMessage(prompt="Queued browser input", request_key="role-race-input", mode="when_idle"),
     )

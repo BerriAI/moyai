@@ -19,9 +19,9 @@ from pydantic_ai.models.function import FunctionModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from moyai.continuations.product_continuation_models import ProductContinuation
 from moyai.effects import EffectReceipts, confirm_effect
 from moyai.models import Session, Turn
-from moyai.product_continuation_models import ProductContinuation
 from moyai.product_credential_models import ProductCredentialRequest as AccessRequest
 from moyai.product_credential_tools import capability, redact_output
 from moyai.product_secrets import ProductSecrets
@@ -118,7 +118,7 @@ async def test_native_request_resolves_once_and_resumes_with_only_handle(credent
         secret = (await db.execute(text("SELECT * FROM moyai.provider_secrets"))).mappings().one()
         assert "synthetic-signing-material" not in secret["encrypted"]
     assert (await f.product.database.claim_next()).id == response["turn_id"]
-    resumed = await f.product.database.prepare(response["turn_id"])
+    resumed = await f.product.database.admission.prepare(response["turn_id"])
     async with f.product.database.sessions.begin() as db:
         value = await f.service.webhook_secret(resumed.scope, resumed.scope.turn_id, result["request_id"], db=db)
         assert value.get_secret_value() == "synthetic-signing-material-123456"
@@ -158,7 +158,7 @@ async def test_saved_secret_reuse_rechecks_revision_scope_and_no_values_enter_in
     pending = await wait_for_credential(f)
     response = await f.service.resolve(None, f.product.principal, pending["request_id"], provide())
     await f.product.database.claim_next()
-    prepared = await f.product.database.prepare(response["turn_id"])
+    prepared = await f.product.database.admission.prepare(response["turn_id"])
     inventory = await f.service.inventory(prepared.scope, ListCredentials())
     assert len(inventory["credentials"]) == 1
     assert "synthetic-signing-material" not in json.dumps(inventory)
@@ -218,7 +218,7 @@ async def test_shared_and_slack_sessions_cannot_use_personal_agent_credentials(c
     pending = await wait_for_credential(f)
     response = await f.service.resolve(None, f.product.principal, pending["request_id"], provide())
     await f.product.database.claim_next()
-    prepared = await f.product.database.prepare(response["turn_id"])
+    prepared = await f.product.database.admission.prepare(response["turn_id"])
     async with f.product.database.sessions.begin() as db:
         with pytest.raises(HTTPException, match="Shared webhook"):
             await f.service.webhook_secret(prepared.scope, prepared.scope.turn_id, pending["request_id"], db=db)
@@ -306,7 +306,7 @@ async def test_source_lookup_claim_requires_confirmed_command_with_same_handle(c
         value=SecretStr('{"OP_SERVICE_ACCOUNT_TOKEN":"synthetic-vault-token"}'),
     ))
     await f.product.database.claim_next()
-    scope = (await f.product.database.prepare(response["turn_id"])).scope
+    scope = (await f.product.database.admission.prepare(response["turn_id"])).scope
     needed = await f.service.request(scope, scope.turn_id, "target", request_body())
     assert needed["status"] == "lookup_required"
     metadata = needed["credential_sources"][0]
@@ -333,7 +333,7 @@ async def test_session_lifetime_credential_follows_only_its_fenced_original_root
         "lifetime": "session",
     }))
     await f.product.database.claim_next()
-    scope = (await f.product.database.prepare(response["turn_id"])).scope
+    scope = (await f.product.database.admission.prepare(response["turn_id"])).scope
     original, root = "a" * 32, "b" * 32
     async with f.product.source.begin() as db:
         await db.execute(text("CREATE TABLE moyai.run_roots(run_id TEXT PRIMARY KEY,root_id TEXT)"))

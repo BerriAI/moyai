@@ -31,7 +31,7 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql import ColumnElement, Executable
 
-from .analytics import ReportRange, actual_cost, integer, utc
+from ..reporting.analytics import ReportRange, actual_cost, integer, utc
 
 if TYPE_CHECKING:
     from .billing_storage import Storage

@@ -30,6 +30,7 @@ from moyai.contracts import NewMessage, NewSession, PreparedTurn
 from moyai.database import Database
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Message, ProductTurnAuthority, Session, Turn, User
+from moyai.preferences.settings_runtime import SettingsSkills
 from moyai.product_identity import ProductIdentityAdapter
 from moyai.product_schema import (
     AUTHORITY_SCHEMA_VERSION,
@@ -42,7 +43,6 @@ from moyai.product_schema import (
     verify_product_schema,
 )
 from moyai.runtime import Runtime
-from moyai.settings_runtime import SettingsSkills
 from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
@@ -234,7 +234,7 @@ async def test_grant_survives_worker_restart_and_is_immutable(admitted_product):
     try:
         await worker.start()
         assert not hasattr(await worker.user(product.user_id), "product_grant")
-        again = await worker.prepare(turn.id)
+        again = await worker.admission.prepare(turn.id)
         assert again == prepared
         await worker.authorize_scope(again.scope)
         encoded = TypeAdapter(PreparedTurn).dump_json(again)
@@ -264,7 +264,7 @@ async def test_live_demotion_blocks_activity_retry_prepare_and_grant_replacement
         await SettingsSkills(product.database).catalog(prepared.scope)
     assert denied.value.status_code == 401
     with pytest.raises(PermissionError, match="revoked"):
-        await product.database.prepare(turn.id)
+        await product.database.admission.prepare(turn.id)
     fresh = await product.adapter.current(product.user_id)
     assert fresh.role == "member"
     with pytest.raises(HTTPException) as denied:
@@ -277,7 +277,7 @@ async def test_unbound_old_turn_and_automation_owner_lookup_fail_closed(admitted
     session = await product.database.create_session(product.actor, NewSession())
     mirror = await product.database.user(product.user_id)
     with pytest.raises(HTTPException) as denied:
-        await product.database.submit(mirror, session.id, NewMessage(prompt="Scheduled", request_key="old-task"))
+        await product.database.admission.submit(mirror, session.id, NewMessage(prompt="Scheduled", request_key="old-task"))
     assert denied.value.status_code == 401
     async with product.database.sessions.begin() as db:
         assert await db.scalar(select(func.count()).select_from(Turn)) == 0
@@ -289,7 +289,7 @@ async def test_unbound_old_turn_and_automation_owner_lookup_fail_closed(admitted
         db.add(old)
     assert (await product.database.claim_next()).id == old.id
     with pytest.raises(PermissionError, match="no admitted product authority"):
-        await product.database.prepare(old.id)
+        await product.database.admission.prepare(old.id)
     async with product.database.sessions() as db:
         assert await db.get(ProductTurnAuthority, old.id) is None
 
@@ -365,7 +365,7 @@ async def test_submit_waiting_on_canonical_writer_rechecks_before_creating_work(
             await writer.execute(text(
                 "SELECT pg_advisory_xact_lock(726941, 'moyai'::regnamespace::oid::int)"
             ))
-            pending = asyncio.create_task(product.database.submit(
+            pending = asyncio.create_task(product.database.admission.submit(
                 product.actor, session.id, NewMessage(prompt="Must be denied", request_key="race"),
             ))
             done, _ = await asyncio.wait({pending}, timeout=0.1)

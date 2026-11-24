@@ -15,10 +15,10 @@ import modal
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from sqlalchemy import select, update
 
+from .continuations.product_continuation_errors import preparation_blocked
 from .contracts import PreparedTurn, RunScope
 from .models import ComputerLease, ComputerOperation, Effect, Event, Session, Turn, User
 from .performance import ComputerTiming, computer_timing
-from .product_continuation_errors import preparation_blocked
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,7 +118,10 @@ async def require_settled(db: AsyncSession, session_id: str) -> None:
 
 
 async def product_bindings(db: AsyncSession, scope: RunScope, reference: dict) -> tuple[str | None, str | None]:
-    from .product_continuation_models import ProductExecutionContext, ProductWorkspaceRestoration
+    from .continuations.product_continuation_models import (
+        ProductExecutionContext,
+        ProductWorkspaceRestoration,
+    )
 
     context = await db.get(ProductExecutionContext, scope.turn_id)
     restoration = await db.get(ProductWorkspaceRestoration, (scope.session_id, reference["id"]))
@@ -202,7 +205,7 @@ async def restored_sandbox(runtime: Runtime, scope: RunScope, saved: WorkspaceCh
 
 
 async def preserve_restoration(db: AsyncSession, session_id: str, old_id: str, new_id: str, scope: str) -> None:
-    from .product_continuation_models import ProductWorkspaceRestoration
+    from .continuations.product_continuation_models import ProductWorkspaceRestoration
 
     original = await db.get(ProductWorkspaceRestoration, (session_id, old_id))
     if original is None:

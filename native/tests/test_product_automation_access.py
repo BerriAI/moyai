@@ -13,11 +13,11 @@ from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.tools import ToolDefinition
 from sqlalchemy import update
 
+from moyai.automations.product_automation_models import ProductAutomationBinding as Binding
+from moyai.automations.product_automation_tools import GrantRequest, ScopedUpdate
+from moyai.automations.product_automations import AUTOMATION_MUTATIONS
 from moyai.effects import requires_receipt
 from moyai.models import Effect, Session, Turn
-from moyai.product_automation_models import ProductAutomationBinding as Binding
-from moyai.product_automation_tools import GrantRequest, ScopedUpdate
-from moyai.product_automations import AUTOMATION_MUTATIONS
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Set a disposable local PostgreSQL URL.")
 product_database = fixtures.product_database
@@ -42,7 +42,7 @@ async def invoke(ctx, run_ctx, action, body):
 async def automation_context(ctx, row, binding):
     result = await fixtures.occurrence(ctx, row, binding)
     await ctx.product.database.claim_next()
-    prepared = await ctx.product.database.prepare(result["turn_id"])
+    prepared = await ctx.product.database.admission.prepare(result["turn_id"])
     from pydantic_ai import RunContext, RunUsage
     from pydantic_ai.models.test import TestModel
     return RunContext(

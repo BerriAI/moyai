@@ -3,7 +3,7 @@
 from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .models import Base, now
+from ..models import Base, now
 
 
 class ProductAutomationChatGrant(Base):

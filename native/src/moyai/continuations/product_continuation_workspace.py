@@ -23,14 +23,14 @@ from pydantic import TypeAdapter
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .contracts import Grant, PreparedTurn, RunScope
-from .models import Session, Turn
+from ..contracts import Grant, PreparedTurn, RunScope
+from ..models import Session, Turn
+from ..product_identity import ProductGrant, ProductPrincipal
 from .product_continuation_models import ProductContinuation, ProductExecutionContext
 from .product_continuation_schema import identifier
-from .product_identity import ProductGrant, ProductPrincipal
 
 if TYPE_CHECKING:
-    from .runtime import Runtime
+    from ..runtime import Runtime
 
 REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 BUILD_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -503,7 +503,7 @@ class ProductWorkspaceCompatibility:
         context = await self.turn_context(scope)
         if context is None:
             if recover_workspace:
-                from .workspace_recovery import prepare_workspace
+                from ..workspace_recovery import prepare_workspace
                 return await prepare_workspace(self.runtime, prepared)
             return prepared
         self.authorize_project_grants(context, scope.grants)
@@ -520,7 +520,7 @@ class ProductWorkspaceCompatibility:
             materialized.update(environment_snapshot_id=image, image_source="validated_environment")
         await self.runtime.database.authorize_scope(scope)
         if recover_workspace:
-            from .workspace_recovery import prepare_workspace
+            from ..workspace_recovery import prepare_workspace
             prepared = await prepare_workspace(self.runtime, prepared)
         prepared = await self.restorer.prepare(prepared, materialized)
         await self.turn_context(scope)

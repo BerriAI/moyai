@@ -103,7 +103,7 @@ async def test_status_batch_acl_public_messages_links_and_no_private_context(run
     session = await runtime.database.create_session(actor, NewSession())
     other = await teammate(runtime)
     private = await runtime.database.create_session(other, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt=URL, request_key="public-pr",
     ))
     async with runtime.database.sessions.begin() as db:
@@ -175,9 +175,9 @@ async def test_delegated_pr_contexts_are_batched_and_keep_shared_account_restric
 
     await add_connection(runtime, actor)
     parent = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    turn = await runtime.database.submit(actor, parent.id, NewMessage(prompt="Delegate", request_key="parent"))
+    turn = await runtime.admission.submit(actor, parent.id, NewMessage(prompt="Delegate", request_key="parent"))
     await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
+    prepared = await runtime.admission.prepare(turn.id)
     children = [
         await DelegationService(runtime.database).start(prepared.scope, str(i), "Shared task")
         for i in range(3)

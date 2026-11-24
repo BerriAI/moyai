@@ -40,7 +40,7 @@ async def test_retry_recovers_only_the_original_receipt_through_activity_authori
     service = DelegationService(database)
     child = await service.start(prepared.scope, "call", "Original work")
     if change == "guidance":
-        correction = await database.submit(actor, session.id, NewMessage(
+        correction = await database.admission.submit(actor, session.id, NewMessage(
             prompt="New guidance", request_key="correction", mode="asap",
         ))
         await database.steering_receipt(correction.id, "enqueue")
@@ -126,7 +126,7 @@ async def test_temporal_retries_a_lost_admission_reply_after_new_guidance_and_re
             )
             try:
                 await asyncio.wait_for(admitted.wait(), 20)
-                correction = await runtime.database.submit(actor, session.id, NewMessage(
+                correction = await runtime.admission.submit(actor, session.id, NewMessage(
                     prompt="Continue waiting for the already admitted child. Do not create another.",
                     request_key="correction", mode="asap",
                 ))

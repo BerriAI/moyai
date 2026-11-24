@@ -181,12 +181,12 @@ async def test_permission_repair_retries_from_new_call_and_opens_one_pr(publicat
             document.pop("preflight_error")
             row.document = f.product.database.security.seal(document)
         await f.product.database.fail(f.scope.turn_id, "GitHub permission missing")
-        turn = await f.product.database.submit(f.product.actor, f.scope.session_id, NewMessage(
+        turn = await f.product.database.admission.submit(f.product.actor, f.scope.session_id, NewMessage(
             prompt="Permission has been approved; retry the publication", request_key="retry-after-permission-repair",
             connections=[f.grant.id],
         ))
         assert (await f.product.database.claim_next()).id == turn.id
-        f.scope = (await f.product.database.prepare(turn.id)).scope
+        f.scope = (await f.product.database.admission.prepare(turn.id)).scope
         f.ctx = replace(f.ctx, deps=f.scope, run_id=turn.id)
         f.publisher = support.Publications(f.service, f.scope, f.grant)
 

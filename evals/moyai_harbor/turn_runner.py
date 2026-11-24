@@ -16,27 +16,18 @@ from uuid import uuid4
 import boto3
 import httpx
 import sqlalchemy
-from app.credentials import SaveSecret
 from botocore.config import Config
 from cryptography.fernet import Fernet
 from moto.server import ThreadedMotoServer
-from pydantic import SecretStr
-from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
-from pydantic_ai.capabilities.abstract import leaf_capabilities
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
-from temporalio.client import WorkflowFailureError
-from temporalio.testing import WorkflowEnvironment
-
+from moyai.continuations.product_continuation_schema import (
+    install_source_continuation_fence,
+    verify_source_continuation_fence,
+)
 from moyai.models import SlackThread, Turn
 from moyai.product_config import (
     NATIVE_KEY_FORMAT,
     NATIVE_OBJECT_FORMAT,
     load_product_config,
-)
-from moyai.product_continuation_schema import (
-    install_source_continuation_fence,
-    verify_source_continuation_fence,
 )
 from moyai.product_schema import migrate_product_schema
 from moyai.runtime import Runtime, configure
@@ -45,6 +36,15 @@ from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
+from pydantic import SecretStr
+from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
+from pydantic_ai.capabilities.abstract import leaf_capabilities
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
+from temporalio.client import WorkflowFailureError
+from temporalio.testing import WorkflowEnvironment
+
+from app.credentials import SaveSecret
 
 from .slack_fixture import route_slack_clients
 from .workspace import HarborWorkspace
@@ -287,7 +287,7 @@ async def run_runtime_turn(
 async def offered_tool_names(
     runtime: Runtime, turn_id: str, workspace: HarborWorkspace,
 ) -> list[str]:
-    prepared = await runtime.database.prepare(turn_id)
+    prepared = await runtime.admission.prepare(turn_id)
     context = RunContext(
         deps=prepared.scope,
         model=runtime.models[prepared.scope.model],

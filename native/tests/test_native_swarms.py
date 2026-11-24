@@ -36,7 +36,7 @@ async def start(runtime, actor, *, key="one", workers=2, **kwargs):
 async def prepared_team(runtime, actor, **kwargs):
     root, initial = await start(runtime, actor, **kwargs)
     turns = await runtime.database.claim_batch(30)
-    prepared = {turn.session_id: (turn, await runtime.database.prepare(turn.id)) for turn in turns}
+    prepared = {turn.session_id: (turn, await runtime.admission.prepare(turn.id)) for turn in turns}
     view = await runtime.database.swarms.view(actor, root.id)
     workers = [member for member in view["members"] if not member["coordinator"]]
     return root, initial, prepared, workers
@@ -183,7 +183,7 @@ async def test_shared_viewer_cannot_direct_team_or_inspect_private_mission(runti
     with pytest.raises(HTTPException, match="Only the swarm owner"):
         await runtime.database.swarms.control(viewer, root.id, SwarmControl(action="stop", revision=0))
     with pytest.raises(HTTPException, match="Only the swarm owner"):
-        await runtime.database.submit(viewer, root.id, NewMessage(prompt="New goal.", request_key="unauthorized"))
+        await runtime.admission.submit(viewer, root.id, NewMessage(prompt="New goal.", request_key="unauthorized"))
     private, _ = await start(runtime, actor, key="private")
     with pytest.raises(HTTPException):
         await runtime.database.swarms.view(viewer, private.id)
@@ -350,8 +350,8 @@ async def test_authenticated_api_and_sidebar_keep_workers_inside_the_mission(run
 
 async def test_queued_human_edits_and_cancellations_are_not_broadcast_before_admission(runtime, actor):
     root, initial, prepared, _ = await prepared_team(runtime, actor)
-    queued = await runtime.database.submit(actor, root.id, NewMessage(prompt="Old direction.", request_key="edit"))
-    cancelled = await runtime.database.submit(actor, root.id, NewMessage(prompt="Never act on this.", request_key="cancel"))
+    queued = await runtime.admission.submit(actor, root.id, NewMessage(prompt="Old direction.", request_key="edit"))
+    cancelled = await runtime.admission.submit(actor, root.id, NewMessage(prompt="Never act on this.", request_key="cancel"))
     token, csrf = runtime.security.issue_session(actor.id, actor.auth_version)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
@@ -371,7 +371,7 @@ async def test_queued_human_edits_and_cancellations_are_not_broadcast_before_adm
         await runtime.database.settle(turn.id)
     claimed = await runtime.database.claim_batch(3)
     assert [turn.id for turn in claimed] == [queued.id]
-    await runtime.database.prepare(queued.id)
+    await runtime.admission.prepare(queued.id)
     await tick(runtime.database.swarms, MissionRun(root.id, 1))
     after = await runtime.database.swarms.view(actor, root.id)
     guidance = [post for post in after["posts"] if post["kind"] == "human"]
@@ -467,7 +467,7 @@ def test_large_roster_pages_remain_bounded_and_preserve_every_member():
 async def test_agent_board_exposes_separate_roster_pages(runtime, actor):
     root, _ = await start(runtime, actor, workers=61)
     turns = await runtime.database.claim_batch(1)
-    context = await runtime.database.prepare(turns[0].id)
+    context = await runtime.admission.prepare(turns[0].id)
     first = await call(runtime, context, "board", {"after": 0}, "roster-first")
     second = await call(runtime, context, "board", {
         "after": 0, "member_offset": first["next_member_offset"],
@@ -512,7 +512,7 @@ async def test_completion_waits_for_saved_synthesis_and_followup_reuses_team(run
     done = await runtime.database.swarms.view(actor, root.id)
     assert done["status"] == "completed"
     assert any(post["kind"] == "completed" for post in done["posts"])
-    followup = await runtime.database.submit(actor, root.id, NewMessage(prompt="Verify a follow-up.", request_key="followup"))
+    followup = await runtime.admission.submit(actor, root.id, NewMessage(prompt="Verify a follow-up.", request_key="followup"))
     reopened = await runtime.database.swarms.view(actor, root.id)
     assert reopened["status"] == "active" and reopened["generation"] == 2
     assert [m["session_id"] for m in reopened["members"]] == [m["session_id"] for m in done["members"]]
@@ -524,7 +524,7 @@ async def test_human_input_wins_over_pending_completion(runtime, actor):
     await settle_team_workers(runtime, prepared, root.id)
     coordinator = prepared[root.id][1]
     await call(runtime, coordinator, "finish", {"summary": "Original work done."}, "finish")
-    followup = await runtime.database.submit(actor, root.id, NewMessage(prompt="Include this correction.", request_key="correction"))
+    followup = await runtime.admission.submit(actor, root.id, NewMessage(prompt="Include this correction.", request_key="correction"))
     await runtime.database.save_result(
         coordinator.scope, conversation='{"messages":[]}', output="Original result.", workspace=None, usage={},
     )

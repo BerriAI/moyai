@@ -11,12 +11,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import MISSING
 from sqlalchemy import select
 
+from ..product_files import FILE_HEADERS
+from ..product_history import ResponseModel, absent, session_id
+from ..product_routes import ProductContinuationResult
 from .product_continuation import ContinuationRequest
 from .product_continuation_models import ProductContinuationCapture
 from .product_continuation_workspace import fingerprint
-from .product_files import FILE_HEADERS
-from .product_history import ResponseModel, absent, session_id
-from .product_routes import ProductContinuationResult
 
 
 class ProductEnvironmentBuild(ResponseModel):

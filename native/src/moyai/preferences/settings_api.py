@@ -23,20 +23,20 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from temporalio.service import RPCError
 
-from .analytics_service import report as analytics_report
-from .contracts import PreparedTurn, RunScope
+from ..contracts import PreparedTurn, RunScope
+from ..models import Connection, Turn, User, now
+from ..private_instructions import individual, preferences_for_user
+from ..product_auth import ProductUserDirectory, user_directory
+from ..product_secrets import CredentialInventory
+from ..pull_requests import PullRequestService
+from ..reporting.analytics_service import report as analytics_report
+from ..security import password_hash
 from .general_preferences import (
     GeneralPreferences,
     general_preferences,
     instruction_revision,
     preference_document,
 )
-from .models import Connection, Turn, User, now
-from .private_instructions import individual, preferences_for_user
-from .product_auth import ProductUserDirectory, user_directory
-from .product_secrets import CredentialInventory
-from .pull_requests import PullRequestService
-from .security import password_hash
 from .settings_models import SettingAutomation, SettingAutomationRun, SettingSecret, SettingSkill
 from .settings_runtime import automation_readiness, reconcile_schedule
 from .settings_views import (
@@ -59,9 +59,9 @@ from .settings_views import (
 
 Scope = Literal["personal", "shared"]
 CAPABILITIES = {"create": True, "update": True, "delete": True}
-SKILLS_ROOT = Path(__file__).resolve().parent / "resources" / "skills"
+SKILLS_ROOT = Path(__file__).resolve().parents[1] / "resources" / "skills"
 if not SKILLS_ROOT.is_dir():
-    SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
+    SKILLS_ROOT = Path(__file__).resolve().parents[3] / "skills"
 
 
 class Input(BaseModel):

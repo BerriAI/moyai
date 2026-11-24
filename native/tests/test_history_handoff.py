@@ -179,7 +179,7 @@ async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, act
             await asyncio.wait_for(entered.wait(), 45)
             if action in {"steer", "steer_twice", "failed_steer"}:
                 for index in range(2 if action == "steer_twice" else 1):
-                    correction = await runtime.database.submit(actor, session.id, NewMessage(
+                    correction = await runtime.admission.submit(actor, session.id, NewMessage(
                         prompt=f"NEW GUIDANCE {index}", request_key=f"at-handoff-{index}", mode="asap",
                     ))
                     await runtime.database.signal_attempted(correction.id)

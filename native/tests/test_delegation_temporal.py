@@ -77,7 +77,7 @@ async def test_three_children_steer_and_continue_after_worker_replacement(runtim
         workspace=LocalWorkspace(runtime.settings.data_dir.parent / "computer"),
     )
     root = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    parent = await runtime.database.submit(actor, root.id, NewMessage(prompt="SPAWN_THREE", request_key="root"))
+    parent = await runtime.admission.submit(actor, root.id, NewMessage(prompt="SPAWN_THREE", request_key="root"))
     converter = encrypted_converter(runtime.security, runtime.objects)
     async with await WorkflowEnvironment.start_local(
         plugins=[PydanticAIPlugin()], data_converter=converter,
@@ -96,7 +96,7 @@ async def test_three_children_steer_and_continue_after_worker_replacement(runtim
                 assert len(children) == 3
                 child = next(item for item in children if item.tool_call_id == "child-0")
                 initial = await db.get(Turn, child.initial_turn_id)
-            correction = await runtime.database.submit(actor, child.session_id, NewMessage(
+            correction = await runtime.admission.submit(actor, child.session_id, NewMessage(
                 prompt="CORRECTED", request_key="human-correction", mode="asap",
             ))
             assert correction.parent_turn == child.initial_turn_id
@@ -114,7 +114,7 @@ async def test_three_children_steer_and_continue_after_worker_replacement(runtim
             child_history = await runtime.client.get_workflow_handle(initial.workflow_id).fetch_history()
         monkeypatch.setattr(delegation, "enabled", current_enabled)
         async with make_worker(runtime), dispatching(runtime):
-            follow = await runtime.database.submit(actor, child.session_id, NewMessage(
+            follow = await runtime.admission.submit(actor, child.session_id, NewMessage(
                 prompt="FOLLOW_UP", request_key="human-followup",
             ))
             async with asyncio.timeout(30):
@@ -275,7 +275,7 @@ async def test_parent_evidence_reaches_child_model_through_durable_start_and_rep
         workspace=LocalWorkspace(runtime.settings.data_dir.parent / "computer"),
     )
     root = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    parent = await runtime.database.submit(actor, root.id, NewMessage(
+    parent = await runtime.admission.submit(actor, root.id, NewMessage(
         prompt="Original request: preserve release branch october.", request_key="context-root",
     ))
     converter = encrypted_converter(runtime.security, runtime.objects)

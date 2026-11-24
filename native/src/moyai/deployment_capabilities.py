@@ -28,8 +28,8 @@ def capabilities(config: ProductConfig) -> dict:
         ROLE_CONTROL_PROTOCOL,
     )
 
+    from .continuations.product_continuation_restore import RESTORE_CONCURRENCY
     from .fleet_registry import PROTOCOL as ADMISSION_PROTOCOL
-    from .product_continuation_restore import RESTORE_CONCURRENCY
     from .product_start import _settings
     from .worker_adoption import CHECKPOINT_PROTOCOL
     from .worker_adoption import PROTOCOL as ADOPTION_BRIDGE_PROTOCOL

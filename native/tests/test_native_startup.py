@@ -22,7 +22,7 @@ from temporalio.testing import WorkflowEnvironment
 from moyai.agent import make_agent
 from moyai.contracts import NewMessage, NewSession, RunScope
 from moyai.models import Effect, Turn, User
-from moyai.settings_runtime import SETTINGS_ACTIVITIES, SettingsSkills, settings_skill_catalog
+from moyai.preferences.settings_runtime import SETTINGS_ACTIVITIES, SettingsSkills, settings_skill_catalog
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
@@ -92,7 +92,7 @@ async def test_startup_failure_drains_sibling_reads_without_temporal_cancel_spin
         models=runtime.models, workspace=ReadWorkspace(root), skills_directory="skills",
     )
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Synthetic startup probe", request_key="startup-probe"),
     )
     await runtime.database.claim_next()

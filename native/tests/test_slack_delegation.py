@@ -40,7 +40,7 @@ async def test_slack_delegation_keeps_original_authority_and_private_audience(sl
         saved = await db.get(ProductTurnAuthority, child_turn)
         assert saved.actor_id == principal.id
     assert (await database.claim_next()).id == child_turn
-    child_scope = (await database.prepare(child_turn)).scope
+    child_scope = (await database.admission.prepare(child_turn)).scope
     assert child_scope.product_grant == principal.grant
     product.adapter.settings.slack_session_users = "UREVOKED"
     with pytest.raises((HTTPException, PermissionError)):
@@ -63,9 +63,9 @@ async def slack_parent(product):
         db.add(ProductSlackBinding(session_id=parent.id, requester_id=actor.id, team_id="TLOCAL001",
             channel_id="DTEST0001", thread_ts="1792255740.000", started_ts="1792255740.000",
             connection_authority="a" * 64))
-    turn = await database.submit(actor, parent.id, NewMessage(prompt="Inspect the repository.", request_key="parent"))
+    turn = await database.admission.submit(actor, parent.id, NewMessage(prompt="Inspect the repository.", request_key="parent"))
     assert (await database.claim_next()).id == turn.id
-    return actor, parent, await database.prepare(turn.id)
+    return actor, parent, await database.admission.prepare(turn.id)
 
 
 @pytest.mark.parametrize("repository", [False, True])
@@ -75,15 +75,15 @@ async def test_real_slack_child_runs_production_memory_hook(slack_admission, mem
     from pydantic_ai.models.function import FunctionModel
     from test_product_memory import note
 
-    from moyai.product_continuation_workspace import ProductWorkspaceCompatibility
+    from moyai.continuations.product_continuation_workspace import ProductWorkspaceCompatibility
     from moyai.product_memory_store import memory_capability
 
     product = slack_admission
     await product.memory.save(product.principal.grant, note())
     _, _, prepared = await slack_parent(product)
     if repository:
-        from moyai.product_continuation_models import ProductExecutionContext
-        from moyai.product_continuation_workspace import fingerprint
+        from moyai.continuations.product_continuation_models import ProductExecutionContext
+        from moyai.continuations.product_continuation_workspace import fingerprint
         context = {"source_schema": "moyai", "repo_url": "https://github.com/BerriAI/moyai", "repository_id": 123}
         context["context_fingerprint"] = fingerprint(context)
         async with product.database.sessions.begin() as db:
@@ -99,7 +99,7 @@ async def test_real_slack_child_runs_production_memory_hook(slack_admission, mem
         ))
     child = await DelegationService(product.database).start(prepared.scope, "memory-child", "Inspect the UI.")
     turn = await product.database.claim_next()
-    saved = await product.database.prepare(turn.id)
+    saved = await product.database.admission.prepare(turn.id)
     assert saved.scope.product_grant == prepared.scope.product_grant
     assert saved.scope.grants == prepared.scope.grants
     workspace = ProductWorkspaceCompatibility(SimpleNamespace(
@@ -171,8 +171,8 @@ async def test_verified_requester_can_open_and_find_slack_child_but_stale_link_c
 async def test_child_pins_parent_repository_descriptor_at_admission(slack_admission):
     import json
 
-    from moyai.product_continuation_models import ProductExecutionContext
-    from moyai.product_continuation_workspace import fingerprint
+    from moyai.continuations.product_continuation_models import ProductExecutionContext
+    from moyai.continuations.product_continuation_workspace import fingerprint
 
     product = slack_admission
     _, _, prepared = await slack_parent(product)

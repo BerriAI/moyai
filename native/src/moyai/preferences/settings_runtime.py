@@ -3,7 +3,7 @@
 Integration:
 * Add settings_capability(database) alongside the existing bundled Skills(...).
 * Register SETTINGS_WORKFLOWS and SETTINGS_ACTIVITIES in make_worker.
-* Keep the existing dispatcher: scheduled admissions use Database.submit.
+* Keep the existing dispatcher: scheduled admissions use TurnAdmission.submit.
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
     from sqlalchemy import or_, select, update
 
-    from .contracts import NewMessage, RunScope
-    from .database import Database
-    from .models import Turn, now
+    from ..contracts import NewMessage, RunScope
+    from ..database import Database
+    from ..models import Turn, now
     from .settings_models import SettingAutomation, SettingAutomationRun, SettingSkill
 
 SETTINGS_WORKER_PREFIX = "moyai-settings-v1-"
@@ -270,7 +270,7 @@ async def admit_automation(runtime: Any, automation_id: str, occurrence_id: str)
             owner = await runtime.database.user(snapshot["owner_id"])
             if owner.auth_version != snapshot["auth_version"]:
                 raise HTTPException(403, "Automation owner's access changed.")
-            turn = await runtime.database.submit(owner, snapshot["session_id"], NewMessage(
+            turn = await runtime.admission.submit(owner, snapshot["session_id"], NewMessage(
                 prompt=snapshot["prompt"], model=snapshot["model"], connections=snapshot["connections"],
                 request_key=f"automation:{identity}",
             ))
@@ -289,13 +289,13 @@ async def admit_automation(runtime: Any, automation_id: str, occurrence_id: str)
 
 @activity.defn(name="moyai_settings_admit")
 async def settings_admit(automation_id: str, occurrence_id: str) -> dict[str, Any]:
-    from .runtime import current
+    from ..runtime import current
     return await admit_automation(current(), automation_id, occurrence_id)
 
 
 @activity.defn(name="moyai_settings_skill_catalog")
 async def settings_skill_catalog(scope: RunScope) -> list[dict[str, Any]]:
-    from .runtime import current
+    from ..runtime import current
     return await SettingsSkills(current().database).catalog(scope)
 
 

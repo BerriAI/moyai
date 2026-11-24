@@ -32,18 +32,18 @@ from moyai.workflow import TurnWorkflow
 
 
 async def prepared_turn(runtime, actor, session):
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Investigate the task.", request_key=new_id(),
     ))
     assert (await runtime.database.claim_next()).id == turn.id
-    await runtime.database.prepare(turn.id)
+    await runtime.admission.prepare(turn.id)
     await runtime.database.stopped(turn.id)
     return turn
 
 
 async def test_invalid_mentioned_pr_does_not_hide_workspace_resources(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    await runtime.database.submit(actor, session.id, NewMessage(
+    await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="A pasted address: https://github.com/example/repo/pull/" + "1" * 3000,
         request_key=new_id(),
     ))
@@ -209,13 +209,13 @@ async def test_overview_only_uses_public_pr_mentions_and_session_bound_sources(r
     async with sign_in(runtime) as client:
         image = (await client.post("/api/uploads?name=bound.png", content=image_bytes())).json()
         unattached = (await client.post("/api/uploads?name=private.png", content=image_bytes())).json()
-        turn = await runtime.database.submit(actor, session.id, NewMessage(
+        turn = await runtime.admission.submit(actor, session.id, NewMessage(
             prompt="Review https://github.com/BerriAI/Moyai/pull/465 and "
                    "https://github.com/BerriAI/Moyai/pull/466#discussion.",
             attachments=[image["id"]], request_key="public-prs",
         ))
         await runtime.database.claim_next()
-        await runtime.database.prepare(turn.id)
+        await runtime.admission.prepare(turn.id)
         await native_run(runtime, turn.id)
         path = f"/api/sessions/{session.id}"
         response = await client.post(f"{path}/links", json={

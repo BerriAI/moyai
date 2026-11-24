@@ -148,11 +148,11 @@ async def prepare_native_schema(config: ProductConfig, *, apply: bool) -> dict[s
     import asyncpg
     from sqlalchemy.exc import SQLAlchemyError
 
-    from .postgres import create_engine
-    from .product_continuation_schema import (
+    from .continuations.product_continuation_schema import (
         install_source_continuation_fence,
         verify_source_continuation_fence,
     )
+    from .postgres import create_engine
     from .product_schema import migrate_product_schema
     from .product_schema import verify_product_schema as verify_native_schema
     from .stores import NativeStores

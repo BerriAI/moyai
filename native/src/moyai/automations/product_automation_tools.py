@@ -17,8 +17,8 @@ from pydantic_ai.toolsets import FunctionToolset
 from temporalio import workflow
 from temporalio.exceptions import ActivityError, ApplicationError
 
-from .contracts import RunScope
-from .effects import effect_id
+from ..contracts import RunScope
+from ..effects import effect_id
 from .product_automations import (
     AUTOMATION_ID,
     AUTOMATION_MUTATIONS,

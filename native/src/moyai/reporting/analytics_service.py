@@ -13,7 +13,12 @@ from cryptography.fernet import InvalidToken
 from fastapi import HTTPException, Response
 from sqlalchemy import func, or_, select, tuple_
 
-from . import analytics_billing, performance_report
+from moyai.reporting import analytics_billing, performance_report
+
+from ..inference_usage import InferenceUsage
+from ..models import Effect, ProductTurnAuthority, Session, Turn, User
+from ..pr_publications import SHARED_CREATIONS, PRPublication, verified_status
+from ..pull_requests import PullRequestService, parse_pr_url
 from .analytics import (
     ReportRange,
     UsageEvent,
@@ -29,13 +34,9 @@ from .analytics import (
     utc,
 )
 from .analytics_identity import ReportIdentities, report_identities
-from .inference_usage import InferenceUsage
-from .models import Effect, ProductTurnAuthority, Session, Turn, User
-from .pr_publications import SHARED_CREATIONS, PRPublication, verified_status
-from .pull_requests import PullRequestService, parse_pr_url
 
 if TYPE_CHECKING:
-    from .product_billing_routes import ProductBillingService
+    from ..billing.product_billing_routes import ProductBillingService
 
 MAX_TURNS = 10_000
 MAX_INFERENCES = 50_000
@@ -128,7 +129,7 @@ async def undispatched_failures(runtime: Any, db: Any, records: list[Any]) -> se
     """
     if not getattr(runtime.database, "product_authority_enabled", False):
         return set()
-    from .product_inference import ProductInferenceRequest
+    from ..product_inference import ProductInferenceRequest
 
     candidates = {
         row.id for row in records if row.status == "failed"

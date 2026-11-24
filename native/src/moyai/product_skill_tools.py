@@ -18,10 +18,10 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .automations.product_automations import ProductAutomationService
 from .contracts import RunScope
 from .effects import effect_id
 from .models import Effect, Session, now
-from .product_automations import ProductAutomationService
 from .product_identity import ProductPrincipal
 from .product_skill_catalog import ProductSkillCatalog
 

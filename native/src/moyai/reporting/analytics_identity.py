@@ -9,8 +9,8 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select, text
 
-from .models import User
-from .product_billing import IdentityMappings, SourceRef
+from ..billing.product_billing import IdentityMappings, SourceRef
+from ..models import User
 
 MAX_IDENTITIES = 50_000
 

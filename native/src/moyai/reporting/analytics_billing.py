@@ -12,9 +12,9 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
+from ..billing.product_billing import BillingReadError, SourceRef
+from ..billing.product_billing_routes import ProductBillingService, _totals, accounting_failure
 from .analytics_identity import ReportIdentities
-from .product_billing import BillingReadError, SourceRef
-from .product_billing_routes import ProductBillingService, _totals, accounting_failure
 
 
 def identity_map(service: ProductBillingService, identities: ReportIdentities) -> dict[str, str]:

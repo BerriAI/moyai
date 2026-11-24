@@ -34,7 +34,7 @@ async def test_grandchild_page_retains_both_levels_of_ancestry(runtime, actor, a
     service = DelegationService(runtime.database)
     child = await service.start(prepared.scope, "child", "Child work")
     turn = await runtime.database.claim_next()
-    context = await runtime.database.prepare(turn.id)
+    context = await runtime.admission.prepare(turn.id)
     grandchild = await service.start(context.scope, "grandchild", "Nested work")
     page = await listing(runtime, actor, limit=1)
     assert page["sessions"][0]["id"] == grandchild["session_id"]

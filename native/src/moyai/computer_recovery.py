@@ -22,11 +22,11 @@ from sqlalchemy import delete, select, update
 from temporalio.exceptions import ApplicationError
 
 from .computer import DESKTOP_VERSION, ComputerControlResult, authorize, guest_request
+from .continuations.product_continuation_errors import PREPARATION_BLOCKED_TYPE, public_preparation_message
 from .contracts import PreparedTurn, RunScope
 from .lifecycle_tracing import failure, scope_attributes, workspace_attributes
 from .lifecycle_tracing import operation as operation_span
 from .models import ComputerDesktop, ComputerLease, ComputerOperation, Event, Session, Turn, User, new_id
-from .product_continuation_errors import PREPARATION_BLOCKED_TYPE, public_preparation_message
 from .product_requester import answer_actor
 from .workspace_recovery import (
     live_sandbox,

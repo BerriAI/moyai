@@ -224,9 +224,9 @@ async def test_verified_web_slack_reply_keeps_original_grant_and_stale_links_los
     async with f.product.database.sessions.begin() as db:
         actor = await adapter.project_native_user(db, principal)
     f.session = await f.product.database.create_session(actor, NewSession(visibility="shared"))
-    f.turn = await f.product.database.submit(actor, f.session.id, NewMessage(prompt="Signed local Slack task", request_key="slack-task"))
+    f.turn = await f.product.database.admission.submit(actor, f.session.id, NewMessage(prompt="Signed local Slack task", request_key="slack-task"))
     assert (await f.product.database.claim_next()).id == f.turn.id
-    f.scope = (await f.product.database.prepare(f.turn.id)).scope
+    f.scope = (await f.product.database.admission.prepare(f.turn.id)).scope
     await mixed_request(f)
     async with f.product.database.sessions() as db:
         turn = await db.get(Turn, f.turn.id)

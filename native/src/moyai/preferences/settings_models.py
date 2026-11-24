@@ -7,7 +7,7 @@ native schema lock. No ALTER TABLE or legacy database access is required.
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .models import Base, new_id, now
+from ..models import Base, new_id, now
 
 
 class SettingSkill(Base):

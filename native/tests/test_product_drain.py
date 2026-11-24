@@ -171,7 +171,7 @@ async def test_checkpoint_retirement_requires_same_pause_and_saved_work(drain):
     with pytest.raises(ProductDrainError, match="pause changed"):
         await service.require_checkpoint_retirement("other")
     session = await drain.product.database.create_session(drain.product.actor, NewSession())
-    turn = await drain.product.database.submit(
+    turn = await drain.product.database.admission.submit(
         drain.product.actor, session.id, NewMessage(prompt="queued work", request_key="queued"),
     )
     # Queued inputs are preserved; an uncheckpointed running turn is unsafe.
@@ -307,7 +307,7 @@ async def test_included_input_does_not_hide_an_unsettled_effect(drain):
 
 async def accepted_steering(product, session, parent):
     """Use the real admission and durable steering acknowledgement transitions."""
-    child = await product.database.submit(product.actor, session.id, NewMessage(
+    child = await product.database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Keep the same task, with this correction.", request_key="accepted-correction", mode="asap",
     ))
     assert child.status == "steering" and child.parent_turn == parent.id

@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from test_billing_storage import finish_backfill, projection, seed
 from test_product_billing import new_row, old_row
 
-from moyai.billing_storage import BillingStorageError, prepare, rollback, status
-from moyai.billing_storage_cutover import consolidate, verify_consolidated
+from moyai.billing.billing_storage import BillingStorageError, prepare, rollback, status
+from moyai.billing.billing_storage_cutover import consolidate, verify_consolidated
 from moyai.inference_usage import InferenceUsage
 from moyai.product_schema import verify_product_schema
 

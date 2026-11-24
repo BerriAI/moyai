@@ -14,9 +14,11 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from sqlalchemy import delete, text, update
 
+from moyai.automations.product_automation_models import ProductAutomationTurn
 from moyai.contracts import ExecutionContext
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Message, MessageSource, Session, Turn, User
+from moyai.preferences.settings_models import SettingAutomation, SettingAutomationRun
 from moyai.private_history import (
     MAX_CHATS,
     MAX_MESSAGES,
@@ -27,8 +29,6 @@ from moyai.private_history import (
     PrivateHistory,
     PrivateHistoryRecall,
 )
-from moyai.product_automation_models import ProductAutomationTurn
-from moyai.settings_models import SettingAutomation, SettingAutomationRun
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 admitted_product = authority.admitted_product
@@ -215,7 +215,7 @@ async def resume(product, ctx):
         product.actor, ctx.deps.session_id, ctx.deps.turn_id, str(uuid4()), {"approvals": {"write": True}},
     )
     assert (await database.claim_next()).id == turn.id
-    scope = (await database.prepare(turn.id)).scope
+    scope = (await database.admission.prepare(turn.id)).scope
     return RunContext(deps=scope, run_id=scope.root_run_id, model=TestModel(), usage=RunUsage())
 
 

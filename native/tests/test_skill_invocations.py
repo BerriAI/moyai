@@ -10,8 +10,8 @@ from test_native_settings import client_for
 from moyai.activities import prepare_steering, prepare_turn
 from moyai.contracts import NewMessage
 from moyai.models import Message, MessageSource, Turn
+from moyai.preferences.settings_models import SettingSkill
 from moyai.runtime import configure
-from moyai.settings_models import SettingSkill
 from moyai.skill_invocations import has_invocations, references, slack_references
 from moyai.skill_mentions import display_text, marker, mentions
 from moyai.swarm_contracts import NewSwarm
@@ -104,7 +104,7 @@ async def test_slack_asap_uses_the_new_input_selection_not_the_running_turn(runt
     await save_skill(runtime, actor.id, content="New Slack request selected this procedure.")
     from moyai.inbound_events import InboundEvent
     normalized = await runtime.skill_invocations.normalize_slack("Use /team now.", actor, session)
-    correction = await runtime.database.submit(actor, session.id, NewMessage.from_event(InboundEvent(
+    correction = await runtime.admission.submit(actor, session.id, NewMessage.from_event(InboundEvent(
         source="slack", sender_id=actor.id, deduplication_key="new-slack-selection", text=normalized,
         provenance={"skill_references": ["personal:team"]},
     )))
@@ -311,7 +311,7 @@ async def test_preparation_and_asap_steering_load_skills_in_existing_activity_bo
     # The active turn has no invocation; ordinary preparation stays unchanged.
     ordinary = await environment.run(prepare_turn, turn.id)
     assert ordinary.prompt == "Perform the task."
-    correction = await runtime.database.submit(actor, session.id, NewMessage(
+    correction = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="/personal:team inspect", request_key="steer-with-skill", mode="asap",
     ))
     assert correction.parent_turn == turn.id

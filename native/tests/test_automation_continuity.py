@@ -13,12 +13,12 @@ from pydantic_ai.models.function import FunctionModel
 from sqlalchemy import select, update
 from test_product_automation_access import invoke
 
+from moyai.automations.product_automation_models import ProductAutomationTurn
+from moyai.automations.product_automation_tools import CreateRequest
+from moyai.automations.product_automations import Mutation, definition_digest
 from moyai.contracts import NewMessage, NewSession
 from moyai.goal_models import Goal, GoalTurn
 from moyai.models import Message, Session, Turn
-from moyai.product_automation_models import ProductAutomationTurn
-from moyai.product_automation_tools import CreateRequest
-from moyai.product_automations import Mutation, definition_digest
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
 product_database = fixtures.product_database
@@ -29,7 +29,7 @@ automations = fixtures.automations
 async def run_turn(ctx, turn_id, response, *, workspace=None):
     database = ctx.product.database
     assert (await database.claim_next()).id == turn_id
-    prepared = await database.prepare(turn_id)
+    prepared = await database.admission.prepare(turn_id)
     conversation = (ConversationTypeAdapter.validate_json(prepared.conversation) if prepared.conversation
                     else Conversation(conversation_id=prepared.scope.conversation_id))
     result = await Agent(FunctionModel(response)).run(prepared.prompt, conversation=conversation)
@@ -56,7 +56,7 @@ async def test_repeated_runs_deliver_real_previous_messages_only_in_continued_ch
     database = ctx.product.database
     session = await database.create_session(ctx.product.actor, NewSession(visibility=visibility))
     marker = "Context marker " + uuid4().hex
-    human = await database.submit(ctx.product.actor, session.id, NewMessage(prompt=marker, request_key="human"))
+    human = await database.admission.submit(ctx.product.actor, session.id, NewMessage(prompt=marker, request_key="human"))
     workspace = {"provider": "local", "id": "/tmp/synthetic-chat-computer"}
     await run_turn(ctx, human.id, lambda *_: ModelResponse(parts=[TextPart("Original chat answer")]), workspace=workspace)
     row, binding = await fixtures.activate(ctx, session_id=session.id if continued else None, visibility=visibility)
@@ -85,9 +85,9 @@ async def test_repeated_runs_deliver_real_previous_messages_only_in_continued_ch
         assert message.role == "system" and message.author_id is None
         assert await db.get(ProductAutomationTurn, second["turn_id"]) is not None
     if continued:
-        followup = await database.submit(ctx.product.actor, session.id, NewMessage(prompt="Change my automation", request_key="followup"))
+        followup = await database.admission.submit(ctx.product.actor, session.id, NewMessage(prompt="Change my automation", request_key="followup"))
         await database.claim_next()
-        scope = (await database.prepare(followup.id)).scope
+        scope = (await database.admission.prepare(followup.id)).scope
         assert scope.authority.surface == "web"
         assert (await ctx.service.authorize_tool(scope, scope.turn_id)).id == ctx.product.actor.id
 
@@ -158,7 +158,7 @@ async def test_resumed_run_keeps_automation_authority_and_occurrence_identity(au
     row, binding = await fixtures.activate(ctx, session_id=session.id, self_management={"instructions": True}, visibility=visibility)
     first = await fixtures.occurrence(ctx, row, binding)
     await database.claim_next()
-    scope = (await database.prepare(first["turn_id"])).scope
+    scope = (await database.admission.prepare(first["turn_id"])).scope
     with pytest.raises(HTTPException):
         await ctx.service.authorize_tool(scope, scope.turn_id)
     call = ToolCallPart("ask_user_question", {"questions": [{"header": "Color", "question": "Choose a color", "options": [{"label": "Blue"}, {"label": "Green"}]}]}, tool_call_id="color")
@@ -168,12 +168,12 @@ async def test_resumed_run_keeps_automation_authority_and_occurrence_identity(au
                                       output="", workspace=None, usage={}, deferred=True)
     if question:
         reply = NewMessage(prompt="Blue", request_key="answer", reply_to=scope.turn_id)
-        resumed = await database.submit(ctx.product.actor, session.id, reply)
-        assert (await database.submit(ctx.product.actor, session.id, reply)).id == resumed.id
+        resumed = await database.admission.submit(ctx.product.actor, session.id, reply)
+        assert (await database.admission.submit(ctx.product.actor, session.id, reply)).id == resumed.id
     else:
         resumed = await database.resume(ctx.product.actor, session.id, scope.turn_id, "answer", {"approvals": {"write": True}})
     await database.claim_next()
-    resumed_scope = (await database.prepare(resumed.id)).scope
+    resumed_scope = (await database.admission.prepare(resumed.id)).scope
     assert resumed_scope.authority.surface == "automation"
     assert resumed_scope.authority.visibility == visibility
     with pytest.raises(HTTPException):
@@ -198,7 +198,7 @@ async def test_multiple_schedules_in_one_chat_keep_separate_scoped_permissions(a
     await run_turn(ctx, first_run["turn_id"], lambda *_: ModelResponse(parts=[TextPart("Earlier schedule result")]))
     second_run = await fixtures.occurrence(ctx, second, second_binding)
     await database.claim_next()
-    prepared = await database.prepare(second_run["turn_id"])
+    prepared = await database.admission.prepare(second_run["turn_id"])
     async with database.sessions() as db:
         _, source = await ctx.service.access.source(db, prepared.scope)
         assert source.automation_id == second["id"]
@@ -209,8 +209,8 @@ async def test_multiple_schedules_in_one_chat_keep_separate_scoped_permissions(a
 
 @pytest.mark.parametrize("change", ["accounts", "project"])
 async def test_changed_chat_selections_require_explicit_reenable(automations, change):
-    from moyai.product_continuation_models import ProductExecutionContext
-    from moyai.product_continuation_workspace import fingerprint
+    from moyai.continuations.product_continuation_models import ProductExecutionContext
+    from moyai.continuations.product_continuation_workspace import fingerprint
     ctx = automations
     run = await fixtures.tool_context(ctx)
     database = ctx.product.database

@@ -31,7 +31,7 @@ async def test_concurrent_product_ticks_preserve_original_authority(admitted_pro
     database = product.database
     session, initial = await start(product)
     assert (await database.claim_next()).id == initial
-    prepared = await database.prepare(initial)
+    prepared = await database.admission.prepare(initial)
     await database.save_result(
         prepared.scope, conversation='{"messages":[]}', output="First part complete.",
         workspace=None, usage={"input_tokens": 5, "output_tokens": 4},
@@ -85,8 +85,8 @@ async def test_concurrent_ticks_complete_consumed_steering_without_duplicate_wor
     database = product.database
     session, initial = await start(product)
     await database.claim_next()
-    prepared = await database.prepare(initial)
-    correction = await database.submit(product.actor, session.id, NewMessage(
+    prepared = await database.admission.prepare(initial)
+    correction = await database.admission.submit(product.actor, session.id, NewMessage(
         prompt="Verify the checksum too.", request_key="correction",
         mode="asap" if mode == "asap" else "when_idle",
     ))

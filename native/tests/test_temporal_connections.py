@@ -114,7 +114,7 @@ async def test_shared_github_routes_in_activity_and_replays_without_provider_acc
 
     runtime.models["test"].stream_function = stream
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Check out test/second.", request_key="shared-checkout",
         connections=[connection.id for connection in connections],
     ))
@@ -317,7 +317,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
 
     runtime.models["test"].stream_function = stream
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Read the selected repository.", request_key="connection-read",
         connections=[connection.id, unrelated.id],
     ))
@@ -336,7 +336,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             result = await asyncio.wait_for(handle.result(), timeout=60)
             history = await handle.fetch_history()
             if product:
-                followup = await runtime.database.submit(actor, session.id, NewMessage(
+                followup = await runtime.admission.submit(actor, session.id, NewMessage(
                     prompt="Confirm the repository read completed.", request_key="connection-followup",
                     connections=[connection.id, unrelated.id],
                 ))
@@ -437,7 +437,7 @@ async def test_large_connection_catalog_preserves_all_tools_selection_and_replay
 
     runtime.models["test"].stream_function = stream
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Read item 42 on the selected account.", request_key="large-catalog",
         connections=[connection.id for connection in connections],
     ))

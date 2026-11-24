@@ -17,8 +17,8 @@ import test_product_continuation as fixtures
 from sqlalchemy import bindparam, event, text
 from test_history_query_plans import recursive_history
 
+from moyai.continuations.product_continuation_schema import identifier
 from moyai.models import Session
-from moyai.product_continuation_schema import identifier
 from moyai.product_history import SOURCE_FORMAT, Principal, bounded
 from moyai.product_routes import ProductReadService, Reader
 

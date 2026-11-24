@@ -20,12 +20,12 @@ from .storage import ObjectStore, encrypted_converter
 from .stores import NativeStores
 
 if TYPE_CHECKING:
-    from .product_automations import ProductAutomationService
-    from .product_billing_routes import ProductBillingService
+    from .automations.product_automations import ProductAutomationService
+    from .billing.product_billing_routes import ProductBillingService
+    from .continuations.product_continuation import ProductContinuationService
+    from .continuations.product_continuation_workspace import ProductWorkspaceCompatibility
     from .product_config import ProductConfig
     from .product_connections import ProductConnections
-    from .product_continuation import ProductContinuationService
-    from .product_continuation_workspace import ProductWorkspaceCompatibility
     from .product_drain import ProductDrainService
     from .product_inference import ProductInferenceService
     from .product_memory import ProductMemoryService
@@ -85,11 +85,11 @@ class Runtime:
         self.product_continuations: ProductContinuationService | None = None
         self.product_drain: ProductDrainService | None = None
         if self.product is not None:
-            from .product_automations import ProductAutomationService
-            from .product_billing_routes import ProductBillingService
+            from .automations.product_automations import ProductAutomationService
+            from .billing.product_billing_routes import ProductBillingService
+            from .continuations.product_continuation import ProductContinuationService
+            from .continuations.product_continuation_workspace import ProductWorkspaceCompatibility
             from .product_connections import ProductConnections
-            from .product_continuation import ProductContinuationService
-            from .product_continuation_workspace import ProductWorkspaceCompatibility
             from .product_inference import ProductInferenceService
             from .product_memory import ProductMemoryService
             from .product_secrets import ProductSecrets
@@ -152,7 +152,7 @@ class Runtime:
             await self.database.start()
             await self.stores.start()
             if self.product is not None:
-                from .product_continuation_schema import verify_source_continuation_fence
+                from .continuations.product_continuation_schema import verify_source_continuation_fence
                 await verify_source_continuation_fence(
                     self.database.engine,
                     source_schema=self.product.settings.moyai_database_schema,
@@ -198,7 +198,7 @@ class Runtime:
                 # poller types advertise the registered review capability.
                 self.product_memory_review.mark_registered()
             if self.product_automations is not None:
-                from .product_automation_tools import capability
+                from .automations.product_automation_tools import capability
                 product_capabilities.append(capability(self.product_automations))
                 if self.product_skill_catalog is not None:
                     from .product_skill_tools import capability as skill_capability

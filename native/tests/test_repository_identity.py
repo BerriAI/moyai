@@ -14,8 +14,8 @@ from app.repository_identity import (
 from fastapi import HTTPException
 from pydantic_ai.exceptions import ToolFailed
 
+from moyai.continuations.product_continuation_workspace import ProductWorkspaceCompatibility
 from moyai.contracts import Grant, RunScope
-from moyai.product_continuation_workspace import ProductWorkspaceCompatibility
 from moyai.product_identity import ProductGrant
 from moyai.product_memory_store import ProductMemoryStore
 

@@ -10,9 +10,9 @@ from fastapi import HTTPException
 from pydantic_ai.exceptions import ToolFailed
 from sqlalchemy import select, text, update
 
+from moyai.automations.product_automation_models import ProductAutomationBinding as Binding
+from moyai.automations.product_automation_tools import CreateRequest, MigrateRequest
 from moyai.models import Effect, ProductTurnAuthority, Session
-from moyai.product_automation_models import ProductAutomationBinding as Binding
-from moyai.product_automation_tools import CreateRequest, MigrateRequest
 from moyai.product_slack import ProductSlackAuthority
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")

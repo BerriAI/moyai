@@ -28,7 +28,7 @@ async def submissions(database, actor, count):
     turns = []
     for index in range(count):
         session = await database.create_session(actor, NewSession())
-        turns.append(await database.submit(
+        turns.append(await database.admission.submit(
             actor, session.id, NewMessage(prompt=f"Task {index}", request_key=str(uuid4())),
         ))
     return turns
@@ -92,7 +92,7 @@ async def test_dispatch_loop_does_not_poll_sleep_between_full_batches(runtime, a
 
 async def test_batch_reserves_only_one_turn_per_session_and_fills_other_sessions(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    queued = [await runtime.database.submit(
+    queued = [await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Serial", request_key=str(uuid4())),
     ) for _ in range(12)]
     others = await submissions(runtime.database, actor, 5)

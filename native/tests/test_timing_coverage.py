@@ -15,7 +15,7 @@ from moyai.contracts import NewMessage, NewSession
 from moyai.inference_usage import INFERENCE_ACTIVITY, InferenceActivity, InferenceUsageTransport
 from moyai.models import Event, Session, Turn
 from moyai.performance import PREFIX, evidence, record_dispatch
-from moyai.performance_report import cards, timing_view, turn_timing
+from moyai.reporting.performance_report import cards, timing_view, turn_timing
 
 
 @pytest.mark.parametrize("surface", ["web", "slack", "automation"])
@@ -24,24 +24,24 @@ async def test_every_native_admission_has_a_durable_start_and_retries_keep_it(ru
     async with runtime.database.sessions.begin() as db:
         (await db.get(Session, session.id)).surface = surface
     body = NewMessage(prompt="Safe test input", request_key="receipt")
-    turn = await runtime.database.submit(actor, session.id, body)
+    turn = await runtime.admission.submit(actor, session.id, body)
     first = await saved(runtime, turn.id, "received")
     assert first.created_at <= turn.created_at
     assert json.loads(first.content) == {"source": "admission", "surface": surface, "coverage_version": 2}
-    again = await runtime.database.submit(actor, session.id, body, received_at="2099-01-01T00:00:00Z")
+    again = await runtime.admission.submit(actor, session.id, body, received_at="2099-01-01T00:00:00Z")
     assert again.id == turn.id
     assert (await saved(runtime, turn.id, "received")).created_at == first.created_at
 
 
 async def test_preparation_receipt_commits_with_preparation_and_survives_activity_retry(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Safe", request_key="worker"))
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(prompt="Safe", request_key="worker"))
     await runtime.database.claim_next()
-    await runtime.database.prepare(turn.id, picked_up_at=stamp(1))
+    await runtime.admission.prepare(turn.id, picked_up_at=stamp(1))
     # No asynchronous or second best-effort timing transaction is needed.
     assert not runtime.database.performance_tasks
     assert (await saved(runtime, turn.id, "worker")).created_at == stamp(1)
-    await runtime.database.prepare(turn.id, picked_up_at=stamp(9))
+    await runtime.admission.prepare(turn.id, picked_up_at=stamp(9))
     assert (await saved(runtime, turn.id, "worker")).created_at == stamp(1)
 
 

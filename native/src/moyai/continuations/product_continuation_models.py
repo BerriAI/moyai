@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .models import Base, now
+from ..models import Base, now
 
 CONTINUATION_TABLES = frozenset({
     "moyai_product_continuations",

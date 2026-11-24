@@ -82,7 +82,7 @@ def _messages(turn_id: str) -> list[ModelRequest | ModelResponse]:
 
 async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(runtime, actor, monkeypatch, tmp_path):
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Inspect the project.", request_key="debug-trace"),
     )
     async with runtime.database.sessions.begin() as db:
@@ -172,7 +172,7 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
 
 async def test_debug_trace_preserves_malformed_tool_arguments(runtime, actor, monkeypatch):
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="Inspect malformed tool arguments.", request_key="malformed-tool-args"),
     )
     timestamp = datetime(2026, 6, 20, tzinfo=UTC)
@@ -206,7 +206,7 @@ async def test_debug_trace_hides_teammate_work_and_denies_nonmembers(runtime, ac
 
     monkeypatch.setattr("moyai.debug_trace.latest_turn_snapshot", unexpected_snapshot)
     async with member_client(runtime) as (client, teammate):
-        turn = await runtime.database.submit(
+        turn = await runtime.admission.submit(
             teammate, shared.id, NewMessage(prompt="Private teammate request.", request_key="teammate"),
         )
         async with runtime.database.sessions.begin() as db:
@@ -240,7 +240,7 @@ async def test_debug_trace_hides_teammate_work_and_denies_nonmembers(runtime, ac
 
 async def test_debug_trace_uses_saved_assistant_when_no_snapshot_exists(runtime, actor, monkeypatch):
     session = await runtime.database.create_session(actor, NewSession(visibility="private"))
-    turn = await runtime.database.submit(
+    turn = await runtime.admission.submit(
         actor, session.id, NewMessage(prompt="A queued task.", request_key="queued-debug-trace"),
     )
     async with runtime.database.sessions.begin() as db:
@@ -268,7 +268,7 @@ async def test_interrupted_trace_orders_and_deduplicates_delivered_steering(runt
     from moyai.input_identity import identified_prompt
 
     session, turn, _ = active
-    followup = await runtime.database.submit(actor, session.id, NewMessage(
+    followup = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Use the current checkout.", request_key="trace-steering", mode="asap",
     ))
     start = datetime(2026, 10, 19, tzinfo=UTC)

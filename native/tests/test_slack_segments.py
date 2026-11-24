@@ -26,7 +26,7 @@ async def steer(runtime, active, slack):
     session, root, _ = active
     async with runtime.database.sessions() as db:
         actor = await db.get(User, root.actor_id)
-    turn = await runtime.database.submit(actor, session.id, NewMessage(
+    turn = await runtime.admission.submit(actor, session.id, NewMessage(
         prompt="Also verify the word count.", mode="asap", request_key=new_id(),
     ))
     assert turn.parent_turn == root.id

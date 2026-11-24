@@ -23,7 +23,7 @@ from moyai.agent import PACKAGE_ROOT, Authority, HarnessActivityContext, Startup
 from moyai.bundled_skills import bundled_skill_catalog
 from moyai.context import ContextSource, SessionContext
 from moyai.contracts import RunScope
-from moyai.settings_runtime import settings_capability
+from moyai.preferences.settings_runtime import settings_capability
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity

@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .security import Security
+from ..security import Security
 
 INSTRUCTION_LIMIT = 4000
 
