@@ -14,9 +14,9 @@ from moyai.models import ComputerDesktop, Effect, new_id
 from moyai.tools.desktop import DesktopAction, desktop_capability
 
 
-async def invocation(runtime, scope):
+async def invocation(runtime, scope, command=None):
     ctx = SimpleNamespace(deps=scope, run_id=scope.turn_id, tool_call_id=new_id(), workspace=workspace())
-    command = DesktopAction(action="click", app="Test", observation=new_id(), element_index="4")
+    command = command or DesktopAction(action="click", app="Test", observation=new_id(), element_index="4")
     call = ToolCallPart("desktop_action", {"command": command}, tool_call_id=ctx.tool_call_id)
     definition = ToolDefinition(name="desktop_action")
     receipts = EffectReceipts(runtime.database)
@@ -130,3 +130,41 @@ def test_desktop_requires_observed_targets(args):
 def test_desktop_observations_do_not_reserve_external_writes():
     assert requires_receipt(ToolDefinition(name="desktop_action"))
     assert not requires_receipt(ToolDefinition(name="desktop_read"))
+
+
+async def test_recording_uses_native_receipts_and_a_server_selected_identity(runtime, actor, monkeypatch):
+    _, scope = await running_browser(runtime, actor)
+    dispatched = []
+
+    async def guest(_workspace, body):
+        dispatched.append(body["command"])
+        return {"status": "recording", "recording": body["command"]["recording"]}
+
+    monkeypatch.setattr("moyai.browser.guest_request", guest)
+    items = await invocation(runtime, scope, DesktopAction(action="record", seconds=10, recording="f" * 64))
+    value = await items[-1]["desktop_action"](items[0], items[1])
+    await finish(items, value)
+    identity = dispatched[0]["recording"]
+    assert identity != "f" * 64 and len(identity) == 64
+    assert dispatched[0]["seconds"] == 10
+    result = await items[-1]["desktop_read"](items[0], recording=identity)
+    assert result.return_value["status"] == "recording"
+    assert dispatched[-1]["action"] == "recording_status"
+
+
+async def test_human_control_blocks_record_start_and_stop(runtime, actor, monkeypatch):
+    session, scope = await running_browser(runtime, actor)
+    await lease(runtime, session.id, actor, "claim", new_id())
+    dispatched = []
+
+    async def guest(_workspace, body):
+        dispatched.append(body)
+        return {}
+
+    monkeypatch.setattr("moyai.browser.guest_request", guest)
+    for command in [DesktopAction(action="record"), DesktopAction(action="stop_recording", recording="a" * 64)]:
+        items = await invocation(runtime, scope, command)
+        value = await items[-1]["desktop_action"](items[0], command)
+        with pytest.raises(ToolFailed, match="person has control"):
+            await finish(items, value)
+    assert not dispatched
