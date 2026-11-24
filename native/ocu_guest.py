@@ -172,6 +172,58 @@ class LinuxInput:
         self.runtime = runtime
         self.operation = runtime.perform_operation
         self.snapshot = runtime.build_snapshot
+        self.value = runtime.element_value
+        self.action_window = None
+
+    def element_value(self, node, **kwargs):
+        value = self.value(node, **kwargs)
+        r = self.runtime
+        if r.node_role(node) in {"check box", "radio button", "toggle button"}:
+            state = "mixed" if r.state_contains(node, r.Atspi.StateType.INDETERMINATE) else (
+                "checked" if r.state_contains(node, r.Atspi.StateType.CHECKED) else "unchecked"
+            )
+            value = f"{value} [{state}]".strip()
+        return value
+
+    def guarded_pointer(self, send):
+        def dispatch(*args, **kwargs):
+            if self.action_window is None or not self.runtime.state_contains(
+                self.action_window, self.runtime.Atspi.StateType.ACTIVE,
+            ):
+                raise InputNotDispatched("Activate the requested app by clicking its frame before sending pointer input.")
+            return send(*args, **kwargs)
+        return dispatch
+
+    def activate(self, app, window):
+        """Activate one exact visible X11 window under the observed AT-SPI app."""
+        r = self.runtime
+        pid, title = r.node_pid(app), r.node_name(window)
+        if pid <= 0 or not title:
+            raise InputNotDispatched("The observed app has no unambiguous window identity.")
+        search = subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
+            check=False, capture_output=True, text=True, timeout=3,
+        )
+        identities = search.stdout.split()
+        if search.returncode or len(identities) > 16:
+            raise InputNotDispatched("The requested app's visible windows could not be resolved.")
+        matches = []
+        for identity in identities:
+            if not identity.isdigit():
+                continue
+            name = subprocess.run(
+                ["xdotool", "getwindowname", identity], check=False, capture_output=True, text=True, timeout=3,
+            )
+            if name.returncode == 0 and name.stdout.rstrip("\n") == title:
+                matches.append(identity)
+        if len(matches) != 1:
+            raise InputNotDispatched("The requested app does not have one matching visible window.")
+        subprocess.run(["xdotool", "windowactivate", "--sync", matches[0]], check=True, timeout=3)
+        for _ in range(20):
+            if r.state_contains(window, r.Atspi.StateType.ACTIVE):
+                return
+            time.sleep(.05)
+        raise RuntimeError("The app did not confirm activation. Inspect before repeating it.")
 
     def nodes(self, window, predicate):
         return [node for node in self.runtime.iter_all(window) if predicate(node)]
@@ -275,19 +327,31 @@ class LinuxInput:
     def perform(self, operation):
         r = self.runtime
         action = operation.get("tool")
+        if action not in {"list_apps", "get_app_state"}:
+            _, self.action_window = r.main_window(r.resolve_app(operation["app"]))
         if action not in {"type_text", "press_key", "scroll", "click"}:
             return self.operation(operation)
         app = r.resolve_app(operation["app"])
         _, window = r.main_window(app)
         element = r.find_element(app, operation.get("element"))
         if action == "click":
-            if (element is None or not self.editable(element)
-                    or operation.get("mouse_button", "left") != "left"
+            if (operation.get("mouse_button", "left") != "left"
                     or operation.get("click_count", 1) != 1):
                 return self.operation(operation)
-            # GTK entries expose "activate", which can submit a form. Clicking
-            # an editable element must focus it, not invoke that default action.
-            self.confirmed(r.Atspi.Component.grab_focus(element.get_component_iface()))
+            if element == window:
+                self.activate(app, window)
+            elif element is not None and r.node_role(element) == "page tab":
+                parent = element.get_parent()
+                if not r.supports_interface(parent, "Selection"):
+                    raise InputNotDispatched("This tab does not expose selection; activate the app and inspect it.")
+                self.confirmed(r.Atspi.Selection.select_child(
+                    parent.get_selection_iface(), element.get_index_in_parent(),
+                ))
+            elif element is not None and self.editable(element):
+                # GTK entries expose "activate", which can submit a form.
+                self.confirmed(r.Atspi.Component.grab_focus(element.get_component_iface()))
+            else:
+                return self.operation(operation)
         elif action == "type_text":
             self.type_text(window, operation.get("text", ""))
         elif action == "press_key":
@@ -304,6 +368,14 @@ class LinuxInput:
         result = self.snapshot(*args, **kwargs)
         r = self.runtime
         _, window = r.main_window(r.resolve_app(args[0]))
+        if not r.state_contains(window, r.Atspi.StateType.ACTIVE):
+            # Pinned OCU crops the root display, not the window's own pixels.
+            # A covering app would otherwise be mislabeled as this app.
+            result["screenshotPngBase64"] = None
+            result["focusedSummary"] = (
+                "Requested window is inactive. Its screenshot is unavailable because another app may cover it. "
+                "Click this window's frame element to activate it, then read a new screenshot."
+            )
         focused = self.nodes(window, lambda node: r.state_contains(node, r.Atspi.StateType.FOCUSED))
         if len(focused) == 1 and self.editable(focused[0]):
             node = focused[0]
@@ -339,6 +411,9 @@ def linux_runtime(script, operation):
     adapter = LinuxInput(runtime)
     runtime.perform_operation = adapter.perform
     runtime.build_snapshot = adapter.build_snapshot
+    runtime.element_value = adapter.element_value
+    runtime.send_mouse_click = adapter.guarded_pointer(runtime.send_mouse_click)
+    runtime.send_drag = adapter.guarded_pointer(runtime.send_drag)
     sys.argv = [script, operation]
     try:
         runtime.main()

@@ -70,7 +70,7 @@ def runtime():
         EditableText=NS(delete_text=Mock(side_effect=delete), insert_text=Mock(side_effect=insert)),
         Component=NS(grab_focus=Mock(return_value=True)),
         StateType=NS(FOCUSED="focused", EDITABLE="editable", ACTIVE="active", VERTICAL="vertical",
-                     HORIZONTAL="horizontal"),
+                     HORIZONTAL="horizontal", CHECKED="checked", INDETERMINATE="mixed"),
         ModifierType=NS(CONTROL=2, SHIFT=0),
         KeySynthType=NS(LOCKMODIFIERS="lock", UNLOCKMODIFIERS="unlock", SYM="symbol"),
         generate_keyboard_event=Mock(return_value=True),
@@ -80,6 +80,8 @@ def runtime():
         supports_interface=lambda node, _interface: node.editable,
         perform_operation=Mock(return_value={"ok": True}),
         build_snapshot=Mock(return_value={"focusedSummary": "text Target"}),
+        element_value=lambda _node, **_kwargs: "",
+        node_role=lambda node: "frame" if node is window else "text",
         resolve_app=lambda _name: window, main_window=lambda _app: (0, window),
         find_element=lambda _app, record: record,
         KEY_ALIASES={"enter": "Return"}, MODIFIER_BITS={"ctrl": "CONTROL", "shift": "SHIFT"},
@@ -191,3 +193,73 @@ def test_scroll_changes_requested_scrollbar_without_sending_keys(runtime):
     assert bar.position == 190
     assert runtime.target.text == "abcd"
     runtime.Atspi.generate_keyboard_event.assert_not_called()
+
+
+def test_inactive_window_never_releases_another_apps_pixels(runtime):
+    runtime.window.active = False
+    runtime.build_snapshot.return_value = {"screenshotPngBase64": "pixels-from-covering-app"}
+    state = guest.LinuxInput(runtime).build_snapshot("target")
+    assert state["screenshotPngBase64"] is None
+    assert "inactive" in state["focusedSummary"]
+    assert "frame" in state["focusedSummary"]
+
+
+@pytest.mark.parametrize(("checked", "mixed", "value"), [
+    (False, False, "[unchecked]"), (True, False, "[checked]"), (True, True, "[mixed]"),
+])
+def test_checkbox_observations_include_actual_state(runtime, checked, mixed, value):
+    runtime.node_role = lambda _node: "check box"
+    runtime.target.checked, runtime.target.mixed = checked, mixed
+    assert guest.LinuxInput(runtime).element_value(runtime.target) == value
+
+
+def test_global_pointer_cannot_hit_a_covering_app(runtime):
+    adapter = guest.LinuxInput(runtime)
+    adapter.action_window = runtime.window
+    runtime.window.active = False
+    send = Mock()
+    with pytest.raises(guest.InputNotDispatched, match="Activate"):
+        adapter.guarded_pointer(send)(10, 20)
+    send.assert_not_called()
+    runtime.window.active = True
+    adapter.guarded_pointer(send)(10, 20)
+    send.assert_called_once_with(10, 20)
+
+
+def test_page_tab_uses_its_own_selection_interface(runtime):
+    runtime.node_role = lambda node: "page tab" if node is runtime.target else "page tab list"
+    runtime.window.get_selection_iface = lambda: runtime.window
+    runtime.Atspi.Selection = NS(select_child=Mock(return_value=True))
+    guest.LinuxInput(runtime).perform({
+        "tool": "click", "app": "target", "element": runtime.target, "skip_read_back": True,
+    })
+    runtime.Atspi.Selection.select_child.assert_called_once_with(runtime.window, 1)
+    runtime.perform_operation.assert_not_called()
+
+
+@pytest.mark.parametrize("matches", [0, 1, 2])
+def test_activation_requires_one_window_for_exact_pid_and_title(runtime, monkeypatch, matches):
+    runtime.node_pid = lambda _app: 42
+    runtime.node_name = lambda _window: "Target"
+    calls = []
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if argv[1] == "search":
+            return NS(stdout="10\n11\n", returncode=0)
+        if argv[1] == "getwindowname":
+            return NS(stdout="Target\n" if int(argv[2]) - 10 < matches else "Other\n", returncode=0)
+        runtime.window.active = True
+        return NS(stdout="", returncode=0)
+
+    monkeypatch.setattr(guest.subprocess, "run", command)
+    runtime.window.active = False
+    adapter = guest.LinuxInput(runtime)
+    if matches == 1:
+        adapter.activate(runtime.window, runtime.window)
+        assert calls[-1] == ["xdotool", "windowactivate", "--sync", "10"]
+    else:
+        with pytest.raises(guest.InputNotDispatched, match="one matching"):
+            adapter.activate(runtime.window, runtime.window)
+        assert not any("windowactivate" in call for call in calls)
+    assert calls[0] == ["xdotool", "search", "--onlyvisible", "--pid", "42"]
