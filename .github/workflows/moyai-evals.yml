@@ -1,5 +1,6 @@
 name: Moyai agent evals
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
@@ -18,6 +19,7 @@ jobs:
         run: docker run --rm --network none -v "$PWD:/repo:ro" moyai-desktop-test python /repo/evals/desktop/smoke.py
   moyai-agent-evals:
     name: Moyai agent evals
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -33,33 +35,37 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      LITELLM_API_BASE: ${{ secrets.MOYAI_EVAL_LITELLM_API_BASE }}
-      LITELLM_API_KEY: ${{ secrets.MOYAI_EVAL_LITELLM_API_KEY }}
-      MOYAI_EVAL_AGENT_MODEL: ${{ vars.MOYAI_EVAL_AGENT_MODEL }}
-      MOYAI_EVAL_JUDGE_MODEL: ${{ vars.MOYAI_EVAL_JUDGE_MODEL }}
+      LITELLM_API_BASE: ${{ vars.MOYAI_EVAL_GATEWAY_URL || secrets.MOYAI_EVAL_LITELLM_API_BASE }}
+      LITELLM_API_KEY: ${{ secrets.MOYAI_EVAL_GATEWAY_KEY || secrets.MOYAI_EVAL_LITELLM_API_KEY }}
+      MOYAI_EVAL_AGENT_MODEL: ${{ vars.MOYAI_EVAL_AGENT_MODEL || vars.MOYAI_EVAL_MODEL }}
+      MOYAI_EVAL_JUDGE_MODEL: ${{ vars.MOYAI_EVAL_JUDGE_MODEL || vars.MOYAI_EVAL_MODEL || vars.MOYAI_EVAL_AGENT_MODEL }}
       MOYAI_TEST_POSTGRES: postgresql://postgres:eval-only@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4.4.0
       - name: Check eval configuration
-        id: eval-config
         run: |
-          if [[ -z "$LITELLM_API_BASE" || -z "$LITELLM_API_KEY" ]]; then
-            echo "::notice::Moyai agent eval skipped because the LiteLLM secrets are not configured"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          missing=0
+          for name in LITELLM_API_BASE LITELLM_API_KEY MOYAI_EVAL_AGENT_MODEL MOYAI_EVAL_JUDGE_MODEL; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Required model evaluation setting is missing: $name"
+              missing=1
+            fi
+          done
+          if [[ "$missing" == 1 ]]; then
+            echo "Model quality is **not evaluated**: required configuration is missing. See evals/README.md." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
-          if [[ -z "$MOYAI_EVAL_AGENT_MODEL" || -z "$MOYAI_EVAL_JUDGE_MODEL" ]]; then
-            echo "::notice::Moyai agent eval skipped because the model variables are not configured"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "Model evaluations configured for commit \`$GITHUB_SHA\`."
+            echo "- Agent: \`$MOYAI_EVAL_AGENT_MODEL\`"
+            echo "- Judge: \`$MOYAI_EVAL_JUDGE_MODEL\`"
+            echo "- Gate: at least 2 successful trials out of 3 for every task."
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: astral-sh/setup-uv@v6.8.0
-        if: steps.eval-config.outputs.enabled == 'true'
         with:
           python-version: '3.13'
       - name: Run Harbor evaluation
-        if: steps.eval-config.outputs.enabled == 'true'
+        id: evaluation
         env:
           PYTHONPATH: .:evals:native/src:native/tests
         run: |
@@ -74,7 +80,7 @@ jobs:
               -k 3 -n 1 -o evals/jobs -y
           done
       - name: Report eval result
-        if: always() && steps.eval-config.outputs.enabled == 'true'
+        if: always() && steps.evaluation.outcome != 'skipped'
         run: |
           python - <<'PY'
           import os
@@ -115,9 +121,18 @@ jobs:
               raise SystemExit(1)
           PY
       - name: Upload Harbor jobs
-        if: always() && steps.eval-config.outputs.enabled == 'true'
+        if: always() && steps.evaluation.outcome != 'skipped'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: moyai-harbor-jobs
           path: evals/jobs/
-          if-no-files-found: warn
+          if-no-files-found: error
+  fork-evaluation-notice:
+    name: Model evaluation unavailable for fork
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain model evaluation coverage
+        run: |
+          echo "::notice::Model evaluations did not run: fork pull requests cannot access evaluation credentials."
+          echo "Model quality is **not evaluated** for this fork PR. The model evaluation job is skipped. A maintainer must review the changes before running them on a trusted branch; deterministic checks do not establish model quality." >> "$GITHUB_STEP_SUMMARY"
