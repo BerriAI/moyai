@@ -442,6 +442,8 @@ class SkillLearningService:
                 source = next((item for item in sources if item["id"] == proposal.source_id), None)
                 if source is None or proposal.source_quote not in source["content"]:
                     raise ValueError("A learned skill requires an exact supporting source quote.")
+                if not source["id"].startswith("user:"):
+                    raise ValueError("A learned skill requires supporting evidence authored by the requester.")
                 check_content(proposal.instructions)
                 check_content(proposal.description)
                 check_content(proposal.source_quote)
@@ -498,6 +500,7 @@ class SkillLearningService:
                     "key": proposal.key, "repository": repository, "source_session_id": scope.session_id,
                     "source_turn_id": scope.turn_id, "source_id": proposal.source_id,
                     "source_quote": proposal.source_quote, "captured_at": stamp,
+                    "evidence_kind": "requester_statement",
                 }
                 if learned is None:
                     learned = LearnedSkill(skill_id=identity, scope_key=job.scope_key, topic_hash=topic)
