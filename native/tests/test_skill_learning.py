@@ -17,7 +17,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.profiles import ModelProfile
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 from test_product_authority import demote
@@ -26,7 +26,7 @@ from test_product_memory_store import memory_execution
 from moyai.context.learned_skills import LearnedSkills
 from moyai.contracts import NewMessage, NewSession
 from moyai.inference_usage import InferenceActivity
-from moyai.models import MessageSource, Session, User
+from moyai.models import Message, MessageSource, Session, User
 from moyai.product_drain_models import ProductDrainState
 from moyai.product_memory_review import ReviewAuthority
 from moyai.product_skill_catalog import ProductSkillCatalog
@@ -96,8 +96,8 @@ async def enable(product, kind="organization"):
     )
 
 
-async def completed(product, *, private=False, surface="web"):
-    session, turn, scope, _ = await memory_execution(product, private=private, surface=surface)
+async def completed(product, *, private=False, surface="web", prompt=ANSWER):
+    session, turn, scope, _ = await memory_execution(product, private=private, surface=surface, prompt=prompt)
     assert await product.database.save_result(
         scope, conversation='{"messages":[]}', output=ANSWER, workspace=None, usage={},
     )
@@ -105,7 +105,9 @@ async def completed(product, *, private=False, surface="web"):
     return session, turn, scope
 
 
-def review(turn_id, **changes):
+async def review(product, turn_id, **changes):
+    async with product.database.sessions() as db:
+        message_id = await db.scalar(select(Message.id).where(Message.turn_id == turn_id, Message.role == "user"))
     return SkillReview(skills=[SkillProposal(**{
         "key": "acorn-importer-reload", "description": "Verify changed fixtures in the Acorn importer tests.",
         "instructions": (
@@ -113,7 +115,7 @@ def review(turn_id, **changes):
             "then run pytest tests/importer/test_reload.py and verify the result. "
             "The fixture cache can otherwise hide changes."
         ),
-        "source_id": f"answer:{turn_id}", "source_quote": ANSWER[:140], **changes,
+        "source_id": f"user:{message_id}", "source_quote": ANSWER[:140], **changes,
     })])
 
 
@@ -137,8 +139,8 @@ async def test_learned_skill_is_canonical_scoped_encrypted_and_idempotent(learni
     prepared = await product.learning.prepare(turn.id)
     assert prepared.scope.surface == "skill_learning"
     assert prepared.scope.product_grant == scope.product_grant
-    assert await product.learning.apply(prepared, review(turn.id)) == 1
-    assert await product.learning.apply(prepared, review(turn.id)) == 1
+    assert await product.learning.apply(prepared, await review(product, turn.id)) == 1
+    assert await product.learning.apply(prepared, await review(product, turn.id)) == 1
     listing = await product.catalog.listing(product.principal.grant, shared=not private)
     skill = listing["skills"][0]
     assert skill["scope"] == ("personal" if private else "organization")
@@ -146,6 +148,8 @@ async def test_learned_skill_is_canonical_scoped_encrypted_and_idempotent(learni
     assert "pytest tests/importer/test_reload.py" in detail["instructions"]
     provenance = json.loads(await product.catalog.file(product.principal.grant, skill["id"], "learning-source.json"))
     assert provenance["source_session_id"] == session.id and provenance["source_quote"] == ANSWER[:140]
+    assert provenance["source_id"].startswith("user:")
+    assert provenance["evidence_kind"] == "requester_statement"
     async with product.database.sessions() as db:
         job = await db.get(SkillLearningJob, turn.id)
         learned = await db.get(LearnedSkill, skill["id"])
@@ -154,7 +158,7 @@ async def test_learned_skill_is_canonical_scoped_encrypted_and_idempotent(learni
     if private:
         assert not (await product.catalog.listing(product.principal.grant, shared=True))["skills"]
     with pytest.raises(PermissionError):
-        await product.learning.apply(replace(prepared, scope=replace(prepared.scope, actor_id="someone-else")), review(turn.id))
+        await product.learning.apply(replace(prepared, scope=replace(prepared.scope, actor_id="someone-else")), await review(product, turn.id))
 
 
 @pytest.mark.parametrize("change", ["disable", "visibility", "delete", "revoke", "edit", "archive"])
@@ -162,7 +166,7 @@ async def test_inflight_learning_cannot_overwrite_changed_authority_or_manual_wo
     product = learning
     await enable(product)
     _, first, _ = await completed(product)
-    assert await product.learning.apply(await product.learning.prepare(first.id), review(first.id)) == 1
+    assert await product.learning.apply(await product.learning.prepare(first.id), await review(product, first.id)) == 1
     session, second, _ = await completed(product)
     prepared = await product.learning.prepare(second.id)
     if change == "disable":
@@ -181,7 +185,7 @@ async def test_inflight_learning_cannot_overwrite_changed_authority_or_manual_wo
             else:
                 await db.execute(update(User).where(User.id == product.user_id).values(auth_version=2))
     with pytest.raises(HTTPException if change == "revoke" else PermissionError):
-        await product.learning.apply(prepared, review(second.id))
+        await product.learning.apply(prepared, await review(product, second.id))
     async with product.source.connect() as db:
         assert await db.scalar(text("SELECT count(*) FROM moyai.skill_audit")) == 1
 
@@ -191,7 +195,7 @@ async def test_manual_control_freezes_the_topic_for_future_learning(learning, mu
     product = learning
     await enable(product)
     _, first, _ = await completed(product)
-    await product.learning.apply(await product.learning.prepare(first.id), review(first.id))
+    await product.learning.apply(await product.learning.prepare(first.id), await review(product, first.id))
     async with product.source.begin() as db:
         if mutation == "delete":
             await db.execute(text("DELETE FROM moyai.skills"))
@@ -201,7 +205,7 @@ async def test_manual_control_freezes_the_topic_for_future_learning(learning, mu
             await db.execute(text("UPDATE moyai.skills SET revision=revision+1,archived=:archived"),
                              {"archived": int(mutation == "archive")})
     _, second, _ = await completed(product)
-    assert await product.learning.apply(await product.learning.prepare(second.id), review(second.id)) == 0
+    assert await product.learning.apply(await product.learning.prepare(second.id), await review(product, second.id)) == 0
     async with product.source.connect() as db:
         assert await db.scalar(text("SELECT count(*) FROM moyai.skill_audit")) == 1
 
@@ -211,7 +215,7 @@ async def test_later_evidence_updates_one_learned_skill_and_preserves_versions(l
     await enable(product)
     for index in range(2):
         _, turn, _ = await completed(product)
-        proposed = review(turn.id)
+        proposed = await review(product, turn.id)
         if index:
             proposed.skills[0].instructions += " Check the fixture reload test result before continuing."
         assert await product.learning.apply(await product.learning.prepare(turn.id), proposed) == 1
@@ -227,9 +231,40 @@ async def test_invalid_quote_or_secret_never_publishes(learning):
     _, turn, _ = await completed(product)
     prepared = await product.learning.prepare(turn.id)
     with pytest.raises(ValueError, match="supporting source"):
-        await product.learning.apply(prepared, review(turn.id, source_quote="This evidence was not actually in the source."))
+        await product.learning.apply(prepared, await review(product, turn.id, source_quote="This evidence was not actually in the source."))
     with pytest.raises(HTTPException):
-        await product.learning.apply(prepared, review(turn.id, instructions="Use api_key=synthetic_sensitive_value to connect to the test service."))
+        await product.learning.apply(prepared, await review(product, turn.id, instructions="Use api_key=synthetic_sensitive_value to connect to the test service."))
+    assert not (await product.catalog.listing(product.principal.grant))["skills"]
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_answer_claim_cannot_be_used_as_independent_success_evidence(learning, confirmed):
+    product = learning
+    await enable(product)
+    _, turn, _ = await completed(
+        product, prompt=ANSWER if confirmed else "Please investigate the Acorn importer failure.",
+    )
+    prepared = await product.learning.prepare(turn.id)
+    # The exact quote exists in the answer, including when the same text also
+    # appears in a user message. The cited source must itself be requester-authored.
+    proposal = await review(product, turn.id, source_id=f"answer:{turn.id}")
+    with pytest.raises(ValueError, match="authored by the requester"):
+        await product.learning.apply(prepared, proposal)
+    assert not (await product.catalog.listing(product.principal.grant))["skills"]
+    async with product.source.connect() as db:
+        assert await db.scalar(text("SELECT count(*) FROM moyai.skill_audit")) == 0
+    if confirmed:
+        assert await product.learning.apply(prepared, await review(product, turn.id)) == 1
+
+
+async def test_agent_claim_cannot_be_relabelled_as_a_requester_quote(learning):
+    product = learning
+    await enable(product)
+    _, turn, _ = await completed(product, prompt="Please investigate the Acorn importer failure.")
+    with pytest.raises(ValueError, match="supporting source"):
+        await product.learning.apply(
+            await product.learning.prepare(turn.id), await review(product, turn.id),
+        )
     assert not (await product.catalog.listing(product.principal.grant))["skills"]
 
 
@@ -251,7 +286,7 @@ async def test_competing_sessions_do_not_duplicate_a_topic(learning):
     _, b, _ = await completed(product)
     pa, pb = await product.learning.prepare(a.id), await product.learning.prepare(b.id)
     results = await asyncio.gather(
-        product.learning.apply(pa, review(a.id)), product.learning.apply(pb, review(b.id)), return_exceptions=True,
+        product.learning.apply(pa, await review(product, a.id)), product.learning.apply(pb, await review(product, b.id)), return_exceptions=True,
     )
     assert any(result == 1 for result in results)
     async with product.source.connect() as db:
@@ -348,7 +383,7 @@ async def test_recall_requires_relevance_repository_and_authorized_audience(lear
     repository = AsyncMock(return_value="https://github.com/example/acorn")
     monkeypatch.setattr(product.learning, "_repository", repository)
     _, old, _ = await completed(product, private=personal)
-    await product.learning.apply(await product.learning.prepare(old.id), review(old.id))
+    await product.learning.apply(await product.learning.prepare(old.id), await review(product, old.id))
     source = LearnedSkills(product.learning)
 
     async def context(prompt, private):
@@ -382,11 +417,12 @@ async def test_native_learning_temporal_execution_and_history_replay(learning, m
     await enable(product)
     _, turn, _ = await completed(product)
     calls = []
+    proposal = await review(product, turn.id)
 
     def respond(messages, info):
         calls.append(messages)
         assert not info.function_tools
-        return ModelResponse(parts=[TextPart(review(turn.id).model_dump_json())])
+        return ModelResponse(parts=[TextPart(proposal.model_dump_json())])
 
     product.learning.configure({"test": FunctionModel(respond, profile=ModelProfile(supports_json_schema_output=True))})
     runtime = product.learning.runtime

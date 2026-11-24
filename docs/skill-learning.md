@@ -15,14 +15,19 @@ not learning sources. Slack audiences can be narrower than an organization;
 automatic publication does not widen them.
 
 After the chat becomes idle, a durable background job asks the configured model
-for at most two procedures supported by the requester's authored messages and
-the visible final answer. It can choose to save nothing. It does not inspect
+for at most two procedures supported by a concrete correction or confirmation
+authored by the requester. The visible final answer supplies context but cannot
+serve as the supporting evidence, even if it claims tests passed. A generic
+acknowledgment does not confirm a procedure. It can choose to save nothing. It does not inspect
 private model history, recalled memories, hidden tool output or attachments.
 The model has no tools. Skills include when to use a procedure, its narrow
 scope, steps, reasons and verification. The original turn's authority, current
 settings, source quotes and skill revisions are checked again before publication.
-Source matching establishes provenance; it does not independently rerun tests or
-certify that a reported result is true.
+The publication boundary requires an exact quote from a current requester
+message and records `evidence_kind: requester_statement`. This establishes
+authorship; it does not independently rerun tests or certify the statement's truth.
+The model still judges whether the statement is a meaningful correction or
+confirmation. Prior learned records are not retroactively certified or removed.
 
 Learned skills appear in the existing library and `/` picker. The
 `learning-source.json` supporting file records the source session, turn, exact

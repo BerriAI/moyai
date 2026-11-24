@@ -40,7 +40,10 @@ admitted_product = memory_fixtures.admitted_product
 memory_product = memory_fixtures.memory_product
 
 
-async def memory_execution(product, *, private=False, surface="web", connections=()):
+async def memory_execution(
+    product, *, private=False, surface="web", connections=(),
+    prompt="Please remember: Prefer pytest for focused backend tests.",
+):
     session = await product.database.create_session(
         product.actor, NewSession(visibility="private" if private else "shared"),
     )
@@ -55,12 +58,12 @@ async def memory_execution(product, *, private=False, surface="web", connections
             ), {"schema": product.adapter.schema})
             _, turn = await product.database.admit_automation(
                 db, grant=product.principal.grant, title="Continued automation", model="test",
-                prompt="Please remember: Prefer pytest for focused backend tests.", request_key="memory-input",
+                prompt=prompt, request_key="memory-input",
                 session_id=session.id,
             )
     else:
         turn = await product.database.admission.submit(product.actor, session.id, NewMessage(
-            prompt="Please remember: Prefer pytest for focused backend tests.", request_key="memory-input",
+            prompt=prompt, request_key="memory-input",
             connections=list(connections),
         ))
     assert (await product.database.claim_next()).id == turn.id
