@@ -139,6 +139,29 @@ def test_ordinary_active_service_restart_does_not_need_a_running_controller(regi
     assert len(seal(store, arguments)) == 2
 
 
+def test_kubernetes_pod_registration_and_seal_keep_workload_identity(registry):
+    store, _, _, arguments = registry
+    service = "k8s-" + str(uuid4())
+    arguments.update(service_id=service, instance_id=service + "-" + str(uuid4()),
+                     service_name="moyai/blue-coordinator")
+    store.connection.execute(store.query("""
+        UPDATE {schema}.roles SET service_id=%s,service_name=%s WHERE fleet='production'
+    """), (service, arguments["service_name"]))
+    assert store.register(**arguments)["state"] == "accepting"
+    replacement = deepcopy(arguments)
+    replacement["instance_id"] = service + "-" + str(uuid4())
+    replacement["identity"]["instance"] = uuid4().hex
+    store.register(**replacement)
+    assert len(seal(store, arguments)) == 2
+    replacement["instance_id"] = service + "-" + str(uuid4())
+    replacement["identity"]["instance"] = uuid4().hex
+    with pytest.raises(FleetAdmissionError, match="service_sealed"):
+        store.register(**replacement)
+    for invalid in (service + "-abcde", "k8s-" + str(uuid4()) + "-" + str(uuid4())):
+        with pytest.raises(FleetAdmissionError, match="process_invalid"):
+            store.register(**{**replacement, "instance_id": invalid})
+
+
 def test_sealed_owner_capture_survives_process_retirement(registry):
     store, dsn, _, arguments = registry
     store.register(**arguments)

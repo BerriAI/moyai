@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ def capabilities(config: ProductConfig) -> dict:
 
     settings = _settings(config)
     source = config.legacy_settings()
+    kubernetes = os.environ.get("MOYAI_FLEET_PROVIDER") == "kubernetes"
     # Each of these pools is separately bounded. The Harness stores share one
     # pool; they do not each allocate another. Identity/history share the product
     # engine. The two restore locks use NullPool under the restorer semaphore.
@@ -55,7 +57,10 @@ def capabilities(config: ProductConfig) -> dict:
     return {
         "protocol": PROTOCOL, "core": config.core_identity, "role": config.role,
         "source_sha": source.moyai_build_sha, "local_rehearsal": config.local_rehearsal,
-        "role_control": {"protocol": ROLE_CONTROL_PROTOCOL, "render_entrypoint": True},
+        "role_control": {
+            "protocol": ROLE_CONTROL_PROTOCOL,
+            ("kubernetes_entrypoint" if kubernetes else "render_entrypoint"): True,
+        },
         "generation_admission": {
             "protocol": ADMISSION_PROTOCOL, "durable_role_seals": True, "image_revision_fence": True,
             "durable_drain_receipts": True,
@@ -72,9 +77,10 @@ def capabilities(config: ProductConfig) -> dict:
             "initial_same_image_required": True, "unversioned_retirement_qualified": False,
         },
         "http": {
-            "listener_overlap_seconds": LISTENER_GRACE_SECONDS if config.role != "worker" else 0,
+            "listener_overlap_seconds": LISTENER_GRACE_SECONDS if not kubernetes and config.role != "worker" else 0,
             "shutdown_seconds": (
-                API_GRACEFUL_SHUTDOWN_SECONDS if config.role == "api"
+                settings.http_shutdown_seconds if kubernetes
+                else API_GRACEFUL_SHUTDOWN_SECONDS if config.role == "api"
                 else BROKER_GRACEFUL_SHUTDOWN_SECONDS if config.role == "broker" else 20
             ),
         },

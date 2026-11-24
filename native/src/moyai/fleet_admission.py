@@ -8,6 +8,7 @@ import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from app.db import database
 
@@ -19,6 +20,25 @@ if TYPE_CHECKING:
 BUILD_REVISION_FILE = Path("/app/build-revision")
 
 
+def kubernetes_identity() -> tuple[str, str, str]:
+    """Bind membership to immutable workload and pod lifetimes, not pod names."""
+    namespace = os.environ.get("MOYAI_KUBERNETES_NAMESPACE", "")
+    name = os.environ.get("MOYAI_KUBERNETES_WORKLOAD_NAME", "")
+    workload = os.environ.get("MOYAI_KUBERNETES_WORKLOAD_UID", "")
+    pod = os.environ.get("MOYAI_KUBERNETES_POD_UID", "")
+    try:
+        if any(
+            not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", value)
+            for value in (namespace, name)
+        ):
+            raise ValueError
+        if any(str(UUID(value)) != value for value in (workload, pod)):
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise FleetAdmissionError("fleet_kubernetes_identity_invalid") from None
+    return f"k8s-{workload}", f"k8s-{workload}-{pod}", f"{namespace}/{name}"
+
+
 def service_identity(source_sha: str, *, local_rehearsal: bool) -> tuple[str, str, str]:
     """Validate the image before either early authorization or role startup."""
     if os.environ.get("MOYAI_FLEET_REGISTRY_SCHEMA", SCHEMA) != SCHEMA:
@@ -26,6 +46,15 @@ def service_identity(source_sha: str, *, local_rehearsal: bool) -> tuple[str, st
     service_id = os.environ.get("RENDER_SERVICE_ID", "")
     service_name = os.environ.get("RENDER_SERVICE_NAME", "")
     instance_id = os.environ.get("RENDER_INSTANCE_ID", "")
+    provider = os.environ.get("MOYAI_FLEET_PROVIDER", "")
+    if provider not in {"", "render", "kubernetes"}:
+        raise FleetAdmissionError("fleet_provider_unsupported")
+    if provider == "kubernetes":
+        if service_id or local_rehearsal:
+            raise FleetAdmissionError("fleet_provider_identity_conflict")
+        service_id, instance_id, service_name = kubernetes_identity()
+    elif provider == "render" and not service_id:
+        raise FleetAdmissionError("fleet_provider_identity_missing")
     if service_id:
         try:
             actual_commit = BUILD_REVISION_FILE.read_text().strip()

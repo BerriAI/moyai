@@ -9,6 +9,12 @@ publicUrl: https://moyai.example.com
 # ClusterIP Service on port 8080 for an authenticated tunnel, never a public LB.
 brokerUrl: ""
 installationId: moyai
+# The default installer owns one pod. After an explicit maintenance adoption,
+# a release controller can own independently admitted fleets and stable ingress.
+# Changing this value alone does not initialize or migrate a fleet.
+application:
+  mode: singlePod
+  fleetIngress: ""
 # Existing Secret: provider credentials, storage bucket/region, gateway/model,
 # and optionally Cloudflare settings. Never put secrets in Helm values.
 runtimeSecret: moyai-runtime
@@ -45,6 +51,9 @@ ingress:
   tls: []
 postgresql:
   enabled: false
+  # Size explicitly for overlapping role pools before enabling fleet releases.
+  # Changing this restarts bundled PostgreSQL; use the maintenance procedure.
+  maxConnections: 100
   image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
   persistence:
     existingClaim: ""
