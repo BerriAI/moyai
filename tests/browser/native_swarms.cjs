@@ -14,7 +14,7 @@ let server, browser, address, cache;
 const fixture = `
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SwarmPanel, SwarmSetup } from '../native/web/workspace/swarm';
+import { SwarmPanel } from '../native/web/workspace/swarm';
 import { Home } from '../native/web/home';
 import { setCsrf } from '../native/web/api';
 import '../frontend/theme.css';
@@ -22,14 +22,11 @@ import '../native/web/style.css';
 setCsrf('synthetic-csrf');
 function Fixture() {
   const [id, setId] = useState('mission-one');
-  const [options, setOptions] = useState({ workers:20, budget_seconds:0, worker_models:[] });
   const [space, setSpace] = useState(false);
   window.swarmFixture = { setId, setSpace };
   if (location.search === '?home') return <Home recentSessions={[]} recentLoading={false} onSearchSessions={() => {}} models={['test-model']} defaultModel="test-model"
     onCreated={async () => {}} onStarted={value => { window.startedConversation = value; }} />;
   return <main>
-    <SwarmSetup value={options} onChange={setOptions} models={['openai/test','anthropic/test']} disabled={false} />
-    <output aria-label="Selected workers">{options.workers}</output>
     <div className={'chat' + (space ? ' swarm-space-mode' : '')} style={{height:700}}>
       <SwarmPanel sessionId={id} onChanged={async () => {}} space={space} onSpaceChange={setSpace} />
     </div>
@@ -113,28 +110,8 @@ for (const width of [1440, 768, 320]) {
     assert.equal(await panel.getByRole("button", { name: "Pause team", exact: true }).count(), 1);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.equal(await panel.locator(".swarm-member").first().getAttribute("href"), "#mission-one");
-    await page.getByRole("spinbutton", { name: "Swarm workers", exact: true }).fill("3");
-    assert.equal(await page.getByLabel("Selected workers").textContent(), "3");
   });
 }
-
-test("custom worker counts accept whole numbers and preserve invalid drafts for correction", async t => {
-  const page = await pageFor(t);
-  const input = page.getByRole("spinbutton", { name: "Swarm workers", exact: true });
-  assert.equal(await input.getAttribute("max"), null);
-  for (const value of ["2", "3", "7", "17", "20", "21", "37", "1000"]) {
-    await input.fill(value);
-    assert.equal(await input.evaluate(element => element.checkValidity()), true);
-    assert.equal(await page.getByLabel("Selected workers").textContent(), value);
-  }
-  for (const value of ["", "0", "1", "-1", "2.5"]) {
-    await input.fill(value);
-    assert.equal(await input.inputValue(), value);
-    assert.equal(await input.evaluate(element => element.checkValidity()), false);
-    assert.equal(await input.getAttribute("aria-invalid"), "true");
-    await page.getByText("Enter a whole number of at least 2.", { exact: true }).waitFor();
-  }
-});
 
 test("home starts a normal conversation for a request to create a swarm", async t => {
   const writes = [];

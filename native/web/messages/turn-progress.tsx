@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { SkillMarkdown } from "./skill-markdown"
 import { Check, ChevronDown, ChevronRight, Circle, ExternalLink, Terminal, X } from "lucide-react"
 import { Button } from "@/components/ui/button"

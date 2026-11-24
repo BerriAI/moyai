@@ -9,10 +9,10 @@ const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../../
 const loaded = import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 
 test('only root-marked rounds enter the transcript; retries replace their round and preserve earlier commentary', async () => {
-  const {emptyLiveTranscript, applyLiveEvent: apply, liveCommentary: text} = await loaded;
+  const {emptyLiveTranscript, applyLiveEvent: apply, progressMessages} = await loaded;
   let state = emptyLiveTranscript('root');
   state = apply(state, {type:'text_start',index:0,text:'unlabelled child'}, 0);
-  assert.equal(text(state,false), '');
+  assert.deepEqual(progressMessages(state,false), []);
   state = apply(state, {type:'response_start',run_id:'root',step:1}, 1);
   state = apply(state, {type:'text_start',index:0,text:'I will inspect.'}, 2);
   state = apply(state, {type:'response_start',run_id:'root',step:2}, 3);
@@ -21,15 +21,15 @@ test('only root-marked rounds enter the transcript; retries replace their round 
   state = apply(state, {type:'response_start',run_id:'root',step:2}, 6);
   state = apply(state, {type:'text_start',index:0,text:'Final'}, 7);
   state = apply(state, {type:'text_delta',index:0,text:' answer'}, 8);
-  assert.equal(text(state,false), 'I will inspect.\n\nFinal answer');
-  assert.equal(text(state,true), 'I will inspect.', 'saved final assistant replaces only the last model round');
+  assert.deepEqual(progressMessages(state,false).map(message => message.text), ['I will inspect.', 'Final answer']);
+  assert.deepEqual(progressMessages(state,true).map(message => message.text), ['I will inspect.'], 'saved final assistant replaces only the last model round');
   state = apply(state, {type:'response_start',run_id:'child',step:3}, 9);
   state = apply(state, {type:'text_delta',index:0,text:'child secret'}, 10);
-  assert.equal(text(state,false), 'I will inspect.\n\nFinal answer');
+  assert.deepEqual(progressMessages(state,false).map(message => message.text), ['I will inspect.', 'Final answer']);
 });
 
 test('SSE offsets deduplicate reconnect replay without losing replacement semantics', async () => {
-  const {emptyLiveTranscript, applyLiveEvent: apply, liveCommentary: text} = await loaded;
+  const {emptyLiveTranscript, applyLiveEvent: apply, progressMessages} = await loaded;
   let state = apply(emptyLiveTranscript('root'), {type:'response_start',run_id:'root',step:1}, 0);
   state = apply(state, {type:'text_start',index:0,text:'Hello'}, 1);
   state = apply(state, {type:'text_delta',index:0,text:' world'}, 2);
@@ -37,7 +37,7 @@ test('SSE offsets deduplicate reconnect replay without losing replacement semant
   assert.equal(apply(state, {type:'text_start',index:0,text:'Hello'}, 1), state);
   assert.equal(apply(state, {type:'text_delta',index:0,text:'bad'}, NaN), state);
   state = apply(state, {type:'text_start',index:0,text:'Replacement'}, 3);
-  assert.equal(text(state,false), 'Replacement');
+  assert.deepEqual(progressMessages(state,false).map(message => message.text), ['Replacement']);
   assert.equal(apply({...state,finished:true}, {type:'text_delta',index:0,text:'late'}, 4).rounds, state.rounds);
 });
 
@@ -51,11 +51,11 @@ test('tool details merge by call and event type, while the compact action stays 
 });
 
 test('phase separates commentary and final text within one response and survives a late phase', async () => {
-  const {emptyLiveTranscript, applyLiveEvent: apply, liveCommentary, liveFinalAnswer} = await loaded;
+  const {emptyLiveTranscript, applyLiveEvent: apply, progressMessages, liveFinalAnswer} = await loaded;
   let state = apply(emptyLiveTranscript('root'), {type:'response_start',run_id:'root',step:1}, 0);
   state = apply(state, {type:'text_start',index:0,text:'Checking.',phase:'commentary'}, 1);
   state = apply(state, {type:'text_start',index:1,text:'Result'}, 2);
   state = apply(state, {type:'text_end',index:1,text:'Result.',phase:'final_answer'}, 3);
-  assert.equal(liveCommentary(state,true),'Checking.');
+  assert.deepEqual(progressMessages(state,true).map(message => message.text), ['Checking.']);
   assert.equal(liveFinalAnswer(state),'Result.');
 });

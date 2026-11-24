@@ -1,4 +1,4 @@
-import React, { memo } from "react"
+import { memo } from "react"
 import "./space-backdrop.css"
 
 export const SpaceBackdrop = memo(function SpaceBackdrop({ variant = "home" }: { variant?: "home" | "chat" }) {

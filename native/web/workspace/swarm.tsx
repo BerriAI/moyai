@@ -1,17 +1,14 @@
-import React, { useEffect, useId, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ExternalLink, MessageSquare, Orbit, Pause, Play, Square, Users } from "lucide-react"
 import Markdown, { defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { appPath, ApiError, csrfToken } from "../api"
 import { controlSwarm, getSwarm, type SwarmBoard } from "../generated/api"
 import { SwarmSpace } from "./swarm-space"
 import "./swarm.css"
 
-export type SwarmOptions = { workers: number | null; budget_seconds: number; worker_models: string[] }
 export type SwarmView = SwarmBoard
 
 const windows = [
@@ -19,44 +16,6 @@ const windows = [
   { value: "1800", label: "30 minutes" }, { value: "3600", label: "1 hour" },
   { value: "14400", label: "4 hours" }, { value: "86400", label: "1 day" },
 ]
-
-export function validWorkerCount(value: number | null): value is number {
-  return value !== null && Number.isSafeInteger(value) && value >= 2
-}
-
-export function SwarmSetup({ value, onChange, models, disabled }: {
-  value: SwarmOptions; onChange: (value: SwarmOptions) => void; models: string[]; disabled: boolean
-}) {
-  const workerHint = useId(), windowHint = useId()
-  const valid = validWorkerCount(value.workers)
-  return <fieldset className="swarm-setup" disabled={disabled}>
-    <legend>Team settings</legend>
-    <div className="swarm-settings-row">
-      <label><span>Workers</span>
-        <Input aria-label="Swarm workers" type="number" min={2} step={1} required disabled={disabled}
-          value={value.workers ?? ""} aria-invalid={!valid} aria-describedby={workerHint}
-          onChange={event => onChange({ ...value, workers: event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber })} />
-        <span id={workerHint} className="swarm-field-hint" data-invalid={!valid}>
-          {valid ? "At least 2 workers, plus a coordinator." : "Enter a whole number of at least 2."}
-        </span>
-      </label>
-      <label><span>Work window</span><Select value={String(value.budget_seconds)} disabled={disabled} onValueChange={seconds => onChange({ ...value, budget_seconds: Number(seconds) })}>
-        <SelectTrigger aria-label="Swarm work window" aria-describedby={windowHint}><SelectValue /></SelectTrigger>
-        <SelectContent>{windows.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-      </Select><span id={windowHint} className="swarm-field-hint">
-        {value.budget_seconds ? "Maximum time for the entire team." : "Runs until the goal is complete."}
-      </span></label>
-    </div>
-    <p className="muted">Each worker has its own conversation and computer. The team shares a goal and board.</p>
-    {models.length > 1 && <details><summary>Worker models · {value.worker_models.length || "inherit coordinator"}</summary>
-      <div className="swarm-models">{models.map(model => <label key={model}>
-        <Checkbox disabled={disabled} checked={value.worker_models.includes(model)} onCheckedChange={checked => onChange({
-          ...value, worker_models: checked ? [...value.worker_models, model] : value.worker_models.filter(item => item !== model),
-        })} />{model}
-      </label>)}</div>
-    </details>}
-  </fieldset>
-}
 
 export function SwarmPanel({ sessionId, visible = true, onChanged, space = false, onSpaceChange }: {
   sessionId: string; visible?: boolean; onChanged: () => Promise<unknown>

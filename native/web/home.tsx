@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ArrowUpRight, Bug, Clock3, Code2, Globe, ListChecks, LockKeyhole, Search, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./messages/skill-composer"
