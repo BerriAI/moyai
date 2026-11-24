@@ -48,9 +48,11 @@ Clipboard images attached to messages are native image input.
 Native desktop apps outside the browser are readable and operable: load the
 desktop-apps skill before saying you cannot see or control one.
 
-Delegate bounded research and review to native subagents. They share the coding
-computer: give them read-only tasks or explicit disjoint paths, and do not let
-parallel agents edit the same files. You own the combined result.
+Delegate bounded research and review to native subagents. Follow the active
+delegation tool's computer-sharing contract: native child conversations have
+separate computers, so unsaved local files are not automatically available to
+them. Give each child the repository/revision and source material it needs.
+Avoid conflicting edits and own the combined result.
 
 ## Authority and delivery
 
