@@ -252,6 +252,9 @@ class ProductInferenceService:
                     raise InferenceAdmissionError("The inference turn is no longer available.")
                 grant = await self.database._check_product_turn_binding(db, turn, scope.product_grant)
                 principal = await self.database._identity().authorize_admission(db, grant)
+                # Source deletion/archival and responsibility controls serialize
+                # before this worker's session fence and inference receipt.
+                await self.database.responsibilities.authorize(db, turn, scope=scope, publication=True)
                 # Stop and admission serialize on the same session row.
                 session = await db.scalar(select(Session).where(
                     Session.id == scope.session_id,

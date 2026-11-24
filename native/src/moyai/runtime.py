@@ -227,6 +227,10 @@ class Runtime:
                 skills_directory=skills_directory, product_capabilities=product_capabilities, memory=memory,
                 instrumentation=self.tracing.instrumentation if self.tracing else None,
             )
+            from .responsibility_agent import make_responsibility_agent
+            self.responsibility_agent = make_responsibility_agent(
+                self.database, self.models, instrumentation=self.tracing.instrumentation if self.tracing else None,
+            )
         except BaseException:
             await self.close()
             raise

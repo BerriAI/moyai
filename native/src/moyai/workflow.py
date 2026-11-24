@@ -63,6 +63,7 @@ with workflow.unsafe.imports_passed_through():
     from .maintenance_workspace import MaintenanceResume, wait_reason
     from .product_drain import DRAIN_VERSION, DrainDecision
     from .request_limits import unlimited_model_requests
+    from .responsibility_contracts import ResponsibilityDecision
     from .runtime import current
     from .workspace_recovery import VERSION as WORKSPACE_CHECKPOINT_VERSION
 
@@ -109,7 +110,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             prior_state=handoff.stream_state if handoff else None,
             drain_timeout=timedelta(seconds=1),
         )
-        self.agent_run: AgentRun[RunScope, str | DeferredToolRequests] | None = None
+        self.agent_run: AgentRun[RunScope, str | DeferredToolRequests | ResponsibilityDecision] | None = None
         self.scope: RunScope | None = None
         self.pending_agent_mail: list[int] = list(handoff.pending_agent_mail) if handoff else []
         self.enqueued_agent_mail: set[int] = set()
@@ -410,6 +411,8 @@ class TurnWorkflow(PydanticAIWorkflow):
                 "moyai_history_limits_v1", result_type=HistoryLimits, **CONTROL,
             ) if history_handoff else None
             runtime = current()
+            reviewer = prepared.scope.responsibility_id is not None
+            agent = runtime.responsibility_agent if reviewer else runtime.agent
             conversation = (
                 ConversationTypeAdapter.validate_json(resumed.conversation) if resumed else
                 ConversationTypeAdapter.validate_json(prepared.conversation)
@@ -432,7 +435,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                 self.events,
                 self.agent_mail_lifetime(),
                 public_event_sink(self.events.stream),
-                runtime.agent.iter(
+                agent.iter(
                     None if resumed else prompt_content(prepared.prompt, prepared.images),
                     conversation=conversation,
                     run_id=prepared.scope.root_run_id,
@@ -441,7 +444,8 @@ class TurnWorkflow(PydanticAIWorkflow):
                     deferred_tool_results=deferred_results,
                     workspace=workspace,
                     usage_limits=UsageLimits(
-                        request_limit=None if unlimited_model_requests() else runtime.settings.model_request_limit,
+                        request_limit=3 if reviewer else
+                        None if unlimited_model_requests() else runtime.settings.model_request_limit,
                     ),
                 ) as agent_run,
             ):
@@ -600,7 +604,8 @@ class TurnWorkflow(PydanticAIWorkflow):
                 CompletedTurn(
                     scope=prepared.scope,
                     conversation=ConversationTypeAdapter.dump_json(result.conversation).decode(),
-                    output="" if waiting else str(result.output),
+                    output=(result.output.model_dump_json() if isinstance(result.output, ResponsibilityDecision) else
+                            "" if waiting else str(result.output)),
                     workspace=reference,
                     usage=asdict(result.usage),
                     deferred=waiting,
@@ -772,8 +777,8 @@ class TurnWorkflow(PydanticAIWorkflow):
 
     @staticmethod
     def checkpoint(
-        prepared: PreparedTurn, run: AgentRun[RunScope, str | DeferredToolRequests],
-        node: ModelRequestNode[RunScope, str | DeferredToolRequests],
+        prepared: PreparedTurn, run: AgentRun[RunScope, str | DeferredToolRequests | ResponsibilityDecision],
+        node: ModelRequestNode[RunScope, str | DeferredToolRequests | ResponsibilityDecision],
     ) -> AgentCheckpoint:
         # The next request holds the normalized results of the settled batch;
         # it has not been appended to all_messages() yet.

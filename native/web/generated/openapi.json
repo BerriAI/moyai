@@ -9793,6 +9793,57 @@
         "title": "NewMessage",
         "type": "object"
       },
+      "NewResponsibility": {
+        "additionalProperties": false,
+        "properties": {
+          "interval_seconds": {
+            "default": 30,
+            "maximum": 3600.0,
+            "minimum": 10.0,
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "max_evaluations": {
+            "default": 10,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Evaluations",
+            "type": "integer"
+          },
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "objective": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Objective",
+            "type": "string"
+          },
+          "request_key": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Request Key",
+            "type": "string"
+          },
+          "source_session_id": {
+            "maxLength": 36,
+            "minLength": 1,
+            "title": "Source Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_key",
+          "source_session_id",
+          "objective",
+          "model"
+        ],
+        "title": "NewResponsibility",
+        "type": "object"
+      },
       "NewSession": {
         "properties": {
           "model": {
@@ -15591,6 +15642,416 @@
           "step"
         ],
         "title": "ResponseStartEvent",
+        "type": "object"
+      },
+      "ResponsibilityControl": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "pause",
+              "resume"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation",
+          "action"
+        ],
+        "title": "ResponsibilityControl",
+        "type": "object"
+      },
+      "ResponsibilityDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "wait",
+              "notify"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/ResponsibilityEvidence"
+            },
+            "maxItems": 5,
+            "title": "Evidence",
+            "type": "array"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "summary",
+          "evidence"
+        ],
+        "title": "ResponsibilityDecision",
+        "type": "object"
+      },
+      "ResponsibilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "quote": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Quote",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "quote"
+        ],
+        "title": "ResponsibilityEvidence",
+        "type": "object"
+      },
+      "ResponsibilityHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResponsibilityReview"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ResponsibilityHistory",
+        "type": "object"
+      },
+      "ResponsibilityInbox": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResponsibilityInboxItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ResponsibilityInbox",
+        "type": "object"
+      },
+      "ResponsibilityInboxItem": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/ResponsibilityEvidence"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "read_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read At"
+          },
+          "responsibility_id": {
+            "title": "Responsibility Id",
+            "type": "string"
+          },
+          "source_session_id": {
+            "title": "Source Session Id",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          },
+          "worker_session_id": {
+            "title": "Worker Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "turn_id",
+          "responsibility_id",
+          "source_session_id",
+          "worker_session_id",
+          "objective",
+          "summary",
+          "evidence",
+          "created_at",
+          "read_at"
+        ],
+        "title": "ResponsibilityInboxItem",
+        "type": "object"
+      },
+      "ResponsibilityList": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResponsibilityView"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ResponsibilityList",
+        "type": "object"
+      },
+      "ResponsibilityReadResult": {
+        "additionalProperties": false,
+        "properties": {
+          "read": {
+            "title": "Read",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read"
+        ],
+        "title": "ResponsibilityReadResult",
+        "type": "object"
+      },
+      "ResponsibilityReview": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponsibilityDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "reconciled": {
+            "title": "Reconciled",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "starting",
+              "running",
+              "waiting",
+              "saving",
+              "completed",
+              "failed",
+              "stopped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "through_sequence": {
+            "title": "Through Sequence",
+            "type": "integer"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          },
+          "usage": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Usage",
+            "type": "object"
+          },
+          "validation": {
+            "enum": [
+              "pending",
+              "valid",
+              "invalid",
+              "not_accepted"
+            ],
+            "title": "Validation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "turn_id",
+          "generation",
+          "through_sequence",
+          "status",
+          "reconciled",
+          "accepted",
+          "created_at",
+          "finished_at",
+          "error",
+          "usage",
+          "validation",
+          "decision"
+        ],
+        "title": "ResponsibilityReview",
+        "type": "object"
+      },
+      "ResponsibilityView": {
+        "additionalProperties": false,
+        "properties": {
+          "active_turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn Id"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "evaluations": {
+            "title": "Evaluations",
+            "type": "integer"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "interval_seconds": {
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "max_evaluations": {
+            "title": "Max Evaluations",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "next_check_at": {
+            "title": "Next Check At",
+            "type": "string"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "source_session_id": {
+            "title": "Source Session Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "waiting",
+              "running",
+              "paused",
+              "blocked",
+              "budget_limited"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "watermark": {
+            "title": "Watermark",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "source_session_id",
+          "objective",
+          "model",
+          "status",
+          "generation",
+          "watermark",
+          "interval_seconds",
+          "max_evaluations",
+          "evaluations",
+          "active_turn_id",
+          "reason",
+          "next_check_at",
+          "created_at"
+        ],
+        "title": "ResponsibilityView",
         "type": "object"
       },
       "Revision": {
@@ -24217,6 +24678,205 @@
           }
         },
         "summary": "Statuses"
+      }
+    },
+    "/api/responsibilities": {
+      "get": {
+        "operationId": "listResponsibilities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsibilityList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Listing"
+      },
+      "post": {
+        "operationId": "createResponsibility",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewResponsibility"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsibilityView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create"
+      }
+    },
+    "/api/responsibilities/{responsibility_id}/control": {
+      "post": {
+        "operationId": "controlResponsibility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "responsibility_id",
+            "required": true,
+            "schema": {
+              "title": "Responsibility Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResponsibilityControl"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsibilityView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Control"
+      }
+    },
+    "/api/responsibilities/{responsibility_id}/reviews": {
+      "get": {
+        "operationId": "listResponsibilityReviews",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "responsibility_id",
+            "required": true,
+            "schema": {
+              "title": "Responsibility Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsibilityHistory"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reviews"
+      }
+    },
+    "/api/responsibility-inbox": {
+      "get": {
+        "operationId": "listResponsibilityInbox",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsibilityInbox"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Inbox"
+      }
+    },
+    "/api/responsibility-inbox/{turn_id}/read": {
+      "post": {
+        "operationId": "markResponsibilityFindingRead",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsibilityReadResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read"
       }
     },
     "/api/runs/{run_id}/artifact": {

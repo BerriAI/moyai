@@ -246,6 +246,7 @@ function App() {
       <nav className="rail-destinations" aria-label="Workspace tools">
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><FileText />Skills</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
+        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("responsibilities")}><MessageSquare />Dot</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
       <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...sessionUpdates.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}

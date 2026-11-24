@@ -165,6 +165,8 @@ class PullRequestService:
         self.gitlab = GitLabReviews(runtime)
 
     async def contexts(self, user: User, ids: list[str]) -> dict[str, Scope]:
+        from .responsibilities import ordinary_session
+
         fresh = await self.runtime.database.user(user.id)
         if fresh.auth_version != user.auth_version:
             raise HTTPException(401, "Sign in to continue.")
@@ -173,6 +175,7 @@ class PullRequestService:
                 DelegatedSession, DelegatedSession.session_id == Session.id,
             ).where(
                 Session.id.in_(ids), Session.deleted.is_(False),
+                ordinary_session(),
                 or_(Session.owner_id == user.id, Session.visibility == "shared"),
             ))).all()
             connections = list(await db.scalars(select(Connection).where(

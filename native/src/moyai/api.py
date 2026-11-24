@@ -345,6 +345,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     app.include_router(image_routes(runtime, actor))
     app.include_router(computer_routes(runtime, actor, cookie_name=session_cookie))
     app.include_router(sidebar_routes(runtime, actor))
+    from .responsibility_routes import routes as responsibility_routes
+    app.include_router(responsibility_routes(runtime, actor))
     app.include_router(workspace_routes(runtime, actor))
     app.include_router(file_preview_routes(runtime, actor))
     app.include_router(pull_request_routes(runtime, actor))
@@ -754,6 +756,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 raise HTTPException(404, "Message not found.")
             session = await runtime.database.allowed_session(db, turn.session_id, user)
             await runtime.database.swarms.editable_input(db, turn)
+            await runtime.database.responsibilities.editable_input(db, turn)
             prompt = await runtime.skill_invocations.normalize(body.prompt, user, session)
             from .contracts import RunScope
             from .skill_invocations import gateway_connection_ids

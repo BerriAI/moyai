@@ -5444,6 +5444,36 @@ export type NewMessage = {
 };
 
 /**
+ * NewResponsibility
+ */
+export type NewResponsibility = {
+    /**
+     * Interval Seconds
+     */
+    interval_seconds?: number;
+    /**
+     * Max Evaluations
+     */
+    max_evaluations?: number;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Objective
+     */
+    objective: string;
+    /**
+     * Request Key
+     */
+    request_key: string;
+    /**
+     * Source Session Id
+     */
+    source_session_id: string;
+};
+
+/**
  * NewSession
  */
 export type NewSession = {
@@ -8709,6 +8739,249 @@ export type ResponseStartEvent = {
      * Type
      */
     type: 'response_start';
+};
+
+/**
+ * ResponsibilityControl
+ */
+export type ResponsibilityControl = {
+    /**
+     * Action
+     */
+    action: 'pause' | 'resume';
+    /**
+     * Generation
+     */
+    generation: number;
+};
+
+/**
+ * ResponsibilityDecision
+ */
+export type ResponsibilityDecision = {
+    /**
+     * Action
+     */
+    action: 'wait' | 'notify';
+    /**
+     * Evidence
+     */
+    evidence: Array<ResponsibilityEvidence>;
+    /**
+     * Summary
+     */
+    summary: string;
+};
+
+/**
+ * ResponsibilityEvidence
+ */
+export type ResponsibilityEvidence = {
+    /**
+     * Message Id
+     */
+    message_id: number;
+    /**
+     * Quote
+     */
+    quote: string;
+};
+
+/**
+ * ResponsibilityHistory
+ */
+export type ResponsibilityHistory = {
+    /**
+     * Items
+     */
+    items: Array<ResponsibilityReview>;
+};
+
+/**
+ * ResponsibilityInbox
+ */
+export type ResponsibilityInbox = {
+    /**
+     * Items
+     */
+    items: Array<ResponsibilityInboxItem>;
+};
+
+/**
+ * ResponsibilityInboxItem
+ */
+export type ResponsibilityInboxItem = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Evidence
+     */
+    evidence: Array<ResponsibilityEvidence>;
+    /**
+     * Objective
+     */
+    objective: string;
+    /**
+     * Read At
+     */
+    read_at: string | null;
+    /**
+     * Responsibility Id
+     */
+    responsibility_id: string;
+    /**
+     * Source Session Id
+     */
+    source_session_id: string;
+    /**
+     * Summary
+     */
+    summary: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+    /**
+     * Worker Session Id
+     */
+    worker_session_id: string;
+};
+
+/**
+ * ResponsibilityList
+ */
+export type ResponsibilityList = {
+    /**
+     * Items
+     */
+    items: Array<ResponsibilityView>;
+};
+
+/**
+ * ResponsibilityReadResult
+ */
+export type ResponsibilityReadResult = {
+    /**
+     * Read
+     */
+    read: boolean;
+};
+
+/**
+ * ResponsibilityReview
+ */
+export type ResponsibilityReview = {
+    /**
+     * Accepted
+     */
+    accepted: boolean;
+    /**
+     * Created At
+     */
+    created_at: string;
+    decision: ResponsibilityDecision | null;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Reconciled
+     */
+    reconciled: boolean;
+    /**
+     * Status
+     */
+    status: 'queued' | 'starting' | 'running' | 'waiting' | 'saving' | 'completed' | 'failed' | 'stopped';
+    /**
+     * Through Sequence
+     */
+    through_sequence: number;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+    /**
+     * Usage
+     */
+    usage: {
+        [key: string]: JsonValue;
+    };
+    /**
+     * Validation
+     */
+    validation: 'pending' | 'valid' | 'invalid' | 'not_accepted';
+};
+
+/**
+ * ResponsibilityView
+ */
+export type ResponsibilityView = {
+    /**
+     * Active Turn Id
+     */
+    active_turn_id: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Evaluations
+     */
+    evaluations: number;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Interval Seconds
+     */
+    interval_seconds: number;
+    /**
+     * Max Evaluations
+     */
+    max_evaluations: number;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Next Check At
+     */
+    next_check_at: string;
+    /**
+     * Objective
+     */
+    objective: string;
+    /**
+     * Reason
+     */
+    reason: string;
+    /**
+     * Source Session Id
+     */
+    source_session_id: string;
+    /**
+     * Status
+     */
+    status: 'waiting' | 'running' | 'paused' | 'blocked' | 'budget_limited';
+    /**
+     * Watermark
+     */
+    watermark: number;
 };
 
 /**
@@ -14325,6 +14598,153 @@ export type ListPullRequestStatusesResponses = {
 };
 
 export type ListPullRequestStatusesResponse = ListPullRequestStatusesResponses[keyof ListPullRequestStatusesResponses];
+
+export type ListResponsibilitiesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/responsibilities';
+};
+
+export type ListResponsibilitiesResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponsibilityList;
+};
+
+export type ListResponsibilitiesResponse = ListResponsibilitiesResponses[keyof ListResponsibilitiesResponses];
+
+export type CreateResponsibilityData = {
+    body: NewResponsibility;
+    path?: never;
+    query?: never;
+    url: '/api/responsibilities';
+};
+
+export type CreateResponsibilityErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateResponsibilityError = CreateResponsibilityErrors[keyof CreateResponsibilityErrors];
+
+export type CreateResponsibilityResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponsibilityView;
+};
+
+export type CreateResponsibilityResponse = CreateResponsibilityResponses[keyof CreateResponsibilityResponses];
+
+export type ControlResponsibilityData = {
+    body: ResponsibilityControl;
+    path: {
+        /**
+         * Responsibility Id
+         */
+        responsibility_id: string;
+    };
+    query?: never;
+    url: '/api/responsibilities/{responsibility_id}/control';
+};
+
+export type ControlResponsibilityErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ControlResponsibilityError = ControlResponsibilityErrors[keyof ControlResponsibilityErrors];
+
+export type ControlResponsibilityResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponsibilityView;
+};
+
+export type ControlResponsibilityResponse = ControlResponsibilityResponses[keyof ControlResponsibilityResponses];
+
+export type ListResponsibilityReviewsData = {
+    body?: never;
+    path: {
+        /**
+         * Responsibility Id
+         */
+        responsibility_id: string;
+    };
+    query?: never;
+    url: '/api/responsibilities/{responsibility_id}/reviews';
+};
+
+export type ListResponsibilityReviewsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListResponsibilityReviewsError = ListResponsibilityReviewsErrors[keyof ListResponsibilityReviewsErrors];
+
+export type ListResponsibilityReviewsResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponsibilityHistory;
+};
+
+export type ListResponsibilityReviewsResponse = ListResponsibilityReviewsResponses[keyof ListResponsibilityReviewsResponses];
+
+export type ListResponsibilityInboxData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/responsibility-inbox';
+};
+
+export type ListResponsibilityInboxResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponsibilityInbox;
+};
+
+export type ListResponsibilityInboxResponse = ListResponsibilityInboxResponses[keyof ListResponsibilityInboxResponses];
+
+export type MarkResponsibilityFindingReadData = {
+    body?: never;
+    path: {
+        /**
+         * Turn Id
+         */
+        turn_id: string;
+    };
+    query?: never;
+    url: '/api/responsibility-inbox/{turn_id}/read';
+};
+
+export type MarkResponsibilityFindingReadErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type MarkResponsibilityFindingReadError = MarkResponsibilityFindingReadErrors[keyof MarkResponsibilityFindingReadErrors];
+
+export type MarkResponsibilityFindingReadResponses = {
+    /**
+     * Successful Response
+     */
+    200: ResponsibilityReadResult;
+};
+
+export type MarkResponsibilityFindingReadResponse = MarkResponsibilityFindingReadResponses[keyof MarkResponsibilityFindingReadResponses];
 
 export type OriginalArchiveApiRunsRunIdArtifactGetData = {
     body?: never;

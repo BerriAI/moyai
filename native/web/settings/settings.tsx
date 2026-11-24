@@ -12,6 +12,7 @@ import { ApiError, csrfToken } from "../api"
 import { getGatewayDefaults, checkConnection, createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "../generated/api"
 import { AnalyticsPage } from "../analytics/analytics"
 import { ProductAutomationsPage } from "../automations/product-automations"
+import { ResponsibilitiesPage } from "./responsibilities"
 import { onceUtcInput, onceUtcInstant } from "../automations/product-automation-data"
 import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "../generated/api"
 import {
@@ -112,6 +113,7 @@ const destinations = [
   { id: "general", title: "General", description: "Set your chat preferences.", group: "Preferences", Icon: SlidersHorizontal },
   { id: "skills", title: "Skills", description: "Choose reusable instructions for your chats.", group: "Workflows", Icon: FileText },
   { id: "automations", title: "Automations", description: "Schedule recurring work and review past runs.", group: "Workflows", Icon: CalendarClock },
+  { id: "responsibilities", title: "Dot", description: "Ongoing responsibilities and your private inbox.", group: "Workflows", Icon: BookOpen },
   { id: "memory", title: "Memory", description: "Manage what Moyai remembers about your work.", group: "Workflows", Icon: BookOpen },
   { id: "connections", title: "Connections", description: "Choose the accounts Moyai can use in your sessions.", group: "Integrations", Icon: Link2 },
   { id: "personal-slack", title: "Personal Slack", description: "Use your Slack account in private chats with Moyai.", group: "Integrations", Icon: LockKeyhole, productOnly: true },
@@ -1343,6 +1345,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
             : current === "overview" ? <OverviewPage user={user} navigate={navigate} productMode={productMode} />
               : current === "sign-in" ? <SignInPage />
               : current === "general" ? <GeneralPage key={`${user.id}:${user.individual !== false}:${csrfToken()}`} individual={user.individual !== false} onPreferences={onPreferences} />
+              : current === "responsibilities" ? <ResponsibilitiesPage key={`${user.id}:${csrfToken()}`} userId={user.id} />
               : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />

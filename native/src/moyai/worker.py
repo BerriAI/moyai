@@ -25,6 +25,8 @@ from .execution import ExecutionAuthority
 from .models import Turn
 from .preferences.settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
 from .product_drain import ProductDrainError, drain_checkpoint
+from .responsibility_dispatch import ResponsibilityDispatch, dispatch_responsibilities
+from .responsibility_workflow import ResponsibilityWorkflow, responsibility_step
 from .runtime import Runtime, configure
 from .swarm_runtime import SWARM_ACTIVITIES, SwarmWorkflow, dispatch_missions
 from .worker_capacity import ActivityCapacity, WorkerPools
@@ -37,7 +39,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
     if runtime.client is None:
         raise RuntimeError("Connect to Temporal before creating the worker.")
     configure(runtime)
-    TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent]
+    TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent, runtime.responsibility_agent]
     product_workflows = []
     product_activities = []
     if runtime.product_automations is not None:
@@ -48,7 +50,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         product_workflows.extend(PRODUCT_AUTOMATION_WORKFLOWS)
         product_activities.extend(PRODUCT_AUTOMATION_ACTIVITIES)
     interceptors: list[Interceptor] = [ExecutionAuthority(runtime.database), ActivityCapacity()]
-    agent_plugins = [AgentPlugin(runtime.agent)]
+    agent_plugins = [AgentPlugin(runtime.agent), AgentPlugin(runtime.responsibility_agent)]
     identity = settings_worker_identity()
     review = getattr(runtime, "product_memory_review", None)
     if review is not None:
@@ -81,7 +83,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         agent_plugins.append(AgentPlugin(learning.agent))
         identity += WORKER_MARKER
     drain = getattr(runtime, "product_drain", None)
-    activities = [*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities, *SWARM_ACTIVITIES]
+    activities = [*ACTIVITIES, drain_checkpoint, responsibility_step, *SETTINGS_ACTIVITIES, *product_activities, *SWARM_ACTIVITIES]
     activity_pools = ("control", "model", "tools")
     # WorkerPools starts all poller shutdowns concurrently, so each active
     # operation gets the shared process budget without multiplying that budget.
@@ -101,7 +103,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         runtime.client,
         identity=identity,
         task_queue=runtime.settings.temporal_queue,
-        workflows=[TurnWorkflow, SwarmWorkflow, *SETTINGS_WORKFLOWS, *product_workflows],
+        workflows=[TurnWorkflow, SwarmWorkflow, ResponsibilityWorkflow, *SETTINGS_WORKFLOWS, *product_workflows],
         activities=activities,
         interceptors=interceptors,
         max_concurrent_activities=runtime.settings.temporal_worker_activities,
@@ -129,6 +131,7 @@ class DispatchState:
     starting_through: tuple[str, str] | None = None
     backlog: bool = False
     mail: MailDispatch = field(default_factory=MailDispatch)
+    responsibilities: ResponsibilityDispatch = field(default_factory=ResponsibilityDispatch)
 
 
 async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) -> int:
@@ -231,6 +234,13 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
         raise
     except Exception:
         logger.warning("Swarm coordination dispatch remains pending.", exc_info=True)
+    try:
+        async with asyncio.timeout(2):
+            await dispatch_responsibilities(runtime, state.responsibilities)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Responsibility wake delivery remains pending.", exc_info=True)
     if runtime.product_automations is not None:
         try:
             # Keep automation RPC outages from delaying manual input/Stop.
@@ -271,9 +281,11 @@ async def dispatcher(
     slack = getattr(runtime, "product_slack", None)
     # Answer settlement already commits a dispatch hint. Fan it out on the
     # coordinator's existing listener; Slack retains its own durable scan/event.
-    async with wakeups or DispatchWakeups(
-        runtime.settings, observers=(slack.delivery_wakeup,) if slack is not None else (),
-    ) as listener:
+    async with (
+        wakeups or DispatchWakeups(
+            runtime.settings, observers=(slack.delivery_wakeup,) if slack is not None else (),
+        ) as listener,
+    ):
         while stop is None or not stop.is_set():
             # Clear before reading durable rows, so a commit during/after the
             # scan cannot be lost between deciding to wait and actually waiting.

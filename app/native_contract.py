@@ -9,9 +9,9 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Every role must preserve private automation definitions and admitted visibility.
-# Older readers assume that all definitions and scheduled executions are shared.
-NATIVE_PROTOCOL_REVISION = 8
+# Every participant must support the responsibility wake outbox and entity
+# workflows. Drain old pollers before routing the new workflow type.
+NATIVE_PROTOCOL_REVISION = 10
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

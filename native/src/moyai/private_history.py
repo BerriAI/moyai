@@ -58,8 +58,10 @@ class PrivateHistory:
 
     @staticmethod
     def private_chat(actor_id: str):
+        from .responsibilities import ordinary_session
         # A private-looking delegated or Slack-backed row is not a direct web chat.
         return (
+            ordinary_session(),
             Session.owner_id == actor_id, Session.visibility == "private",
             Session.surface == "web", Session.deleted.is_(False),
             ~select(DelegatedSession.session_id).where(DelegatedSession.session_id == Session.id).exists(),

@@ -71,7 +71,9 @@ PRIVATE_AUTOMATION_SCHEMA_VERSION = "2026-11-21-private-automations-v24"
 SLACK_WEB_SCHEMA_VERSION = "2026-11-21-slack-web-v25"
 SKILL_LEARNING_SCHEMA_VERSION = "2026-11-21-skill-learning-v26"
 PERSONAL_OAUTH_SCHEMA_VERSION = "2026-11-23-personal-oauth-v27"
-PRODUCT_SCHEMA_VERSION = PERSONAL_OAUTH_SCHEMA_VERSION
+RESPONSIBILITY_SCHEMA_VERSION = "2026-11-23-responsibilities-v28"
+RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION = "2026-11-24-responsibility-workflows-v29"
+PRODUCT_SCHEMA_VERSION = RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -158,6 +160,11 @@ MIGRATIONS = (
         "moyai_skill_learning_preferences", "moyai_skill_learning_jobs", "moyai_learned_skills",
     })),
     (PERSONAL_OAUTH_SCHEMA_VERSION, frozenset({"moyai_oauth_credentials", "moyai_oauth_authorizations"})),
+    (RESPONSIBILITY_SCHEMA_VERSION, frozenset({
+        "moyai_responsibilities", "moyai_responsibility_assignments", "moyai_responsibility_findings",
+        "moyai_responsibility_completions",
+    })),
+    (RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION, frozenset({"moyai_responsibility_wakes"})),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing
@@ -247,6 +254,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "swarm_models",
         "delegation_models",
         "goal_models",
+        "responsibility_models",
     ):
         import_module(f"{__package__}.{module}")
     included = frozenset().union(*(item[1] for item in MIGRATIONS[:versions.index(version) + 1]))

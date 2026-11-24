@@ -34,6 +34,10 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
     try:
         runtime = current()
         prepared = await runtime.admission.prepare(turn_id)
+        if prepared.scope.responsibility_id is not None:
+            # The captured packet is complete. Do not hydrate skills, files,
+            # project context or computers for a generated evidence review.
+            return prepared
         if recover_workspace and runtime.product is None:
             prepared = await prepare_workspace(runtime, prepared)
         if runtime.product is not None:

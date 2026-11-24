@@ -1,0 +1,18 @@
+.dot-page { display: grid; gap: 28px; max-width: 900px; min-width: 0; }
+.dot-toolbar, .dot-row, .dot-actions { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.dot-toolbar p { flex: 1 1 260px; margin: 0; }
+.dot-page h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.dot-card { border: 1px solid var(--ui-border); border-radius: 8px; padding: 16px; margin-bottom: 12px; background: var(--ui-background); overflow-wrap: anywhere; }
+.dot-card p { margin: 10px 0; }
+.dot-row time, .dot-row > span { font-size: 12px; color: var(--ui-muted); }
+.dot-objective { flex: 1 1 200px; }
+.dot-summary { white-space: pre-wrap; }
+.dot-actions { justify-content: flex-start; margin-top: 14px; }
+.dot-actions a { color: var(--ui-foreground); text-decoration: underline; text-underline-offset: 3px; }
+.dot-card summary { cursor: pointer; }
+.dot-card blockquote { border-left: 2px solid var(--ui-border); padding-left: 12px; margin: 12px 0; white-space: pre-wrap; }
+.dot-dialog { max-height: 90dvh; overflow-y: auto; }
+.dot-dialog form { display: grid; gap: 10px; min-width: 0; }
+.dot-dialog label { font-weight: 500; margin-top: 6px; }
+.dot-dialog p { margin: 0; }
+@media (max-width: 600px) { .dot-dialog input, .dot-dialog textarea { font-size: 16px; } }
