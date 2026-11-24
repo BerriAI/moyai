@@ -26,6 +26,8 @@ from .oauth_models import OAuthAuthorization, OAuthCredential
 from .oauth_providers import PROVIDERS, OAuthProvider, authorization_url, client_identity, exchange
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from .contracts import Grant, RunScope
     from .database import Database
     from .runtime import Runtime
@@ -46,6 +48,21 @@ def native_connections():
     return Connection.kind.in_(["mcp", "litellm"]) | select(OAuthCredential.connection_id).where(
         OAuthCredential.connection_id == Connection.id,
     ).exists()
+
+
+async def connection_owner(
+    database: Database, db: AsyncSession, actor_id: str, provider: str, surface: str,
+) -> str | None:
+    """Keep the sender's authority; resolve only a verified credential owner."""
+    if surface == "web":
+        return actor_id
+    if surface != "slack" or provider != "github":
+        return None
+    if not actor_id.startswith("slack:"):
+        return actor_id
+    if database.product_identity is None:
+        return None
+    return await database.product_identity.personal_memory_owner(db, actor_id)
 
 
 def personal_callback(request: Request) -> bool:
@@ -106,16 +123,19 @@ async def credentials(database: Database, scope: RunScope, grant: Grant) -> dict
         raise PermissionError("The deployment's app connections are unavailable.")
     provider = TypeAdapter(OAuthProvider).validate_python(grant.kind)
     async with database.sessions.begin() as db:
+        owner = await connection_owner(database, db, scope.actor_id, provider, scope.authority.surface)
+        if owner is None:
+            raise PermissionError("Link your work account and connect GitHub in Settings > Connections.")
         # Serialize refreshes across processes before reading a rotating token.
         await db.execute(update(Connection).where(
-            Connection.id == grant.id, Connection.owner_id == scope.actor_id,
+            Connection.id == grant.id, Connection.owner_id == owner,
             Connection.enabled.is_(True), Connection.shared.is_(False), Connection.revision == grant.revision,
         ).values(revision=Connection.revision))
         account = await db.get(Connection, grant.id, populate_existing=True)
         saved = await db.get(OAuthCredential, grant.id, populate_existing=True)
         if (
             account is None or saved is None or not account.enabled or account.shared
-            or account.owner_id != scope.actor_id or account.revision != grant.revision
+            or account.owner_id != owner or account.revision != grant.revision
             or account.kind != grant.kind or not saved.encrypted
         ):
             raise PermissionError("This personal connection changed. Connect it again in Settings.")

@@ -11,7 +11,7 @@ import {
 const descriptions: Record<PersonalOAuthView["provider"], string> = {
   linear: "Work with your issues, projects, and teams.",
   notion: "Find and update the pages you authorize.",
-  github: "Work with your repositories, issues, and pull requests.",
+  github: "Read commits, work with issues, and open pull requests as your GitHub account. No organization app installation required.",
 }
 
 export function PersonalConnections({ userId, individual, children }: { userId: string; individual: boolean; children?: React.ReactNode }) {
@@ -74,13 +74,13 @@ export function PersonalConnections({ userId, individual, children }: { userId: 
   const params = new URLSearchParams(location.search)
   const outcome = params.get("personal_connection")
   const connected = rows?.find(row => row.provider === params.get("provider") && row.connected)
-  const callbackNotice = outcome === "success" && connected ? `${connected.name} is connected and ready for your private chats.`
+  const callbackNotice = outcome === "success" && connected ? `${connected.name} is connected and ready for your ${connected.provider === "github" ? "private chats and linked Slack requests" : "private chats"}.`
     : outcome === "cancelled" ? "Authorization cancelled. Your existing connections are unchanged."
       : outcome === "expired" ? "This authorization request expired or was replaced. Click Connect to try again."
         : outcome === "failed" ? "The provider did not confirm authorization. Click Connect to try again." : ""
   return <section className="ns-personal-connections" aria-label="Your apps">
     <h2>Your apps</h2>
-    <p className="ns-help">Connect an app, approve access, and you're ready. These accounts are personal and can be used only in your private chats.</p>
+    <p className="ns-help">Connect your own account and approve access. GitHub works in private chats and your linked Slack requests. Other personal apps stay in private chats.</p>
     {!individual ? <p className="ns-notice">Sign in with your individual work account to connect your apps.</p> : <>
       {(notice || callbackNotice) && <p className="ns-notice" role="status">{notice || callbackNotice}</p>}
       {state.error && <div className="ns-error" role="alert">{state.error} <Button variant="outline" onClick={() => setRevision(value => value + 1)}>Retry</Button></div>}
@@ -92,7 +92,8 @@ export function PersonalConnections({ userId, individual, children }: { userId: 
           <div className="ns-record-copy">
             <div className="ns-record-title"><h3>{row.name}</h3>{row.connected && <span className="ns-badge ns-oauth-connected"><Check size={13} aria-hidden="true" />Connected</span>}</div>
             <p>{descriptions[row.provider]}</p>
-            <small>{row.connected ? "Only you · Changes require your approval" : row.configured ? "Approve access on the provider’s website." : "Not enabled on this Moyai deployment yet. Ask your administrator."}</small>
+            {row.provider === "github" && <p className="ns-help">GitHub grants repository access across the repositories your account can authorize, including private repositories, plus organization read access. Organization approval or SSO may still be required. Slack must use the same verified work email; results and files requested there are visible to the conversation.</p>}
+            <small>{row.connected ? "Your account · Changes require your approval" : row.configured ? "Approve access on the provider’s website." : "Not enabled on this Moyai deployment yet. Ask your administrator."}</small>
           </div>
           <div className="ns-row-actions">
             <Button size="sm" variant={row.connected ? "outline" : "default"} disabled={busy !== null || !row.configured}

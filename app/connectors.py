@@ -672,24 +672,28 @@ class Connectors:
             parts.append({'channel': result.get('channel', channel), 'ts': result['ts']})
         return {**result, 'channel': parts[0]['channel'], 'ts': parts[0]['ts'], 'parts': parts, 'complete': True}
 
-    def oauth_client(self, provider):
-        """One deployment app, shared by organization and personal grants."""
+    def oauth_client(self, provider, *, personal=False):
+        """Personal GitHub uses a separate OAuth App, never an installation token."""
+        if provider == "github" and personal:
+            return self.settings.github_oauth_client_id, self.settings.github_oauth_client_secret
         if provider == "github":
             app = self.github.app_config()
             if app.get("client_id") and app.get("client_secret"):
                 return app["client_id"], app["client_secret"]
         return getattr(self.settings, f"{provider}_client_id"), getattr(self.settings, f"{provider}_client_secret")
 
-    def authorization_url(self, provider, state, *, code_challenge=None):
-        client_id, _ = self.oauth_client(provider)
+    def authorization_url(self, provider, state, *, code_challenge=None, personal=False):
+        client_id, _ = self.oauth_client(provider, personal=personal)
         params = {"client_id": client_id, "redirect_uri": self.redirect_uri(provider), "state": state, "response_type": "code"}
         if provider == "linear":
             params.update(scope="read,write", actor="user")
             base = "https://linear.app/oauth/authorize"
         elif provider == "github":
-            # A GitHub App's user token is limited by both the app installation
-            # and the authorizing person; OAuth App scopes do not apply.
             base = "https://github.com/login/oauth/authorize"
+            if personal:
+                params["scope"] = "repo read:org"
+            # The organization GitHub App path still uses installation
+            # permissions rather than OAuth App scopes.
         elif provider == "slack":
             params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history")
             if self.settings.slack_bot_enabled:
@@ -709,8 +713,8 @@ class Connectors:
     def redirect_uri(self, provider):
         return f"{self.settings.public_url.rstrip('/')}/oauth/{provider}/callback"
 
-    async def exchange(self, provider, *, code=None, refresh_token=None, code_verifier=None):
-        client_id, client_secret = self.oauth_client(provider)
+    async def exchange(self, provider, *, code=None, refresh_token=None, code_verifier=None, personal=False):
+        client_id, client_secret = self.oauth_client(provider, personal=personal)
         payload = {"grant_type": "refresh_token" if refresh_token else "authorization_code"}
         if refresh_token:
             payload["refresh_token"] = refresh_token
@@ -738,6 +742,11 @@ class Connectors:
             result = user
         if not result.get("access_token"):
             raise ConnectorError("The app did not return an access token. Reconnect with the required user scopes.", dispatched=False)
+        if provider == "github" and personal:
+            scopes = set(re.split(r"[\s,]+", result.get("scope", "")))
+            # GitHub normalizes previously granted scopes to their superset.
+            if "repo" not in scopes or not scopes.intersection({"read:org", "write:org", "admin:org"}):
+                raise ConnectorError("Approve repository and organization read access to connect GitHub.", dispatched=False)
         result["kind"] = "oauth_user" if provider == "github" else "oauth"
         if "expires_in" in result:
             lifetime = result["expires_in"]

@@ -76,6 +76,11 @@ def _gitlab_revision(encrypted: str | None) -> str:
 
 
 class ProductConnections:
+    @property
+    def personal_github(self) -> bool:
+        # A partial configuration fails closed too; never fall back to the bot.
+        return bool(self.settings.github_oauth_client_id or self.settings.github_oauth_client_secret)
+
     def __init__(self, product: ProductResources, database: Database):
         from app.connectors import Connectors
         from app.identities import SlackIdentities
@@ -124,6 +129,10 @@ class ProductConnections:
         connectors = source_connectors if source_connectors is not None else self.connectors
         result: list[Grant] = []
         for provider in PROVIDERS:
+            if provider == "github" and self.personal_github and (
+                surface == "slack" or (surface == "web" and not shared_session)
+            ):
+                continue
             policy = connectors.policy(provider)
             if not policy["enabled"]:
                 continue
@@ -219,10 +228,11 @@ class ProductConnections:
                 from .personal_oauth import native_connections
                 identities = list(await transaction.scalars(select(Connection.id).where(
                     Connection.id.in_(candidates),
-                    native_connections() if surface == "web" else Connection.kind.in_(["mcp", "litellm"]),
+                    native_connections() if surface == "web" or (surface == "slack" and self.personal_github)
+                    else Connection.kind.in_(["mcp", "litellm"]),
                 )))
                 return await self.database.native_grants(
-                    transaction, actor_id, identities, shared_session=shared_session,
+                    transaction, actor_id, identities, shared_session=shared_session, surface=surface,
                 )
 
             if db is not None:
@@ -452,7 +462,32 @@ class ProductConnections:
                 "read_only": grant.read_only, "enabled": True, "revision": grant.revision,
                 "policy": grant.policy, "source": "product",
             })
+        if surface == "slack" and self.personal_github:
+            async with self.database.sessions() as db:
+                account = await self.slack_github_account(db, actor_id)
+                if account is not None:
+                    result.append({
+                        "id": account.id, "name": "Personal GitHub", "kind": "github",
+                        "owner_id": account.owner_id, "shared": False, "read_only": account.read_only,
+                        "enabled": True, "revision": account.revision,
+                        "policy": json.loads(account.policy), "source": None,
+                    })
         return result
+
+    async def slack_github_account(self, db: AsyncSession, actor_id: str) -> Connection | None:
+        from .oauth_models import OAuthCredential
+        from .personal_oauth import connection_owner
+
+        owner = await connection_owner(self.database, db, actor_id, "github", "slack")
+        if owner is None:
+            return None
+        row = await db.scalar(select(Connection).join(
+            OAuthCredential, OAuthCredential.connection_id == Connection.id,
+        ).where(
+            Connection.owner_id == owner, Connection.kind == "github", Connection.shared.is_(False),
+            Connection.enabled.is_(True), OAuthCredential.encrypted != "",
+        ))
+        return row if row is not None and json.loads(row.policy).get("oauth") else None
 
     def _saved_catalog_labels(self, grants: Sequence[Grant]) -> dict[tuple[str, int | None], str]:
         """Bound saved repository-name queries to the requested catalog window."""

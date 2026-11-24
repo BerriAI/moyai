@@ -101,9 +101,18 @@ class RunScope:
 
     @property
     def workspace_key(self) -> str:
+        grants_key = self.grants_key
+        if self.visibility == "shared" and self.authority.surface == "slack":
+            # GitHub OAuth credentials never enter the shared computer. Files
+            # and results requested here belong to the Slack conversation,
+            # while tool catalogs, history and memory retain per-user grants.
+            grants_key = hashlib.sha256(json.dumps(sorted(
+                (grant.id, grant.revision) for grant in self.grants
+                if not (grant.kind == "github" and grant.policy.get("oauth"))
+            )).encode()).hexdigest()
         return hashlib.sha256(json.dumps([
             self.visibility, self.actor_id if self.visibility == "private" else "shared",
-            self.grants_key,
+            grants_key,
         ]).encode()).hexdigest()
 
 

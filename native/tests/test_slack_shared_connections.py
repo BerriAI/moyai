@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from test_product_connections import save
 
 from moyai.models import Base, Connection, Session, Turn, User
+from moyai.oauth_models import OAuthCredential
+from moyai.personal_oauth import access_token, connection_id
 
 bridge = context_tests.bridge
 slack = context_tests.slack
@@ -151,3 +153,74 @@ async def test_second_participant_reaches_execution_in_existing_slack_workspace(
     assert all(g.policy["product"]["personal_owner"] is None for g in continuation.scope.grants)
     if legacy_bot:
         assert [g.policy["product"]["access"] for g in continuation.scope.grants] == ["bot"]
+
+
+@pytest.mark.parametrize("second_connected", [False, True])
+async def test_github_is_reselected_for_each_slack_sender_without_borrowing_credentials(
+    ingress, actor, bridge, monkeypatch, second_connected,
+):
+    runtime, service = ingress.runtime, ingress.service
+    bridge.database = runtime.database
+    bridge.settings.github_oauth_client_id = "personal-github"
+    bridge.settings.github_oauth_client_secret = "personal-github-secret"
+    async with runtime.database.sessions.begin() as db:
+        second = User(id="google:second", username="second", display_name="Second", password="")
+        db.add(second)
+        for user in ([actor, second] if second_connected else [actor]):
+            identity = connection_id(user.id, "github")
+            db.add(Connection(
+                id=identity, owner_id=user.id, kind="github", name="Personal GitHub",
+                credential=runtime.security.seal(""), shared=False, enabled=True,
+                policy=json.dumps({"oauth": True, "require_approval": True}),
+            ))
+            await db.flush()
+            db.add(OAuthCredential(connection_id=identity, encrypted=runtime.security.seal({
+                "client_id": "personal-github", "access_token": f"token-for-{user.id}",
+            })))
+    principal = await service.product.identity.require_current(ingress.grant)
+
+    async def sender(team, user):
+        selected = actor if user == "UTEST0001" else second
+        return selected, replace(principal, id=selected.id)
+
+    async def request(*args, **kwargs):
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service, "actor", sender)
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(context_tests.envelope(context_tests.mention_message()))
+    first = await runtime.database.claim_next()
+    prepared = await runtime.admission.prepare(first.id)
+    github = next(grant for grant in prepared.scope.grants if grant.kind == "github")
+    assert await access_token(runtime.database, prepared.scope, github) == f"token-for-{actor.id}"
+    for automated in (
+        {"delegation_depth": 1}, {"delegation_generated": True},
+        {"swarm_id": "automated-swarm"}, {"goal_generation": 1},
+    ):
+        with pytest.raises(PermissionError):
+            await runtime.database.authorize_scope(replace(prepared.scope, **automated))
+    async with runtime.database.sessions.begin() as db:
+        session = await db.get(Session, first.session_id)
+        session.workspace, session.workspace_scope = json.dumps({"id": "retained-computer"}), prepared.scope.workspace_key
+        (await db.get(Turn, first.id)).status = "completed"
+        session.active_turn, session.status = None, "idle"
+        # Disconnect the former requester before another person replies.
+        (await db.get(Connection, github.id)).enabled = False
+    event = context_tests.envelope({
+        **context_tests.mention_message(), "type": "message", "user": "UOTHER001",
+        "ts": "1792255890.001", "text": "Read the pull request using my GitHub account.",
+    })
+    await service.receive_payload(event)
+    await service.receive_payload(event)
+    followup = await runtime.database.claim_next()
+    continuation = await runtime.admission.prepare(followup.id)
+    assert continuation.scope.actor_id == second.id
+    assert continuation.scope.workspace_key == prepared.scope.workspace_key
+    assert continuation.scope.conversation_id != prepared.scope.conversation_id
+    selected = [grant for grant in continuation.scope.grants if grant.kind == "github"]
+    assert len(selected) == int(second_connected)
+    if second_connected:
+        assert selected[0].id == connection_id(second.id, "github")
+        assert await access_token(runtime.database, continuation.scope, selected[0]) == f"token-for-{second.id}"
+    async with runtime.database.sessions() as db:
+        assert len(list(await db.scalars(select(Turn)))) == 2
