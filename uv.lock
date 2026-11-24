@@ -19,7 +19,7 @@ members = [
 [[package]]
 name = "agentchat"
 version = "0.1.0a1"
-source = { git = "https://github.com/BerriAI/agentchat.git?rev=6985d192b3ba4f3d1cc77379c4e0354078b8a8a7#6985d192b3ba4f3d1cc77379c4e0354078b8a8a7" }
+source = { git = "https://github.com/BerriAI/agentchat.git?rev=1af6a76b8bbb630da3b1c903c97cef1aeaa3a801#1af6a76b8bbb630da3b1c903c97cef1aeaa3a801" }
 dependencies = [
     { name = "aiohttp" },
     { name = "slack-sdk" },
@@ -1888,7 +1888,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=6985d192b3ba4f3d1cc77379c4e0354078b8a8a7" },
+    { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=1af6a76b8bbb630da3b1c903c97cef1aeaa3a801" },
     { name = "aiosqlite", specifier = ">=0.20,<1" },
     { name = "asyncpg", specifier = ">=0.30,<1" },
     { name = "boto3", specifier = ">=1.43,<2" },

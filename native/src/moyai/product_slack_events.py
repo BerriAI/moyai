@@ -58,11 +58,7 @@ class SlackMessage:
     command: SlackCommand | None
 
     @classmethod
-    def parse(cls, payload: dict, event: dict, installed: dict) -> SlackMessage | None:
-        host = SlackHost(
-            bot_user_id=installed["user_id"], workspace_id=installed["team_id"],
-            exclude_prefixes=ASIDE_PREFIXES,
-        )
+    def parse(cls, payload: dict, event: dict, host: SlackHost) -> SlackMessage | None:
         try:
             normalized = host.normalize_event(payload)
         except ValueError:
@@ -116,7 +112,11 @@ class SlackEvents:
         event = self._eligible_event(payload, installed)
         if event is None:
             return {"ok": True}
-        message = SlackMessage.parse(payload, event, installed)
+        host = SlackHost(
+            bot_user_id=installed["user_id"], workspace_id=installed["team_id"],
+            exclude_prefixes=ASIDE_PREFIXES,
+        )
+        message = SlackMessage.parse(payload, event, host)
         await self._automation(payload, event, installed)
         if message is None:
             return {"ok": True}
@@ -125,7 +125,7 @@ class SlackEvents:
         ):
             return {"ok": True}
         thread = await self.conversations.find(message.origin)
-        if thread is None and not message.mentioned and not message.direct:
+        if not host.accepts(message.source, subscribed=thread is not None):
             return {"ok": True}
         if not settings.slack_thread_chat_enabled and not message.mentioned:
             return {"ok": True}

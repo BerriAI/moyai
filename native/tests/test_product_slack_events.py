@@ -168,6 +168,38 @@ async def test_bound_thread_followup_does_not_add_a_reaction(ingress, conversati
 
     assert calls == []
 
+
+@pytest.mark.parametrize("state,accepted", [
+    ("bound", True), ("unbound", False), ("paused", False), ("disabled", False),
+])
+async def test_sdk_followup_routing_preserves_session_and_product_policy(
+    ingress, conversation, monkeypatch, state, accepted,
+):
+    service, runtime = ingress.service, ingress.runtime
+    payload = followup("Continue the original task.")
+    payload["event"].pop("files")
+    if state == "unbound":
+        payload["event"]["thread_ts"] = "1792255700.000"
+    elif state == "paused":
+        await service.set_paused(conversation.session_id, True)
+    elif state == "disabled":
+        service.settings.slack_thread_chat_enabled = False
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+
+    # Retry the same delivery: a routed follow-up must still produce only one turn.
+    await service.receive_payload(payload)
+    await service.receive_payload(payload)
+
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+        sessions = list(await db.scalars(select(Session)))
+        sources = list(await db.scalars(select(SlackTurnSource)))
+    assert len(sessions) == 1
+    assert len(turns) == 1 + int(accepted)
+    assert all(turn.session_id == conversation.session_id for turn in turns)
+    assert sum(source.message_ts == payload["event"]["ts"] for source in sources) == int(accepted)
+
+
 async def test_unaddressed_top_level_message_is_not_acknowledged(ingress, monkeypatch):
     calls = []
 
