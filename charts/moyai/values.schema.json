@@ -47,6 +47,11 @@
     "postgresql": {
       "type": "object",
       "properties": {
+        "maxConnections": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 2000
+        },
         "enabled": {
           "type": "boolean"
         }

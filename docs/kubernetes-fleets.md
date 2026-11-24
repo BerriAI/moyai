@@ -55,3 +55,12 @@ shared runtime contract. The first migration needs a maintenance boundary with
 zero old owners; changing `Recreate` to `RollingUpdate` does not perform it.
 Subsequent releases must pass exact-image compatibility and capacity checks.
 Incompatible protocol/schema changes still need their reviewed migration path.
+
+Reserve database capacity for the source, candidate, a fresh rollback fleet,
+process replacement, routing watchers and existing clients. The controller
+checks this envelope before creating a generation. `config.MOYAI_DATABASE_POOL_SIZE`
+sets each role's bounded pools; `postgresql.maxConnections` sets the bundled
+server limit (default 100). Qualify pool changes with the workload. Raising the
+server limit requires a memory review and restarts bundled PostgreSQL, so do
+that during the initial maintenance boundary, before overlapping application
+generations. External PostgreSQL capacity remains its operator's responsibility.
