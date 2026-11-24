@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import String, cast, delete, literal, select, tuple_, update
+from sqlalchemy import String, cast, delete, literal, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -85,17 +85,26 @@ async def dispatch_responsibilities(runtime: Runtime, state: ResponsibilityDispa
     groups: dict[tuple[str, int], list[str]] = {}
     for event in events:
         groups.setdefault((event.responsibility_id, event.generation), []).append(event.id)
-    # Advance the bounded round even when the coordinator's RPC budget expires.
-    # Unacknowledged intents remain in the outbox for the next round.
-    if len(events) == limit:
-        state.after = events[-1].created_at, events[-1].id
-    else:
+    if not events:
         state.after = state.through = None
+        return
     client = await runtime.connect()
     slots = asyncio.Semaphore(runtime.settings.temporal_dispatch_concurrency)
+    attempted: set[str] = set()
+    through_attempt = 0
 
     async def deliver(identity: str, generation: int, event_ids: list[str]) -> None:
+        nonlocal through_attempt
         async with slots:
+            attempted.update(event_ids)
+            # Only pass the contiguous prefix that actually obtained an RPC
+            # slot. Cancellation must not skip groups still waiting for one.
+            while through_attempt < len(events) and events[through_attempt].id in attempted:
+                event = events[through_attempt]
+                state.after = event.created_at, event.id
+                through_attempt += 1
+            if through_attempt == len(events) and len(events) < limit:
+                state.after = state.through = None
             await send(identity, generation, event_ids)
 
     async def send(identity: str, generation: int, event_ids: list[str]) -> None:
@@ -108,17 +117,9 @@ async def dispatch_responsibilities(runtime: Runtime, state: ResponsibilityDispa
                 rpc_timeout=timedelta(seconds=1),
             )
         except WorkflowAlreadyStartedError:
-            # A closed generation cannot be reopened by a late wake. If the
-            # application still expects it to run, surface recovery rather
-            # than silently acknowledging a signal that was not delivered.
-            async with runtime.database.sessions.begin() as db:
-                await db.execute(update(Responsibility).where(
-                    Responsibility.id == identity, Responsibility.generation == generation,
-                    Responsibility.status.in_(["waiting", "running"]),
-                ).values(
-                    status="blocked",
-                    reason="Responsibility workflow closed unexpectedly. Review activity, then resume.",
-                ))
+            # Reconcile any already accepted result without admitting work.
+            # This generation remains closed until an explicit Resume.
+            await runtime.database.responsibilities.tick(identity, generation=generation, closed=True)
         except (RPCError, TimeoutError):
             logger.warning("Temporal did not acknowledge a responsibility wake; its intent remains saved.")
             return

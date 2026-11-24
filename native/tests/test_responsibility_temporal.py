@@ -74,6 +74,7 @@ async def test_old_generation_cannot_admit_after_pause_resume(runtime, actor):
     ]:
         await runtime.database.responsibilities.control(actor, row.id, command)
     assert (await runtime.database.responsibilities.tick(row.id, generation=1)).finished
+    assert (await runtime.database.responsibilities.tick(row.id, generation=1, closed=True)).finished
     assert await assignment(runtime, row.id) is None
     await runtime.database.responsibilities.tick(row.id, generation=3)
     assert await assignment(runtime, row.id)
@@ -125,6 +126,35 @@ async def test_unacknowledged_outbox_page_does_not_starve_later_wakes(runtime, a
     assert state.after is None and state.through is None
 
 
+async def test_cancelled_dispatch_does_not_skip_groups_waiting_for_rpc_slot(runtime, actor):
+    rows = [(await enroll(runtime, actor))[1] for _ in range(3)]
+    runtime.settings.temporal_dispatch_concurrency = 1
+    state = ResponsibilityDispatch()
+    attempted = []
+    entered = asyncio.Event()
+    stalled = True
+
+    async def start(*args, **kwargs):
+        attempted.append(kwargs["id"])
+        if stalled:
+            entered.set()
+            await asyncio.Future()
+
+    runtime.connect = AsyncMock(return_value=SimpleNamespace(start_workflow=start))
+    dispatch = asyncio.create_task(dispatch_responsibilities(runtime, state))
+    await asyncio.wait_for(entered.wait(), 3)
+    dispatch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+    assert len(attempted) == 1 and len(await pending(runtime)) == 3
+    stalled = False
+    await dispatch_responsibilities(runtime, state)
+    assert set(attempted) == {ResponsibilityRun(row.id, row.generation).workflow_id for row in rows}
+    assert len(await pending(runtime)) == 1
+    await dispatch_responsibilities(runtime, state)
+    assert not await pending(runtime)
+
+
 async def test_closed_current_workflow_blocks_until_explicit_resume(runtime, actor):
     _, row = await enroll(runtime, actor)
     async with await WorkflowEnvironment.start_local(
@@ -151,6 +181,42 @@ async def test_closed_current_workflow_blocks_until_explicit_resume(runtime, act
             assert (await replacement.describe()).run_id != (await handle.describe()).run_id
             await stop(runtime, actor, resumed, state)
             await asyncio.wait_for(replacement.result(), 15)
+
+
+@pytest.mark.parametrize("budget", [1, 2])
+async def test_closed_controller_reconciles_accepted_save_without_new_admission(runtime, actor, budget):
+    source, row = await enroll(runtime, actor, max_evaluations=budget)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    _, prepared, decision = await worker(runtime, row.id)
+    assert await runtime.database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output=decision, workspace=None, usage={},
+    )
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=encrypted_converter(runtime.security, runtime.objects),
+    ) as environment:
+        runtime.client = environment.client
+        state = ResponsibilityDispatch()
+        async with make_worker(runtime):
+            await dispatch_responsibilities(runtime, state)
+            handle = environment.client.get_workflow_handle(ResponsibilityRun(row.id, row.generation).workflow_id)
+            await handle.terminate("Exercise closure after result acceptance")
+            async with runtime.database.sessions.begin() as db:
+                await request_wake(db, row.id, row.generation, "source:after-termination")
+            await dispatch_responsibilities(runtime, state)
+            blocked = (await runtime.database.responsibilities.list(actor))[0]
+            assert blocked.status == "blocked" and blocked.active_turn_id == prepared.scope.turn_id
+            # More evidence cannot turn this recovery path into new admission.
+            await source_answer(runtime, actor, source, "Another status update")
+            await runtime.database.settle(prepared.scope.turn_id)
+            await dispatch_responsibilities(runtime, state)
+            final = (await runtime.database.responsibilities.list(actor))[0]
+            assert final.status == ("budget_limited" if budget == 1 else "blocked")
+            assert final.evaluations == 1 and final.active_turn_id is None and final.watermark == 1
+            assert len(await runtime.database.responsibilities.inbox(actor)) == 1
+            assert not await pending(runtime)
+            async with runtime.database.sessions() as db:
+                assert await db.scalar(select(func.count()).select_from(ResponsibilityAssignment)) == 1
 
 
 @pytest.mark.parametrize("mode", ["waiting", "running", "saving"])
@@ -278,10 +344,11 @@ async def test_signal_during_step_and_continue_as_new_keeps_committed_evidence(r
     async def gated(*args, **kwargs):
         nonlocal calls
         calls += 1
+        state = await original(*args, **kwargs)
         if calls == 2:
             entered.set()
             await release.wait()
-        return await original(*args, **kwargs)
+        return state
 
     monkeypatch.setattr(runtime.database.responsibilities, "tick", gated)
     async with await WorkflowEnvironment.start_local(
@@ -301,12 +368,12 @@ async def test_signal_during_step_and_continue_as_new_keeps_committed_evidence(r
             await asyncio.wait_for(entered.wait(), 10)
             await source_answer(runtime, actor, source)
             await overdue(runtime, row.id)
-            # The signal is delivered while a step is outstanding. The source
-            # event itself remains committed even across history rollover.
+            # The old run has already read the database. Commit evidence and
+            # deliver its hint before allowing that stale result to return.
             await dispatch_responsibilities(runtime, state)
             release.set()
-            await eventually(lambda: assignment(runtime, row.id))
             await eventually(handle.describe, lambda description: description.run_id != first.run_id)
+            await eventually(lambda: assignment(runtime, row.id))
             _, prepared, decision = await worker(runtime, row.id)
             assert await finish(runtime, prepared, decision)
             await dispatch_responsibilities(runtime, state)

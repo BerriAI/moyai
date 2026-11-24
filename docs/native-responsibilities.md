@@ -32,8 +32,9 @@ external actions, or enable a watch by default.
   dispatcher delivers the outbox using Temporal Signal-With-Start, deterministic
   IDs (`moyai-responsibility-<id>-<generation>`) and `REJECT_DUPLICATE`.
   It acknowledges only the event IDs sent in that RPC. Unacknowledged intents
-  remain saved; bounded scan rounds prevent an unavailable head from starving
-  later delivery. Delivery has a two-second coordinator budget after manual
+  remain saved; bounded scan rounds advance only past attempted groups, so an
+  unavailable head or cancellation cannot starve later delivery. Delivery has
+  a two-second coordinator budget after manual
   input and Stop handling. This is transactional transport, not a second
   scheduler or workflow engine.
 - The workflow executes a domain step, then waits for a signal or a Temporal
@@ -56,8 +57,11 @@ external actions, or enable a watch by default.
   monitoring; this slice does not add a new pending-save-age alert.
 - A closed current controller cannot be silently restarted with the same
   identity. A rejected wake marks the responsibility blocked with a recovery
-  reason; explicit Resume advances its generation. Stale generations cannot
-  admit work or publish findings.
+  reason; explicit Resume advances its generation. A generation-fenced recovery
+  step can still reconcile an already accepted result, including after the last
+  review is spent. It preserves pending native settlement, never admits another
+  review and does not charge the budget again. Stale generations cannot admit
+  work or publish findings.
 - `moyai_responsibility` is a separate `NativeOutput` agent. Its input contains
   the objective and at most five new messages, each capped at 6,000 characters.
   It has no functional tools, account selection, conversation history, skills,

@@ -96,7 +96,7 @@ export function ResponsibilitiesPage({ userId }: { userId: string }) {
         {!items.length && <p className="ns-empty">Add your first responsibility to get started. You can pause it at any time.</p>}
         {items.map(item => <article className="dot-card" key={item.id}>
           <div className="dot-row"><strong className="dot-objective">{item.objective}</strong><span>{item.status.replaceAll("_", " ")}</span></div>
-          <p>{item.evaluations} of {item.max_evaluations} reviews used · Checks every {item.interval_seconds} seconds</p>
+          <p>{item.evaluations} of {item.max_evaluations} reviews used · Minimum review interval: {item.interval_seconds} seconds</p>
           {item.reason && <p>{item.reason}</p>}
           <div className="dot-actions"><a href={`#${item.source_session_id}`}>Open source chat</a>
             <Button variant="ghost" size="sm" onClick={() => setReview(item.id)}>Review activity</Button>

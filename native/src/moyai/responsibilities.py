@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 GRANT = TypeAdapter(ProductGrant)
 BUSY = ("queued", "starting", "running", "waiting", "saving")
+CLOSED_CONTROLLER = "Responsibility workflow closed unexpectedly. Review activity, then resume."
 
 
 def ordinary_session():
@@ -360,7 +361,9 @@ class Responsibilities:
             raise ValueError("The worker cited evidence outside its assignment.")
         return decision
 
-    async def tick(self, identity: str, *, generation: int | None = None) -> ResponsibilityStep:
+    async def tick(
+        self, identity: str, *, generation: int | None = None, closed: bool = False,
+    ) -> ResponsibilityStep:
         async with self.database._admission_session(None) as db:
             original = await db.get(Responsibility, identity)
             if original is None or (generation is not None and original.generation != generation):
@@ -371,7 +374,11 @@ class Responsibilities:
             except (PermissionError, HTTPException):
                 pass
             row = await self.lock(db, identity)
-            if row.status not in {"waiting", "running"} or (generation is not None and row.generation != generation):
+            recovering = closed and row.status == "blocked" and row.reason == CLOSED_CONTROLLER
+            if (
+                row.status not in {"waiting", "running"} and not recovering
+                or generation is not None and row.generation != generation
+            ):
                 return ResponsibilityStep(finished=True)
             if self.database.product_drain is not None and not await self.database.product_drain.admit(db):
                 # Temporal's Activity RetryPolicy owns the wait. No persisted
@@ -385,6 +392,10 @@ class Responsibilities:
                 await self.cancel_assignment(db, row)
                 row.status, row.reason = "blocked", "Source access or the original requester authority changed."
                 return ResponsibilityStep(finished=True)
+            if closed:
+                # Reject new inference/result acceptance after controller loss,
+                # but preserve native settlement of an already accepted save.
+                row.status, row.reason = "blocked", CLOSED_CONTROLLER
             if row.active_turn_id:
                 turn = await db.get(Turn, row.active_turn_id)
                 assignment = await db.get(ResponsibilityAssignment, row.active_turn_id)
@@ -401,6 +412,10 @@ class Responsibilities:
                     # Expiry gates new model work and result acceptance. An
                     # on-time accepted result keeps its native settlement path.
                     return ResponsibilityStep()
+                if closed and turn.status in BUSY:
+                    await self.cancel_assignment(db, row)
+                    assignment.reconciled = True
+                    return ResponsibilityStep(finished=True)
                 if turn.status in BUSY and assignment.expires_at > now():
                     return ResponsibilityStep(wake_at=assignment.expires_at)
                 if turn.status != "completed" or not turn.result_accepted:
@@ -434,6 +449,9 @@ class Responsibilities:
                 row.status = "waiting"
             if row.evaluations >= row.max_evaluations:
                 row.status, row.reason = "budget_limited", "Evaluation budget exhausted."
+                return ResponsibilityStep(finished=True)
+            if closed:
+                row.status, row.reason = "blocked", CLOSED_CONTROLLER
                 return ResponsibilityStep(finished=True)
             completed = (await db.execute(select(ResponsibilityCompletion.sequence, Message).join(
                 Message, Message.id == ResponsibilityCompletion.message_id,
