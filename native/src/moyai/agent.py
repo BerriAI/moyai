@@ -360,6 +360,8 @@ def make_agent(
     memory: AbstractCapability[RunScope] | None = None,
     instrumentation: InstrumentationSettings | None = None,
 ) -> tuple[Agent[RunScope, str | DeferredToolRequests], TemporalDurability[RunScope]]:
+    from .dot_agent import DotInstructions
+
     models = models or inference_models(settings)
     if workspace is None:
         from .lambda_workspace import WorkspaceProviders
@@ -404,6 +406,7 @@ def make_agent(
             workspace,
             authority,
             private_instructions.PrivateInstructions(database),
+            DotInstructions(database),
             InteractiveDelegation(database),
             SwarmCapability(database.swarms),
             GoalCapability(database.goals),

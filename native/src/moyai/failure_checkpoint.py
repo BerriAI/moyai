@@ -65,6 +65,7 @@ async def preserve_failed_workspace(runtime: Runtime, turn_id: str) -> None:
             await require_settled(db, session.id)
             reference = json.loads(session.workspace or "null")
             session.conversation = turn.conversation = database.security.seal(conversation)
+            await database.dots.saved_checkpoint(db, scope)
             session.last_actor_id, session.last_model = scope.actor_id, scope.model
             session.last_grants = scope.grants_key
             session.revision += 1

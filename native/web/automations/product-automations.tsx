@@ -307,7 +307,7 @@ function AutomationDialog({ id, mode, canCreate, eventChoices, onMode, onSaved, 
       <AutomationReadiness preview={ready} />
       <ul className="pa-triggers">{automationTriggers(ready.definition).map(trigger => <li key={trigger.id}><TriggerSummary trigger={trigger} /></li>)}</ul>
       <details><summary>Workflow instructions</summary><pre>{ready.definition.prompt}</pre></details>
-      <p>{ready.definition.session_id ? <><a className="ns-link" href={`#${encodeURIComponent(ready.definition.session_id)}`} onClick={onClose}>Continue existing chat</a> · Each run uses this chat’s history and computer.</> : "New chat each run · Runs start with fresh conversation history."}</p>
+      <p>{ready.definition.session_id ? <><a className="ns-link" href={`#${encodeURIComponent(ready.definition.session_id)}`} onClick={onClose}>{ready.definition.kind === "attention" ? "Open Your Dot" : "Continue existing chat"}</a> · {ready.definition.kind === "attention" ? "Read-only checks run separately and bring useful updates here." : "Each run uses this chat’s history and computer."}</> : "New chat each run · Runs start with fresh conversation history."}</p>
       <UnsupportedSettings definition={ready.definition} />
       <div className="ns-row-actions pa-actions">
         {actions?.edit && <Button variant="outline" disabled={busy || preview.loading} onClick={() => { setError(""); onMode("edit") }}>Edit definition</Button>}
@@ -357,12 +357,12 @@ export function UnsupportedSettings({ definition }: { definition: AutomationDefi
   const entries = [
     !definition.session_id && definition.plugins.length ? ["Connections", definition.plugins.join(", ")] : null,
     !definition.session_id && (definition.repo_url || definition.github_repository_id || definition.gitlab_project_id) ? ["Repository", definition.repo_url || `Repository ID ${definition.github_repository_id ?? definition.gitlab_project_id}`] : null,
-    definition.session_id ? ["Project and connections", "From the selected chat"] : ["Environment", definition.environment_id],
+    definition.kind === "attention" ? ["Connections", "Saved personal read-only accounts"] : definition.session_id ? ["Project and connections", "From the selected chat"] : ["Environment", definition.environment_id],
     definition.mode !== "modal" ? ["Execution mode", definition.mode] : null,
     definition.self_management.instructions || definition.self_management.schedule ? ["Self-management", "Instructions or schedule permissions are enabled."] : null,
     Object.keys(definition.metadata).length ? ["Metadata", Object.entries(definition.metadata).map(([key, value]) => `${key}: ${value}`).join("\n")] : null,
     ["Hourly limit", definition.max_runs_per_hour === null ? "No cap" : `${definition.max_runs_per_hour} runs`],
-    ["Event handling", definition.session_id ? "Wait for the selected chat to be idle" : definition.queue_events ? "Queue while another run is active" : "Allow overlapping runs"],
+    ["Event handling", definition.kind === "attention" ? "Check separately from your conversation" : definition.session_id ? "Wait for the selected chat to be idle" : definition.queue_events ? "Queue while another run is active" : "Allow overlapping runs"],
   ].filter((entry): entry is string[] => Boolean(entry))
   return entries.length > 0 && <div className="pa-preserved"><h3>Saved execution settings</h3><p>These settings are part of the saved definition. Current readiness determines whether they can be used.</p><dl>{entries.map(([name, value]) => <React.Fragment key={name}><dt>{name}</dt><dd>{value}</dd></React.Fragment>)}</dl></div>
 }
@@ -429,7 +429,7 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
   onCancel: () => void; onSave: (definition: AutomationDefinition) => Promise<void>
 }) {
   const [definition, setDefinition] = useState<AutomationDefinition>(() => existing ? structuredClone(existing) : {
-    name: "", prompt: "", visibility: "shared", connection_ids: [], session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null, gitlab_project_id: null,
+    name: "", prompt: "", kind: "task", visibility: "shared", connection_ids: [], session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null, gitlab_project_id: null,
     environment_id: "auto", plugins: [], metadata: {}, queue_events: false, max_runs_per_hour: 50,
     self_management: { instructions: false, schedule: false },
     triggers: [{ id: crypto.randomUUID(), schedule: { ...automationDefaultSchedule(), cron: "", run_at: null } }],
@@ -475,8 +475,8 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
           setError(""); change({ visibility: value === "private" ? "private" : "shared", session_id: null, plugins: [], connection_ids: [] })
         }} /><p className="ns-field-hint">Visibility stays fixed after creation. Runs can continue only a chat with the same visibility.</p></div>
       <div className="ns-field"><label htmlFor={`${id}-prompt`}>Instructions</label><Textarea id={`${id}-prompt`} rows={6} required minLength={3} maxLength={500000} disabled={busy} value={definition.prompt} onChange={event => change({ prompt: event.target.value })} /></div>
-      <div className="ns-field"><label htmlFor={`${id}-destination`}>Run in</label><Choice id={`${id}-destination`} label="Run in" value={definition.session_id || "__new__"} options={chatOptions} disabled={busy || chatLoading} onChange={value => change({ session_id: value === "__new__" ? null : value })} />
-        <p className="ns-field-hint">{definition.session_id ? "Each run continues this chat with its earlier messages, results, computer and connected accounts. Runs wait while the chat is busy." : `Each run starts a new ${definition.visibility} chat. Choose a recent ${definition.visibility} chat you own to keep context between runs.`}</p>
+      <div className="ns-field"><label htmlFor={`${id}-destination`}>Run in</label><Choice id={`${id}-destination`} label="Run in" value={definition.session_id || "__new__"} options={chatOptions} disabled={busy || chatLoading || definition.kind === "attention"} onChange={value => change({ session_id: value === "__new__" ? null : value })} />
+        <p className="ns-field-hint">{definition.kind === "attention" ? "Checks run privately with their saved read-only accounts. Useful updates appear in Your Dot; quiet checks leave it unchanged." : definition.session_id ? "Each run continues this chat with its earlier messages, results, computer and connected accounts. Runs wait while the chat is busy." : `Each run starts a new ${definition.visibility} chat. Choose a recent ${definition.visibility} chat you own to keep context between runs.`}</p>
         {chatLoading && <p role="status" className="ns-field-hint">Loading recent chats…</p>}
         {chatError && <p className="ns-error" role="alert">{chatError}{onRefreshChats && <Button type="button" variant="outline" onClick={onRefreshChats}>Retry chats</Button>}</p>}
       </div>
@@ -504,15 +504,15 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
       })}
       <Button type="button" variant="outline" disabled={busy || definition.triggers.length >= 16} onClick={() => changeTriggers([...definition.triggers, { id: crypto.randomUUID(), schedule: { ...automationDefaultSchedule(), cron: "", run_at: null } }])}><Plus size={16} />Add trigger</Button>
     </fieldset>
-    {!definition.session_id && definition.visibility === "private" && <section className="pa-editor-section"><h3>Connections and tools</h3>
+    {(!definition.session_id || definition.kind === "attention") && definition.visibility === "private" && <section className="pa-editor-section"><h3>Connections and tools</h3>
       <p className="ns-field-hint">Choose the accounts this private schedule may use. Each run rechecks your access to these exact connections.</p>
       {personalConnectionLoading && <p role="status">Loading your connections…</p>}
       {personalConnectionError && <p className="ns-error" role="alert">{personalConnectionError}{onRefreshPersonalConnections && <Button type="button" variant="outline" onClick={onRefreshPersonalConnections}>Retry personal connections</Button>}</p>}
       {personalConnections.map(connection => <CheckField key={connection.id}
         label={`${connection.name} · ${connection.shared ? "Workspace" : "Personal"}${connection.enabled ? connection.read_only ? " · Read only" : "" : " · Disabled"}`}
-        checked={definition.connection_ids.includes(connection.id)} disabled={busy || !connection.enabled}
+        checked={definition.connection_ids.includes(connection.id)} disabled={busy || !connection.enabled || (definition.kind === "attention" && (connection.shared || !connection.read_only))}
         onChange={checked => change({ connection_ids: checked ? [...definition.connection_ids, connection.id] : definition.connection_ids.filter(value => value !== connection.id) })} />)}
-      {!personalConnectionLoading && !personalConnectionError && !personalConnections.length && <p className="ns-field-hint">No connections are available. This schedule can still use base tools and your saved memory.</p>}
+      {!personalConnectionLoading && !personalConnectionError && !personalConnections.length && <p className="ns-field-hint">{definition.kind === "attention" ? "Connect a personal read-only account and choose its allowed read tools before enabling attention checks." : "No connections are available. This schedule can still use base tools and your saved memory."}</p>}
       {definition.connection_ids.filter(value => !personalConnections.some(connection => connection.id === value)).map(value => <CheckField key={value}
         label="Saved connection · Unavailable" checked disabled={busy}
         onChange={() => change({ connection_ids: definition.connection_ids.filter(item => item !== value) })} />)}
@@ -528,10 +528,10 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
         </div>
       })}
     </section>}
-    <section className="pa-editor-section"><h3>Self-management</h3><p className="ns-field-hint">Allow this automation and its workers to change only the selected parts of this workflow. Schedule changes may affect frequency and cost within your invocation limit.</p>
+    {definition.kind !== "attention" && <section className="pa-editor-section"><h3>Self-management</h3><p className="ns-field-hint">Allow this automation and its workers to change only the selected parts of this workflow. Schedule changes may affect frequency and cost within your invocation limit.</p>
       <CheckField label="May revise its instructions" disabled={busy} checked={definition.self_management.instructions} onChange={instructions => change({ self_management: { ...definition.self_management, instructions } })} />
       <CheckField label="May adjust existing schedules" disabled={busy} checked={definition.self_management.schedule} onChange={schedule => change({ self_management: { ...definition.self_management, schedule } })} />
-    </section>
+    </section>}
     <section className="pa-editor-section"><h3>Metadata</h3><p className="ns-field-hint">Descriptive key-value pairs for organizing this workflow. Metadata does not configure delivery or execute actions.</p>
       {metadata.map((entry, index) => <div className="pa-metadata" key={entry.id}>
         <div className="ns-field"><label htmlFor={`${id}-key-${entry.id}`}>Key {index + 1}</label><Input id={`${id}-key-${entry.id}`} required value={entry.key} disabled={busy} onChange={event => setMetadata(rows => rows.map(row => row.id === entry.id ? { ...row, key: event.target.value } : row))} /></div>

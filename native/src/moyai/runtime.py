@@ -231,6 +231,10 @@ class Runtime:
             self.responsibility_agent = make_responsibility_agent(
                 self.database, self.models, instrumentation=self.tracing.instrumentation if self.tracing else None,
             )
+            from .dot_agent import make_attention_agent
+            self.attention_agent = make_attention_agent(
+                self.database, self.models, instrumentation=self.tracing.instrumentation if self.tracing else None,
+            )
         except BaseException:
             await self.close()
             raise

@@ -177,9 +177,10 @@ async def test_billing_identity_comes_from_canonical_actor_not_client_headers(in
     assert "x-litellm-customer-team-id" not in ctx.calls[0]
 
 
-async def test_workflow_retry_with_new_run_id_cannot_repeat_paid_activity(inference, monkeypatch):
+@pytest.mark.parametrize("agent_name", ["moyai", "moyai_responsibility", "moyai_dot_attention"])
+async def test_workflow_retry_with_new_run_id_cannot_repeat_paid_activity(inference, monkeypatch, agent_name):
     info = SimpleNamespace(
-        activity_type="agent__moyai__model_request", workflow_namespace="local",
+        activity_type=f"agent__{agent_name}__model_request", workflow_namespace="local",
         workflow_id="same-turn-workflow", workflow_run_id="first-run", activity_id="model-one", attempt=1,
     )
     monkeypatch.setattr("moyai.execution.activity.info", lambda: info)

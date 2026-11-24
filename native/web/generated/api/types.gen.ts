@@ -1495,6 +1495,12 @@ export type AutomationDefinition = {
      */
     harness?: string;
     /**
+     * Kind
+     *
+     * Attention checks read selected accounts and quietly decide whether to message the owner in their Dot chat. They cannot take external actions.
+     */
+    kind?: 'task' | 'attention';
+    /**
      * Max Runs Per Hour
      */
     max_runs_per_hour?: number | null;
@@ -3565,6 +3571,20 @@ export type CredentialSecretMetadata = {
      * Status
      */
     status: string;
+};
+
+/**
+ * DotView
+ */
+export type DotView = {
+    /**
+     * Attention Available
+     */
+    attention_available: boolean;
+    /**
+     * Session Id
+     */
+    session_id: string | null;
 };
 
 /**
@@ -6074,6 +6094,12 @@ export type ProductAutomationDefinition = {
      * Harness
      */
     harness: string;
+    /**
+     * Kind
+     *
+     * Attention checks read selected accounts and quietly decide whether to message the owner in their Dot chat. They cannot take external actions.
+     */
+    kind: 'task' | 'attention';
     /**
      * Max Runs Per Hour
      */
@@ -13057,6 +13083,38 @@ export type UpdateCredentialResponses = {
 };
 
 export type UpdateCredentialResponse = UpdateCredentialResponses[keyof UpdateCredentialResponses];
+
+export type GetPersonalDotData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/dot';
+};
+
+export type GetPersonalDotResponses = {
+    /**
+     * Successful Response
+     */
+    200: DotView;
+};
+
+export type GetPersonalDotResponse = GetPersonalDotResponses[keyof GetPersonalDotResponses];
+
+export type OpenPersonalDotData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/dot';
+};
+
+export type OpenPersonalDotResponses = {
+    /**
+     * Successful Response
+     */
+    200: DotView;
+};
+
+export type OpenPersonalDotResponse = OpenPersonalDotResponses[keyof OpenPersonalDotResponses];
 
 export type ResolveEffectData = {
     body: EffectResolution;

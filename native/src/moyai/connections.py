@@ -143,11 +143,13 @@ class ConnectionTools(Toolset[RunScope]):
         return args
 
 
-def connection_tools(security: Security) -> Toolset[RunScope]:
+def connection_tools(security: Security, *, read_only: bool = False) -> Toolset[RunScope]:
     catalog = ConnectionCatalog()
 
     def scoped(ctx: RunContext[RunScope], connection: SelectedConnection) -> AbstractToolset[RunScope]:
         grant, policy = connection.grant, connection.policy
+        if read_only and (not grant.read_only or not policy.allowed_tools):
+            raise PermissionError("Attention requires an explicit read-only tool policy.")
         if policy.oauth:
             from .personal_oauth_tools import PersonalOAuthToolset
 
@@ -201,7 +203,7 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
             ]
 
         return (
-            native.filtered(lambda _ctx, tool: policy.allows(tool.name))
+            native.filtered(lambda _ctx, tool: policy.allows(tool.name) and (not read_only or read_only_tool(tool)))
             .prepared(prepare_approval)
             .approval_required(lambda _ctx, tool, _args: policy.needs_approval(approval_requirement(tool)))
             .prefixed(connection.prefix)
@@ -279,6 +281,8 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
     # credential decryption and canonical provider imports are not replay-safe.
     # Provider schemas, transport, calls and deferred approvals stay SDK-owned.
     return ConnectionTools(
-        DynamicToolset(resolve, id="moyai_connections", per_run_step=True),
+        DynamicToolset(resolve, id="moyai_connections", per_run_step=True).filtered(
+            lambda _ctx, tool: not read_only or read_only_tool(tool),
+        ),
         id="moyai_connections",
     )

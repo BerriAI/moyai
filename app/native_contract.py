@@ -9,9 +9,9 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Every participant must support the responsibility wake outbox and entity
-# workflows. Drain old pollers before routing the new workflow type.
-NATIVE_PROTOCOL_REVISION = 10
+# Every participant must recognize attention provenance and its restricted agent.
+# Drain old pollers before enabling attention schedules.
+NATIVE_PROTOCOL_REVISION = 11
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

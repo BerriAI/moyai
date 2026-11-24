@@ -92,6 +92,8 @@ class TurnAdmission:
         if db is None and not swarm_generated and not automation_generated and delegated_authority is None:
             await self.database.prefetch_session_audiences(actor, [session_id])
         async with self.database._admission_session(db) as transaction:
+            if await self.database.dots.worker_session(transaction, session_id):
+                raise HTTPException(409, "This is an immutable attention check. Reply in Your Dot.")
             if not responsibility_generated and await self.database.responsibilities.worker_session(transaction, session_id):
                 raise HTTPException(409, "This chat is an immutable responsibility review. Open the source chat to follow up.")
             product_grant = await self.database._actor_product_grant(transaction, actor)
@@ -320,6 +322,8 @@ class TurnAdmission:
             if responsibility is not None:
                 scope.responsibility_id = responsibility.responsibility_id
                 scope.responsibility_generation = responsibility.generation
+            attention = await self.database.dots.authorize(db, turn)
+            scope.attention = attention is not None
             if scope.delegation_generated and delegation is not None:
                 inherited = (await saved_authority(self.database, db, delegation)).grants
                 if inherited != grants:
@@ -342,6 +346,19 @@ class TurnAdmission:
                     raise PermissionError("Connection access changed during preparation.")
                 if delegation or context.surface == "automation":
                     prepared.scope.execution_context = context
+                if prepared.scope.attention != scope.attention:
+                    raise PermissionError("The prepared attention authority changed.")
+                return prepared
+            if attention is not None:
+                if turn.deferred_results:
+                    raise PermissionError("Attention checks cannot resume action approvals.")
+                turn.status, session.status = "running", "running"
+                turn.accepted_at = turn.accepted_at or now()
+                prepared = PreparedTurn(
+                    scope=scope, prompt=await self.database.dots.attention_prompt(db, turn),
+                    conversation=None, workspace=None,
+                )
+                turn.preparation = self.database.security.seal(TypeAdapter(PreparedTurn).dump_json(prepared))
                 return prepared
             if responsibility is not None:
                 if session.workspace or session.conversation or turn.deferred_results or grants:
@@ -359,18 +376,23 @@ class TurnAdmission:
                 scope.background_agents = list(await resumed_agents(self.database, db, scope))
                 scope.background_delegation = bool(scope.background_agents)
             conversation = None
+            scope.dot_notification_cursor = await self.database.dots.cursor(db, session.id)
             if (
                 session.last_actor_id == actor.id and session.last_model == turn.model
                 and session.last_grants == grant_fingerprint(grants)
                 and session.conversation
             ):
                 conversation = self.database.security.unseal(session.conversation).decode()
+                if scope.dot_notification_cursor is not None:
+                    conversation = await self.database.dots.carry_notifications(
+                        db, session.id, conversation, await self.database.dots.checkpoint_cursor(db, session.id),
+                    )
             elif session.conversation:
                 from .message_sources import public_messages
 
                 public = list(await db.scalars(select(Message).where(
                     Message.session_id == session.id, Message.turn_id != turn.id,
-                    Message.created_at < turn.created_at,
+                    or_(Message.created_at < turn.created_at, Message.identity.like("dot:%")),
                 ).order_by(Message.id)))
                 projected = await public_messages(self.database, db, public)
                 history = []
@@ -385,6 +407,8 @@ class TurnAdmission:
                 conversation = ConversationTypeAdapter.dump_json(
                     Conversation(messages=history, conversation_id=scope.conversation_id)
                 ).decode()
+            elif scope.dot_notification_cursor is not None:
+                conversation = await self.database.dots.carry_notifications(db, session.id, None, 0)
             turn.status = "running"
             turn.accepted_at = turn.accepted_at or now()
             session.status = "running"

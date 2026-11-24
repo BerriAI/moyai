@@ -2678,6 +2678,16 @@
             "title": "Harness",
             "type": "string"
           },
+          "kind": {
+            "default": "task",
+            "description": "Attention checks read selected accounts and quietly decide whether to message the owner in their Dot chat. They cannot take external actions.",
+            "enum": [
+              "task",
+              "attention"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
           "max_runs_per_hour": {
             "anyOf": [
               {
@@ -6539,6 +6549,31 @@
           "can_manage"
         ],
         "title": "CredentialSecretMetadata",
+        "type": "object"
+      },
+      "DotView": {
+        "properties": {
+          "attention_available": {
+            "title": "Attention Available",
+            "type": "boolean"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "required": [
+          "session_id",
+          "attention_available"
+        ],
+        "title": "DotView",
         "type": "object"
       },
       "EffectResolution": {
@@ -10844,6 +10879,16 @@
             "title": "Harness",
             "type": "string"
           },
+          "kind": {
+            "default": "task",
+            "description": "Attention checks read selected accounts and quietly decide whether to message the owner in their Dot chat. They cannot take external actions.",
+            "enum": [
+              "task",
+              "attention"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
           "max_runs_per_hour": {
             "anyOf": [
               {
@@ -10958,6 +11003,7 @@
         "required": [
           "name",
           "prompt",
+          "kind",
           "visibility",
           "connection_ids",
           "session_id",
@@ -22252,6 +22298,40 @@
           }
         },
         "summary": "Update"
+      }
+    },
+    "/api/dot": {
+      "get": {
+        "operationId": "getPersonalDot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DotView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read"
+      },
+      "post": {
+        "operationId": "openPersonalDot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DotView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Open Dot"
       }
     },
     "/api/effects/{effect_id}/resolve": {

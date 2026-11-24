@@ -143,7 +143,7 @@ def toolset(service: ProductAutomationService) -> FunctionToolset[RunScope]:
                 **({
                     "plugins": [],
                     "connection_ids": sorted(grant.id for grant in ctx.deps.grants)
-                    if request.destination == "new_chat" else [],
+                    if request.destination == "new_chat" or request.definition.kind == "attention" else [],
                 } if ctx.deps.authority.visibility == "private" else {}),
             })})
         body = (

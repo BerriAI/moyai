@@ -183,6 +183,16 @@ class AnswerSettlement:
                     if error.status_code not in {401, 403}:
                         raise
                     product_allowed = False
+            if scope.attention:
+                from .dot import validate_decision
+                if workspace or deferred or checkpoint_workspace:
+                    raise PermissionError("Attention checks cannot save computers or wait for action approvals.")
+                validate_decision(output, conversation, scope.grants)
+                try:
+                    await self.database.authorize_scope(scope, db=db)
+                    await self.database.dots.authorize(db, turn, scope=scope, publication=True)
+                except (PermissionError, HTTPException):
+                    product_allowed = False
             # This is the first write in the transaction. Stop fences the same
             # session row first, so whichever transaction wins decides publication.
             accepted = await db.scalar(update(Session).where(
@@ -194,8 +204,7 @@ class AnswerSettlement:
                 conversation=self.database.security.seal(conversation),
                 workspace=json.dumps(workspace) if workspace else session.workspace,
                 workspace_scope=scope.workspace_key if workspace else session.workspace_scope,
-                last_actor_id=scope.actor_id, last_model=scope.model,
-                last_grants=scope.grants_key,
+                last_actor_id=scope.actor_id, last_model=scope.model, last_grants=scope.grants_key,
                 revision=Session.revision + 1, updated_at=now(),
                 status="waiting" if deferred and not checkpointing else "saving",
             ).returning(Session.id))
@@ -208,6 +217,7 @@ class AnswerSettlement:
             if accepted is None:
                 turn.result_accepted = False
                 return False
+            await self.database.dots.saved_checkpoint(db, scope)
             turn.result_accepted = True
             turn.status = "waiting" if deferred and not checkpointing else "saving"
             completed_agents: set[str] = set()
@@ -238,16 +248,18 @@ class AnswerSettlement:
             await db.execute(update(Turn).where(
                 Turn.parent_turn == turn.id, Turn.status == "accepted"
             ).values(status="included", finished_at=now()))
-            if not deferred and scope.responsibility_id is None:
+            if scope.attention:
+                await self.database.dots.publication(db, turn, scope, output=output, conversation=conversation)
+            if not deferred and scope.responsibility_id is None and not scope.attention:
                 existing = await db.scalar(select(Message.id).where(Message.identity == f"answer:{turn.id}"))
                 if existing is None:
                     db.add(Message(
                         session_id=session.id, turn_id=turn.id, role="assistant",
                         content=self.database.security.seal(output), identity=f"answer:{turn.id}",
                     ))
-                if self.database.product_memory_review is not None and scope.responsibility_id is None:
+                if self.database.product_memory_review is not None and not scope.attention:
                     await self.database.product_memory_review.enqueue_in(db, turn, session)
-                if self.database.product_skill_learning is not None and scope.responsibility_id is None:
+                if self.database.product_skill_learning is not None and not scope.attention:
                     await self.database.product_skill_learning.enqueue_in(db, turn, session)
                 await db.flush()
                 await settle_failed_action_attempts(db, session.id, accepted_turn_id=turn.id)
@@ -443,6 +455,7 @@ class AnswerSettlement:
                         self.database.security.unseal(turn.preparation)
                     )
                     session.last_grants = prepared.scope.grants_key
+                    await self.database.dots.saved_checkpoint(db, prepared.scope)
             turn.status = "stopped"
             turn.finished_at = now()
             session.active_turn = None
