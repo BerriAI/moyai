@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from app.connector_errors import ConnectorError
@@ -38,8 +38,12 @@ def make_repository_names(connections: ProductConnections) -> RepositoryNames:
 class GitHubRepositories(ContextSource):
     name: ClassVar[str] = "github"
 
-    def __init__(self, repository_names: RepositoryNames):
+    def __init__(
+        self, repository_names: RepositoryNames,
+        repository_guides: Callable[[RunScope, Sequence[int]], Awaitable[str]] | None = None,
+    ):
         self.repository_names = repository_names
+        self.repository_guides = repository_guides
 
     async def render(self, scope: RunScope) -> str:
         repository_ids = tuple(dict.fromkeys(
@@ -55,7 +59,12 @@ class GitHubRepositories(ContextSource):
         if not names:
             return ""
         repositories = ", ".join(sorted(names)[:30])
-        return (
+        context = (
             "Connected GitHub repositories for this session: "
             f"{repositories}. Use them to work out what the user's team works on."
         )
+        if self.repository_guides is not None:
+            guides = await self.repository_guides(scope, repository_ids)
+            if guides:
+                context += "\n\n" + guides
+        return context

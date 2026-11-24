@@ -210,10 +210,13 @@ class Runtime:
                 from .context import ContextSource, SessionContext
                 from .context.github import GitHubRepositories, make_repository_names
                 from .context.gitlab import GitLabProjects
+                from .context.repository_guides import RepositoryGuides
                 from .context.slack import SlackThread, make_slack_thread_reader
 
                 sources: list[ContextSource] = [
-                    GitHubRepositories(make_repository_names(self.product_connections)),
+                    GitHubRepositories(
+                        make_repository_names(self.product_connections), RepositoryGuides(self.product_connections),
+                    ),
                     GitLabProjects(self.product_connections),
                 ]
                 if self.product_skill_learning is not None:
