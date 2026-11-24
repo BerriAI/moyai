@@ -85,6 +85,18 @@ publication/bootstrap and Slack file ingress use this module. Read results can
 require a fresh grant check after the request; confirmed writes retain their
 evidence even when authority changes during the request.
 
+`repository_preparation.py` owns durable checkout receipts for GitHub and GitLab:
+reservation, frozen commit identity, encrypted bundle storage and confirmation.
+The provider adapters keep repository validation, authorization rechecks, Git
+transport and sandbox installation. Existing receipt identities and lock order
+are preserved, so retries can resume preparations created by either revision.
+
+`publication_journal.py` owns the shared publication authorization and preflight
+refusal transition. The provider adapters retain operation identities, request
+policies and write dispatch. Refusal takes the same operation/effect locks as
+dispatch and cannot make a partially written operation retryable. GitLab also
+protects its durable stack projection when final acknowledgement is interrupted.
+
 `answer_settlement.py` owns result acceptance, checkpoint capture/publication and
 completion after failure or Stop. Its snapshot adapter keeps Modal calls outside
 database transactions and lets tests control capture through the same interface.

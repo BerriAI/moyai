@@ -5,10 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from app.connector_errors import ConnectorError
@@ -37,9 +35,10 @@ from .github_workflow_types import (
     PullRequest,
     Rebase,
 )
-from .models import Effect, Turn, User, now
+from .models import Effect, Turn, now
 from .pr_publications import creation_receipt, persist_publication
 from .product_github_models import ProductGitOperation as Operation
+from .publication_journal import PublicationJournal
 
 if TYPE_CHECKING:
     from .product_connections import ProductConnections
@@ -50,26 +49,7 @@ WRITE = {"annotations": {"readOnlyHint": False}}
 AUTHORITIES = TypeAdapter(dict[str, DispatchAuthority])
 
 
-class Publications:
-    def __init__(self, service: ProductConnections, scope: RunScope, grant: Grant):
-        self.service, self.scope, self.grant = service, scope, grant
-        self.database = service.database
-        self.target = grant.policy["product"]["repository_id"]
-
-    async def authorize(self, db) -> None:
-        await self.service.product.identity.authorize_admission(db, self.scope.product_grant)
-        actor, turn = await db.get(User, self.scope.actor_id), await db.get(Turn, self.scope.turn_id)
-        if actor is None or not actor.enabled or turn is None:
-            raise ToolFailed("The publication requester is unavailable.")
-        await self.database._check_product_turn(db, turn, self.scope.product_grant)
-        cast(Any, actor).product_grant = self.scope.product_grant
-        session = await self.database.execution_session(db, self.scope.session_id, actor)
-        if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
-            raise ToolFailed("This publication was stopped or superseded.")
-        current = await self.database.scope_grants(db, self.scope, session)
-        if self.grant not in current or self.grant.read_only:
-            raise ToolFailed("Current GitHub write access is required.")
-
+class Publications(PublicationJournal):
     async def check_target(self, request) -> None:
         target = await source_database(
             self.service.connectors.github.target, request.repository_id or request.repository,
@@ -105,47 +85,6 @@ class Publications:
             raise ToolFailed(str(error)) from None
         await self.service.check(self.scope, self.grant)
         return token
-
-    def document(self, row: Operation) -> dict:
-        return json.loads(self.database.security.unseal(row.document))
-
-    def require_attempt(self, current: Operation, row: Operation) -> None:
-        if current.original_effect_id != row.original_effect_id or self.document(current).get("preflight_error"):
-            raise ToolFailed("This publication attempt was refused or replaced. It will not dispatch a write.")
-
-    @asynccontextmanager
-    async def attempt(self, ctx: RunContext[RunScope], kind: str, request) -> AsyncIterator[Operation]:
-        row = await self.operation(ctx, kind, request)
-        try:
-            yield row
-        except (ToolFailed, ConnectorError) as error:
-            if await self.refuse_preflight(row, str(error)):
-                raise ToolFailed(
-                    f"{error} No repository write was attempted. After correcting the reported condition, "
-                    "retry with the same request_key and unchanged inputs in a new tool call."
-                ) from None
-            raise ToolFailed(
-                f"{error} This operation may already have attempted writes. Inspect publication_status "
-                "with the original operation and request_key; do not start a replacement publication."
-            ) from None
-
-    async def refuse_preflight(self, row: Operation, reason: str) -> bool:
-        # Share step's lock: either this refusal wins, or the durable dispatch
-        # marker wins. Never turn a partially dispatched operation into a retry.
-        async with self.database.sessions.begin() as db:
-            current = await db.get(Operation, row.id, with_for_update=True)
-            if current is None or current.original_effect_id != row.original_effect_id:
-                return False
-            document = self.document(current)
-            if document["attempts"] or document["steps"] or document.get("result"):
-                return False
-            effect = await db.get(Effect, current.original_effect_id, with_for_update=True)
-            if effect is None or effect.state not in {"pending", "not_dispatched"}:
-                return False
-            document["preflight_error"] = reason
-            current.document, current.updated_at = self.database.security.seal(document), now()
-            effect.state, effect.settled_at = "not_dispatched", now()
-            return True
 
     async def operation(self, ctx: RunContext[RunScope], kind: str, request) -> Operation:
         if not ctx.tool_call_id:

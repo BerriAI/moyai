@@ -302,6 +302,39 @@ async def test_preflight_refusal_proven_no_write_and_no_ownership_from_open(nati
     assert status["status"] == "not_dispatched" and not status["attempted_steps"]
 
 
+async def test_completed_stack_projection_cannot_be_refused_before_acknowledgement(native, monkeypatch):
+    f = native
+    first = await owned(f, head_branch="lower")
+    second = await owned(f, request_key="second-member", base_sha=first["sha"],
+                         base_branch="lower", head_branch="upper")
+
+    def member(mr):
+        return StackMember(number=mr["iid"], head_sha=mr["sha"],
+                           head_branch=mr["source_branch"], base_branch=mr["target_branch"])
+
+    request = CreateStack(request_key="stack-interrupted-ack", merge_requests=[member(first), member(second)])
+    finish = f.publisher.finish
+
+    async def interrupted(*args, **kwargs):
+        raise ToolFailed("Acknowledgement interrupted")
+
+    monkeypatch.setattr(f.publisher, "finish", interrupted)
+    with pytest.raises(ToolFailed, match="may already have attempted writes"):
+        await invoke(f, "create_stack", request)
+    identity = f.publisher.operation_id("create_stack", request.request_key)
+    async with f.product.database.sessions() as db:
+        row = await db.get(Operation, identity)
+        document = f.publisher.document(row)
+        effect = await db.get(Effect, row.original_effect_id)
+        assert document["stack_result"] and not document.get("preflight_error")
+        assert effect.state == "pending"
+
+    monkeypatch.setattr(f.publisher, "finish", finish)
+    f.provider.calls.clear()
+    assert await invoke(f, "create_stack", request) == document["stack_result"]
+    assert f.provider.calls == []
+
+
 async def test_external_exact_head_approval_and_lifecycle_separation(native):
     f = native
     f.provider.refs["external"] = BASE

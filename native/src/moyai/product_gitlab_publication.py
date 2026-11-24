@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING, Any
 
-from app.connector_errors import ConnectorError
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ToolFailed
@@ -20,8 +18,9 @@ from .effects import effect_id
 from .gitlab_request_policy import REVIEW_CAPABILITY, validate_request
 from .gitlab_transport import remote_url
 from .gitlab_workflow_types import MergeRequest, MRWrite, Project, Status, Target, origin
-from .models import Effect, Turn, User, now
+from .models import Effect, now
 from .product_github_models import ProductGitOperation as Operation
+from .publication_journal import PublicationJournal
 
 if TYPE_CHECKING:
     from .product_connections import ProductConnections
@@ -52,13 +51,24 @@ def digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-class Publications:
+class Publications(PublicationJournal):
     """Use the shared operation/effect tables with provider-specific authority."""
 
+    _requester_name = "GitLab publication"
+    _write_provider = "GitLab"
+    _result_keys = ("result", "stack_result")
+    _replaced_error = "This publication attempt was refused or replaced; it will not dispatch."
+    _refused_error = (
+        "No repository write was attempted. After correcting the condition, "
+        "retry unchanged inputs with the same request_key in a new tool call."
+    )
+    _uncertain_error = (
+        "This operation may already have attempted writes. Inspect publication_status "
+        "with its original operation/request_key; do not start a replacement publication."
+    )
+
     def __init__(self, service: ProductConnections, scope: RunScope, grant: Grant):
-        self.service, self.scope, self.grant = service, scope, grant
-        self.database = service.database
-        self.target = grant.policy["product"]["repository_id"]
+        super().__init__(service, scope, grant)
         if grant.kind != "gitlab" or type(self.target) is not int or self.target <= 0:
             raise ValueError("A canonical selected GitLab project grant is required.")
         self.origin = origin(grant.policy["product"].get("base_url", "https://gitlab.com"))
@@ -74,59 +84,6 @@ class Publications:
     @property
     def identity_scope(self) -> dict:
         return {"provider": "gitlab", "origin": self.origin, "project_id": self.target}
-
-    async def authorize(self, db) -> None:
-        await self.service.product.identity.authorize_admission(db, self.scope.product_grant)
-        actor, turn = await db.get(User, self.scope.actor_id), await db.get(Turn, self.scope.turn_id)
-        if actor is None or not actor.enabled or turn is None:
-            raise ToolFailed("The GitLab publication requester is unavailable.")
-        await self.database._check_product_turn(db, turn, self.scope.product_grant)
-        cast(Any, actor).product_grant = self.scope.product_grant
-        session = await self.database.execution_session(db, self.scope.session_id, actor)
-        if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
-            raise ToolFailed("This GitLab publication was stopped or superseded.")
-        current = await self.database.scope_grants(db, self.scope, session)
-        if self.grant not in current or self.grant.read_only:
-            raise ToolFailed("Current GitLab write access is required.")
-
-    def document(self, row: Operation) -> dict:
-        return json.loads(self.database.security.unseal(row.document))
-
-    def require_attempt(self, current: Operation, row: Operation) -> None:
-        if current.original_effect_id != row.original_effect_id or self.document(current).get("preflight_error"):
-            raise ToolFailed("This publication attempt was refused or replaced; it will not dispatch.")
-
-    @asynccontextmanager
-    async def attempt(self, ctx: RunContext[RunScope], kind: str, request) -> AsyncIterator[Operation]:
-        row = await self.operation(ctx, kind, request)
-        try:
-            yield row
-        except (ToolFailed, ConnectorError) as error:
-            if await self.refuse_preflight(row, str(error)):
-                raise ToolFailed(
-                    f"{error} No repository write was attempted. After correcting the condition, "
-                    "retry unchanged inputs with the same request_key in a new tool call."
-                ) from None
-            raise ToolFailed(
-                f"{error} This operation may already have attempted writes. Inspect publication_status "
-                "with its original operation/request_key; do not start a replacement publication."
-            ) from None
-
-    async def refuse_preflight(self, row: Operation, reason: str) -> bool:
-        async with self.database.sessions.begin() as db:
-            current = await db.get(Operation, row.id, with_for_update=True)
-            if current is None or current.original_effect_id != row.original_effect_id:
-                return False
-            document = self.document(current)
-            if document["attempts"] or document["steps"] or document.get("result") or document.get("stack_result"):
-                return False
-            effect = await db.get(Effect, current.original_effect_id, with_for_update=True)
-            if effect is None or effect.state not in {"pending", "not_dispatched"}:
-                return False
-            document["preflight_error"] = reason
-            current.document, current.updated_at = self.database.security.seal(document), now()
-            effect.state, effect.settled_at = "not_dispatched", now()
-            return True
 
     async def save(self, row: Operation, **values) -> dict:
         async with self.database.sessions.begin() as db:

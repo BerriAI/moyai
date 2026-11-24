@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import os
 import re
@@ -22,8 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .contracts import RunScope
-from .models import Effect, Session, now
-from .storage import ObjectStore
+from .models import Effect, Session
+from .repository_preparation import RepositoryPreparation, directory_size
 
 if TYPE_CHECKING:
     from .product_connections import ProductConnections
@@ -117,21 +116,12 @@ async def fetch_bundle(url: str, branch: str, commit: str, token: str, destinati
         })
     with tempfile.TemporaryDirectory(prefix="moyai-git-source-") as temporary:
         root = Path(temporary)
-        def directory_size() -> int:
-            size = 0
-            for path in root.rglob("*"):
-                try:
-                    if path.is_file():
-                        size += path.stat().st_size
-                except FileNotFoundError:
-                    pass  # Git atomically renames temporary pack files.
-            return size
         await git(["init", "--bare", "."], root, environment)
         task = asyncio.create_task(git(["fetch", "--no-tags", url, commit], root, environment))
         try:
             while not task.done():
                 await asyncio.wait({task}, timeout=.5)
-                size = await asyncio.to_thread(directory_size)
+                size = await asyncio.to_thread(directory_size, root)
                 if size > MAX_BUNDLE:
                     raise ValueError("Repository history exceeds the 128 MiB bootstrap budget; select a validated environment.")
             await task
@@ -196,28 +186,11 @@ async def prepare_repository(
         "repository_id": target, "connection_id": grant.id if grant else "", "connection_revision": grant.revision if grant else 0,
         "working_dir": "/workspace/repo", "requested_url": url.rstrip("/"), "access": "selected_connection" if grant else "public",
     }
-    fingerprint = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
-    identity = hashlib.sha256(("product-github-bootstrap:" + fingerprint).encode()).hexdigest()
-    objects = ObjectStore(service.database.settings, service.database.security)
-    async with service.database.sessions() as db:
-        previous = await db.get(Effect, identity)
-    if previous and previous.fingerprint != fingerprint:
-        raise ValueError("The repository preparation identity changed.")
-    state = json.loads(service.database.security.unseal(previous.resolution)) if previous and previous.resolution else {}
-    if previous and previous.state not in {"preparing", "confirmed"}:
-        raise ValueError("This repository preparation has an unsupported receipt state.")
-    if not previous:
-        try:
-            async with service.database.sessions.begin() as db:
-                if await db.scalar(select(Effect.id).where(Effect.session_id == scope.session_id, Effect.state == "pending")):
-                    raise ValueError("Resolve the pending workspace action before repository preparation.")
-                db.add(Effect(
-                    id=identity, session_id=scope.session_id, turn_id=scope.turn_id, actor_id=scope.actor_id,
-                    tool_name="product_repository_prepare", arguments=service.database.security.seal(descriptor),
-                    fingerprint=fingerprint, state="preparing",
-                ))
-        except IntegrityError:
-            return await prepare_repository(service, scope, sandbox, context)
+    preparation = RepositoryPreparation(service.database, scope, descriptor, "github")
+    try:
+        state = await preparation.reserve()
+    except IntegrityError:
+        return await prepare_repository(service, scope, sandbox, context)
     if not state:
         credential = await service.credentials(scope, grant) if grant else {"access_token": ""}
         async def inspect(bound):
@@ -235,31 +208,15 @@ async def prepare_repository(
             return name, branch, commit
 
         name, branch, commit = await service.execution.call(inspect)
-        state = {**descriptor, "repository": name, "branch": branch, "commit_sha": commit, "prepared": True}
-        state["marker"] = service.database.security.seal({"fingerprint": fingerprint, "commit_sha": commit})
-        async with service.database.sessions.begin() as db:
-            row = await db.get(Effect, identity, with_for_update=True)
-            assert row is not None
-            if row.resolution:
-                state = json.loads(service.database.security.unseal(row.resolution))
-            else:
-                row.resolution = service.database.security.seal(state)
+        state = await preparation.resolve(name, branch, commit)
     url = "https://github.com/" + state["repository"] + ".git"
     if not state.get("bundle"):
         credential = await service.credentials(scope, grant) if grant else {"access_token": ""}
         with tempfile.TemporaryDirectory(prefix="moyai-git-bundle-") as temporary:
             raw = await fetch_bundle(url, state["branch"], state["commit_sha"], credential["access_token"], Path(temporary) / "source.bundle")
         await check()
-        state["bundle"], state["bundle_sha256"] = await objects.put(raw), hashlib.sha256(raw).hexdigest()
-        async with service.database.sessions.begin() as db:
-            row = await db.get(Effect, identity, with_for_update=True)
-            assert row is not None and row.resolution is not None
-            current = json.loads(service.database.security.unseal(row.resolution))
-            if current.get("bundle"):
-                state = current
-            else:
-                row.resolution = service.database.security.seal(state)
-    raw = await objects.get(state["bundle"])
+        state = await preparation.store_bundle(state, raw)
+    raw = await preparation.read_bundle(state)
     await check()
     remote = "/tmp/moyai-git-" + uuid4().hex + ".bundle"
     await sandbox.filesystem.write_bytes.aio(raw, remote)
@@ -274,10 +231,7 @@ async def prepare_repository(
     result = json.loads(await process.stdout.read.aio())
     if result != receipt:
         raise ValueError("The installed repository receipt did not match its reserved identity.")
-    async with service.database.sessions.begin() as db:
-        row = await db.get(Effect, identity, with_for_update=True)
-        assert row is not None
-        row.state, row.settled_at = "confirmed", now()
+    await preparation.confirm()
     await check()
     return receipt
 
