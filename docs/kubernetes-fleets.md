@@ -29,6 +29,13 @@ come from the reviewed pod template and Kubernetes Downward API. Admission also
 checks the image's embedded revision and the registered worker deployment/build.
 Restarting a sealed generation cannot admit new work.
 
+Each generation's Deployment keeps an immutable image and uses `Recreate`.
+The release controller creates a *new* set of Deployments for the next version;
+it does not run `rollout restart` or replace the image in the serving generation.
+There are normally four role pods, with eight during source/candidate overlap,
+plus the stable ingress pods. Eight pods alone do not establish this routing,
+registration or drain behavior.
+
 Use readiness checks to withdraw a draining role. Do not use `/health` for a
 liveness probe: the role becomes unready while accepted requests finish. The
 container's 300-second termination grace is a final shutdown allowance; it is
