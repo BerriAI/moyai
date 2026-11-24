@@ -36,7 +36,6 @@ from pydantic_ai_harness import (
     Planning,
     Skills,
     StepPersistence,
-    SummarizingCompaction,
 )
 from pydantic_ai_harness.ask_user import AskUserRequest, Question
 from pydantic_ai_harness.conversation_search import SnapshotHistorySource
@@ -51,6 +50,7 @@ from .browser_login import BrowserLogin
 from .bundled_skills import bundled_skill_catalog
 from .coding_image import with_node
 from .commentary import Commentary
+from .compaction import EvidenceCompaction
 from .computer_startup import OnDemandDurability, on_demand_coder
 from .connection_catalog import ConnectionToolSearch, connection_search
 from .connection_guidance import connection_guidance
@@ -444,7 +444,7 @@ def make_agent(
             StepPersistence(store=stores.steps, capture_frontier=True),
             DurableConversationSearch(SnapshotHistorySource(stores.steps), scope="conversation"),
             PrivateHistoryRecall(database),
-            SummarizingCompaction(max_fraction=0.75, keep_messages=20, receipts=True),
+            EvidenceCompaction(max_fraction=0.75, keep_messages=20, receipts=True),
             DurableQuestions(answerer=None, id="ask_user"),
             SetToolMetadata(tools=READ_TOOLS, temporal={
                 "start_to_close_timeout": timedelta(seconds=60),
