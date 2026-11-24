@@ -8,6 +8,7 @@ from typing import Any
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.output import OutputContext
 from temporalio import workflow
 
@@ -16,6 +17,7 @@ from .history_handoff import is_turn_run
 from .stores import NativeStores
 
 VERSION = "moyai-plan-completion-review-v1"
+STATE_VERSION = "moyai-plan-completion-state-v2"
 PLAN_WRITES = {
     "write_plan", "add_task", "update_task_status", "update_task_statuses",
     "remove_task", "add_subtask", "set_dependency",
@@ -27,6 +29,18 @@ class CompletionReview(AbstractCapability[RunScope]):
 
     def __init__(self, stores: NativeStores):
         self.stores = stores
+
+    async def after_model_request(
+        self, ctx: RunContext[RunScope], *,
+        request_context: ModelRequestContext, response: ModelResponse,
+    ) -> ModelResponse:
+        if (
+            ctx.run_id == ctx.deps.root_run_id
+            and (not workflow.in_workflow() or workflow.patched(STATE_VERSION))
+            and any(isinstance(part, ToolCallPart) and part.tool_name in PLAN_WRITES for part in response.parts)
+        ):
+            ctx.deps.completion_plan_turn = ctx.deps.turn_id
+        return response
 
     @durable_operation("unfinished")
     async def unfinished(self, scope: RunScope) -> list[dict[str, str]]:
@@ -46,7 +60,7 @@ class CompletionReview(AbstractCapability[RunScope]):
             return output
         # A question about an old plan never reopens it. Only writes from this
         # admitted turn qualify; child runs cannot control the parent's finish.
-        if not any(
+        if ctx.deps.completion_plan_turn != ctx.deps.turn_id and not any(
             isinstance(message, ModelResponse) and is_turn_run(message.run_id, ctx.deps.turn_id)
             and any(isinstance(part, ToolCallPart) and part.tool_name in PLAN_WRITES for part in message.parts)
             for message in ctx.messages
@@ -54,7 +68,7 @@ class CompletionReview(AbstractCapability[RunScope]):
             return output
         if workflow.in_workflow() and not workflow.patched(VERSION):
             return output
-        if any(
+        if ctx.deps.completion_review_turn == ctx.deps.turn_id or any(
             isinstance(message, ModelRequest)
             and (message.metadata or {}).get(VERSION) == ctx.deps.turn_id
             for message in ctx.messages
@@ -63,6 +77,8 @@ class CompletionReview(AbstractCapability[RunScope]):
         pending = await self.unfinished(ctx.deps)
         if not pending:
             return output
+        if not workflow.in_workflow() or workflow.patched(STATE_VERSION):
+            ctx.deps.completion_review_turn = ctx.deps.turn_id
         # Use the SDK's pending-message continuation, preserving native tool
         # receipts, authority, usage, and steering. No regex intent classifier,
         # automatic tool replay, second agent loop, or output retry consumption.

@@ -9,7 +9,7 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai_harness.planning import InMemoryPlanStore, PlanItem
 
 from moyai.agent import WorkflowPlanning
-from moyai.completion import VERSION, CompletionReview
+from moyai.completion import STATE_VERSION, VERSION, CompletionReview
 from moyai.contracts import RunScope
 
 
@@ -155,7 +155,7 @@ async def test_completion_review_replays_and_preserves_old_workflow_decisions(ru
         runtime.client = environment.client
         with monkeypatch.context() as old:
             if legacy:
-                old.setattr(workflow, "patched", lambda marker: False if marker == VERSION else original(marker))
+                old.setattr(workflow, "patched", lambda marker: False if marker in {VERSION, STATE_VERSION} else original(marker))
             async with make_worker(runtime):
                 handle = await runtime.client.start_workflow(
                     TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
@@ -167,3 +167,47 @@ async def test_completion_review_replays_and_preserves_old_workflow_decisions(ru
             interceptors=[ActivityCapacity()],
         ).replay_workflow(history)
     assert (directory / "proof.txt").exists() is not legacy
+
+
+async def test_compacted_plan_and_review_markers_survive_serialized_history_handoff():
+    from pydantic import TypeAdapter
+
+    store = InMemoryPlanStore()
+    await store.set_items([PlanItem(content="Unfinished verification")])
+    capability = CompletionReview(SimpleNamespace(plan=lambda _: store))
+    scope = RunScope("session", "turn", "actor", "test")
+    queued = []
+    ctx = SimpleNamespace(
+        deps=scope, run_id="turn", partial_output=False, pending_messages=[],
+        messages=[], enqueue=queued.append,
+    )
+    await capability.after_model_request(
+        ctx, request_context=None,
+        response=ModelResponse(parts=[ToolCallPart("write_plan", {})]),
+    )
+    # A real compaction removes old calls; the persisted workflow scope must
+    # retain the completion decision independently of that summarized history.
+    scope = TypeAdapter(RunScope).validate_json(TypeAdapter(RunScope).dump_json(scope))
+    scope.history_segment = 1
+    ctx.deps, ctx.run_id = scope, scope.root_run_id
+    ctx.messages = [ModelRequest(parts=[])]
+    await capability.after_output_process(ctx, output_context=None, output="I will verify it.")
+    assert len(queued) == 1 and scope.completion_review_turn == "turn"
+    ctx.deps = TypeAdapter(RunScope).validate_json(TypeAdapter(RunScope).dump_json(scope))
+    ctx.messages = []  # The review message itself can also be compacted away.
+    await capability.after_output_process(ctx, output_context=None, output="Blocked: service unavailable.")
+    assert len(queued) == 1
+
+
+async def test_copied_completion_state_does_not_reopen_another_turn():
+    store = InMemoryPlanStore()
+    await store.set_items([PlanItem(content="Old unfinished work")])
+    capability = CompletionReview(SimpleNamespace(plan=lambda _: store))
+    scope = RunScope("session", "new-turn", "actor", "test", completion_plan_turn="old-turn")
+    queued = []
+    ctx = SimpleNamespace(
+        deps=scope, run_id=scope.root_run_id, partial_output=False, pending_messages=[],
+        messages=[], enqueue=queued.append,
+    )
+    assert await capability.after_output_process(ctx, output_context=None, output="Four.") == "Four."
+    assert not queued
