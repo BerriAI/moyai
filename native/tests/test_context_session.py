@@ -48,10 +48,10 @@ class StartingSource(ContextSource):
 
 
 class RaisingSource(ContextSource):
-    name: ClassVar[str] = "broken"
+    name: ClassVar[str] = "slack"
 
     async def render(self, scope: RunScope) -> str:
-        raise RuntimeError("source unavailable")
+        raise RuntimeError("synthetic-private-provider-detail")
 
 
 def scope() -> RunScope:
@@ -90,8 +90,36 @@ async def test_failing_source_is_logged_and_other_sources_are_rendered(caplog: p
         RunContext(deps=scope(), model=TestModel(), usage=RunUsage()),
     )
 
-    assert rendered == "before\n\nafter"
-    assert "Session context source broken failed" in caplog.text
+    assert rendered.startswith("before\n\nafter\n\nContext coverage:")
+    assert "unavailable — Slack conversation context" in rendered
+    assert "synthetic-private-provider-detail" not in rendered + caplog.text
+    assert "Session context source slack failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timeout_reports_missing_source_and_preserves_other_context() -> None:
+    started = asyncio.Event()
+    context = SessionContext([
+        DelayedSource("never loaded", started), Source("usable context"),
+    ], timeout_seconds=0.01)
+    rendered = await context.render_sources(RunContext(deps=scope(), model=TestModel(), usage=RunUsage()))
+    assert rendered.startswith("usable context\n\nContext coverage:")
+    assert "unavailable — additional context" in rendered
+    assert "never loaded" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_context_cancellation_is_not_reported_as_an_outage() -> None:
+    class CancelledSource(ContextSource):
+        name = "slack"
+
+        async def render(self, scope: RunScope) -> str:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await SessionContext([CancelledSource()]).render_sources(
+            RunContext(deps=scope(), model=TestModel(), usage=RunUsage()),
+        )
 
 
 @pytest.mark.asyncio
