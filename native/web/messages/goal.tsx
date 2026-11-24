@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from "react"
+import { useEffect, useId, useState } from "react"
 import { Maximize2, Pause, Play, Target, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"

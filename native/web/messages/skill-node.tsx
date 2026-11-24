@@ -1,5 +1,5 @@
 import React from "react"
-import { $applyNodeReplacement, $getNodeByKey, DecoratorNode, type LexicalNode, type NodeKey, type SerializedLexicalNode } from "lexical"
+import { $applyNodeReplacement, $getNodeByKey, DecoratorNode, type NodeKey, type SerializedLexicalNode } from "lexical"
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext"
 import { SkillMention } from "./skill-content"
 import { skillMarker, skillReferencePattern, type SkillReference } from "./skill-mentions"
@@ -58,4 +58,3 @@ function SelectedSkill({ nodeKey, skill }: { nodeKey: NodeKey; skill: SkillRefer
 export function $createSkillNode(skill: SkillReference) {
   return $applyNodeReplacement(new SkillNode(skill.reference, skill.icon || "auto"))
 }
-export function $isSkillNode(node: LexicalNode | null | undefined): node is SkillNode { return node instanceof SkillNode }

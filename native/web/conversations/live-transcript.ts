@@ -45,9 +45,6 @@ export function applyLiveEvent(state: LiveTranscript, event: LiveEvent, offset: 
   // is not evidence that the authoritative saved message is available yet.
   return next
 }
-export function liveCommentary(state: LiveTranscript, hasSavedAssistant: boolean): string {
-  return progressMessages(state, hasSavedAssistant).map(message => message.text).join("\n\n")
-}
 export type ProgressMessage = { id: string; text: string; phase: "commentary"; created_at?: string }
 export function progressMessages(state: LiveTranscript, hasSavedAssistant: boolean): ProgressMessage[] {
   return state.rounds.flatMap((round, roundIndex) => Object.entries(round.parts)
