@@ -449,7 +449,10 @@ class TurnWorkflow(PydanticAIWorkflow):
                     deferred_tool_results=deferred_results,
                     workspace=workspace,
                     usage_limits=UsageLimits(
-                        request_limit=8 if prepared.scope.attention else 3 if reviewer else
+                        # Discovery may use 12 sequential tools, then needs a
+                        # final structured response and SDK correction headroom.
+                        request_limit=16 if prepared.scope.discovery else
+                        8 if prepared.scope.attention else 3 if reviewer else
                         None if unlimited_model_requests() else runtime.settings.model_request_limit,
                         tool_calls_limit=12 if prepared.scope.discovery else None,
                         input_tokens_limit=60_000 if prepared.scope.discovery else None,

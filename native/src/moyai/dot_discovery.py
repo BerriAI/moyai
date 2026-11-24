@@ -145,12 +145,17 @@ class Discovery:
                 for part in message.parts:
                     if not isinstance(part, (ToolReturnPart, RetryPromptPart)) or part.tool_name not in allowed:
                         continue
-                    if isinstance(part, RetryPromptPart):
+                    if isinstance(part, RetryPromptPart) or part.outcome != "success":
                         partial = True
                     elif isinstance(part.content, dict) and part.content.get("dot_scan") is True:
-                        partial |= bool(part.content.get("limited") or part.content.get("error"))
+                        partial |= bool(
+                            part.content.get("limited") or part.content.get("error")
+                            or part.content.get("scanned") is not True
+                        )
                         if not part.content.get("error") and part.content.get("scanned"):
                             checked.add(allowed[part.tool_name])
+                    else:
+                        partial = True
             if not checked:
                 research.coverage = "blocked"
             elif partial or checked != {grant.id for grant in scope.grants}:

@@ -76,7 +76,7 @@ def connected_records(conversation: str, grants: list[Grant]) -> list[tuple[str,
         (allowed[part.tool_name], record)
         for message in ConversationTypeAdapter.validate_json(conversation).messages
         for part in message.parts
-        if isinstance(part, ToolReturnPart) and part.tool_name in allowed
+        if isinstance(part, ToolReturnPart) and part.outcome == "success" and part.tool_name in allowed
         for record in records(part.content)
     ]
 

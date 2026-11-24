@@ -245,6 +245,41 @@ async def test_restricted_github_dispatch_blocks_relationship_and_unknown_method
             assert await bounds.before_tool_execute(ctx, call=call, tool_def=None, args=args) == args
 
 
+async def test_restricted_github_schema_exposes_only_dispatchable_methods(runtime, actor):
+    from copy import deepcopy
+
+    from pydantic_ai import Agent
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.toolsets import FunctionToolset
+
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    grant = prepared.scope.grants[0]
+    grant.policy = {"allowed_tools": ["issue_read"], "mcp": {"url": GITHUB_MCP}}
+    prepared.scope.discovery_repositories = {grant.id: [("berriai", "moyai")]}
+    tools = FunctionToolset()
+
+    @tools.tool_plain
+    def issue_read(method: str, owner: str, repo: str) -> str:
+        return "unused"
+
+    original = deepcopy(tools.tools["issue_read"].function_schema.json_schema)
+
+    def response(messages, info):
+        definition = next(tool for tool in info.function_tools if tool.name.endswith("_issue_read"))
+        schema = definition.parameters_json_schema
+        assert schema["properties"]["method"] == {"type": "string", "enum": ["get_comments"]}
+        assert "method" in schema["required"]
+        assert "owner" in schema["properties"] and "repo" in schema["properties"]
+        return ModelResponse(parts=[TextPart("Scoped")])
+
+    result = await Agent(
+        FunctionModel(response), capabilities=[DiscoveryBounds()],
+        toolsets=[tools.prefixed(f"mcp_{grant.id[:8]}")],
+    ).run("Inspect", deps=prepared.scope)
+    assert result.output == "Scoped"
+    assert tools.tools["issue_read"].function_schema.json_schema == original
+
+
 @pytest.mark.parametrize("payload", [
     {"items": [{"id": 1}], "total_count": 190},
     {"items": [], "incomplete_results": True},
@@ -275,7 +310,7 @@ async def test_bare_and_explicit_github_pages_cannot_be_claimed_as_complete(runt
         assert result["limited"]
 
 
-async def test_github_number_only_issues_and_structured_comments_retain_bound_evidence(runtime, actor):
+async def test_github_unverified_issue_repositories_are_excluded_and_comments_keep_identity(runtime, actor):
     _, _, _, prepared = await observer(runtime, actor, discovery=True)
     grant = prepared.scope.grants[0]
     grant.policy = {"allowed_tools": ["list_issues", "issue_read"], "mcp": {"url": GITHUB_MCP}}
@@ -286,15 +321,18 @@ async def test_github_number_only_issues_and_structured_comments_retain_bound_ev
         f"mcp_{grant.id[:8]}_list_issues", {}, "read",
     ), tool_def=None, args=args, result={
         "issues": [
+            # Number-only rows could belong to a renamed repository.
             {"number": 25, "title": "Reply needed", "updated_at": "2026-11-24T12:00:00Z", "state": "OPEN"},
-            {"number": 26, "html_url": "https://github.com/other/project/issues/26", "title": "Foreign"},
+            {"number": 26, "html_url": "https://github.com/BerriAI/moyai-renamed/issues/26", "title": "Renamed"},
+            {"number": 27, "html_url": "https://github.com/BerriAI/Moyai/issues/27", "title": "Verified",
+             "updated_at": "2026-11-24T12:00:00Z"},
         ],
         "pageInfo": {"hasNextPage": False},
     })
-    assert result["scanned"] and result["limited"]  # Foreign row was excluded.
+    assert result["scanned"] and result["limited"]
     assert result["records"] == [{
-        "number": 25, "title": "Reply needed", "updated_at": "2026-11-24T12:00:00Z", "state": "OPEN",
-        "html_url": "https://github.com/berriai/moyai/issues/25",
+        "number": 27, "title": "Verified", "updated_at": "2026-11-24T12:00:00Z",
+        "html_url": "https://github.com/berriai/moyai/issues/27",
     }]
     comment = {"html_url": "https://github.com/BerriAI/Moyai/issues/25#issuecomment-1",
                "updated_at": "2026-11-24T12:00:00Z", "body": "A reply"}
@@ -399,6 +437,44 @@ async def test_result_cap_cannot_hide_a_reopened_item_from_resolution_guard(runt
         await publish(runtime, prepared, conversation, notify=False, state="resolved")
 
 
+@pytest.mark.parametrize("outcome,content", [
+    ("failed", "Provider read failed"),
+    ("denied", "Access denied"),
+    ("interrupted", "Read interrupted"),
+    ("success", "Unrecognized result"),
+    ("success", {"dot_scan": True, "scanned": False, "error": False, "limited": False, "records": []}),
+])
+async def test_incomplete_provider_read_cannot_leave_a_successful_scan_eligible_to_resolve(runtime, actor, outcome, content):
+    async with runtime.database.sessions.begin() as db:
+        account = Connection(
+            owner_id=actor.id, kind="mcp", name="GitHub reader", credential=runtime.security.seal("synthetic"),
+            read_only=True, policy=json.dumps({"allowed_tools": ["pull_request_read"], "mcp": {"url": GITHUB_MCP}}),
+        )
+        db.add(account)
+        await db.flush()
+    _, _, _, prepared = await observer(runtime, actor, connection=account, discovery=True)
+    source, version, title = "https://github.com/berriai/moyai/pull/25", "2026-11-24T12:00:00Z", "Closed"
+    name = f"mcp_{account.id[:8]}_pull_request_read"
+    conversation = ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=[
+        ToolReturnPart(name, {
+            "dot_scan": True, "scanned": True, "limited": False, "error": False,
+            "records": [{"url": source, "updated_at": version, "title": title, "state": "closed"}],
+        }, tool_call_id="success"),
+        ToolReturnPart(name, content, tool_call_id="incomplete", outcome=outcome),
+    ])])).decode()
+    report = DotResearch.model_validate({"coverage": "complete", "observations": [{
+        "title": title, "summary": title,
+        "evidence": [{"connection_id": account.id, "source": source, "source_version": version, "quote": title}],
+    }]})
+    snapshot = DiscoverySnapshot.model_validate_json(await runtime.database.dots.discovery.judgment_input(
+        prepared.scope, report.model_dump_json(), conversation,
+    ))
+    assert snapshot.research.coverage == "partial"
+    assert snapshot.verified_closed == []
+    with pytest.raises(ValueError, match="closure evidence"):
+        await publish(runtime, prepared, conversation, notify=False, state="resolved")
+
+
 async def test_github_closure_uses_all_versions_and_rejects_stale_or_conflicting_state(runtime, actor):
     from moyai.dot_contracts import DotEvidence
     from moyai.dot_evidence import verified_closed
@@ -427,7 +503,8 @@ async def test_github_closure_uses_all_versions_and_rejects_stale_or_conflicting
         assert verified_closed(evidence, conversation, [grant]) is expected
 
 
-async def test_two_phase_workflow_uses_real_temporal_and_distinct_runs(runtime, actor, monkeypatch):
+@pytest.mark.parametrize("sequential_reads", [0, 11])
+async def test_two_phase_workflow_uses_real_temporal_and_distinct_runs(runtime, actor, monkeypatch, sequential_reads):
     from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
     from pydantic_ai.toolsets import FunctionToolset
     from temporalio.testing import WorkflowEnvironment
@@ -443,12 +520,26 @@ async def test_two_phase_workflow_uses_real_temporal_and_distinct_runs(runtime, 
         row = await db.get(Connection, connection.id)
         row.policy = json.dumps({"allowed_tools": ["read_item"], "mcp": {"url": "https://example.test/mcp"}})
         (await db.get(Turn, prepared.scope.turn_id)).preparation = None
-    monkeypatch.setattr("moyai.mcp_remote.remote_mcp_toolset", lambda *a, **kw: FunctionToolset())
+    def read_item() -> list:
+        return []
+    monkeypatch.setattr("moyai.mcp_remote.remote_mcp_toolset", lambda *a, **kw: FunctionToolset(
+        [read_item], metadata={"annotations": {"readOnlyHint": True}},
+    ))
     phases = []
     def response(messages, info):
         schema = info.model_request_parameters.output_object.json_schema
         research_phase = "observations" in schema["properties"]
         phases.append("research" if research_phase else "judgment")
+        if research_phase and sequential_reads:
+            name = f"mcp_{connection.id[:8]}_read_item"
+            if name not in {tool.name for tool in info.function_tools}:
+                return ModelResponse(parts=[ToolCallPart("search_tools", {"queries": ["read_item"]}, "discover")])
+            reads = sum(
+                isinstance(part, ToolReturnPart) and part.tool_name == name
+                for message in messages for part in message.parts
+            )
+            if reads < sequential_reads:
+                return ModelResponse(parts=[ToolCallPart(name, {}, f"read-{reads}")])
         return ModelResponse(parts=[TextPart(json.dumps(
             {"coverage": "complete", "observations": []} if research_phase else
             {"items": [], "notify_observation": None, "message": ""},
@@ -469,9 +560,9 @@ async def test_two_phase_workflow_uses_real_temporal_and_distinct_runs(runtime, 
                 data_converter=encrypted_converter(runtime.security, runtime.objects),
                 interceptors=[ActivityCapacity()],
             ).replay_workflow(await handle.fetch_history())
-    assert phases == ["research", "judgment"]
+    assert phases == ["research"] * (sequential_reads + (2 if sequential_reads else 1)) + ["judgment"]
     async with runtime.database.sessions() as db:
-        assert (await db.get(DotAttentionTurn, prepared.scope.turn_id)).outcome == "blocked"
+        assert (await db.get(DotAttentionTurn, prepared.scope.turn_id)).outcome == ("quiet" if sequential_reads else "blocked")
         assert (await db.get(Session, destination)).conversation is None
         turn = await db.get(Turn, prepared.scope.turn_id)
-        assert json.loads(turn.usage)["requests"] == 2
+        assert json.loads(turn.usage)["requests"] == len(phases)

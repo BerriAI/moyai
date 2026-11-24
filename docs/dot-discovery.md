@@ -13,8 +13,10 @@ with cross-repository relationships. Records without a verified repository,
 out-of-scope records and earlier item references are excluded. Every selected account needs
 an approved repository in restricted mode; other providers support account-wide
 discovery only in this slice.
-GitHub's number-only issue rows are bound to the dispatched repository and
-normalized to canonical URLs; structured comment envelopes are decoded too.
+GitHub rows need a provider URL to establish repository identity. Number-only
+issue rows are excluded in restricted scans: GitHub can follow repository
+renames, so the requested name alone does not verify the response. Structured
+comment envelopes are decoded, and provider URL casing is normalized.
 The existing automation tools own creation, review, enable, pause and timing.
 Discovery does not introduce another scheduler or create automations per item.
 
@@ -40,7 +42,8 @@ restarts; an explicitly failed check is visible as failed rather than quietly
 retried with a fresh model budget. Input and tool limits fail visibly. A partial
 or blocked scan is recorded in run history, never described as a clean quiet scan.
 Provider pagination, next-page cursors and incomplete-result signals also make
-a scan partial. Known paginated tools also remain partial without explicit
+a scan partial, as do failed, denied, interrupted or unrecognized tool results.
+Known paginated tools also remain partial without explicit
 first-page exhaustion evidence; bare arrays never imply complete coverage.
 A snapshot older than fifteen minutes cannot publish.
 The snapshot uses the existing encrypted Temporal payload/offload path and a
@@ -75,13 +78,31 @@ does not.
 ## Bounds and release
 
 Bounds: two accounts; one trigger; 2,000 characters of private priorities;
-12 research tool calls and eight model requests; 30 returned records and 16,000
+12 research tool calls and sixteen model requests; 30 returned records and 16,000
 characters per tool result; 12 validated observations; four judgment requests
 and four memory reads/searches; 180 KB of serialized model input per request.
 The judgment context includes the 30 most recent items and 15 chat messages
 (1,500 characters each); every observed item's current revision is fenced even
 when its summary is outside that context. The UI lists the 100 most recent items.
 These are bounded attention checks, not exhaustive inbox scans.
+
+## Reused infrastructure
+
+| Responsibility | Implementation |
+| --- | --- |
+| Scheduling, wakeups, replay and worker recovery | Existing canonical automations and Temporal workflow/activity execution |
+| Model/tool loop, structured output and bounded correction | Pydantic AI agents, `NativeOutput`, validators and `UsageLimits` |
+| Model-visible method restrictions | SDK `AbstractCapability.prepare_tools`; host checks still enforce dispatch |
+| Persistent personal memory | Existing Harness memory capability, read-only during judgment |
+| Item consistency and notification delivery | Existing database transactions, owner revision checks and delivery receipts |
+| Account authority and private execution data | Existing grant checks, encrypted payload conversion and offload |
+| Browser/API contract | Pydantic models → OpenAPI → generated hey-api client |
+
+The new domain code decides what a Dot may observe, retain and publish. Provider
+normalization only accepts verifiable records; it is not a new connector framework.
+There is no new agent dispatch loop, scheduler, retry engine or memory store.
+The extra research request allowance covers sequential tools and final typed
+output; the SDK still enforces tool and token ceilings.
 
 Existing focused attention definitions retain their old digests and workflow
 path. Discovery requires native schema v31 and execution protocol 12; drain old

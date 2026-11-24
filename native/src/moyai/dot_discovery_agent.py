@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -11,6 +13,7 @@ from pydantic_ai import Agent, Conversation, ConversationTypeAdapter, NativeOutp
 from pydantic_ai.capabilities import AbstractCapability, Instrumentation
 from pydantic_ai.durable_exec.temporal import TemporalDurability
 from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded
+from pydantic_ai.tools import ToolDefinition
 from temporalio.common import RetryPolicy
 
 from .connection_catalog import ConnectionToolSearch, connection_search
@@ -110,6 +113,23 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
             if name == f"{grant.kind}_{grant.id[:8]}_{tool}"
         ), None)
 
+    async def prepare_tools(self, ctx, tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
+        prepared = []
+        for definition in tool_defs:
+            tool = self.github_tool(ctx, definition.name)
+            if self.scope(ctx, definition.name) and tool in GITHUB_METHODS:
+                schema = deepcopy(definition.parameters_json_schema)
+                schema.setdefault("properties", {})["method"] = {
+                    "type": "string", "enum": sorted(GITHUB_METHODS[tool]),
+                }
+                schema["required"] = list(dict.fromkeys([*schema.get("required", []), "method"]))
+                definition = replace(
+                    definition, parameters_json_schema=schema,
+                    description=f"Read an owner-approved GitHub repository. Allowed methods: {', '.join(sorted(GITHUB_METHODS[tool]))}.",
+                )
+            prepared.append(definition)
+        return prepared
+
     async def before_model_request(self, ctx, request_context):
         # Check serialized input before sending it, independent of provider token
         # accounting. Oversized inputs fail visibly; they never become quiet.
@@ -158,7 +178,7 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
             limited |= provider_partial(record)
             complete |= provider_complete(record)
             if tool:
-                record = github_record(record, tool, args)
+                record = github_record(record)
             identity = next((record[key] for key in IDENTITY_FIELDS if record.get(key)), None)
             if allowed and (not isinstance(identity, str) or not source_allowed(identity, allowed)):
                 # Collection envelopes inform coverage but never expose their

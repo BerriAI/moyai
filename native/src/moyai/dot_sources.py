@@ -62,18 +62,13 @@ def github_item(source: str) -> bool:
     ))
 
 
-def github_record(record: dict, tool: str | None, args: dict) -> dict:
-    """Bind GitHub's number-only issue rows to the dispatched repository."""
+def github_record(record: dict) -> dict:
+    """Normalize provider URLs without manufacturing repository identity."""
     result = dict(record)
-    if tool == "list_issues" and not any(record.get(key) for key in ("html_url", "web_url", "permalink", "url")):
-        owner, repo, number = args.get("owner"), args.get("repo"), record.get("number")
-        if type(number) is int and number > 0 and all(
-            isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", value) and value not in {".", ".."}
-            for value in (owner, repo)
-        ):
-            result["html_url"] = f"https://github.com/{owner}/{repo}/issues/{number}"
+    # GitHub can follow repository renames. Request arguments do not establish
+    # the returned repository, so number-only issue rows remain unverified.
     # Repository names are case-insensitive. Use one identity across provider
-    # URLs and number-only rows even when subsequent calls spell them differently.
+    # URLs even when subsequent calls spell them differently.
     for key in ("html_url", "web_url", "permalink", "url"):
         value = result.get(key)
         if not isinstance(value, str):
