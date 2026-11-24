@@ -141,8 +141,10 @@ def main():
         assert not request({"action": "click", "app": "apps.py", "observation": old["observation"],
                             "element_index": target(old, "button", "Submit")})["action_executed"]
         action("set_value", "spin button", "Amount (USD)", value="42.50")
+        assert "Reimbursable Value: [unchecked]" in request({"action": "read", "app": "apps.py"})["text"]
         action("click", "check box", "Reimbursable")
         state = request({"action": "read", "app": "apps.py", "screenshot": True})
+        assert "Reimbursable Value: [checked]" in state["text"]
         assert len(state["images"]) == 1 and Path(state["images"][0]).is_file()
         # A worker restart must invalidate old indexes without repeating input.
         os.killpg(int(Path("/tmp/moyai-native-desktop/ocu/browser-driver.pid").read_text()), signal.SIGKILL)
@@ -155,6 +157,11 @@ def main():
         browser = guest({"action": "browser", "command": {"action": "open", "url": "http://127.0.0.1:4173",
                                                            "new_tab": True}})
         assert browser["navigation_error"]["code"] == "ERR_CONNECTION_REFUSED", browser
+        hidden = request({"action": "read", "app": "apps.py", "screenshot": True})
+        assert not hidden["images"] and "inactive" in hidden["text"], hidden
+        action("click", "frame", "Expense Report")
+        visible = request({"action": "read", "app": "apps.py", "screenshot": True})
+        assert len(visible["images"]) == 1 and "inactive" not in visible["text"], visible
         # Compare one identical native result before/after formatting, with all text retained.
         spec = importlib.util.spec_from_file_location("ocu_smoke", ROOT / "native/ocu_guest.py")
         module = importlib.util.module_from_spec(spec)
@@ -173,7 +180,8 @@ def main():
             ocu.process.wait(timeout=5)
         input_checks = check_native_input()
         print(json.dumps({"passed": ["form_values", "checkbox", "submit", "stale_observation", "worker_restart",
-                                     "screenshot", "failed_browser_navigation", "full_text_preserved",
+                                     "screenshot", "occluded_screenshot_withheld", "exact_window_activation",
+                                     "checkbox_state", "failed_browser_navigation", "full_text_preserved",
                                      *input_checks], **sizes}))
     finally:
         app.terminate()
