@@ -74,7 +74,7 @@ async def obsolete_segment(db: AsyncSession, delivery: Delivery, root: Turn, *, 
 
 async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
     """Queue at most one commentary revision per 30 seconds; never send from here."""
-    from app.slack_format import slack_text
+    from .slack_mentions import format_reply
 
     async with runtime.database.sessions() as db:
         pairs = (await db.execute(select(Turn, SlackThread).join(
@@ -133,7 +133,9 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
             primary if anchor is None and legacy is None
             else prefix + hashlib.sha256(latest["id"].encode()).hexdigest()[:32]
         )
-        message = slack_text(latest["text"][:2400])
+        message = await format_reply(
+            runtime, thread, latest["text"][:2400], product=runtime.product_slack if product else None,
+        )
         try:
             async with runtime.database.sessions.begin() as db:
                 db.add(Delivery(

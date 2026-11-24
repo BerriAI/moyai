@@ -362,3 +362,134 @@ async def test_product_navigation_does_not_enter_approval_or_agent_path(slack):
         "type": "block_actions", "team": {"id": "TTEST0001"}, "user": {"id": "UTEST0001"},
         "actions": [{"type": "button", "action_id": "moyai_view_pr"}],
     })
+
+
+async def mention_context(runtime, active, thread, text, **source_changes):
+    """Persist the same authored text/provenance pair that admission records."""
+    from moyai.models import Message, MessageSource, new_id
+    identity = new_id()
+    async with runtime.database.sessions.begin() as db:
+        db.add(Message(
+            identity=identity, session_id=active[0].id, turn_id=active[1].id,
+            author_id=active[1].actor_id, role='user', content=runtime.security.seal(text),
+        ))
+        await db.flush()
+        db.add(MessageSource(message_identity=identity, kind='slack', data=runtime.security.seal({
+            'kind': 'slack', 'team_id': thread.team_id, 'channel_id': thread.channel_id,
+            'thread_ts': thread.thread_ts, **source_changes,
+        })))
+
+
+@pytest.mark.parametrize('lane', ['final', 'progress', 'web'])
+async def test_every_product_delivery_lane_preserves_mention_policy(runtime, active, slack, monkeypatch, lane):
+    from moyai.models import Message, MessageSource
+    thread = await bind(slack, active)
+    person, other, bot = 'U0BTBPXJWPM', 'UOTHER001', 'UBOT00001'
+    await mention_context(runtime, active, thread, f'Send to <@{person}|Jordan> and <@{bot}>.')
+    for user, name in [(other, 'Another person'), (bot, 'Moyai')]:
+        slack.service.store.execute('INSERT INTO slack_mention_names VALUES(?,?,?,?)',
+                                    (thread.team_id, user, name, 9999999999))
+    answer = (
+        f'Sent the image link to <@{person}> via DM. <@{other}|not a verified name> <@{bot}> '
+        f'<!channel> <!here> <@UUNKNOWN1> `<@{person}>`'
+    )
+    expected = (
+        f'Sent the image link to <@{person}> via DM. @Another person @Moyai '
+        f'&lt;!channel&gt; &lt;!here&gt; &lt;@UUNKNOWN1&gt; `&lt;@{person}&gt;`'
+    )
+    if lane == 'progress':
+        async def progress(*_):
+            return {'messages': [{'id': 'mention-progress', 'text': answer}], 'subagents': []}
+        monkeypatch.setattr(runtime.work_progress, 'read', progress)
+        await stage_progress(runtime, product=True)
+        identity = f'product-slack:{active[1].id}:commentary'
+    elif lane == 'web':
+        async with runtime.database.sessions.begin() as db:
+            message = await db.scalar(select(Message).where(Message.turn_id == active[1].id).order_by(Message.id))
+            message.content = runtime.security.seal(answer)
+            source = await db.get(MessageSource, message.identity)
+            source.mirror = True
+            identity = f'product-slack:{active[1].id}:web-input:{message.identity}:0:0'
+        await slack.service.stage_web_inputs()
+    else:
+        async with runtime.database.sessions.begin() as db:
+            turn = await db.get(Turn, active[1].id)
+            turn.status, turn.result = 'completed', runtime.security.seal(answer)
+        await slack.service.stage()
+        identity = f'product-slack:{active[1].id}:completed:0'
+    async with runtime.database.sessions() as db:
+        row = await db.scalar(select(Delivery).where(Delivery.identity == identity))
+    assert row is not None
+    requests, _, handler = transport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url='https://slack.test/') as client:
+        await slack.service.deliver(client, row)
+    assert len(requests) == 1
+    payload = requests[0][1]
+    assert expected in payload['text']
+    if lane != 'web':
+        assert expected in payload['blocks'][0]['text']['text']
+    assert payload['parse'] == 'none' and payload['link_names'] is False
+    assert payload['unfurl_links'] is False and payload['unfurl_media'] is False
+
+
+@pytest.mark.parametrize('source_changes,text', [
+    ({'team_id': 'TOTHER001'}, '<@U0BTBPXJWPM>'),
+    ({'channel_id': 'COTHER001'}, '<@U0BTBPXJWPM>'),
+    ({'thread_ts': '1792100000.999'}, '<@U0BTBPXJWPM>'),
+    ({'deleted': True}, '<@U0BTBPXJWPM>'),
+    ({'kind': 'web'}, '<@U0BTBPXJWPM>'),
+    ({'edited_in': 'web'}, '<@U0BTBPXJWPM>'),
+    ({}, '`<@U0BTBPXJWPM>`'),
+    ({}, '```\n<@U0BTBPXJWPM>\n```'),
+    ({}, '&lt;@U0BTBPXJWPM&gt;'),
+])
+async def test_reply_does_not_grant_ping_from_wrong_destination_or_examples(
+    runtime, active, slack, source_changes, text,
+):
+    thread = await bind(slack, active)
+    await mention_context(runtime, active, thread, text, **source_changes)
+    async with runtime.database.sessions.begin() as db:
+        turn = await db.get(Turn, active[1].id)
+        turn.status, turn.result = 'completed', runtime.security.seal('Sent to <@U0BTBPXJWPM>.')
+    await slack.service.stage()
+    async with runtime.database.sessions() as db:
+        row = await db.scalar(select(Delivery).where(Delivery.identity == f'product-slack:{turn.id}:completed:0'))
+    assert 'Sent to &lt;@U0BTBPXJWPM&gt;.' in json.loads(runtime.security.unseal(row.content))['text']
+
+
+@pytest.mark.parametrize('product', [False, True])
+async def test_unmentioned_recipient_is_readable_without_pinging(runtime, active, slack, product):
+    from moyai.models import User
+    thread = await bind(slack, active)
+    person = 'U0BTBPXJWPM'
+    runtime.settings.slack_team_id = thread.team_id
+    slack.service.store.execute('INSERT INTO slack_mention_names VALUES(?,?,?,?)',
+                               (thread.team_id, person, 'Jordan Lee', 9999999999))
+    async with runtime.database.sessions.begin() as db:
+        user = await db.get(User, active[1].actor_id)
+        user.slack_user_id, user.display_name = person, 'Jordan Lee'
+        turn = await db.get(Turn, active[1].id)
+        turn.status, turn.result = 'completed', runtime.security.seal(f'Sent the image link to <@{person}> via DM.')
+    await (slack.service.stage() if product else stage_deliveries(runtime))
+    identity = f'product-slack:{turn.id}:completed:0' if product else f'slack-answer:{turn.id}'
+    async with runtime.database.sessions() as db:
+        row = await db.scalar(select(Delivery).where(Delivery.identity == identity))
+    value = json.loads(runtime.security.unseal(row.content))
+    assert value['text'].startswith('Sent the image link to @Jordan Lee via DM.')
+    assert '<@' not in value['text']
+
+
+async def test_profile_failure_keeps_allowed_mentions_and_does_not_block_staging(runtime, active, slack, monkeypatch):
+    thread = await bind(slack, active)
+    await mention_context(runtime, active, thread, '<@U0BTBPXJWPM>')
+
+    async def unavailable(*_):
+        raise TimeoutError('profile cache unavailable')
+    monkeypatch.setattr(slack.service.mention_names, 'names', unavailable)
+    async with runtime.database.sessions.begin() as db:
+        turn = await db.get(Turn, active[1].id)
+        turn.status, turn.result = 'completed', runtime.security.seal('<@U0BTBPXJWPM> <@UUNKNOWN1>')
+    await slack.service.stage()
+    async with runtime.database.sessions() as db:
+        row = await db.scalar(select(Delivery).where(Delivery.identity == f'product-slack:{turn.id}:completed:0'))
+    assert json.loads(runtime.security.unseal(row.content))['text'].startswith('<@U0BTBPXJWPM> &lt;@UUNKNOWN1&gt;')

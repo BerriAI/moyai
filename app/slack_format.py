@@ -3,12 +3,14 @@ import html
 import re
 
 from .file_links import file_link
+from .slack_mentions import MENTION
 
 ID = re.compile(r"^[A-Z][A-Z0-9]{7,30}$")
 STAMP = re.compile(r"^\d{10,16}\.\d{1,9}$")
 ASIDE_PREFIXES = ("!aside", "(aside)")
 CODE_SPAN = re.compile(r'(`[^`\n]+`)')
 FENCED_CODE = re.compile(r'(```[\s\S]*?(?:```|\Z))')
+CODE = re.compile(r'(```[\s\S]*?(?:```|\Z)|`[^`\n]+`)')
 
 
 def slack_markdown_blocks(text):
@@ -37,15 +39,20 @@ def slack_markdown_blocks(text):
     return ''.join(pieces)
 
 
-def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
+def mention_ids(text, *, escaped=False):
+    """Find user references outside code; only raw human mentions authorize pings."""
+    return set().union(*(set(MENTION.findall(html.unescape(piece) if escaped else piece))
+                         for piece in CODE.split(text)[::2]))
+
+
+def slack_text(text, mentions=frozenset(), *, mention_names=None, public_url='', run_id=''):
     """Format replies without letting model text trigger Slack mentions/unfurls.
 
     Only user IDs in ``mentions`` (already mentioned by people in the thread)
-    may render as mentions; broadcasts and every other ID stay literal text.
+    may render as mentions. Other verified names render without pinging anyone;
+    unresolved IDs and broadcasts stay literal. Code examples are never rewritten.
     """
     text = slack_markdown_blocks(html.escape(text, quote=False))
-    def mention(match):
-        return f'<@{match[1]}>' if match[1] in mentions else match[0]
     def link(match):
         label, url = match.groups()
         if not url.startswith(('https://', 'http://')):
@@ -57,10 +64,9 @@ def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
             return label
         return '<' + url + '|' + label.replace('|', '¦') + '>'
     # Preserve fenced examples; standalone inline Markdown filenames are links.
-    pieces = re.split(r'(```[\s\S]*?(?:```|\Z)|`[^`\n]+`)', text)
+    pieces = CODE.split(text)
     for i in range(0, len(pieces), 2):
         value = re.sub(r'!?\[([^\]\n]+)\]\(([^\s)<>]+)\)', link, pieces[i])
-        value = re.sub(r'&lt;@([UW][A-Z0-9]{7,30})&gt;', mention, value)
         pieces[i] = value
     markers = [
         (index, match.start())
@@ -77,6 +83,23 @@ def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
         url = file_link(public_url, run_id, html.unescape(label))
         if url:
             pieces[i] = '<' + html.escape(url, quote=False) + '|' + label.replace('|', '¦') + '>'
+    def mention(match):
+        user = match[1]
+        if user in mentions:
+            return f'<@{user}>'
+        name = (mention_names or {}).get(user)
+        return html.escape('@' + name, quote=False) if name else match[0]
+
+    # Resolve only after Markdown conversion, and never inside a generated link.
+    # Decode at most one pre-escaped mention, not arbitrary HTML or broadcasts.
+    for i in range(0, len(pieces), 2):
+        spans = re.split(r'(<https?://[^>]+>)', pieces[i])
+        for j in range(0, len(spans), 2):
+            spans[j] = re.sub(
+                r'&(?:amp;)?lt;@([UW][A-Z0-9]{7,30})(?:\|(?:(?!&(?:amp;)?(?:lt|gt);)[^<>\n])*)?&(?:amp;)?gt;',
+                mention, spans[j],
+            )
+        pieces[i] = ''.join(spans)
     return ''.join(pieces)
 
 

@@ -178,7 +178,7 @@ async def mark_inbox(runtime: Runtime, identity: str, status: str) -> None:
 
 
 async def stage_deliveries(runtime: Runtime) -> None:
-    from app.slack_format import slack_text
+    from .slack_mentions import format_reply
 
     async with runtime.database.sessions() as db:
         pairs = (await db.execute(select(Turn, SlackThread).join(
@@ -209,7 +209,7 @@ async def stage_deliveries(runtime: Runtime) -> None:
         link = session_url(runtime.settings.public_url, turn.session_id)
         # Standalone publishes the answer before its checkpoint finishes saving.
         cards = pr_cards(text, link) if turn.status in {"saving", "completed"} else []
-        content = thread_message(slack_text(text), link, cards=cards)
+        content = thread_message(await format_reply(runtime, thread, text), link, cards=cards)
         try:
             async with runtime.database.sessions.begin() as db:
                 from .slack_progress import latest_segment
