@@ -225,6 +225,7 @@ async def test_failed_first_allocation_is_not_reported_as_a_lost_computer(
         ).replay_workflow(history)
     saved = await runtime.database.session(actor, session.id)
     assert not saved.workspace
+    assert not saved.save_warning
     async with runtime.database.sessions() as db:
         failed = await db.get(Turn, turn.id)
         assert failed is not None
