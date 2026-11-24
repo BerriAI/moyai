@@ -13,7 +13,7 @@ from pydantic_ai.exceptions import ToolFailed
 from sqlalchemy import select, update
 from test_product_automations import activate, occurrence
 
-from moyai.automations.product_automation_tools import CreateRequest
+from moyai.automations.product_automation_tools import CreateRequest, UpdateRequest
 from moyai.automations.product_automations import AutomationDefinition, Mutation, definition_payload
 from moyai.contracts import NewMessage
 from moyai.dot_models import DotAttentionTurn, PersonalDot
@@ -119,6 +119,42 @@ async def test_conversational_attention_preserves_explicit_account_subset(automa
         return
     saved = await tools.call_tool("automation_create", {"request": body}, run, tool)
     assert (await ctx.service.preview(ctx.grant, saved["id"]))["definition"]["connection_ids"] == chosen
+
+
+@pytest.mark.parametrize("selection", ["unchanged", "selected_addition", "unselected_addition"])
+async def test_conversational_edits_require_authority_only_for_new_accounts(automations, canonical_connections, selection):
+    ctx = automations
+    _, original, row, _ = await setup(ctx)
+    run = await automation_fixtures.tool_context(ctx, visibility="private")
+    database = ctx.product.database
+    async with database.sessions.begin() as db:
+        other = Connection(
+            owner_id=run.deps.actor_id, kind="mcp", name="Another account",
+            credential=database.security.seal("synthetic"), read_only=True,
+            policy=json.dumps({"allowed_tools": ["read_item"]}),
+        )
+        db.add(other)
+        await db.flush()
+        if selection == "selected_addition":
+            (await db.get(Turn, run.deps.turn_id)).connections = json.dumps([other.id])
+            run.deps.grants = await database.dots.grants(db, run.deps.actor_id, [other.id])
+    preview = await ctx.service.preview(ctx.grant, row["id"])
+    chosen = [original.id] + ([other.id] if selection != "unchanged" else [])
+    definition = AutomationDefinition.model_validate(preview["definition"]).model_copy(update={
+        "name": "Updated schedule", "connection_ids": chosen,
+    })
+    body = UpdateRequest(
+        automation_id=row["id"], revision=preview["revision"], request_key=uuid4().hex,
+        turn_id=run.deps.turn_id, definition=definition,
+    )
+    tools, tool, _ = await automation_fixtures.reserved_call(ctx, run, "automation_update", body)
+    if selection == "unselected_addition":
+        with pytest.raises(ToolFailed):
+            await tools.call_tool("automation_update", {"request": body}, run, tool)
+        assert (await ctx.service.preview(ctx.grant, row["id"]))["definition"]["connection_ids"] == [original.id]
+    else:
+        await tools.call_tool("automation_update", {"request": body}, run, tool)
+        assert (await ctx.service.preview(ctx.grant, row["id"]))["definition"]["connection_ids"] == sorted(chosen)
 
 
 def test_task_digests_and_late_current_chat_binding_remain_compatible():

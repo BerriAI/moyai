@@ -285,12 +285,12 @@ async def test_attention_evidence_and_worker_input_are_restricted(runtime, actor
 def test_evidence_uses_one_record_and_canonical_account_identity():
     accounts = [Grant(id=str(uuid4()), kind="mcp", revision=1, credential="", policy={"allowed_tools": ["read_item"]})
                 for _ in range(2)]
-    record = {"id": "item-1", "html_url": "https://provider.test/items/1", "updated_at": "v1", "title": "Review due."}
+    record = {"id": "item-1", "html_url": "https://provider.test/items/1", "updated_at": "v1", "version": "revision-1", "title": "Review due."}
 
-    def resolve(account, *, source="item-1", content=record):
+    def resolve(account, *, source="item-1", version="v1", content=record):
         return validate_decision(json.dumps({
             "action": "notify", "message": "Prepare the review.", "evidence": [{
-                "connection_id": account.id, "source": source, "source_version": "v1", "quote": "Review due.",
+                "connection_id": account.id, "source": source, "source_version": version, "quote": "Review due.",
             }],
         }), ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=[ToolReturnPart(
             tool_name=f"mcp_{account.id[:8]}_read_item", tool_call_id="read",
@@ -298,12 +298,15 @@ def test_evidence_uses_one_record_and_canonical_account_identity():
         )])])).decode(), accounts)[1]
 
     assert resolve(accounts[0]) == resolve(accounts[0], source=record["html_url"])
+    assert resolve(accounts[0]) == resolve(accounts[0], version="revision-1")
     assert resolve(accounts[0]) != resolve(accounts[1])
     with pytest.raises(ValueError, match="one connected account"):
         resolve(accounts[0], content=[
             {"id": "item-1", "updated_at": "v1", "title": "Nothing due."},
             {"id": "item-2", "updated_at": "v2", "title": "Review due."},
         ])
+    with pytest.raises(ValueError, match="one connected account"):
+        resolve(accounts[0], content={"id": "real-item", "body": json.dumps(record)})
 
 
 @pytest.mark.parametrize("patch", [{"read_only": False}, {"shared": True}, {"policy": "{}"}])

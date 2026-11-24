@@ -25,8 +25,10 @@ automation tools or delegation. Model execution is bounded to eight requests.
 The observer returns a typed **quiet** or **notify** decision. Notify requires a
 current connected-tool result with an exact account, source identity, provider
 version or last-modified timestamp, and quotation from one structured record.
-The host chooses a canonical URL/ID from that record and includes the account in
-the deduplication key; changing a citation from an ID to its URL cannot bypass it.
+The host chooses a canonical URL/ID and version from that record and includes the
+account in the deduplication key; changing a citation to an equivalent identity
+or version field cannot bypass it. JSON decoding is limited to the tool payload
+and supported MCP envelopes; text within provider records remains text.
 Unsupported record shapes fail closed. Tool discovery results cannot serve as
 evidence. Publication rechecks the owner, automation generation, original account
 revisions and current private destination under the relevant transaction locks.
@@ -62,6 +64,8 @@ requires reviewing and enabling the schedule again. The same account may remain
 selected for ordinary conversation without changing the captured observer scope.
 Conversational setup preserves the requested account subset. With multiple
 selected accounts it requires an explicit subset rather than defaulting to all.
+Edits may retain existing accounts without selecting them again, but adding an
+account requires that account's current turn grant.
 
 ## Verification
 

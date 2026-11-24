@@ -350,6 +350,15 @@ class ProductAutomationService:
         if definition.visibility != scope.authority.visibility:
             raise HTTPException(403, "Manage this automation from a chat with matching visibility.")
 
+    @staticmethod
+    def _attention_edit(scope: RunScope, definition: Definition, previous: Definition | None = None) -> None:
+        if definition.kind != "attention":
+            return
+        retained = set(previous.connection_ids) if previous and previous.kind == "attention" else set()
+        added = set(definition.connection_ids) - retained
+        if not added.issubset(grant.id for grant in scope.grants):
+            raise HTTPException(403, "Select each new attention account in this chat before adding it.")
+
     async def _old_active(self, db: AsyncSession, identity: str) -> bool:
         return bool(await db.scalar(text(
             f"SELECT 1 FROM {self._table('automation_runs')} a "
@@ -1058,6 +1067,7 @@ class ProductAutomationService:
                     definition = identified or self.normalize_definition(Definition.model_validate(body.definition.model_dump()))
                     if scope is not None:
                         self._tool_target(scope, definition)
+                        self._attention_edit(scope, definition)
                     if definition.visibility == "private" and not principal.individual:
                         raise HTTPException(403, "Private automations require an individual account.")
                     stamp = now()
@@ -1083,9 +1093,11 @@ class ProductAutomationService:
                 if action == "update":
                     if not isinstance(body, Save):
                         raise HTTPException(422, "An update requires a complete definition.")
+                    previous = definition
                     definition = identified or self.normalize_definition(Definition.model_validate(body.definition.model_dump()), definition)
                     if scope is not None:
                         self._tool_target(scope, definition)
+                        self._attention_edit(scope, definition, previous)
                     definition.harness = CORE_IDENTITY if binding else previous_harness
                     if self.events is not None:
                         await self.events.remove_receivers(db, identity, definition)

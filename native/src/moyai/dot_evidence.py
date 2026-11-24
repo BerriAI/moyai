@@ -17,24 +17,52 @@ from .dot_contracts import DotDecision
 # An unsupported record shape fails closed instead of guessing its identity.
 IDENTITY_FIELDS = ("html_url", "web_url", "permalink", "url", "id", "uid", "uuid")
 VERSION_FIELDS = ("updated_at", "updatedAt", "updated", "last_modified", "lastModified", "version", "revision", "etag")
+COLLECTION_FIELDS = ("data", "items", "result", "results", "records", "events", "messages", "issues", "pull_requests", "nodes", "edges", "node")
+
+
+def structured_records(value: object) -> Iterator[dict]:
+    """Traverse provider collections, never decode free-text record fields."""
+    if isinstance(value, dict):
+        yield value
+        for key in COLLECTION_FIELDS:
+            if key in value:
+                yield from structured_records(value[key])
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from structured_records(child)
+
+
+def decode_payload(value: str) -> object:
+    try:
+        return json.loads(value)
+    except (ValueError, RecursionError):
+        return None
 
 
 def records(value: object) -> Iterator[dict]:
-    """Read structuredContent and JSON text blocks from ordinary MCP results."""
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from records(child)
-    elif isinstance(value, (list, tuple)):
-        for child in value:
-            yield from records(child)
-    elif isinstance(value, str):
+    """Decode only the returned payload or a top-level MCP result envelope."""
+    if isinstance(value, str):
+        value = decode_payload(value)
+    if isinstance(value, dict) and "content" in value and set(value).issubset({
+        "content", "structuredContent", "structured_content", "isError", "is_error", "_meta", "meta",
+    }):
+        from mcp.types import CallToolResult, TextContent
+        from pydantic import ValidationError
+
         try:
-            decoded = json.loads(value)
-        except (ValueError, RecursionError):
+            result = CallToolResult.model_validate(value)
+        except ValidationError:
             return
-        if isinstance(decoded, (dict, list)):
-            yield from records(decoded)
+        if result.is_error:
+            return
+        if result.structured_content is not None:
+            yield from structured_records(result.structured_content)
+        else:
+            for block in result.content:
+                if isinstance(block, TextContent):
+                    yield from structured_records(decode_payload(block.text))
+        return
+    yield from structured_records(value)
 
 
 def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tuple[DotDecision, str | None]:
@@ -62,7 +90,7 @@ def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tu
                 account == item.connection_id and item.source in ids and item.source_version in versions
                 and any(item.quote in value for value in fields.values())
             ):
-                matches.add((account, ids[0], item.source_version))
+                matches.add((account, ids[0], versions[0]))
         if len(matches) != 1:
             raise ValueError("Dot evidence must identify one connected account's structured provider record.")
         identities.append(matches.pop())
