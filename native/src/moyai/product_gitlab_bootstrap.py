@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import os
 import re
@@ -27,9 +26,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .contracts import Grant, RunScope
-from .models import Effect, Session, now
+from .models import Effect, Session
 from .product_github_bootstrap import INSTALL, MAX_BUNDLE, git
-from .storage import ObjectStore
+from .repository_preparation import RepositoryPreparation, directory_size
 
 if TYPE_CHECKING:
     from .product_connections import ProductConnections
@@ -165,22 +164,12 @@ async def fetch_bundle(
     with tempfile.TemporaryDirectory(prefix="moyai-gitlab-source-") as temporary:
         root = Path(temporary)
 
-        def directory_size() -> int:
-            size = 0
-            for path in root.rglob("*"):
-                try:
-                    if path.is_file():
-                        size += path.stat().st_size
-                except FileNotFoundError:
-                    pass
-            return size
-
         await git(["init", "--bare", "."], root, environment)
         task = asyncio.create_task(git(["fetch", "--no-tags", canonical + ".git", commit], root, environment))
         try:
             while not task.done():
                 await asyncio.wait({task}, timeout=.5)
-                if await asyncio.to_thread(directory_size) > MAX_BUNDLE:
+                if await asyncio.to_thread(directory_size, root) > MAX_BUNDLE:
                     raise ValueError("GitLab repository history exceeds the 128 MiB bootstrap budget.")
             await task
             await git(["update-ref", "refs/heads/" + branch, commit], root, environment)
@@ -270,26 +259,11 @@ async def prepare_repository(
         "working_dir": "/workspace/repo", "requested_url": url, "access": "selected_connection",
         "requested_commit": context.get("commit_sha"),
     }
-    fingerprint = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
-    identity = hashlib.sha256(("product-gitlab-bootstrap:" + fingerprint).encode()).hexdigest()
-    objects = ObjectStore(service.database.settings, service.database.security)
-    async with service.database.sessions() as db:
-        previous = await db.get(Effect, identity)
-    if previous and (previous.fingerprint != fingerprint or previous.state not in {"preparing", "confirmed"}):
-        raise ValueError("The GitLab preparation identity or receipt state changed.")
-    state = json.loads(service.database.security.unseal(previous.resolution)) if previous and previous.resolution else {}
-    if not previous:
-        try:
-            async with service.database.sessions.begin() as db:
-                if await db.scalar(select(Effect.id).where(Effect.session_id == scope.session_id, Effect.state == "pending")):
-                    raise ValueError("Resolve the pending workspace action before repository preparation.")
-                db.add(Effect(
-                    id=identity, session_id=scope.session_id, turn_id=scope.turn_id, actor_id=scope.actor_id,
-                    tool_name="product_repository_prepare", arguments=service.database.security.seal(descriptor),
-                    fingerprint=fingerprint, state="preparing",
-                ))
-        except IntegrityError:
-            return await prepare_repository(service, scope, sandbox, context)
+    preparation = RepositoryPreparation(service.database, scope, descriptor, "gitlab")
+    try:
+        state = await preparation.reserve()
+    except IntegrityError:
+        return await prepare_repository(service, scope, sandbox, context)
     if not state:
         await check()
         credentials = await service.credentials(scope, grant)
@@ -313,15 +287,7 @@ async def prepare_repository(
             return name, branch, commit
 
         name, branch, commit = await service.execution.call(inspect, authorize=check, recheck=True)
-        state = {**descriptor, "repository": name, "branch": branch, "commit_sha": commit, "prepared": True}
-        state["marker"] = service.database.security.seal({"fingerprint": fingerprint, "commit_sha": commit})
-        async with service.database.sessions.begin() as db:
-            row = await db.get(Effect, identity, with_for_update=True)
-            assert row is not None
-            if row.resolution:
-                state = json.loads(service.database.security.unseal(row.resolution))
-            else:
-                row.resolution = service.database.security.seal(state)
+        state = await preparation.resolve(name, branch, commit)
     if (
         any(state.get(key) != value for key, value in descriptor.items())
         or not valid_branch(state.get("branch")) or not SHA.fullmatch(str(state.get("commit_sha", "")))
@@ -342,16 +308,8 @@ async def prepare_repository(
                 allow_loopback_http=allow_loopback_http,
             )
         await check()
-        state["bundle"], state["bundle_sha256"] = await objects.put(raw), hashlib.sha256(raw).hexdigest()
-        async with service.database.sessions.begin() as db:
-            row = await db.get(Effect, identity, with_for_update=True)
-            assert row is not None and row.resolution is not None
-            current = json.loads(service.database.security.unseal(row.resolution))
-            if current.get("bundle"):
-                state = current
-            else:
-                row.resolution = service.database.security.seal(state)
-    raw = await objects.get(state["bundle"])
+        state = await preparation.store_bundle(state, raw)
+    raw = await preparation.read_bundle(state)
     await check()
     remote = "/tmp/moyai-git-" + uuid4().hex + ".bundle"
     await sandbox.filesystem.write_bytes.aio(raw, remote)
@@ -369,10 +327,7 @@ async def prepare_repository(
         raise ValueError("GitLab preparation did not settle; existing user files were not replaced.")
     if json.loads(await process.stdout.read.aio()) != receipt:
         raise ValueError("The installed GitLab receipt did not match its reserved identity.")
-    async with service.database.sessions.begin() as db:
-        row = await db.get(Effect, identity, with_for_update=True)
-        assert row is not None
-        row.state, row.settled_at = "confirmed", now()
+    await preparation.confirm()
     await check()
     return receipt
 
