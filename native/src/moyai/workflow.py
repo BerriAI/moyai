@@ -707,6 +707,18 @@ class TurnWorkflow(PydanticAIWorkflow):
                 "The agent could not complete this turn. "
                 "Inspect the saved activity before repeating a possibly completed action."
             )
+            if isinstance(error, WorkspaceUnavailableError) and workflow.patched("moyai-workspace-startup-error-v1"):
+                known_workspace = bool(prepared and prepared.workspace)
+                if self.agent_run is not None:
+                    known_workspace |= self.agent_run.ctx.deps.workspace.ref is not None
+                if not known_workspace:
+                    # Allocation failures (capacity, credentials, image build)
+                    # do not establish that an earlier computer was lost.
+                    # Keep arbitrary provider exception text out of chat.
+                    message = (
+                        "Moyai could not start a coding computer. The task is incomplete. "
+                        "Check the workspace provider's capacity, access, and startup configuration, then retry."
+                    )
             if (prepared is None or preserve_maintenance) and workflow.patched("moyai-public-preparation-errors-v1"):
                 message = public_preparation_message(error) or message
             if prepared is not None and workflow.patched("moyai-failure-workspace-checkpoint-v1"):
