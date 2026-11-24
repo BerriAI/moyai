@@ -28,16 +28,6 @@ def require_owner(store, run_id, actor='', connection=None):
     return run
 
 
-def require_request_owner(store, security, request, run_id):
-    security.require(request)
-    info = security.session_info(request)
-    actor = getattr(request.state, 'access_actor', None) if info and info.get('method') == 'cloudflare' else None
-    if actor is None:
-        actor = store.identity(info)
-    require_owner(store, run_id, actor)
-    return actor
-
-
 def deny_export(store, run_id, connection=None):
     if private_run(store, run_id, connection):
         raise PrivateExportDenied(403, 'Export from private sessions is not supported.')

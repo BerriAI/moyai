@@ -1,7 +1,6 @@
 """Small, body-free diagnostics shared by the broker and sandbox relay."""
 import http.client
 import json
-from pathlib import Path
 import re
 import urllib.error
 
@@ -53,82 +52,7 @@ FAILURE_STAGES = {
     'remote_setup', 'remote_prepare', 'remote_finish', 'remote_activate', 'remote_attachments',
     'remote_dispatch', 'remote_result', 'remote_cleanup',
 }
-SOURCE_ROOT = Path(__file__).resolve().parents[1]
 STACK_LOCATION = re.compile(r'(?:app|agent|sandbox)/(?:[a-zA-Z0-9_]+/)*[a-zA-Z0-9_]+\.py:[1-9][0-9]{0,5}:[A-Za-z_][A-Za-z0-9_]{0,79}')
-
-
-def exception_diagnostic(exc, *, stage, request_id=None):
-    """Capture structure, never messages, source lines, arguments or locals.
-
-    Only our installed code contributes stack locations. Third-party frames,
-    absolute paths and exception/provider prose never cross this boundary.
-    """
-    try:
-        return _exception_diagnostic(exc, stage=stage, request_id=request_id)
-    except Exception:
-        # Even hostile exception properties or unavailable filesystems cannot
-        # replace the original failure with a telemetry error.
-        return safe_error({'exception_type': type(exc).__name__, 'failure_stage': stage, 'request_id': request_id})
-
-
-def _exception_diagnostic(exc, *, stage, request_id):
-    result = {'failure_stage': stage, 'request_id': request_id}
-    chain, locations, seen = [], [], set()
-    while isinstance(exc, BaseException) and id(exc) not in seen and len(chain) < 6:
-        seen.add(id(exc))
-        name = type(exc).__name__
-        # Keep this shared sandbox module independent of the Temporal SDK.
-        # Only the known SDK envelope has semantic types/status details;
-        # never infer either from arbitrary exception text or details.
-        if name == 'ApplicationError' and type(exc).__module__ == 'temporalio.exceptions':
-            name = safe_error({'exception_type': exc.type}).get('exception_type', name)
-            if name == 'BrokerRejected' and exc.details:
-                for key, value in safe_error({'http_status': exc.details[0]}).items():
-                    result.setdefault(key, value)
-                if len(exc.details) > 1:
-                    for key, value in safe_error(exc.details[1]).items():
-                        result.setdefault(key, value)
-            if exc.details and isinstance(exc.details[-1], dict):
-                if recovery := safe_recovery(exc.details[-1].get('recovery')):
-                    result.setdefault('recovery', recovery)
-        if recovery := safe_recovery(getattr(exc, 'moyai_recovery', None)):
-            result.setdefault('recovery', recovery)
-        if isinstance(exc, urllib.error.HTTPError):
-            result.setdefault('http_status', exc.code)
-            provenance = upstream_diagnostic(exc.headers or {})
-            for key, value in provenance.items():
-                result.setdefault(key, value)
-            if provenance.get('failure_stage') == 'model_metadata':
-                result['failure_stage'] = 'model_metadata'
-        chain.append(name)
-        if 'exception_type' not in result:
-            result['exception_type'] = name
-        if type(getattr(exc, 'errno', None)) is int:
-            result.setdefault('errno', exc.errno)
-        if type(getattr(exc, 'status_code', None)) is int:
-            result.setdefault('http_status', exc.status_code)
-        if type(getattr(exc, 'returncode', None)) is int:
-            result.setdefault('exit_code', exc.returncode)
-        tb = exc.__traceback__
-        frames = []
-        while tb:
-            code = tb.tb_frame.f_code
-            try:
-                relative = Path(code.co_filename).resolve().relative_to(SOURCE_ROOT).as_posix()
-            except (ValueError, OSError):
-                relative = ''
-            location = f'{relative}:{tb.tb_lineno}:{code.co_name}'
-            if STACK_LOCATION.fullmatch(location):
-                frames.append(location)
-            tb = tb.tb_next
-        locations.extend(frames[-8:])
-        # __context__ remains valuable even for "raise ... from None"; copy
-        # only structure, never resurrect its suppressed private message.
-        exc = exc.__cause__ or exc.__context__
-    result.update(exception_chain=chain, stack_locations=locations[-12:])
-    if len(chain) > 1:
-        result['cause_type'] = chain[1]
-    return safe_error(result)
 
 
 def safe_error(data):
@@ -211,16 +135,6 @@ def tool_rejection_headers(kind, request_id):
     return {'x-moyai-tool-rejection-v1': kind, 'x-moyai-tool-request-id': request_id}
 
 
-def tool_rejection_diagnostic(headers, request_id):
-    """Bind a trusted broker rejection to the submitted tool, never its prose."""
-    kind = headers.get('x-moyai-tool-rejection-v1')
-    if (not isinstance(kind, str) or not tool_rejection_headers(kind, request_id)
-            or headers.get('x-moyai-tool-request-id') != request_id):
-        return {}
-    return {'outcome_type': 'ToolNotDispatched', 'exception_type': kind,
-            'failure_stage': 'tool_dispatch', 'request_id': request_id}
-
-
 def tool_evidence(value, *, receipt_status=None):
     """Public receipt fields only; never treat tool prose as an outcome."""
     value = value if isinstance(value, dict) else {}
@@ -267,41 +181,6 @@ def provider_error(value):
             break
         error = nested.get('error') if isinstance(nested, dict) else None
     return 'unknown'
-
-
-def error_summary(data, *, technical=True):
-    data = safe_error(data)
-    if data.get('failure_stage'):
-        # Every component has already passed the body-free projection.
-        facts = [data.get('exception_type', 'OperationError'), data['failure_stage']]
-        if data.get('errno') is not None:
-            facts.append('errno ' + str(data['errno']))
-        if data.get('exit_code') is not None:
-            facts.append('exit ' + str(data['exit_code']))
-        return 'Operation failed (' + '; '.join(facts) + ').'
-    code = data.get('error_code', 'unknown')
-    reason = {
-        'cyber_policy': 'The model provider rejected this request under its cybersecurity policy',
-        'content_policy_violation': 'The model provider rejected this request under its content policy',
-        'stream_incomplete': 'The model response ended before completion',
-        'cancelled': 'The model request was interrupted',
-    }.get(code)
-    if reason is None:
-        reason = {
-            'authentication_failed': 'The model provider could not authenticate this request',
-            'billing_error': 'The model provider reported a billing problem',
-            'rate_limit': 'The model provider rate-limited this request',
-            'invalid_request': 'The model provider rejected this request as invalid',
-            'server_error': 'The model provider encountered a server error',
-        }.get(data.get('sdk_error'), 'Model request failed')
-    if not technical:
-        return reason + (' (HTTP ' + str(data['http_status']) + ')' if data.get('http_status') else '') + '.'
-    facts = [value for value in (code if code != 'unknown' else '', data.get('sdk_error'),
-                                 data.get('code'), data.get('native_status'), data.get('terminal_reason'),
-                                 data.get('exception_type'), data.get('compaction_reason'), data.get('stage')) if value]
-    if data.get('http_status'):
-        facts.append('HTTP ' + str(data['http_status']))
-    return reason + (' (' + '; '.join(facts) + ')' if facts else ' (cause unavailable)') + '.'
 
 
 def safe_id(value):

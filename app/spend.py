@@ -143,26 +143,6 @@ class IdentityLink(BaseModel):
     google_user_id: str = Field(max_length=150)
 
 
-def completion_events(value):
-    """Preserve text, reasoning, tool calls and usage in the Chat Completions SSE shape."""
-    base = {key: value[key] for key in ('id', 'created', 'model', 'system_fingerprint') if key in value}
-    base['object'] = 'chat.completion.chunk'
-
-    def frame(choices, **extra):
-        return 'data: ' + json.dumps({**base, 'choices': choices, **extra}) + '\n\n'
-
-    for index, choice in enumerate(value.get('choices', [])):
-        delta = dict(choice.get('message') or {})
-        if delta.get('tool_calls'):
-            delta['tool_calls'] = [{**tool, 'index': i} for i, tool in enumerate(delta['tool_calls'])]
-        position = choice.get('index', index)
-        yield frame([{'index': position, 'delta': delta, 'finish_reason': None, 'logprobs': choice.get('logprobs')}])
-        yield frame([{'index': position, 'delta': {}, 'finish_reason': choice.get('finish_reason') or 'stop', 'logprobs': None}])
-    if isinstance(value.get('usage'), dict):
-        yield frame([], usage=value['usage'])
-    yield 'data: [DONE]\n\n'
-
-
 class Spend:
     def __init__(self, store, settings, security, checkpoints):
         self.store, self.settings, self.security, self.checkpoints = store, settings, security, checkpoints
