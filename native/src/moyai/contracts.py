@@ -64,6 +64,10 @@ class RunScope:
     # Recorded by the workflow, so old activity inputs keep the original stream.
     workflow_public_events: bool = False
     goal_generation: int | None = None
+    # Workflow-owned completion markers survive message compaction and history
+    # handoff. Turn identities prevent copied child scopes from inheriting them.
+    completion_plan_turn: str | None = None
+    completion_review_turn: str | None = None
 
     @property
     def root_run_id(self) -> str:
