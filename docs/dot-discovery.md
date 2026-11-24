@@ -6,8 +6,11 @@ ordinary Dot chat; they do not configure a reminder for each finding. A private
 prompt supplies priorities. Optional `attention_sources` provide owner-approved
 GitHub repository URLs when the scope is narrower than an account. This option
 requires the official GitHub read-only MCP endpoint and repository-bound read
-tools. The host checks every read's owner/repository arguments and excludes
-out-of-scope records and earlier item references. Every selected account needs
+tools. The host checks every read's owner/repository arguments and specific
+method: repository lists, PR `get`, and issue/PR `get_comments` are supported.
+Issue `get` and hierarchy methods are blocked because GitHub can enrich them
+with cross-repository relationships. Records without a verified repository,
+out-of-scope records and earlier item references are excluded. Every selected account needs
 an approved repository in restricted mode; other providers support account-wide
 discovery only in this slice.
 The existing automation tools own creation, review, enable, pause and timing.
@@ -35,7 +38,9 @@ restarts; an explicitly failed check is visible as failed rather than quietly
 retried with a fresh model budget. Input and tool limits fail visibly. A partial
 or blocked scan is recorded in run history, never described as a clean quiet scan.
 Provider pagination, next-page cursors and incomplete-result signals also make
-a scan partial. A snapshot older than fifteen minutes cannot publish.
+a scan partial. Known paginated tools also remain partial without explicit
+first-page exhaustion evidence; bare arrays never imply complete coverage.
+A snapshot older than fifteen minutes cannot publish.
 The snapshot uses the existing encrypted Temporal payload/offload path and a
 sealed native record. It is private execution data, not a public artifact.
 
@@ -50,7 +55,9 @@ one-day snooze and reopen without replacing the chat draft. Silence or absence
 from a bounded scan is not evidence of resolution.
 Automatic resolution requires the host to verify a closed/merged GitHub issue or
 pull request in the same provider record as the cited identity, version and
-quotation. Other resolution remains owner-controlled. Prose describing an
+quotation. All versions seen in the scan must agree on closure, and the citation
+must use the latest verifiable version; conflicting state or versions that
+cannot be ordered remain owner-controlled. Other resolution remains owner-controlled. Prose describing an
 attempted fix cannot close an item.
 
 Connection and policy authority is rechecked on research, judgment, delivery and

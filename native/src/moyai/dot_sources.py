@@ -10,6 +10,13 @@ from .contracts import Grant
 
 GITHUB_MCP = "https://api.githubcopilot.com/mcp/readonly"
 GITHUB_READS = frozenset({"list_pull_requests", "list_issues", "pull_request_read", "issue_read"})
+# issue_read.get also enriches hierarchy data from potentially foreign repos.
+# Keep restricted reads to reviewed variants that stay within their repository.
+GITHUB_METHODS = {
+    "pull_request_read": frozenset({"get", "get_comments"}),
+    "issue_read": frozenset({"get_comments"}),
+}
+MORE_FIELDS = ("incomplete_results", "has_more", "hasMore", "truncated", "hasNextPage", "has_next_page")
 
 
 def github_reader(grant: Grant) -> bool:
@@ -57,7 +64,7 @@ def github_item(source: str) -> bool:
 
 def provider_partial(record: dict) -> bool:
     """Preserve explicit provider truncation signals, even in an empty page."""
-    if any(record.get(key) is True for key in ("incomplete_results", "has_more", "hasMore", "truncated", "hasNextPage")):
+    if any(record.get(key) is True for key in MORE_FIELDS):
         return True
     if any(record.get(key) not in (None, "", False) for key in ("next_cursor", "nextCursor", "next_page", "nextPage", "nextPageToken")):
         return True
@@ -69,3 +76,13 @@ def provider_partial(record: dict) -> bool:
     ) and isinstance(value, list)]
     total = next((record[key] for key in ("total_count", "totalCount", "total") if isinstance(record.get(key), int)), None)
     return total is not None and bool(collections) and total > max(map(len, collections))
+
+
+def provider_complete(record: dict) -> bool:
+    """An explicit terminal page, never inferred from a short or empty array."""
+    if provider_partial(record):
+        return False
+    if any(record.get(key) is False for key in ("has_more", "hasMore", "hasNextPage", "has_next_page")):
+        return True
+    page = record.get("pageInfo") or record.get("page_info")
+    return isinstance(page, dict) and provider_complete(page)

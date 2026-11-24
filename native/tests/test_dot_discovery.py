@@ -212,12 +212,37 @@ async def test_repository_scope_is_enforced_before_read_and_on_returned_records(
         "items": [
             {"url": "https://github.com/BerriAI/moyai/pull/1", "version": "one", "title": "Allowed"},
             {"url": "https://github.com/BerriAI/another/pull/1", "version": "one", "title": "Outside"},
+            {"version": "one", "title": "Unverifiable repository"},
         ],
     })
     assert "Outside" not in json.dumps(result) and result["limited"]
+    assert "Unverifiable" not in json.dumps(result)
     grant.policy["mcp"]["url"] = "https://example.test/mcp"
     with pytest.raises(ValueError, match="official GitHub"):
         repositories([grant], [{"connection_id": grant.id, "source": "https://github.com/BerriAI/moyai"}])
+
+
+async def test_restricted_github_dispatch_blocks_relationship_and_unknown_methods(runtime, actor):
+    from pydantic_ai.exceptions import ModelRetry
+
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    grant = prepared.scope.grants[0]
+    grant.policy = {"allowed_tools": ["issue_read", "pull_request_read"], "mcp": {"url": GITHUB_MCP}}
+    prepared.scope.discovery_repositories = {grant.id: [("berriai", "moyai")]}
+    bounds, ctx = DiscoveryBounds(), SimpleNamespace(deps=prepared.scope)
+    for tool, methods in {
+        "issue_read": [None, "get", "get_parent", "get_sub_issues", "future_method"],
+        "pull_request_read": [None, "get_status", "get_commits", "future_method"],
+    }.items():
+        call = ToolCallPart(f"mcp_{grant.id[:8]}_{tool}", {}, "read")
+        for method in methods:
+            with pytest.raises(ModelRetry, match="method"):
+                await bounds.before_tool_execute(ctx, call=call, tool_def=None, args={
+                    "owner": "BerriAI", "repo": "moyai", "method": method,
+                })
+        for method in (["get_comments"] if tool == "issue_read" else ["get", "get_comments"]):
+            args = {"owner": "BerriAI", "repo": "moyai", "method": method}
+            assert await bounds.before_tool_execute(ctx, call=call, tool_def=None, args=args) == args
 
 
 @pytest.mark.parametrize("payload", [
@@ -225,9 +250,29 @@ async def test_repository_scope_is_enforced_before_read_and_on_returned_records(
     {"items": [], "incomplete_results": True},
     {"nodes": [], "pageInfo": {"hasNextPage": True}},
     {"items": [], "nextPageToken": "later"},
+    {"items": [], "has_next_page": True},
 ])
 def test_provider_pagination_is_partial(payload):
     assert provider_partial(payload)
+
+
+async def test_bare_and_explicit_github_pages_cannot_be_claimed_as_complete(runtime, actor):
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    grant = prepared.scope.grants[0]
+    grant.policy = {"allowed_tools": ["list_pull_requests"], "mcp": {"url": GITHUB_MCP}}
+    prepared.scope.discovery_repositories = {grant.id: [("berriai", "moyai")]}
+    bounds, ctx = DiscoveryBounds(), SimpleNamespace(deps=prepared.scope)
+    call = ToolCallPart(f"mcp_{grant.id[:8]}_list_pull_requests", {}, "read")
+    row = {"url": "https://github.com/BerriAI/moyai/pull/1", "version": "one", "title": "Allowed"}
+    for payload in [[row], [], {"items": [row], "has_next_page": True}]:
+        result = await bounds.after_tool_execute(ctx, call=call, tool_def=None, args={}, result=payload)
+        assert result["scanned"] and result["limited"]
+    terminal = {"items": [row], "pageInfo": {"hasNextPage": False}}
+    result = await bounds.after_tool_execute(ctx, call=call, tool_def=None, args={}, result=terminal)
+    assert result["scanned"] and not result["limited"]
+    for args in [{"page": 2}, {"after": "later-page"}]:
+        result = await bounds.after_tool_execute(ctx, call=call, tool_def=None, args=args, result=terminal)
+        assert result["limited"]
 
 
 async def test_judgment_cannot_resolve_an_open_item_from_a_quote(runtime, actor):
@@ -273,6 +318,34 @@ async def test_verified_github_closure_resolves_existing_item_even_in_partial_sc
     _, conversation = await research(runtime, later, source=source, source_state="closed", version="two", coverage="partial")
     await publish(runtime, later, conversation, notify=False, state="resolved")
     assert (await runtime.database.dots.discovery.list(actor)).items[0].state == "resolved"
+
+
+async def test_github_closure_uses_all_versions_and_rejects_stale_or_conflicting_state(runtime, actor):
+    from moyai.dot_contracts import DotEvidence
+    from moyai.dot_evidence import verified_closed
+
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    grant = prepared.scope.grants[0]
+    grant.policy = {"allowed_tools": ["list_issues"], "mcp": {"url": GITHUB_MCP}}
+    source = "https://github.com/BerriAI/moyai/issues/1"
+    old, new = "2026-11-23T12:00:00Z", "2026-11-24T12:00:00Z"
+    for states, versions, cited, expected in [
+        (["closed", "open"], [old, new], old, False),
+        (["open", "closed"], [old, new], new, False),
+        (["closed", "open"], [new, new], new, False),
+        (["closed", "closed"], [old, new], old, False),
+        (["closed", "closed"], [old, new], new, True),
+        (["closed", "closed"], ["opaque-a", "opaque-b"], "opaque-b", False),
+    ]:
+        evidence = DotEvidence(connection_id=grant.id, source=source, source_version=cited, quote="Item")
+        conversation = ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=[ToolReturnPart(
+            tool_name=f"mcp_{grant.id[:8]}_list_issues", tool_call_id="read",
+            content={"items": [
+                {"url": source, "updated_at": version, "title": "Item", "state": state}
+                for state, version in zip(states, versions, strict=True)
+            ]},
+        )])])).decode()
+        assert verified_closed(evidence, conversation, [grant]) is expected
 
 
 async def test_two_phase_workflow_uses_real_temporal_and_distinct_runs(runtime, actor, monkeypatch):

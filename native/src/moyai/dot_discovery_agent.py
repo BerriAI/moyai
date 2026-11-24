@@ -20,7 +20,7 @@ from .contracts import RunScope
 from .dot_contracts import DotJudgment, DotResearch
 from .dot_discovery import DiscoverySnapshot
 from .dot_evidence import COLLECTION_FIELDS, IDENTITY_FIELDS, VERSION_FIELDS, records, validate_evidence
-from .dot_sources import provider_partial, source_allowed
+from .dot_sources import GITHUB_METHODS, github_reader, provider_complete, provider_partial, source_allowed
 
 if TYPE_CHECKING:
     from .database import Database
@@ -95,6 +95,14 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
             for grant in ctx.deps.grants if name.startswith(f"{grant.kind}_{grant.id[:8]}_")
         ), [])
 
+    @staticmethod
+    def github_tool(ctx, name: str) -> str | None:
+        return next((
+            tool for grant in ctx.deps.grants if github_reader(grant)
+            for tool in (ConnectionPolicy.model_validate(grant.policy).allowed_tools or [])
+            if name == f"{grant.kind}_{grant.id[:8]}_{tool}"
+        ), None)
+
     async def before_model_request(self, ctx, request_context):
         # Check serialized input before sending it, independent of provider token
         # accounting. Oversized inputs fail visibly; they never become quiet.
@@ -107,6 +115,9 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
         if self.external(ctx, call.tool_name):
             allowed = self.scope(ctx, call.tool_name)
             if allowed:
+                tool = self.github_tool(ctx, call.tool_name)
+                if tool in GITHUB_METHODS and args.get("method") not in GITHUB_METHODS[tool]:
+                    raise ModelRetry("This method can read outside the approved repository. Use repository lists, PR get, or get_comments.")
                 owner, repository = args.get("owner"), args.get("repo")
                 if not isinstance(owner, str) or not isinstance(repository, str) or (
                     owner.casefold(), repository.casefold(),
@@ -131,12 +142,21 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
         selected, size, limited = [], 0, False
         scanned = value == []
         allowed = self.scope(ctx, call.tool_name)
+        tool = self.github_tool(ctx, call.tool_name)
+        paginated = tool in {"list_issues", "list_pull_requests"} or (
+            tool in GITHUB_METHODS and args.get("method") == "get_comments"
+        )
+        complete = False
         for record in records(value):
             limited |= provider_partial(record)
-            if allowed and any(record.get(key) for key in IDENTITY_FIELDS) and not any(
-                isinstance(record.get(key), str) and source_allowed(record[key], allowed) for key in IDENTITY_FIELDS
-            ):
-                limited = True
+            complete |= provider_complete(record)
+            identity = next((record[key] for key in IDENTITY_FIELDS if record.get(key)), None)
+            if allowed and (not isinstance(identity, str) or not source_allowed(identity, allowed)):
+                # Collection envelopes inform coverage but never expose their
+                # unverified scalar contents as provider evidence.
+                collection = any(isinstance(record.get(key), (list, dict)) for key in COLLECTION_FIELDS)
+                limited |= identity is not None or not collection
+                scanned |= collection
                 continue
             scanned |= (
                 any(record.get(key) for key in IDENTITY_FIELDS) and any(record.get(key) for key in VERSION_FIELDS)
@@ -165,6 +185,9 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
         if not selected and value not in ([], {}):
             # An empty structured collection is valid; unstructured prose is not.
             error |= not isinstance(value, (dict, list))
+        if paginated:
+            # A later terminal page does not prove earlier pages were read.
+            limited |= not complete or args.get("page", 1) != 1 or bool(args.get("after"))
         return {"dot_scan": True, "records": selected, "limited": limited, "error": error, "scanned": bool(scanned)}
 
 

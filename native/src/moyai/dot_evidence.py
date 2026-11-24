@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
+from datetime import datetime
 
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.messages import ToolReturnPart
@@ -110,14 +111,49 @@ def verified_closed(evidence: DotEvidence, conversation: str, grants: list[Grant
     grant = next((grant for grant in grants if grant.id == evidence.connection_id), None)
     if grant is None or not github_reader(grant):
         return False
+    sources = connected_records(conversation, grants)
     matched = [
-        record for account, record in connected_records(conversation, grants)
+        record for account, record in sources
         if (identity := match(evidence, account, record)) and github_item(identity[1])
     ]
-    return bool(matched) and all(
+    if not matched:
+        return False
+    aliases = {str(record[key]) for record in matched for key in IDENTITY_FIELDS if record.get(key)}
+    related = [
+        record for account, record in sources if account == evidence.connection_id
+        and any(str(record.get(key)) in aliases for key in IDENTITY_FIELDS if record.get(key))
+    ]
+    # Inspect every version, not only the version selected by the model.
+    # Contradictory or unknown state remains owner-controlled.
+    if not all(
         str(record.get("state", "")).casefold() == "closed" or record.get("merged") is True
-        for record in matched
-    )
+        for record in related
+    ):
+        return False
+    versions = {
+        str(record[key]) for record in related
+        for key in VERSION_FIELDS if record.get(key)
+    }
+    if versions == {evidence.source_version}:
+        return True
+
+    def timestamp(record: dict) -> datetime | None:
+        for key in VERSION_FIELDS:
+            value = record.get(key)
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value)
+                except ValueError:
+                    continue
+                if parsed.tzinfo is not None:
+                    return parsed
+        return None
+
+    times = [timestamp(record) for record in related]
+    if any(value is None for value in times):
+        return False  # Opaque versions cannot be ordered safely.
+    latest = max(value for value in times if value is not None)
+    return all(timestamp(record) == latest for record in matched)
 
 
 def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tuple[DotDecision, str | None]:
