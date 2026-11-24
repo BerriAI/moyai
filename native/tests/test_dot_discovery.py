@@ -20,20 +20,23 @@ from moyai.dot_contracts import DotItemEdit, DotJudgment, DotResearch
 from moyai.dot_discovery import DiscoverySnapshot
 from moyai.dot_discovery_agent import DiscoveryBounds
 from moyai.dot_models import DotAttentionTurn, DotItem, DotNotification
+from moyai.dot_sources import GITHUB_MCP, provider_partial, repositories
 from moyai.models import Connection, Message, Session, Turn
 
 
-async def research(runtime, prepared, *, version="one", coverage="complete", title="Customer reply needed"):
+async def research(runtime, prepared, *, version="one", coverage="complete", title="Customer reply needed",
+                   source="https://example.test/item", source_state="open"):
     account = prepared.scope.grants[0].id
-    evidence = {"connection_id": account, "source": "https://example.test/item", "source_version": version, "quote": title}
+    evidence = {"connection_id": account, "source": source, "source_version": version, "quote": title}
+    read_tool = prepared.scope.grants[0].policy["allowed_tools"][0]
     report = DotResearch.model_validate({
         "coverage": coverage, "observations": [{"title": title, "summary": title, "evidence": [evidence]}],
     })
     conversation = ConversationTypeAdapter.dump_json(Conversation(messages=[
         ModelRequest(parts=[ToolReturnPart(
-            tool_name=f"mcp_{account[:8]}_read_item", tool_call_id="scan",
+            tool_name=f"mcp_{account[:8]}_{read_tool}", tool_call_id="scan",
             content={"dot_scan": True, "scanned": True, "limited": False, "error": False,
-                     "records": [{"url": evidence["source"], "version": version, "title": title}]},
+                     "records": [{"url": evidence["source"], "version": version, "title": title, "state": source_state}]},
         )]),
     ])).decode()
     payload = await runtime.database.dots.discovery.judgment_input(prepared.scope, report.model_dump_json(), conversation)
@@ -154,6 +157,21 @@ async def test_item_identity_survives_replacing_chat_but_not_account(runtime, ac
     assert not (await service.list(actor)).items
 
 
+async def test_replacing_dot_chat_does_not_reset_discovery_delivery(runtime, actor):
+    destination, connection, automation, prepared = await observer(runtime, actor, discovery=True)
+    _, conversation = await research(runtime, prepared)
+    await publish(runtime, prepared, conversation)
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Session, destination)).deleted = True
+    replacement = await runtime.database.dots.open(actor)
+    _, _, _, later = await observer(runtime, actor, replacement, connection, automation, discovery=True)
+    _, conversation = await research(runtime, later)
+    await publish(runtime, later, conversation)
+    async with runtime.database.sessions() as db:
+        assert len(list(await db.scalars(select(DotNotification)))) == 1
+        assert await db.scalar(select(Message).where(Message.session_id == replacement)) is None
+
+
 async def test_partial_is_not_a_clean_quiet_check(runtime, actor):
     _, _, _, prepared = await observer(runtime, actor, discovery=True)
     _, conversation = await research(runtime, prepared, coverage="partial")
@@ -176,13 +194,96 @@ async def test_host_bounds_provider_results_and_rejects_oversized_page(runtime, 
     assert result["limited"] and result["scanned"] and len(json.dumps(result)) < 18000
 
 
+async def test_repository_scope_is_enforced_before_read_and_on_returned_records(runtime, actor):
+    from pydantic_ai.exceptions import ModelRetry
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    grant = prepared.scope.grants[0]
+    grant.policy = {"allowed_tools": ["list_pull_requests"], "mcp": {"url": GITHUB_MCP}}
+    prepared.scope.discovery_repositories = repositories(
+        [grant], [{"connection_id": grant.id, "source": "https://github.com/BerriAI/moyai"}],
+    )
+    bounds, ctx = DiscoveryBounds(), SimpleNamespace(deps=prepared.scope)
+    call = ToolCallPart(f"mcp_{grant.id[:8]}_list_pull_requests", {}, "read")
+    args = {"owner": "BerriAI", "repo": "moyai", "perPage": 10}
+    assert await bounds.before_tool_execute(ctx, call=call, tool_def=None, args=args) == args
+    with pytest.raises(ModelRetry, match="outside"):
+        await bounds.before_tool_execute(ctx, call=call, tool_def=None, args={**args, "repo": "another"})
+    result = await bounds.after_tool_execute(ctx, call=call, tool_def=None, args=args, result={
+        "items": [
+            {"url": "https://github.com/BerriAI/moyai/pull/1", "version": "one", "title": "Allowed"},
+            {"url": "https://github.com/BerriAI/another/pull/1", "version": "one", "title": "Outside"},
+        ],
+    })
+    assert "Outside" not in json.dumps(result) and result["limited"]
+    grant.policy["mcp"]["url"] = "https://example.test/mcp"
+    with pytest.raises(ValueError, match="official GitHub"):
+        repositories([grant], [{"connection_id": grant.id, "source": "https://github.com/BerriAI/moyai"}])
+
+
+@pytest.mark.parametrize("payload", [
+    {"items": [{"id": 1}], "total_count": 190},
+    {"items": [], "incomplete_results": True},
+    {"nodes": [], "pageInfo": {"hasNextPage": True}},
+    {"items": [], "nextPageToken": "later"},
+])
+def test_provider_pagination_is_partial(payload):
+    assert provider_partial(payload)
+
+
+async def test_judgment_cannot_resolve_an_open_item_from_a_quote(runtime, actor):
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    _, conversation = await research(runtime, prepared, title="We attempted a fix")
+    with pytest.raises(ValueError, match="closure evidence"):
+        await publish(runtime, prepared, conversation, notify=False, state="resolved")
+    async with runtime.database.sessions() as db:
+        assert await db.scalar(select(DotItem)) is None
+
+
+async def test_github_resolution_requires_closed_field_in_same_verified_record(runtime, actor):
+    from moyai.dot_contracts import DotEvidence
+    from moyai.dot_evidence import verified_closed
+
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    grant = prepared.scope.grants[0]
+    grant.policy = {"allowed_tools": ["issue_read"], "mcp": {"url": GITHUB_MCP}}
+    source = "https://github.com/BerriAI/moyai/issues/1"
+    evidence = DotEvidence(connection_id=grant.id, source=source, source_version="one", quote="Fix verified")
+    def conversation(state):
+        return ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=[ToolReturnPart(
+            tool_name=f"mcp_{grant.id[:8]}_issue_read", tool_call_id="read",
+            content={"url": source, "version": "one", "title": "Fix verified", "state": state},
+        )])])).decode()
+    assert not verified_closed(evidence, conversation("open"), [grant])
+    assert verified_closed(evidence, conversation("closed"), [grant])
+
+
+async def test_verified_github_closure_resolves_existing_item_even_in_partial_scan(runtime, actor):
+    async with runtime.database.sessions.begin() as db:
+        account = Connection(
+            owner_id=actor.id, kind="mcp", name="GitHub reader", credential=runtime.security.seal("synthetic"),
+            read_only=True, policy=json.dumps({"allowed_tools": ["issue_read"], "mcp": {"url": GITHUB_MCP}}),
+        )
+        db.add(account)
+        await db.flush()
+    destination, _, automation, prepared = await observer(runtime, actor, connection=account, discovery=True)
+    source = "https://github.com/BerriAI/moyai/issues/1"
+    _, conversation = await research(runtime, prepared, source=source)
+    await publish(runtime, prepared, conversation, notify=False)
+    _, _, _, later = await observer(runtime, actor, destination, account, automation, discovery=True)
+    _, conversation = await research(runtime, later, source=source, source_state="closed", version="two", coverage="partial")
+    await publish(runtime, later, conversation, notify=False, state="resolved")
+    assert (await runtime.database.dots.discovery.list(actor)).items[0].state == "resolved"
+
+
 async def test_two_phase_workflow_uses_real_temporal_and_distinct_runs(runtime, actor, monkeypatch):
     from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
     from pydantic_ai.toolsets import FunctionToolset
     from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer
 
     from moyai.storage import encrypted_converter
     from moyai.worker import make_worker
+    from moyai.worker_capacity import ActivityCapacity
     from moyai.workflow import TurnWorkflow
 
     destination, connection, _, prepared = await observer(runtime, actor, discovery=True)
@@ -211,6 +312,11 @@ async def test_two_phase_workflow_uses_real_temporal_and_distinct_runs(runtime, 
                 task_queue=runtime.settings.temporal_queue,
             )
             assert (await asyncio.wait_for(handle.result(), 60))["status"] == "completed"
+            await Replayer(
+                workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()],
+                data_converter=encrypted_converter(runtime.security, runtime.objects),
+                interceptors=[ActivityCapacity()],
+            ).replay_workflow(await handle.fetch_history())
     assert phases == ["research", "judgment"]
     async with runtime.database.sessions() as db:
         assert (await db.get(DotAttentionTurn, prepared.scope.turn_id)).outcome == "blocked"

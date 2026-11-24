@@ -2599,7 +2599,7 @@
             "type": "string"
           },
           "source": {
-            "description": "Owner-approved starting URL, such as a project or inbox. Visible to account research; never copy private priorities here.",
+            "description": "Owner-approved GitHub repository URL. Restricted discovery currently supports the official GitHub read-only MCP connection.",
             "maxLength": 1000,
             "minLength": 1,
             "pattern": "^https://[^@\\s?#]+$",

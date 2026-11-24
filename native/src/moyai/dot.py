@@ -120,6 +120,8 @@ class Dots:
             destination_session_id=destination, grants_key=grants_key,
         ))
         if discovery:
+            from .dot_sources import repositories
+            repositories(await self.grants(db, turn.actor_id, json.loads(turn.connections)), sources or [])
             await db.flush()
             db.add(DotDiscoveryTurn(turn_id=turn.id, sources=self.database.security.seal(json.dumps(sources or []))))
 
@@ -137,6 +139,14 @@ class Dots:
             raise PermissionError("Attention must use its restricted execution mode.")
         if scope is not None and scope.discovery != (await db.get(DotDiscoveryTurn, turn.id) is not None):
             raise PermissionError("The discovery execution mode changed.")
+        if scope is not None and scope.discovery:
+            from .dot_sources import repositories
+            discovery = await db.get(DotDiscoveryTurn, turn.id)
+            assert discovery is not None
+            if scope.discovery_repositories != repositories(
+                scope.grants, json.loads(self.database.security.unseal(discovery.sources)),
+            ):
+                raise PermissionError("The discovery source scope changed.")
         if publication:
             # The product authority check holds the canonical shared writer fence.
             # Serialize native destination/connection changes through their rows.
@@ -198,8 +208,10 @@ class Dots:
         session = await self.own_session(db, turn.actor_id, record.destination_session_id)
         assert fingerprint is not None
         assert source is not None
+        destinations = select(Session.id).where(Session.owner_id == turn.actor_id)
         if await db.scalar(select(DotNotification.turn_id).where(
-            DotNotification.session_id == session.id, DotNotification.fingerprint == fingerprint,
+            DotNotification.session_id.in_(destinations) if scope.discovery else DotNotification.session_id == session.id,
+            DotNotification.fingerprint == fingerprint,
         )):
             if record.outcome not in ("partial", "blocked"):
                 record.outcome = "duplicate"

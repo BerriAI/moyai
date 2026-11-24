@@ -1451,7 +1451,7 @@ export type AttentionSource = {
     /**
      * Source
      *
-     * Owner-approved starting URL, such as a project or inbox. Visible to account research; never copy private priorities here.
+     * Owner-approved GitHub repository URL. Restricted discovery currently supports the official GitHub read-only MCP connection.
      */
     source: string;
 };

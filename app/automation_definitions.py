@@ -3,6 +3,7 @@
 import re
 from datetime import UTC, datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -92,7 +93,18 @@ class AttentionSource(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid')
     connection_id: str = Field(pattern=r'^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
     source: str = Field(min_length=1, max_length=1000, pattern=r'^https://[^@\s?#]+$',
-                        description='Owner-approved starting URL, such as a project or inbox. Visible to account research; never copy private priorities here.')
+                        description='Owner-approved GitHub repository URL. Restricted discovery currently supports the official GitHub read-only MCP connection.')
+
+    @field_validator('source')
+    @classmethod
+    def github_repository(cls, value):
+        parsed = urlsplit(value)
+        parts = parsed.path.strip('/').removesuffix('.git').split('/')
+        if parsed.netloc.lower() != 'github.com' or len(parts) != 2 or not all(
+            re.fullmatch(r'[A-Za-z0-9_.-]+', part) and part not in {'.', '..'} for part in parts
+        ):
+            raise ValueError('Choose a GitHub repository URL, such as https://github.com/owner/repository.')
+        return f'https://github.com/{parts[0]}/{parts[1]}'
 
 
 class Definition(BaseModel):
@@ -165,9 +177,9 @@ class Definition(BaseModel):
     def distinct_triggers(self):
         if self.attention_sources and (
             self.attention_mode != 'discovery'
-            or any(source.connection_id not in self.connection_ids for source in self.attention_sources)
+            or {source.connection_id for source in self.attention_sources} != set(self.connection_ids)
         ):
-            raise ValueError('Discovery starting locations must belong to selected accounts.')
+            raise ValueError('Restricted discovery needs an approved repository for every selected account.')
         if self.attention_mode == 'discovery' and (
             self.kind != 'attention' or len(self.connection_ids) > 2 or len(self.prompt) > 2000
             or len(self.triggers) != 1

@@ -542,6 +542,11 @@ class ProductAutomationService:
             if definition.kind == "attention":
                 from ..database import grant_fingerprint
                 grants = await self.database.dots.grants(db, binding.owner_id, definition.connection_ids)
+                from ..dot_sources import repositories
+                try:
+                    repositories(grants, [source.model_dump() for source in definition.attention_sources])
+                except ValueError as error:
+                    raise HTTPException(409, str(error)) from None
                 connections = sorted(grant.id for grant in grants)
                 workspace = {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(grants)}
             elif definition.session_id:
@@ -607,6 +612,8 @@ class ProductAutomationService:
                 raise HTTPException(409, "The attention destination is missing.")
             await self.database.dots.own_session(db, binding.owner_id, definition.session_id)
             grants = await self.database.dots.grants(db, binding.owner_id, connections)
+            from ..dot_sources import repositories
+            repositories(grants, [source.model_dump() for source in definition.attention_sources])
             if (
                 connections != sorted(definition.connection_ids)
                 or workspace != {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(grants)}

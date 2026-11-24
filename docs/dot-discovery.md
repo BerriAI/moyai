@@ -4,7 +4,12 @@
 schedule for up to two private read-only accounts. The owner can opt in through
 ordinary Dot chat; they do not configure a reminder for each finding. A private
 prompt supplies priorities. Optional `attention_sources` provide owner-approved
-starting URLs, such as a repository, when the scope is narrower than an account.
+GitHub repository URLs when the scope is narrower than an account. This option
+requires the official GitHub read-only MCP endpoint and repository-bound read
+tools. The host checks every read's owner/repository arguments and excludes
+out-of-scope records and earlier item references. Every selected account needs
+an approved repository in restricted mode; other providers support account-wide
+discovery only in this slice.
 The existing automation tools own creation, review, enable, pause and timing.
 Discovery does not introduce another scheduler or create automations per item.
 
@@ -29,6 +34,8 @@ independent. Temporal activity replay retains accepted research across worker
 restarts; an explicitly failed check is visible as failed rather than quietly
 retried with a fresh model budget. Input and tool limits fail visibly. A partial
 or blocked scan is recorded in run history, never described as a clean quiet scan.
+Provider pagination, next-page cursors and incomplete-result signals also make
+a scan partial. A snapshot older than fifteen minutes cannot publish.
 The snapshot uses the existing encrypted Temporal payload/offload path and a
 sealed native record. It is private execution data, not a public artifact.
 
@@ -41,13 +48,18 @@ and remain effective across source updates, schedule edits and replacement chats
 The **Following** dialog in Dot chat supports filtering, resolve, dismiss,
 one-day snooze and reopen without replacing the chat draft. Silence or absence
 from a bounded scan is not evidence of resolution.
+Automatic resolution requires the host to verify a closed/merged GitHub issue or
+pull request in the same provider record as the cited identity, version and
+quotation. Other resolution remains owner-controlled. Prose describing an
+attempted fix cannot close an item.
 
 Connection and policy authority is rechecked on research, judgment, delivery and
 owner item access. Replacing an opaque credential or endpoint conservatively
 starts a new account identity; prior private summaries and suppression choices
 are not transferred without verified provider identity. Policy/name edits alone
 retain item identity. Reopening or snooze expiry permits one fresh notification
-of the same source version; merely editing a schedule does not.
+of the same source version; merely editing a schedule or replacing the Dot chat
+does not.
 
 ## Bounds and release
 

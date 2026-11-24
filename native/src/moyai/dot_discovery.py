@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
@@ -16,8 +16,9 @@ from sqlalchemy import select
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant, RunScope
 from .dot_contracts import DotItemEdit, DotItemsView, DotItemView, DotJudgment, DotObservation, DotResearch
-from .dot_evidence import validate_evidence
+from .dot_evidence import validate_evidence, verified_closed
 from .dot_models import DotAttentionTurn, DotDiscoveryTurn, DotItem, PersonalDot
+from .dot_sources import repositories, source_allowed
 from .models import Connection, Message, Session, Turn, User, now
 from .private_instructions import individual
 
@@ -57,6 +58,7 @@ class DiscoverySnapshot(BaseModel):
     current_time: str
     priorities: str
     accounts: dict[str, str]
+    verified_closed: list[int]
 
 
 class Discovery:
@@ -88,16 +90,19 @@ class Discovery:
         grants = await self.database.dots.grants(db, turn.actor_id, accounts)
         occurrence = await db.get(DotDiscoveryTurn, turn.id)
         assert occurrence is not None
+        sources = json.loads(self.database.security.unseal(occurrence.sources))
+        restricted = repositories(grants, sources)
         items = list(await db.scalars(select(DotItem).where(
             DotItem.owner_id == turn.actor_id, DotItem.account_key.in_([account_key(grant) for grant in grants]),
             DotItem.state.in_(("open", "snoozed")),
         ).order_by(DotItem.last_seen_at).limit(20)))
         return json.dumps({
             "connection_ids": accounts, "current_time": now(),
-            "starting_locations": json.loads(self.database.security.unseal(occurrence.sources)),
+            "starting_locations": sources,
             "revisit": [
                 {"connection_id": item.connection_id, "source": self.unpack(item).evidence[0].source}
                 for item in items
+                if not restricted or source_allowed(self.unpack(item).evidence[0].source, restricted[item.connection_id])
             ],
             "limits": "At most 12 tool calls, 30 records per call. Prefer recent activity and unfinished conversations.",
         }, ensure_ascii=False)
@@ -123,6 +128,10 @@ class Discovery:
                 validate_evidence(observation.evidence, conversation, scope.grants)[0]
                 for observation in research.observations
             ]
+            for observation in research.observations:
+                for account, source, _ in validate_evidence(observation.evidence, conversation, scope.grants):
+                    if scope.discovery_repositories and not source_allowed(source, scope.discovery_repositories[account]):
+                        raise ValueError("Discovery evidence is outside the approved repositories.")
             if len({(account, source) for account, source, _ in identities}) != len(identities):
                 raise ValueError("Combine findings about the same provider item.")
             allowed = {
@@ -169,6 +178,10 @@ class Discovery:
                 current_time=now(),
                 priorities=self.database.security.unseal(turn.prompt).decode(),
                 accounts=accounts,
+                verified_closed=[
+                    index for index, observation in enumerate(research.observations)
+                    if verified_closed(observation.evidence[0], conversation, scope.grants)
+                ],
             )
             payload = snapshot.model_dump_json()
             occurrence.snapshot = self.database.security.seal(payload)
@@ -183,6 +196,8 @@ class Discovery:
         if occurrence is None or occurrence.snapshot is None or attention is None:
             raise PermissionError("Discovery has no validated research snapshot.")
         snapshot = DiscoverySnapshot.model_validate_json(self.database.security.unseal(occurrence.snapshot))
+        if datetime.now(UTC) - datetime.fromisoformat(snapshot.current_time) > timedelta(minutes=15):
+            return "expired", None, None, None
         judgment = DotJudgment.model_validate_json(output)
         outcome = "quiet" if snapshot.research.coverage == "complete" else snapshot.research.coverage
         notification = None
@@ -190,6 +205,8 @@ class Discovery:
         for change in judgment.items:
             if change.observation >= len(snapshot.research.observations):
                 raise ValueError("Use an observation from this check.")
+            if change.state == "resolved" and change.observation not in snapshot.verified_closed:
+                raise ValueError("Automatic resolution requires verified provider closure evidence.")
             observation = snapshot.research.observations[change.observation]
             account, source, version = snapshot.identities[change.observation]
             key = digest([turn.actor_id, snapshot.accounts[account], source])
@@ -230,7 +247,9 @@ class Discovery:
             raise HTTPException(404, "Open Your Dot first.")
         if lock:
             # Same ordering as publication, so controls and delivery serialize.
-            await db.scalar(select(User).where(User.id == actor.id).with_for_update())
+            current = await db.scalar(select(User).where(User.id == actor.id).with_for_update().execution_options(populate_existing=True))
+            if current is None or not current.enabled or current.auth_version != actor.auth_version:
+                raise HTTPException(401, "Your access changed. Sign in again.")
             await db.scalar(select(Session).where(Session.id == dot.session_id).with_for_update())
         await self.database.dots.own_session(db, actor.id, dot.session_id)
         return dot.session_id

@@ -65,35 +65,59 @@ def records(value: object) -> Iterator[dict]:
     yield from structured_records(value)
 
 
-def validate_evidence(evidence: list[DotEvidence], conversation: str, grants: list[Grant]) -> list[tuple[str, str, str]]:
+def connected_records(conversation: str, grants: list[Grant]) -> list[tuple[str, dict]]:
     allowed = {
         f"{grant.kind}_{grant.id[:8]}_{name}": grant.id
         for grant in grants
         for name in (ConnectionPolicy.model_validate(grant.policy).allowed_tools or [])
     }
-    sources = [
+    return [
         (allowed[part.tool_name], record)
         for message in ConversationTypeAdapter.validate_json(conversation).messages
         for part in message.parts
         if isinstance(part, ToolReturnPart) and part.tool_name in allowed
         for record in records(part.content)
     ]
-    identities: list[tuple[str, str, str]] = []
+
+
+def match(item: DotEvidence, account: str, record: dict) -> tuple[str, str, str] | None:
+    fields = {key: str(value) for key, value in record.items() if isinstance(value, (str, int))}
+    ids = [fields[key] for key in IDENTITY_FIELDS if fields.get(key)]
+    versions = [fields[key] for key in VERSION_FIELDS if fields.get(key)]
+    if (
+        account == item.connection_id and item.source in ids and item.source_version in versions
+        and any(item.quote in value for value in fields.values())
+    ):
+        return account, ids[0], versions[0]
+    return None
+
+
+def validate_evidence(evidence: list[DotEvidence], conversation: str, grants: list[Grant]) -> list[tuple[str, str, str]]:
+    sources = connected_records(conversation, grants)
+    identities = []
     for item in evidence:
-        matches: set[tuple[str, str, str]] = set()
-        for account, record in sources:
-            fields = {key: str(value) for key, value in record.items() if isinstance(value, (str, int))}
-            ids = [fields[key] for key in IDENTITY_FIELDS if fields.get(key)]
-            versions = [fields[key] for key in VERSION_FIELDS if fields.get(key)]
-            if (
-                account == item.connection_id and item.source in ids and item.source_version in versions
-                and any(item.quote in value for value in fields.values())
-            ):
-                matches.add((account, ids[0], versions[0]))
+        matches = {identity for account, record in sources if (identity := match(item, account, record))}
         if len(matches) != 1:
             raise ValueError("Dot evidence must identify one connected account's structured provider record.")
         identities.append(matches.pop())
     return identities
+
+
+def verified_closed(evidence: DotEvidence, conversation: str, grants: list[Grant]) -> bool:
+    """Only provider fields with verified semantics may close a tracked item."""
+    from .dot_sources import github_item, github_reader
+
+    grant = next((grant for grant in grants if grant.id == evidence.connection_id), None)
+    if grant is None or not github_reader(grant):
+        return False
+    matched = [
+        record for account, record in connected_records(conversation, grants)
+        if (identity := match(evidence, account, record)) and github_item(identity[1])
+    ]
+    return bool(matched) and all(
+        str(record.get("state", "")).casefold() == "closed" or record.get("merged") is True
+        for record in matched
+    )
 
 
 def validate_decision(output: str, conversation: str, grants: list[Grant]) -> tuple[DotDecision, str | None]:

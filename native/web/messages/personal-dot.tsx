@@ -66,7 +66,7 @@ export function DotFollowing() {
   const generation = useRef(0)
   useEffect(() => {
     const current = ++generation.current
-    if (!open) return
+    if (!open) { setData(null); return }
     const controller = new AbortController()
     setError("")
     void listDotItems({ signal: controller.signal }).then(({ data: value }) => {

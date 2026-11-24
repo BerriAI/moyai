@@ -69,6 +69,7 @@ class RunScope:
     attention: bool = False
     discovery: bool = False
     attention_judgment: bool = False
+    discovery_repositories: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     # Notifications present when an ordinary Dot turn was prepared. Settlement
     # records this cursor; later deliveries enter the next prepared input.
     dot_notification_cursor: int | None = None
