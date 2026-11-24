@@ -60,8 +60,10 @@ external actions, or enable a watch by default.
   reason; explicit Resume advances its generation. A generation-fenced recovery
   step can still reconcile an already accepted result, including after the last
   review is spent. It preserves pending native settlement, never admits another
-  review and does not charge the budget again. Stale generations cannot admit
-  work or publish findings.
+  review and does not charge the budget again. Resume is rejected under the
+  worker Session fence while an accepted result still awaits reconciliation,
+  so it cannot discard that result or charge again for the same evidence.
+  Stale generations cannot admit work or publish findings.
 - `moyai_responsibility` is a separate `NativeOutput` agent. Its input contains
   the objective and at most five new messages, each capped at 6,000 characters.
   It has no functional tools, account selection, conversation history, skills,

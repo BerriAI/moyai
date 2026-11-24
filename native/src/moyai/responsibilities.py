@@ -275,7 +275,9 @@ class Responsibilities:
                 result.append(self.view(row))
             return result
 
-    async def cancel_assignment(self, db: AsyncSession, row: Responsibility) -> None:
+    async def cancel_assignment(
+        self, db: AsyncSession, row: Responsibility, *, preserve_accepted: bool = False,
+    ) -> None:
         if not row.active_turn_id:
             return
         turn = await db.get(Turn, row.active_turn_id)
@@ -284,6 +286,8 @@ class Responsibilities:
                 revision=Session.revision,
             ))
             await db.refresh(turn)
+            if preserve_accepted and turn.result_accepted and turn.status in {"saving", "completed"}:
+                raise HTTPException(409, "Your last review is still finishing. Wait for its result before resuming.")
             if turn.status in BUSY:
                 await db.execute(update(Session).where(Session.id == turn.session_id).values(
                     status="stopped", revision=Session.revision + 1,
@@ -308,7 +312,7 @@ class Responsibilities:
                 raise HTTPException(409, "The evaluation budget is exhausted. Create a new responsibility to authorize more.")
             if request.action == "resume" and row.status not in {"paused", "blocked"}:
                 raise HTTPException(409, "Only a paused or blocked responsibility can resume.")
-            await self.cancel_assignment(db, row)
+            await self.cancel_assignment(db, row, preserve_accepted=request.action == "resume")
             if row.status in {"waiting", "running"}:
                 await request_wake(db, row.id, row.generation, "stop")
             row.generation += 1

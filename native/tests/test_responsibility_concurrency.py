@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select, text, update
 from test_dispatch_capacity import postgres_database
 from test_product_inference import admitted_product, inference, perform
@@ -15,6 +16,7 @@ from test_responsibilities import assignment, enroll, source_answer, tick, worke
 from moyai.contracts import NewMessage
 from moyai.models import Session, Turn
 from moyai.product_role_authority import ProductOwnershipLost
+from moyai.responsibility_contracts import ResponsibilityControl
 from moyai.responsibility_models import Responsibility, ResponsibilityAssignment
 
 __all__ = ["admitted_product", "inference", "postgres_database", "role"]
@@ -225,3 +227,63 @@ async def test_settlement_winning_expiry_race_publishes_once(postgres_database, 
     assert len(await database.responsibilities.inbox(actor)) == 1
     await tick(runtime, row.id)
     assert len(await database.responsibilities.inbox(actor)) == 1
+
+
+@pytest.mark.parametrize("first", ["resume", "settle"])
+async def test_resume_racing_settlement_preserves_accepted_closed_review(postgres_database, monkeypatch, first):
+    database, actor = postgres_database
+    runtime = harness(database)
+    source, row = await enroll(runtime, actor, max_evaluations=2)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    binding, prepared, decision = await worker(runtime, row.id)
+    assert await database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output=decision, workspace=None, usage={},
+    )
+    await database.responsibilities.tick(row.id, generation=row.generation, closed=True)
+    pids = asyncio.Queue()
+    original_admission = database._admission_session
+
+    @asynccontextmanager
+    async def admission_barrier(db):
+        async with original_admission(db) as transaction:
+            await pids.put(await transaction.scalar(text("SELECT pg_backend_pid()")))
+            yield transaction
+
+    monkeypatch.setattr(database, "_admission_session", admission_barrier)
+
+    async def wait_for_lock():
+        pid = await asyncio.wait_for(pids.get(), 3)
+        async with database.sessions() as db:
+            for _ in range(100):
+                if await db.scalar(text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"), {"pid": pid}):
+                    return
+                await asyncio.sleep(0.01)
+        pytest.fail("The contender did not reach the worker Session fence.")
+
+    tasks = {}
+    try:
+        async with database.sessions.begin() as holder:
+            await holder.execute(select(Session).where(
+                Session.id == prepared.scope.session_id,
+            ).with_for_update())
+            for operation in (["resume", "settle"] if first == "resume" else ["settle", "resume"]):
+                tasks[operation] = asyncio.create_task(
+                    database.settle(binding.turn_id) if operation == "settle" else
+                    database.responsibilities.control(actor, row.id, ResponsibilityControl(
+                        generation=row.generation, action="resume",
+                    ))
+                )
+                await wait_for_lock()
+    finally:
+        await asyncio.wait_for(asyncio.gather(*tasks.values(), return_exceptions=True), 5)
+    error = tasks["resume"].exception()
+    assert isinstance(error, HTTPException) and error.status_code == 409
+    assert tasks["settle"].exception() is None
+    unchanged = (await database.responsibilities.list(actor))[0]
+    assert unchanged.generation == row.generation and unchanged.evaluations == 1
+    assert unchanged.active_turn_id == binding.turn_id
+    await database.responsibilities.tick(row.id, generation=row.generation, closed=True)
+    assert len(await database.responsibilities.inbox(actor)) == 1
+    final = (await database.responsibilities.list(actor))[0]
+    assert final.status == "blocked" and final.active_turn_id is None and final.evaluations == 1

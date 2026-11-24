@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from sqlalchemy import delete, func, select, update
 from temporalio import activity
@@ -206,9 +207,19 @@ async def test_closed_controller_reconciles_accepted_save_without_new_admission(
             await dispatch_responsibilities(runtime, state)
             blocked = (await runtime.database.responsibilities.list(actor))[0]
             assert blocked.status == "blocked" and blocked.active_turn_id == prepared.scope.turn_id
+            if budget > 1:
+                with pytest.raises(HTTPException, match="review is still finishing"):
+                    await runtime.database.responsibilities.control(actor, row.id, ResponsibilityControl(
+                        generation=row.generation, action="resume",
+                    ))
             # More evidence cannot turn this recovery path into new admission.
             await source_answer(runtime, actor, source, "Another status update")
             await runtime.database.settle(prepared.scope.turn_id)
+            if budget > 1:
+                with pytest.raises(HTTPException, match="review is still finishing"):
+                    await runtime.database.responsibilities.control(actor, row.id, ResponsibilityControl(
+                        generation=row.generation, action="resume",
+                    ))
             await dispatch_responsibilities(runtime, state)
             final = (await runtime.database.responsibilities.list(actor))[0]
             assert final.status == ("budget_limited" if budget == 1 else "blocked")
