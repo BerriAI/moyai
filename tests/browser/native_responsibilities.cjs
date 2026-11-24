@@ -51,3 +51,16 @@ test('Failed creation preserves the draft and retries the same request identity'
  await page.getByRole('button',{name:'Start following'}).click();await page.getByRole('dialog').getByRole('alert').waitFor();
  assert.equal(writes.length,2);assert.equal(writes[0].body.request_key,writes[1].body.request_key);
 });
+test('Review activity suppresses pending and rejected evidence',async t=>{
+ const {page}=await open(t,1440);
+ await page.route('**/api/responsibilities/responsibility/reviews',route=>route.fulfill({json:{items:['pending','invalid'].map(validation=>({
+  turn_id:validation,generation:1,through_sequence:1,status:'completed',reconciled:validation==='invalid',accepted:true,created_at:'2026-11-24T05:01:00Z',finished_at:'2026-11-24T05:02:00Z',error:null,usage:{},validation,
+  decision:{action:'notify',summary:'Unvalidated summary',evidence:[{message_id:999,quote:'Forged quotation'}]},
+ }))}}));
+ await page.getByRole('button',{name:'Review activity',exact:true}).last().click();
+ const dialog=page.getByRole('dialog');
+ await dialog.getByText('Validation failed',{exact:true}).waitFor();
+ await dialog.getByText('Awaiting validation',{exact:true}).waitFor();
+ assert.equal(await dialog.getByText('Forged quotation',{exact:true}).count(),0);
+ assert.equal(await dialog.getByText('Unvalidated summary',{exact:true}).count(),0);
+});

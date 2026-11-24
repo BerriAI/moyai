@@ -8916,6 +8916,10 @@ export type ResponsibilityReview = {
     usage: {
         [key: string]: JsonValue;
     };
+    /**
+     * Validation
+     */
+    validation: 'pending' | 'valid' | 'invalid' | 'not_accepted';
 };
 
 /**

@@ -33,6 +33,8 @@ external actions, or enable a watch by default.
   active work and due state.
   PostgreSQL scans skip locked rows. Each wake has a two-second deadline;
   failures receive a persisted 30-second backoff so later pages can progress.
+  Backoff only applies to the original generation and due time. Running reviews
+  are reconciled every five seconds, independently of the source check cadence.
   Reconciliation cannot block the manual-input/Stop dispatcher.
 - `moyai_responsibility` is a separate `NativeOutput` agent. Its input contains
   the objective and at most five new messages, each capped at 6,000 characters.
@@ -69,6 +71,8 @@ delete, link attachment and automation destinations reject audit sessions.
 The private **Review activity** dialog reads saved assignments through a
 dedicated API, including failed attempts after the active pointer is cleared.
 That read holds the original authority and source fences through its transaction.
+It reuses the same packet validator as reconciliation and suppresses pending
+or rejected decision content. Invalid quotations appear as validation failures.
 Their saved answers do not enqueue personal memory or skill learning. The
 source itself must remain accessible even when reading a copied audit result.
 

@@ -330,12 +330,14 @@ class Responsibilities:
 
     async def reconcile(self, limit: int = 10) -> None:
         async with self.database.sessions.begin() as db:
-            ids = list(await db.scalars(select(Responsibility.id).where(
+            attempts = (await db.execute(select(
+                Responsibility.id, Responsibility.generation, Responsibility.next_check_at,
+            ).where(
                 Responsibility.status.in_(["waiting", "running"]), Responsibility.next_check_at <= now(),
-            ).order_by(Responsibility.next_check_at, Responsibility.id).limit(limit).with_for_update(skip_locked=True)))
+            ).order_by(Responsibility.next_check_at, Responsibility.id).limit(limit).with_for_update(skip_locked=True))).all()
         slots = asyncio.Semaphore(4)
 
-        async def reconcile_one(identity: str) -> None:
+        async def reconcile_one(identity: str, generation: int, scheduled: str) -> None:
             async with slots:
                 try:
                     async with asyncio.timeout(2):
@@ -348,12 +350,24 @@ class Responsibilities:
             try:
                 async with asyncio.timeout(1), self.database.sessions.begin() as db:
                     row = await self.lock(db, identity, skip_locked=True)
-                    if row is not None and row.status in {"waiting", "running"}:
+                    if (
+                        row is not None and row.status in {"waiting", "running"}
+                        and row.generation == generation and row.next_check_at == scheduled
+                    ):
                         row.next_check_at = due(30)
             except Exception:
                 logger.warning("Responsibility backoff remains pending.", exc_info=True)
 
-        await asyncio.gather(*(reconcile_one(identity) for identity in ids))
+        await asyncio.gather(*(reconcile_one(identity, generation, scheduled) for identity, generation, scheduled in attempts))
+
+    def validated_decision(self, assignment: ResponsibilityAssignment, turn: Turn) -> ResponsibilityDecision:
+        decision = ResponsibilityDecision.model_validate_json(self.database.security.unseal(turn.result or ""))
+        evidence = json.loads(self.database.security.unseal(assignment.evidence))
+        messages = {item["message_id"]: item["text"] for item in evidence}
+        if any(item.message_id not in messages or item.quote not in messages[item.message_id]
+               for item in decision.evidence):
+            raise ValueError("The worker cited evidence outside its assignment.")
+        return decision
 
     async def tick(self, identity: str, *, skip_locked: bool = False) -> None:
         async with self.database._admission_session(None) as db:
@@ -388,6 +402,7 @@ class Responsibilities:
                     row.status, row.reason = "blocked", "The saved assignment is unavailable."
                     return
                 if turn.status in BUSY and assignment.expires_at > now():
+                    row.next_check_at = min(due(5), assignment.expires_at)
                     return
                 if turn.status != "completed" or not turn.result_accepted:
                     await self.cancel_assignment(db, row)
@@ -395,20 +410,14 @@ class Responsibilities:
                     row.status, row.reason = "blocked", "Worker did not finish. Review its activity before resuming."
                     return
                 try:
-                    decision = ResponsibilityDecision.model_validate_json(
-                        self.database.security.unseal(turn.result or ""),
-                    )
-                    evidence = json.loads(self.database.security.unseal(assignment.evidence))
-                    messages = {item["message_id"]: item["text"] for item in evidence}
-                    if any(item.message_id not in messages or item.quote not in messages[item.message_id]
-                           for item in decision.evidence):
-                        raise ValueError("The worker cited evidence outside its assignment.")
+                    decision = self.validated_decision(assignment, turn)
                 except (ValueError, ValidationError):
                     assignment.reconciled = True
                     row.active_turn_id = None
                     row.status, row.reason = "blocked", "Worker returned an invalid or unsupported finding."
                     return
                 if decision.action == "notify":
+                    evidence = json.loads(self.database.security.unseal(assignment.evidence))
                     fingerprint = hashlib.sha256(json.dumps(
                         [item["text"] for item in evidence], ensure_ascii=False,
                     ).encode()).hexdigest()
@@ -460,6 +469,7 @@ class Responsibilities:
                 expires_at=due(300),
             ))
             row.active_turn_id = turn.id
+            row.next_check_at = due(5)
             row.evaluations += 1
             row.status, row.reason = "running", ""
             await notify_dispatch(db, self.database.settings)
@@ -513,15 +523,19 @@ class Responsibilities:
             result = []
             for assignment, turn in reviews:
                 decision = None
-                if turn.result_accepted and turn.result:
+                validation = "pending" if turn.result_accepted else "not_accepted"
+                if turn.status == "completed" and turn.result_accepted:
                     try:
-                        decision = ResponsibilityDecision.model_validate_json(self.database.security.unseal(turn.result))
+                        validated = self.validated_decision(assignment, turn)
                     except ValueError:
-                        pass
+                        validation = "invalid"
+                    else:
+                        if assignment.reconciled:
+                            validation, decision = "valid", validated
                 result.append(ResponsibilityReview.model_validate({
                     "turn_id": turn.id, "generation": assignment.generation, "through_sequence": assignment.through_sequence,
                     "status": turn.status, "reconciled": assignment.reconciled, "accepted": bool(turn.result_accepted),
                     "created_at": turn.created_at, "finished_at": turn.finished_at, "error": turn.error,
-                    "usage": json.loads(turn.usage), "decision": decision,
+                    "usage": json.loads(turn.usage), "validation": validation, "decision": decision,
                 }))
             return result

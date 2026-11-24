@@ -99,6 +99,7 @@ class ResponsibilityReview(ResponsibilityOutput):
     finished_at: str | None
     error: str | None
     usage: dict[str, JsonValue]
+    validation: Literal["pending", "valid", "invalid", "not_accepted"]
     decision: ResponsibilityDecision | None
 
 

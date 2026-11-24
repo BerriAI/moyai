@@ -15932,6 +15932,16 @@
             },
             "title": "Usage",
             "type": "object"
+          },
+          "validation": {
+            "enum": [
+              "pending",
+              "valid",
+              "invalid",
+              "not_accepted"
+            ],
+            "title": "Validation",
+            "type": "string"
           }
         },
         "required": [
@@ -15945,6 +15955,7 @@
           "finished_at",
           "error",
           "usage",
+          "validation",
           "decision"
         ],
         "title": "ResponsibilityReview",

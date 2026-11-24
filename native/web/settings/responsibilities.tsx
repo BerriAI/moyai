@@ -179,10 +179,10 @@ function ReviewActivity({ identity }: { identity: string }) {
     {error && <p role="alert">{error}</p>}
     {loading ? <p role="status">Loading reviews…</p> : !error && !items.length && <p>No reviews yet.</p>}
     {items.map(item => <article className="dot-card" key={item.turn_id}>
-      <div className="dot-row"><strong>{item.status}</strong><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></div>
+      <div className="dot-row"><strong>{item.validation === "invalid" ? "Validation failed" : item.validation === "pending" ? "Awaiting validation" : item.status}</strong><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></div>
       <p>Generation {item.generation} · Source through completion {item.through_sequence}</p>
       {item.error && <p>{item.error}</p>}
-      {item.decision && <><p>{item.decision.summary}</p>{item.decision.evidence.map((evidence, index) => <blockquote key={index}>{evidence.quote}</blockquote>)}</>}
+      {item.validation === "valid" && item.decision && <><p>{item.decision.summary}</p>{item.decision.evidence.map((evidence, index) => <blockquote key={index}>{evidence.quote}</blockquote>)}</>}
     </article>)}
   </div>
 }

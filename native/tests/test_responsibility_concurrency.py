@@ -15,6 +15,7 @@ from test_responsibilities import assignment, enroll, source_answer, tick, worke
 from moyai.contracts import NewMessage
 from moyai.models import Session, Turn
 from moyai.product_role_authority import ProductOwnershipLost
+from moyai.responsibility_contracts import ResponsibilityControl
 from moyai.responsibility_models import Responsibility
 
 __all__ = ["admitted_product", "inference", "postgres_database", "role"]
@@ -117,6 +118,40 @@ async def test_failed_page_backs_off_so_later_page_progresses(postgres_database,
         assert all(row.next_check_at > "2000" for row in await db.scalars(
             select(Responsibility).where(Responsibility.id.in_([row.id for row in rows])),
         ))
+
+
+@pytest.mark.parametrize("newer", ["successful_tick", "pause_resume"])
+async def test_delayed_failure_cannot_overwrite_newer_schedule(postgres_database, monkeypatch, newer):
+    database, actor = postgres_database
+    runtime = harness(database)
+    _, row = await enroll(runtime, actor)
+    async with database.sessions.begin() as db:
+        await db.execute(update(Responsibility).values(next_check_at="2000"))
+    failing, release = asyncio.Event(), asyncio.Event()
+    original = database.responsibilities.tick
+
+    async def delayed_failure(*args, **kwargs):
+        failing.set()
+        await release.wait()
+        raise RuntimeError("Late transient failure")
+
+    monkeypatch.setattr(database.responsibilities, "tick", delayed_failure)
+    scanning = asyncio.create_task(database.responsibilities.reconcile())
+    try:
+        await asyncio.wait_for(failing.wait(), 3)
+        if newer == "successful_tick":
+            await original(row.id)
+        else:
+            for action, generation in [("pause", 1), ("resume", 2)]:
+                await database.responsibilities.control(actor, row.id, ResponsibilityControl(
+                    action=action, generation=generation,
+                ))
+        current = (await database.responsibilities.list(actor))[0]
+    finally:
+        release.set()
+        await asyncio.wait_for(scanning, 3)
+    after = (await database.responsibilities.list(actor))[0]
+    assert after.next_check_at == current.next_check_at and after.generation == current.generation
 
 
 @pytest.mark.parametrize("role_kind", ["api", "worker", "coordinator", "broker"])

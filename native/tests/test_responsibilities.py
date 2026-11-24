@@ -168,13 +168,25 @@ async def test_independent_sources_budget_and_invalid_citations(runtime, actor):
     _, waiting, _ = await worker(runtime, first.id)
     _, finished, decision = await worker(runtime, second.id)
     await finish(runtime, finished, decision)
+    pending = await runtime.database.responsibilities.history(actor, second.id)
+    assert pending[0].validation == "pending" and pending[0].decision is None
     await tick(runtime, second.id)
+    validated = await runtime.database.responsibilities.history(actor, second.id)
+    assert validated[0].validation == "valid" and validated[0].decision is not None
     assert len(await runtime.database.responsibilities.inbox(actor)) == 1
     # A still-running independent worker does not block that result.
     await finish(runtime, waiting, json.dumps({
         "action": "notify", "summary": "Forged", "evidence": [{"message_id": 999999, "quote": "invented"}],
     }))
     await tick(runtime, first.id)
+    rejected = await runtime.database.responsibilities.history(actor, first.id)
+    assert rejected[0].validation == "invalid" and rejected[0].decision is None
+    from test_application_boundaries import sign_in
+    async with sign_in(runtime) as client:
+        rejected_json = (await client.get(f"/api/responsibilities/{first.id}/reviews")).json()
+        assert rejected_json["items"][0]["validation"] == "invalid"
+        assert rejected_json["items"][0]["decision"] is None
+        assert "invented" not in json.dumps(rejected_json)
     assert len(await runtime.database.responsibilities.inbox(actor)) == 1
     with pytest.raises(HTTPException, match="budget is exhausted"):
         await runtime.database.responsibilities.control(actor, first.id, ResponsibilityControl(action="resume", generation=1))
@@ -330,3 +342,34 @@ async def test_http_audit_controls_are_rejected_and_typed_history_survives_failu
     await runtime.database.delete_session(actor, source.id)
     async with sign_in(runtime) as client:
         assert (await client.get(f"/api/responsibilities/{row.id}/reviews")).status_code == 404
+
+
+async def test_audit_is_never_a_pull_request_helper_target(runtime, actor):
+    from moyai.pull_requests import PullRequestService
+
+    source, row = await enroll(runtime, actor)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    _, prepared, _ = await worker(runtime, row.id)
+    service = PullRequestService(runtime)
+    assert await service.contexts(actor, [prepared.scope.session_id]) == {}
+    await runtime.database.delete_session(actor, source.id)
+    assert await service.contexts(actor, [prepared.scope.session_id]) == {}
+
+
+async def test_active_assignment_reconciles_before_long_source_interval(runtime, actor):
+    from datetime import datetime
+
+    source, row = await enroll(runtime, actor, interval_seconds=3600)
+    await source_answer(runtime, actor, source)
+    await tick(runtime, row.id)
+    binding = await assignment(runtime, row.id)
+    running = (await runtime.database.responsibilities.list(actor))[0]
+    assert datetime.fromisoformat(running.next_check_at) < datetime.fromisoformat(binding.expires_at)
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(ResponsibilityAssignment).where(
+            ResponsibilityAssignment.turn_id == binding.turn_id,
+        ).values(expires_at="2000"))
+    await tick(runtime, row.id)
+    blocked = (await runtime.database.responsibilities.list(actor))[0]
+    assert blocked.status == "blocked" and blocked.active_turn_id is None
