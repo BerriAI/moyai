@@ -8,8 +8,9 @@ permissions:
 jobs:
   ui:
     runs-on: ubuntu-latest
-    # The full browser suite takes ~9 minutes on CI, plus dependency/build setup.
-    timeout-minutes: 15
+    # The full browser suite can take ~14 minutes on CI; allow dependency/build
+    # setup and runner variance without truncating the final checks.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.4.0
       - uses: actions/setup-node@v4.4.0
