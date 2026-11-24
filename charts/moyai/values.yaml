@@ -9,6 +9,12 @@ publicUrl: https://moyai.example.com
 # ClusterIP Service on port 8080 for an authenticated tunnel, never a public LB.
 brokerUrl: ""
 installationId: moyai
+# The default installer owns one pod. After an explicit maintenance adoption,
+# a release controller can own independently admitted fleets and stable ingress.
+# Changing this value alone does not initialize or migrate a fleet.
+application:
+  mode: singlePod
+  fleetIngress: ""
 # Existing Secret: provider credentials, storage bucket/region, gateway/model,
 # and optionally Cloudflare settings. Never put secrets in Helm values.
 runtimeSecret: moyai-runtime

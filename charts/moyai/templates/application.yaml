@@ -1,3 +1,4 @@
+{{- if eq .Values.application.mode "singlePod" -}}
 {{- $name := include "moyai.name" . -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -132,3 +133,4 @@ spec:
           emptyDir: {}
         - name: scripts
           configMap: {name: {{ $name }}-scripts}
+{{- end }}

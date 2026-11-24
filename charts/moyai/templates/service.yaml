@@ -3,10 +3,14 @@ kind: Service
 metadata:
   name: {{ include "moyai.name" . }}
 spec:
+  {{- if eq .Values.application.mode "singlePod" }}
   # Activation must verify the public broker before the pod can become Ready.
   # The proxy gates browser/webhook requests until activation has completed.
   publishNotReadyAddresses: true
   selector: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: moyai}
+  {{- else }}
+  selector: {moyai.ai/ingress: {{ .Values.application.fleetIngress | quote }}}
+  {{- end }}
   ports: [{name: http, port: 8080, targetPort: http}]
 {{- if .Values.brokerUrl }}
 ---
@@ -16,9 +20,13 @@ metadata:
   name: {{ include "moyai.name" . }}-broker
 spec:
   type: ClusterIP
+  {{- if eq .Values.application.mode "singlePod" }}
   # Activation verifies this route before publishing readiness.
   publishNotReadyAddresses: true
   selector: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: moyai}
+  {{- else }}
+  selector: {moyai.ai/ingress: {{ .Values.application.fleetIngress | quote }}}
+  {{- end }}
   ports: [{name: http, port: 8080, targetPort: broker-http}]
 {{- end }}
 {{- if .Values.serviceAccount.create }}
