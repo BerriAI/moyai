@@ -32,6 +32,7 @@ from moyai.agent import make_agent
 from moyai.inference_usage import InferenceUsageTransport
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter
+from moyai.tools.tool_caller import ToolCaller
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
@@ -102,7 +103,16 @@ async def test_native_temporal_trace_content_policy_and_replay_emits_no_duplicat
     _, turn, _ = active
     exporter = InMemorySpanExporter()
     monkeypatch.setattr(tracing, "OTLPSpanExporter", lambda **kwargs: exporter)
-    monkeypatch.setattr("moyai.artifacts.ToolFailed", failure)
+    original_call = ToolCaller.call
+
+    async def call(self, call, tool, args, handler):
+        if call.tool_name == "attach_link" and args["url"] == "invalid-link":
+            # Exercise both handled exception families in workflow code. Tool
+            # activity failures are normalized to ToolFailed by ToolCaller.
+            raise failure("Use a valid HTTP(S) link.")
+        return await original_call(self, call, tool, args, handler)
+
+    monkeypatch.setattr(ToolCaller, "call", call)
     global_provider = get_tracer_provider()
     runtime.tracing = tracing.LensTracing(runtime.settings.model_copy(update={
         "trace_endpoint": "http://127.0.0.1:4318/v1/traces",
