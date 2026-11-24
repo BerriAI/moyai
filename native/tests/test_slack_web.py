@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 import test_product_identity_admission as identities
+from agentchat.channels.slack.host import SlackHost
 from app.connector_errors import ConnectorError
 from fastapi import HTTPException
 from sqlalchemy import func, select, text, update
@@ -167,7 +168,10 @@ async def test_slack_reply_uses_same_private_session_and_preserves_signed_grant(
     event = {"type": "message", "channel_type": "im", "channel": "DLOCAL001", "user": "UACTUAL01",
              "ts": "1795300001.001", "thread_ts": "1795300000.001", "text": "Add the rollback plan."}
     payload = {"type": "event_callback", "event_id": "ELOCAL001", "team_id": "TLOCAL001", "event": event}
-    message = SlackMessage.parse(payload, event, product.service.installation())
+    installed = product.service.installation()
+    message = SlackMessage.parse(payload, event, SlackHost(
+        bot_user_id=installed["user_id"], workspace_id=installed["team_id"],
+    ))
     conversations = SlackConversations(product.service)
     thread = await conversations.find(message.origin)
     conversation = await conversations.existing(
