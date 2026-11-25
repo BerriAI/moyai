@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 import test_slack_web as support
 from fastapi import HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from test_personal_dot import finish, observer
 from test_product_slack import receiver as local_receiver
 
@@ -25,6 +25,7 @@ from moyai.product_connections import ProductConnections
 from moyai.product_slack import ProductSlack
 from moyai.product_slack_models import SlackWebLink, SlackWebTurn
 from moyai.slack import reconcile_one
+from moyai.slack_audience import can_read
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 product_database = support.product_database
@@ -55,6 +56,130 @@ async def dot(linked):
 async def enable(dot):
     settings = await dot.notifications.read(dot.actor)
     return await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=settings.revision, enabled=True))
+
+
+@pytest_asyncio.fixture
+async def dot_ingress(dot):
+    from moyai.product_slack_events import SlackEvents
+
+    await enable(dot)
+    async def catalog(*args, **kwargs):
+        return []
+    async def slack_access(db, session, actor):
+        return await can_read(dot.service, db, session, actor)
+    dot.service.store = SimpleNamespace(rows=lambda query, params: [])
+    dot.service.connections = SimpleNamespace(catalog=catalog, personal_github=False)
+    dot.database.slack_access = slack_access
+    return SlackEvents(dot.service)
+
+
+def dm_event(event_id, stamp, **fields):
+    return {
+        "type": "event_callback", "event_id": event_id, "team_id": "TLOCAL001",
+        "event": {
+            "type": "message", "channel": "DLOCAL001", "channel_type": "im", "user": "UACTUAL01",
+            "text": "Plan the launch privately.", "ts": stamp, **fields,
+        },
+    }
+
+
+@pytest.mark.parametrize("change", ["revoked", "linking_disabled", "remapped"])
+async def test_revoked_dot_dm_does_not_fall_back_to_shared_slack(dot, dot_ingress, change):
+    if change == "linking_disabled":
+        dot.service.settings.slack_identity_linking_enabled = False
+    else:
+        assignment = ("profile_eligible=0, link_status='unavailable'" if change == "revoked"
+                      else "email='different@example.test', linked_user_id=NULL")
+        async with dot.source.begin() as db:
+            await db.execute(text(f"UPDATE moyai.users SET {assignment} WHERE id=:id"), {
+                "id": "slack:TLOCAL001:UACTUAL01",
+            })
+    with pytest.raises(HTTPException) as error:
+        await dot_ingress.receive(dm_event("DOT_REVOKED", "1792100000.021"))
+    assert error.value.status_code == 403
+    async with dot.database.sessions() as db:
+        assert await db.scalar(select(Turn.id).where(Turn.request_key.startswith("slack-message:"))) is None
+        assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
+
+
+async def test_legacy_receipt_prevents_new_dot_root_admission(dot, dot_ingress):
+    payload = dm_event("DOT_LEGACY", "1792100000.022")
+    receipt = (payload["team_id"], payload["event"]["channel"], payload["event"]["ts"], payload["event_id"])
+    def rows(query, params):
+        return [(1,)] if "FROM slack_receipts" in query and params == receipt else []
+    dot.service.store.rows = rows
+    await dot_ingress.receive(payload)
+    async with dot.database.sessions() as db:
+        assert await db.scalar(select(Turn.id).where(Turn.request_key.startswith("slack-message:"))) is None
+        assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
+
+
+@pytest.mark.parametrize("kind", ["private", "deleted", "deleting", "wrong_owner", "paused", "eligible"])
+async def test_historical_dm_is_resolved_before_creating_dot_chat(dot, dot_ingress, monkeypatch, kind):
+    source = {
+        "run_id": "historical", "private_owner_id": "other" if kind == "private" else None,
+        "deleted_at": "yesterday" if kind == "deleted" else None,
+        "deletion_requested_at": "today" if kind == "deleting" else None,
+        "source_sender": "UOTHER001" if kind == "wrong_owner" else "UACTUAL01",
+        "owner_id": "other", "paused": kind == "paused",
+    }
+    dot.service.store.rows = lambda query, params: [source] if "FROM slack_threads" in query else []
+    continued = []
+    async def admit(message, conversation, *args):
+        continued.append(conversation.source)
+        return {"ok": True}
+    monkeypatch.setattr(dot_ingress, "_admit", admit)
+    if kind in {"private", "deleted", "deleting", "wrong_owner"}:
+        with pytest.raises(HTTPException) as error:
+            await dot_ingress.receive(dm_event("DOT_HISTORY", "1792100000.022"))
+        assert error.value.status_code == 403
+    else:
+        await dot_ingress.receive(dm_event("DOT_HISTORY", "1792100000.022"))
+    assert continued == ([source] if kind == "eligible" else [])
+    async with dot.database.sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(DotSlackConversation)) == 0
+
+
+@pytest.mark.parametrize("reply", [False, True])
+@pytest.mark.parametrize("operation", ["edit", "delete", "revoked_edit", "wrong_sender"])
+async def test_dot_message_updates_use_verified_owner_turn(dot, dot_ingress, reply, operation):
+    original = dm_event("DOT_ORIGINAL", "1792100000.023")
+    await dot_ingress.receive(original)
+    if reply:
+        original = dm_event("DOT_REPLY", "1792100000.024", thread_ts="1792100000.023")
+        await dot_ingress.receive(original)
+    async with dot.database.sessions() as db:
+        turn = (await db.scalars(select(Turn).where(
+            Turn.request_key.startswith("slack-message:"),
+        ).order_by(Turn.created_at.desc()))).first()
+        assert (turn.actor_id, turn.status) == (dot.actor.id, "queued")
+    previous = original["event"]
+    if operation == "revoked_edit":
+        async with dot.source.begin() as db:
+            await db.execute(text(
+                "UPDATE moyai.users SET profile_eligible=0, link_status='unavailable' WHERE id=:id",
+            ), {"id": "slack:TLOCAL001:UACTUAL01"})
+    if operation == "wrong_sender":
+        previous = {**previous, "user": "UWRONG001"}
+    updated = {**previous, "text": "Prepare the revised launch plan.", "edited": {"ts": "1792100000.025"}}
+    payload = dm_event(
+        "DOT_UPDATE", "1792100000.025",
+        subtype="message_deleted" if operation == "delete" else "message_changed",
+        deleted_ts=previous["ts"], previous_message=previous, message=updated, event_ts="1792100000.025",
+    )
+    if operation in {"revoked_edit", "wrong_sender"}:
+        with pytest.raises(HTTPException) as error:
+            await dot_ingress.receive(payload)
+        assert error.value.status_code == 403
+    else:
+        assert (await dot_ingress.receive(payload))["updated"]
+    async with dot.database.sessions() as db:
+        saved = await db.get(Turn, turn.id)
+        assert saved.status == ("stopped" if operation == "delete" else "queued")
+        if operation == "edit":
+            assert dot.database.security.unseal(saved.prompt).decode().startswith(updated["text"])
+        else:
+            assert dot.database.security.unseal(saved.prompt).decode().startswith("Plan the launch privately.")
 
 
 async def publish(dot, **kwargs):
@@ -207,16 +332,39 @@ async def test_uncertain_root_reconciles_exact_bot_and_metadata_without_repostin
     assert len(receiver.requests) == 1
 
 
-async def test_early_reply_is_retryable_and_never_creates_a_fallback_chat(dot):
+@pytest.mark.parametrize("kind", ["in_flight", "pending", "unrelated", "expired", "api_error", "old_api_error"])
+async def test_unconfirmed_root_has_a_bounded_confirmation_window(dot, kind):
+    from app.connector_errors import ConnectorError
+
     await enable(dot)
-    await publish(dot)
+    delivery = await publish(dot)
+    moment = datetime.now(UTC)
+    root = moment - timedelta(minutes=3) if kind in {"expired", "old_api_error"} else moment
+    stamp = f"{root.timestamp():.6f}"
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status = "pending" if kind == "pending" else "sending"
+        row.claimed_at = moment.isoformat()
+    calls = []
+    async def history(method, url, **kwargs):
+        calls.append(kwargs["params"])
+        if kind in {"api_error", "old_api_error"}:
+            raise ConnectorError("Temporary failure")
+        return {"ok": True, "messages": [{"ts": stamp, "user": "UOTHER001"}] if kind == "unrelated" else []}
+    dot.service.connectors.request = history
     sender, _ = await dot.service.actor("TLOCAL001", "UACTUAL01")
+    origin = {
+        "team_id": "TLOCAL001", "channel_id": "DLOCAL001",
+        "thread_ts": stamp, "message_ts": f"{moment.timestamp() + 1:.6f}",
+    }
+    defer = await recover_root(dot.service, sender, origin)
+    assert defer == (kind in {"in_flight", "api_error"})
     with pytest.raises(HTTPException) as waiting:
-        await new_direct_message(dot.service, sender, {
-            "team_id": "TLOCAL001", "channel_id": "DLOCAL001",
-            "thread_ts": "1792100000.001", "message_ts": "1792100000.002",
-        }, "Please follow up")
-    assert waiting.value.status_code == 503 and waiting.value.headers == {"Retry-After": "5"}
+        await new_direct_message(dot.service, sender, origin, "Please follow up", waiting_for_root=defer)
+    assert waiting.value.status_code == (503 if defer else 403)
+    if defer:
+        assert waiting.value.headers == {"Retry-After": "5"}
+    assert len(calls) == (0 if kind == "pending" else 1)
     async with dot.database.sessions() as db:
         assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
 

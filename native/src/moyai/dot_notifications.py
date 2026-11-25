@@ -12,6 +12,7 @@ from app.slack_format import ID
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from .dot_models import DotNotification, DotSlackConversation, DotSlackPreference, PersonalDot
 from .models import Delivery, Session, Turn, User, now
@@ -217,7 +218,12 @@ class DotNotifications:
             row.session_id, row.enabled, row.revision = session_id, body.enabled, row.revision + 1
             if recipient:
                 row.recipient = self.database.security.seal(recipient.model_dump_json())
+                row.destination_key = f"{recipient.team_id}:{recipient.channel_id}"
             row.updated_at = now()
+            try:
+                await db.flush()
+            except IntegrityError as error:
+                raise HTTPException(409, "This Slack DM is already connected to another Dot.") from error
             # Only known-unsent rows can be cancelled. An uncertain effect stays claimed.
             await db.execute(update(Delivery).where(
                 Delivery.session_id.in_(select(DotSlackConversation.session_id).where(

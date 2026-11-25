@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from app.connector_errors import ConnectorError
 from app.db import database as source_database
 from app.slack_format import STAMP
 from fastapi import HTTPException
@@ -16,7 +18,7 @@ from .dot_models import DotNotification, DotSlackConversation, DotSlackPreferenc
 from .models import Delivery, Message, Session, SlackThread, User
 from .product_slack_models import ProductSlackBinding, SlackWebLink
 from .slack_messages import plain_slack_title
-from .slack_recipient import SlackRecipient, actor_grant, current
+from .slack_recipient import SlackRecipient, current
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,10 +92,23 @@ async def finalize(database: Database, db: AsyncSession, delivery: Delivery, rec
     await bind(db, session, link, receipt.get("ts", ""))
 
 
-async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]) -> None:
-    """Resolve an early reply using the existing outbox, without another send."""
+ROOT_CONFIRMATION_SECONDS = 120
+
+
+def recent_root(stamp: str) -> datetime | None:
+    """A signed parent timestamp bounds inbox deferral across every retry."""
+    try:
+        root = datetime.fromtimestamp(float(stamp), UTC)
+    except (ValueError, OverflowError):
+        return None
+    age = (datetime.now(UTC) - root).total_seconds()
+    return root if -30 <= age <= ROOT_CONFIRMATION_SECONDS else None
+
+
+async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]) -> bool:
+    """Bind an exact confirmed root, or briefly defer a plausible in-flight root."""
     if origin["thread_ts"] == origin["message_ts"]:
-        return
+        return False
     database = slack.runtime.database
     async with database.sessions() as db:
         rows = list(await db.scalars(select(Delivery).join(
@@ -104,51 +119,74 @@ async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]
             Delivery.identity == ("product-slack:" + Delivery.turn_id + ":dot"),
         ).limit(100)))
     if not rows:
-        return
+        return False
     from .dot_notifications import allowed
     from .slack import confirmed_delivery
     rows = [delivery for delivery in rows if await allowed(slack, delivery, reconcile=True)]
     if not rows:
-        return
-    installed = await source_database(slack.installation)
-    token = await slack.connectors.slack_bot_token()
-    result = await slack.connectors.request(
-        "GET", "https://slack.com/api/conversations.history",
-        headers={"Authorization": "Bearer " + token}, params={
-            "channel": origin["channel_id"], "oldest": origin["thread_ts"], "latest": origin["thread_ts"],
-            "inclusive": "true", "limit": 1, "include_all_metadata": "true",
-        },
+        return False
+    root = recent_root(origin["thread_ts"])
+    # Only claimed sends can already have a Slack parent. A pending queue item
+    # or a recent reconciliation of an old message is not evidence of that.
+    plausible = root is not None and any(
+        delivery.claimed_at is not None
+        and datetime.fromisoformat(delivery.created_at) <= root + timedelta(seconds=30)
+        and datetime.fromisoformat(delivery.claimed_at) >= root - timedelta(seconds=60)
+        for delivery in rows
     )
+    installed = await source_database(slack.installation)
+    try:
+        token = await slack.connectors.slack_bot_token()
+        result = await slack.connectors.request(
+            "GET", "https://slack.com/api/conversations.history",
+            headers={"Authorization": "Bearer " + token}, params={
+                "channel": origin["channel_id"], "oldest": origin["thread_ts"], "latest": origin["thread_ts"],
+                "inclusive": "true", "limit": 1, "include_all_metadata": "true",
+            },
+        )
+    except ConnectorError:
+        # HookInbox owns retries; an unverified parent has only this short
+        # confirmation window, not the inbox's generic seven-day retention.
+        return plausible
+    messages = result.get("messages", [])
     for delivery in rows:
         found = confirmed_delivery(
-            delivery.id, result.get("messages", []), bot_user=installed["user_id"], root_ts=origin["thread_ts"],
+            delivery.id, messages, bot_user=installed["user_id"], root_ts=origin["thread_ts"],
         )
         if found is not None and await allowed(slack, delivery, reconcile=True):
             await slack._settle(delivery.id, "sent", {**found, "channel": origin["channel_id"]})
+            return False
+    # A visible unrelated/ambiguous parent is definitive; never keep it alive
+    # merely because this DM also has an unsettled outgoing notification.
+    return plausible and not messages
 
 
 async def new_direct_message(
-    slack: ProductSlack, sender: User, origin: dict[str, str], title: str,
+    slack: ProductSlack, sender: User, origin: dict[str, str], title: str, *, waiting_for_root: bool = False,
 ) -> SlackThread | None:
     """Only a previously opted-in, currently verified owner gets private Dot DMs."""
-    if not origin["channel_id"].startswith("D") or not slack.settings.slack_identity_linking_enabled:
+    if not origin["channel_id"].startswith("D"):
         return None
     database = slack.runtime.database
     async with database.sessions.begin() as db:
-        try:
-            individual = await slack.product.identity.individual_for_admission(db, actor_grant(sender))
-        except HTTPException as error:
-            if error.status_code >= 500:
-                raise
+        destination = f"{origin['team_id']}:{origin['channel_id']}"
+        preference = await db.scalar(select(DotSlackPreference).where(
+            DotSlackPreference.destination_key == destination,
+        ))
+        if preference is None:
             return None
-        preference = await db.get(DotSlackPreference, individual.id)
-        if preference is None or preference.recipient is None:
-            return None
-        await db.refresh(preference, with_for_update=True)
+        if preference.recipient is None:
+            raise HTTPException(403, "This Dot DM needs to be reconnected.")
         recipient = SlackRecipient.model_validate_json(database.security.unseal(preference.recipient))
-        if recipient.team_id != origin["team_id"] or recipient.channel_id != origin["channel_id"]:
-            raise HTTPException(403, "This is not your connected Dot DM.")
+        # Identify a pinned destination before resolving current owner identity:
+        # loss of that identity must never downgrade it into ordinary Slack chat.
         actor = await current(slack, db, recipient, sender=sender)
+        # Owner authority is locked before this row, matching opt-in/publication.
+        await db.refresh(preference, with_for_update=True)
+        if (preference.destination_key != destination or preference.recipient is None
+                or SlackRecipient.model_validate_json(database.security.unseal(preference.recipient)) != recipient
+                or recipient.team_id != origin["team_id"] or recipient.channel_id != origin["channel_id"]):
+            raise HTTPException(403, "This is not your connected Dot DM.")
         await database.dots.own_session(db, actor.id, preference.session_id)
         # Serialize duplicate first events with owner opt-in/out and publication.
         existing = await db.scalar(select(SlackThread).where(
@@ -159,14 +197,7 @@ async def new_direct_message(
             return existing
         if origin["thread_ts"] != origin["message_ts"]:
             # Never turn an unconfirmed proactive root into an unrelated/shared chat.
-            pending = await db.scalar(select(Delivery.id).join(
-                SlackWebLink, SlackWebLink.session_id == Delivery.session_id,
-            ).where(
-                SlackWebLink.requester_id == sender.id, SlackWebLink.channel_id == recipient.channel_id,
-                Delivery.status.in_(("pending", "sending")),
-                Delivery.identity == ("product-slack:" + Delivery.turn_id + ":dot"),
-            ).limit(1))
-            if pending:
+            if waiting_for_root and recent_root(origin["thread_ts"]) is not None:
                 # The signed event stays in HookInbox, which owns bounded retry
                 # and expiry; a 409 here would permanently discard the reply.
                 raise HTTPException(503, "This Dot thread is still confirming delivery.",

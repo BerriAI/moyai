@@ -364,6 +364,7 @@ def _dot_slack_tables(metadata: MetaData, schema: str) -> None:
         Column("revision", Integer, nullable=False),
         Column("enabled", Boolean, nullable=False),
         Column("recipient", Text, nullable=True),
+        Column("destination_key", String(201), nullable=True, unique=True),
         Column("updated_at", String(40), nullable=False), schema=schema,
     )
     Table(

@@ -33,6 +33,12 @@ async def receive_update(events, payload: dict, installed: dict) -> bool:
     slack = events.slack
     actor, _ = await slack.actor(installed["team_id"], user)
     cast(Any, actor).slack_channel_evidence = (installed["team_id"], channel)
+    thread = await events.conversations.find({
+        "team_id": installed["team_id"], "channel_id": channel,
+        "thread_ts": original.get("thread_ts") or current.get("thread_ts") or stamp,
+    })
+    if thread is not None:
+        actor = await slack.web.input_actor(actor, thread.session_id)
     key = hashlib.sha256(json.dumps([installed["team_id"], channel, stamp]).encode()).hexdigest()
     changed_at = str((None if deleted else (current.get("edited") or {}).get("ts"))
                      or event.get("event_ts") or payload.get("event_time", ""))
@@ -45,9 +51,15 @@ async def receive_update(events, payload: dict, installed: dict) -> bool:
         return False
     database = slack.runtime.database
     async with database.sessions.begin() as db:
-        turn = await db.scalar(select(Turn).where(Turn.actor_id == actor.id, Turn.request_key == "slack-message:" + key))
+        query = select(Turn).where(Turn.actor_id == actor.id, Turn.request_key == "slack-message:" + key)
+        if thread is not None:
+            query = query.where(Turn.session_id == thread.session_id)
+        turn = await db.scalar(query)
         if turn is None:
             return False
+        await database._actor_product_grant(db, actor)
+        from .slack_web import check_turn
+        await check_turn(database, db, turn)
         await database.allowed_session(db, turn.session_id, actor)
         # Serialize with dispatch before deciding whether execution is editable.
         await db.execute(update(Session).where(Session.id == turn.session_id).values(revision=Session.revision + 1))

@@ -86,11 +86,13 @@ class SlackWeb:
         actor = await current(self.slack, db, SlackRecipient.model_validate(link), sender=sender)
         session = await db.get(Session, link.session_id)
         if (session is None or session.deleted or session.owner_id != actor.id
-                or session.surface != "web" or session.visibility != "private"):
+                or session.surface != "web"):
             raise HTTPException(403, "The linked web session is unavailable.")
         from .dot_models import DotSlackConversation, DotSlackPreference
         conversation = await db.get(DotSlackConversation, session.id)
         if conversation is not None:
+            if session.visibility != "private":
+                raise HTTPException(403, "The connected Dot conversation is no longer private.")
             preference = await db.get(DotSlackPreference, actor.id)
             if (preference is None or preference.recipient is None
                     or preference.session_id != conversation.dot_session_id

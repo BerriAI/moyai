@@ -52,6 +52,7 @@ class DotSlackPreference(Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     recipient: Mapped[str | None] = mapped_column(Text, nullable=True)
+    destination_key: Mapped[str | None] = mapped_column(String(201), nullable=True, unique=True)
     updated_at: Mapped[str] = mapped_column(String(40), default=now)
 
 

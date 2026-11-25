@@ -131,15 +131,26 @@ class SlackEvents:
             return {"ok": True}
         actor, principal = await self.slack.actor(installed["team_id"], message.origin["user_id"])
         cast(Any, actor).slack_channel_evidence = (message.origin["team_id"], message.origin["channel_id"])
-        if thread is None and message.direct:
-            from .dot_slack_threads import new_direct_message, recover_root
-            await recover_root(self.slack, actor, message.origin)
-            thread = await self.conversations.find(message.origin)
-            if thread is None:
-                thread = await new_direct_message(self.slack, actor, message.origin, message.prompt)
+        # Resolve legacy receipts and historical ownership before creating any
+        # new native route. Existing history must keep its own continuation.
         conversation = await self.conversations.resolve(
             thread, actor, message.origin, installed, mentioned=message.mentioned, command=message.command_name,
         )
+        if conversation is None:
+            return {"ok": True}
+        if thread is None and message.direct and conversation.source is None:
+            from .dot_slack_threads import new_direct_message, recover_root
+            waiting = await recover_root(self.slack, actor, message.origin)
+            thread = await self.conversations.find(message.origin)
+            if thread is None:
+                thread = await new_direct_message(
+                    self.slack, actor, message.origin, message.prompt, waiting_for_root=waiting,
+                )
+            if thread is not None:
+                conversation = await self.conversations.resolve(
+                    thread, actor, message.origin, installed,
+                    mentioned=message.mentioned, command=message.command_name,
+                )
         if conversation is None:
             return {"ok": True}
         return await self._admit(message, conversation, actor, principal, installed)

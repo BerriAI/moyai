@@ -107,6 +107,18 @@ async def test_dm_is_owner_verified_idempotent_and_keeps_private_web_session(lin
         assert await db.scalar(select(func.count()).select_from(SlackThread)) == 1
 
 
+async def test_shared_web_session_can_continue_in_slack(linked):
+    session = await linked.database.create_session(linked.actor, NewSession(
+        title="Shared checklist", visibility="shared",
+    ))
+    assert (await linked.service.web.status(linked.actor, session.id)).status == "available"
+    assert (await linked.service.web.connect(linked.actor, session.id)).status == "linked"
+    async with linked.database.sessions() as db:
+        saved = await db.get(Session, session.id)
+        assert saved.surface == "web" and saved.visibility == "shared"
+        assert await db.scalar(select(SlackThread.id).where(SlackThread.session_id == session.id))
+
+
 async def test_lost_response_recovers_receipt_without_resending(linked):
     product = linked
     product.state["drop"] = True
