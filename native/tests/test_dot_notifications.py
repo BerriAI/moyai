@@ -11,9 +11,12 @@ import httpx
 import pytest
 import pytest_asyncio
 import test_slack_web as support
-from fastapi import HTTPException
+from app.coordinator_handoff import initialize_schema
+from app.db import Store
+from fastapi import FastAPI, HTTPException
 from sqlalchemy import func, select, text, update
 from test_personal_dot import finish, observer
+from test_product_slack import post_signed_event
 from test_product_slack import receiver as local_receiver
 
 from moyai.dot_models import DotSlackConversation, DotSlackPreference
@@ -181,6 +184,86 @@ async def test_dev_top_level_dm_stays_shared_after_dot_opt_in(dot, dot_ingress):
         session = await db.get(Session, thread.session_id)
         assert (thread.slack_app, session.visibility, session.surface) == ("dev", "shared", "slack")
         assert await db.get(DotSlackConversation, session.id) is None
+
+
+async def test_dot_signed_inbox_drains_and_replay_does_not_repeat_effects(dot, tmp_path, monkeypatch):
+    fixture = dot.service
+    runtime = fixture.runtime
+    settings = fixture.settings
+    settings.slack_dot_signing_secret = "local-dot-signature"
+    store = Store(tmp_path / "inbox")
+    try:
+        initialize_schema(store)
+        runtime.product = SimpleNamespace(
+            store_proxy=store, settings=settings, security=dot.adapter.legacy_security, identity=dot.adapter,
+        )
+        runtime.product_history = None
+        runtime.product_connections = ProductConnections(runtime.product, dot.database)
+        connections = runtime.product_connections
+
+        async def catalog(*args, **kwargs):
+            return []
+
+        monkeypatch.setattr(connections, "catalog", catalog)
+        monkeypatch.setattr(connections.connectors, "request", fixture.connectors.request)
+        for provider, app_id, bot_id in (
+            ("slack", "ADEV00001", "UBOT00001"), ("slack_dot", "ADOT00001", "UDOT00001"),
+        ):
+            connections.connectors.save(provider, {"bot": {
+                "access_token": "local-bot-token", "team": {"id": "TLOCAL001"},
+                "app_id": app_id, "bot_user_id": bot_id,
+            }}, provider)
+        coordinator = runtime.product_slack = ProductSlack(runtime)
+        for ingress in (coordinator, coordinator.dot):
+            monkeypatch.setattr(ingress, "actor", fixture.actor)
+
+            async def installation_in(db, transport=ingress):
+                return transport.installation()
+
+            monkeypatch.setattr(ingress, "installation_in", installation_in)
+        dot.database.slack_dot_installation = coordinator.dot.installation_in
+        assert (await enable(dot)).status == "on"
+
+        app = FastAPI()
+        app.include_router(coordinator.routes())
+        event = {**dm_event("EDRAIN", "1792100000.001"), "api_app_id": "ADOT00001"}
+        key = "dot:event:TLOCAL001:EDRAIN"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+            assert (await post_signed_event(
+                client, event, dot=True, secret=b"local-dot-signature",
+            )).status_code == 200
+            assert await coordinator.inbox.drain_one()
+            assert store.rows("SELECT status FROM coordinator_hooks WHERE id=?", (key,))[0]["status"] == "done"
+            assert coordinator.delivery_wakeup.is_set()
+            async with dot.database.sessions.begin() as db:
+                thread = (await db.scalars(select(SlackThread))).one()
+                assert (thread.slack_app, (await db.get(Session, thread.session_id)).visibility) == ("dot", "private")
+                turn = (await db.scalars(select(Turn).where(Turn.session_id == thread.session_id))).one()
+                turn.status, turn.finished_at = "completed", datetime.now(UTC).isoformat()
+                turn_id = turn.id
+            await coordinator.stage()
+
+            assert (await post_signed_event(
+                client, event, dot=True, secret=b"local-dot-signature",
+            )).status_code == 200
+            assert not await coordinator.inbox.drain_one()
+            assert store.rows("SELECT status FROM coordinator_hooks WHERE id=?", (key,))[0]["status"] == "done"
+            await coordinator.stage()
+
+            dev = {**dm_event("EDEV", "1792100000.002", channel="DDEV00001"), "api_app_id": "ADEV00001"}
+            assert (await post_signed_event(
+                client, dev, secret=settings.slack_signing_secret.encode(),
+            )).status_code == 200
+        assert await coordinator.inbox.drain_one()
+        assert store.rows("SELECT status FROM coordinator_hooks WHERE id=?", ("event:TLOCAL001:EDEV",))[0]["status"] == "done"
+        async with dot.database.sessions() as db:
+            assert list(await db.scalars(select(Turn.id).where(Turn.session_id == thread.session_id))) == [turn_id]
+            delivery = (await db.scalars(select(Delivery).where(Delivery.turn_id == turn_id))).one()
+            assert delivery.slack_app == "dot"
+            dev_thread = (await db.scalars(select(SlackThread).where(SlackThread.slack_app == "dev"))).one()
+            assert (await db.get(Session, dev_thread.session_id)).visibility == "shared"
+    finally:
+        store.close()
 
 
 async def test_dot_pin_retires_legacy_dev_thread_without_changing_private_history(dot, dot_ingress):

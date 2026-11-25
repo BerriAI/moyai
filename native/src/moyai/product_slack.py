@@ -177,6 +177,7 @@ class ProductSlack:
         self.mention_names = SlackMentionNames(self)
         if coordinator is not None:
             self.stopping = coordinator.stopping
+            self.delivery_wakeup = coordinator.delivery_wakeup
             return
         runtime.database.slack_mentions = self.mention_names.decorate
         from .slack_audience import (

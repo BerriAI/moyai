@@ -39,8 +39,7 @@ stops that work.
 
 Keep the existing Moyai Dev installation and `SLACK_SIGNING_SECRET`. Install
 Moyai Dot as a **separate Slack app in the same workspace**, with a distinct
-app ID, bot identity, and signing secret. The existing Moyai Dev app is
-`A0CKXDZDV7A` in workspace `T04JBDEQSHF`, with token rotation enabled.
+app ID, bot identity, and signing secret. Enable token rotation for both apps.
 Enable `SLACK_BOT_ENABLED`,
 `SLACK_DM_ENABLED`, `SLACK_THREAD_CHAT_ENABLED`, and
 `SLACK_IDENTITY_LINKING_ENABLED`; include the owner in `SLACK_SESSION_USERS`
