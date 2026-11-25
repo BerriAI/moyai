@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 import httpx
 from pydantic import Field
 
-from . import notion_tools, slack_tools
+from . import gmail_tools, google_calendar_tools, notion_tools, slack_tools
 from .connector_errors import ConnectorError
 from .connector_schemas import (
     Args,
@@ -101,6 +101,8 @@ class NotionAppend(NotionPage):
 
 
 TOOLS = {
+    **gmail_tools.TOOLS,
+    **google_calendar_tools.TOOLS,
     **GITHUB_TOOLS,
     **notion_tools.TOOLS,
     **slack_tools.TOOLS,
@@ -126,6 +128,7 @@ TOOLS = {
 # Metadata/identity caches may refresh; no action or context selection is replayed.
 # github_checkout here only resolves metadata, before the sandbox changes files.
 RETRY_SAFE_READS = frozenset({
+    *gmail_tools.READS, *google_calendar_tools.READS,
     *notion_tools.READS, *slack_tools.READS, 'linear_options',
     *GITHUB_CODING_READS,
     'github_rulesets', 'github_ruleset', 'github_repositories', 'github_repository',
@@ -350,6 +353,10 @@ class Connectors:
                                  code='response_unavailable', dispatched=dispatched, retryable=True) from exc
 
     async def verify(self, provider, credentials):
+        if provider in {"gmail", "google_calendar"}:
+            if not credentials.get("subject") or not credentials.get("label"):
+                raise ConnectorError("Google did not verify this account.", dispatched=False)
+            return credentials["label"]
         if provider == 'github':
             if credentials.get("kind") == "oauth_user":
                 user = await self.github.request("GET", "/user", token=credentials["access_token"])
@@ -678,6 +685,8 @@ class Connectors:
 
     def oauth_client(self, provider, *, personal=False):
         """Personal GitHub uses a separate OAuth App, never an installation token."""
+        if provider in {"gmail", "google_calendar"} and personal:
+            return self.settings.google_apps_client_id, self.settings.google_apps_client_secret
         if provider == "github" and personal:
             return self.settings.github_oauth_client_id, self.settings.github_oauth_client_secret
         if provider == "github":
@@ -722,6 +731,11 @@ class Connectors:
         return f"{self.settings.public_url.rstrip('/')}/oauth/{path}/callback"
 
     async def exchange(self, provider, *, code=None, refresh_token=None, code_verifier=None, personal=False):
+        if provider in {"gmail", "google_calendar"} and personal:
+            from .google_apps import exchange
+            return await exchange(
+                self, provider, code=code, refresh_token=refresh_token, code_verifier=code_verifier,
+            )
         client_id, client_secret = self.oauth_client(provider, personal=personal)
         payload = {"grant_type": "refresh_token" if refresh_token else "authorization_code"}
         if refresh_token:

@@ -9,8 +9,9 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Drain old pollers before writing app-scoped Slack inbox and delivery records.
-NATIVE_PROTOCOL_REVISION = 14
+# Drain old participants before admitting Google accounts to attention workers
+# or direct Dot conversations; older workers do not understand these grants.
+NATIVE_PROTOCOL_REVISION = 15
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

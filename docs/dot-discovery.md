@@ -79,7 +79,7 @@ does not.
 
 ## Bounds and release
 
-Bounds: two accounts; one trigger; 2,000 characters of private priorities;
+Bounds: four accounts; one trigger; 2,000 characters of private priorities;
 12 research tool calls and sixteen model requests; 30 returned records and 16,000
 characters per tool result; 12 validated observations; four judgment requests
 and four memory reads/searches; 180 KB of serialized model input per request.

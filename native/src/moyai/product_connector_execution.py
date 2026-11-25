@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +92,19 @@ class CanonicalConnectorExecution:
         service = self.connections
         _, write, model, _ = TOOLS[name]
         args = model.model_validate(arguments).model_dump()
+        if grant.kind in {"gmail", "google_calendar"}:
+            # Google SDK clients own their transport, so fence both dispatch and
+            # result release here rather than the legacy HTTP request wrapper.
+            from app import gmail_tools, google_calendar_tools
+            try:
+                credentials = await service.credentials(scope, grant, write=write)
+                await service.check(scope, grant, write=write)
+                adapter = gmail_tools if grant.kind == "gmail" else google_calendar_tools
+                result = await adapter.call(name, args, credentials["access_token"])
+            except ConnectorError as error:
+                raise ToolFailed(json.dumps(error.receipt(write=write))) from None
+            await service.check(scope, grant, write=write)
+            return result
         if (grant.policy.get("product") or {}).get("access") == "bot" and name in {"slack_channel", "slack_thread"}:
             args["as_bot"] = True
         bot_only = grant.kind == "slack" and (name in {"slack_me", "slack_send"} or args.get("as_bot") is True)

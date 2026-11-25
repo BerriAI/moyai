@@ -20,8 +20,9 @@ const gatewayConnection = (patch={}) => mcpConnection({
 function defaults() {
   return {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
-    personalApps: [['linear','Linear'],['notion','Notion'],['github','GitHub']].map(([provider,name])=>({
+    personalApps: [['linear','Linear'],['notion','Notion'],['github','GitHub'],['google_calendar','Google Calendar'],['gmail','Gmail']].map(([provider,name])=>({
       provider,name,configured:['linear','notion'].includes(provider),connected:false,connection_id:null,
+      revision:0,use_proactively:['google_calendar','gmail'].includes(provider)?true:null,attention_status:null,
     })),
     general: {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0},
     organizationConnections:[{id:'slack',connected:true,enabled:true,read_only:true,label:'Example workspace',identity:'Workspace app',tools:[],check_status:'healthy',checked_at:'2026-10-19T10:00:00Z'}],
@@ -78,12 +79,17 @@ async function settingsFixture() {
         if(state.personalAppsGate)await state.personalAppsGate;
         return state.personalAppsError?json({detail:'Temporarily unavailable'},503):json(state.personalApps);
       }
-      const appMatch=url.pathname.match(/^\/api\/personal-connections\/([^/]+)(\/oauth)?$/);
+      const appMatch=url.pathname.match(/^\/api\/personal-connections\/([^/]+)(\/oauth|\/attention)?$/);
       if(appMatch){
         if(state.personalAppMutationGate)await state.personalAppMutationGate;
         if(state.personalAppMutationError)return json({detail:'Try again'},502);
         const row=state.personalApps.find(item=>item.provider===appMatch[1]);
         if(!row)return json({detail:'Not found'},404);
+        if(req.method==='PATCH'&&appMatch[2]==='/attention'){
+          if(body.revision!==row.revision)return json({detail:'Connection changed'},409);
+          Object.assign(row,{revision:row.revision+1,use_proactively:body.use_proactively,attention_status:body.use_proactively?'pending':'disabled'});
+          return json({revision:row.revision,use_proactively:row.use_proactively});
+        }
         if(req.method==='DELETE'){Object.assign(row,{connected:false,connection_id:null});return json({connected:false});}
         return json({url:`https://provider.example.test/authorize?provider=${row.provider}`});
       }

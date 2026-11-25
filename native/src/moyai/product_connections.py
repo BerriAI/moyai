@@ -229,7 +229,11 @@ class ProductConnections:
                 identities = list(await transaction.scalars(select(Connection.id).where(
                     Connection.id.in_(candidates),
                     native_connections() if surface == "web" or (surface == "slack" and self.personal_github)
-                    else Connection.kind.in_(["mcp", "litellm"]),
+                    else (
+                        Connection.kind.in_(["mcp", "litellm"])
+                        | (native_connections() & Connection.kind.in_(["gmail", "google_calendar"]))
+                        if surface == "automation" else Connection.kind.in_(["mcp", "litellm"])
+                    ),
                 )))
                 return await self.database.native_grants(
                     transaction, actor_id, identities, shared_session=shared_session, surface=surface,

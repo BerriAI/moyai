@@ -7,7 +7,7 @@ import html
 import json
 import secrets
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
@@ -15,8 +15,8 @@ from app.connector_errors import ConnectorError
 from app.public_url import app_path, cookie_name
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel, ConfigDict, TypeAdapter
-from sqlalchemy import delete, select, update
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -54,7 +54,7 @@ async def connection_owner(
     database: Database, db: AsyncSession, actor_id: str, provider: str, surface: str,
 ) -> str | None:
     """Keep the sender's authority; resolve only a verified credential owner."""
-    if surface == "web":
+    if surface == "web" or (surface == "automation" and provider in {"gmail", "google_calendar"}):
         return actor_id
     if surface != "slack" or provider != "github":
         return None
@@ -103,6 +103,34 @@ class PersonalOAuthView(BaseModel):
     configured: bool
     connected: bool
     connection_id: str | None
+    revision: int = 0
+    use_proactively: bool | None = None
+    attention_status: Literal["disabled", "unavailable", "paused", "pending", "active"] | None = None
+
+
+class PersonalOAuthRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    use_proactively: bool = True
+
+
+class AuthorizationMaterial(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    verifier: str
+    client_id: str
+    use_proactively: bool
+    authorization_revision: int = Field(ge=1)
+
+
+class PersonalAttentionEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=1)
+    use_proactively: bool
+
+
+class PersonalAttentionUpdated(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    revision: int
+    use_proactively: bool
 
 
 class PersonalOAuthStart(BaseModel):
@@ -145,7 +173,9 @@ async def credentials(database: Database, scope: RunScope, grant: Grant) -> dict
         if tokens.get("expires_at") and tokens["expires_at"] < time.time() + 90:
             try:
                 tokens = await exchange(service, provider, tokens["client_id"], previous=tokens)
-            except ConnectorError:
+            except ConnectorError as error:
+                if provider in {"gmail", "google_calendar"} and error.retryable:
+                    raise
                 raise PermissionError("Your personal connection could not be renewed. Reconnect it in Settings.") from None
             saved.encrypted = database.security.seal(tokens)
             saved.revision += 1
@@ -192,16 +222,33 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             rows = {row.kind: row for row in await db.scalars(select(Connection).join(
                 OAuthCredential, OAuthCredential.connection_id == Connection.id,
             ).where(Connection.owner_id == user.id, Connection.shared.is_(False)))}
+            from .google_attention import status
+            attention: dict[str, Literal["unavailable", "paused", "pending", "active"]] = {
+                provider: await status(runtime.product_automations, db, user.id, row.id)
+                for provider, row in rows.items() if provider in {"gmail", "google_calendar"}
+            }
         return [
             PersonalOAuthView(
                 provider=provider, name=name, configured=bool(await client_identity(service(), provider)),
                 connected=bool(rows.get(provider) and rows[provider].enabled),
                 connection_id=rows[provider].id if rows.get(provider) and rows[provider].enabled else None,
+                revision=rows[provider].revision if rows.get(provider) else 0,
+                use_proactively=(
+                    ConnectionPolicy.model_validate_json(rows[provider].policy).use_proactively
+                    if rows.get(provider) else True
+                ) if provider in {"gmail", "google_calendar"} else None,
+                attention_status=(
+                    attention[provider] if rows.get(provider) and rows[provider].enabled
+                    and ConnectionPolicy.model_validate_json(rows[provider].policy).use_proactively else "disabled"
+                ) if provider in {"gmail", "google_calendar"} else None,
             ) for provider, name in PROVIDERS.items()
         ]
 
     @router.post("/api/personal-connections/{provider}/oauth", operation_id="startPersonalConnection")
-    async def start(provider: OAuthProvider, request: Request, user: User = Depends(actor)) -> PersonalOAuthStart:
+    async def start(
+        provider: OAuthProvider, request: Request, body: PersonalOAuthRequest | None = None,
+        user: User = Depends(actor),
+    ) -> PersonalOAuthStart:
         require_individual(request)
         client = await client_identity(service(), provider)
         if not client:
@@ -222,9 +269,16 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             await db.execute(insert(OAuthCredential).values(
                 connection_id=identity, encrypted="", revision=1,
             ).on_conflict_do_nothing(index_elements=["connection_id"]))
-            revision = await db.scalar(update(Connection).where(Connection.id == identity).values(
-                revision=Connection.revision + 1,
-            ).returning(Connection.revision))
+            # Lock the account without revoking working grants while consent is pending.
+            revision = await db.scalar(select(Connection.revision).where(
+                Connection.id == identity,
+            ).with_for_update())
+            authorization_revision = await db.scalar(update(OAuthCredential).where(
+                OAuthCredential.connection_id == identity,
+            ).values(
+                authorization_revision=func.coalesce(OAuthCredential.authorization_revision, 0) + 1,
+            ).returning(OAuthCredential.authorization_revision))
+            assert revision is not None and authorization_revision is not None
             await db.execute(delete(OAuthAuthorization).where(
                 (OAuthAuthorization.expires_at < int(time.time()))
                 | ((OAuthAuthorization.owner_id == user.id) & (OAuthAuthorization.provider == provider)),
@@ -234,7 +288,11 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 session_hash=digest(session), auth_version=user.auth_version,
                 connection_id=identity, connection_revision=revision,
                 expires_at=int(time.time()) + 600,
-                encrypted=security.seal({"verifier": verifier, "client_id": client}),
+                encrypted=security.seal(AuthorizationMaterial(
+                    verifier=verifier, client_id=client,
+                    use_proactively=(body or PersonalOAuthRequest()).use_proactively,
+                    authorization_revision=authorization_revision,
+                ).model_dump()),
             ))
         return PersonalOAuthStart(url=await authorization_url(service(), provider, state, verifier))
 
@@ -272,33 +330,102 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             return result(provider, "expired")
         if error or not code:
             return result(provider, "cancelled")
-        material = json.loads(security.unseal(pending.encrypted))
+        try:
+            material = AuthorizationMaterial.model_validate_json(security.unseal(pending.encrypted))
+        except ValidationError:
+            return result(provider, "expired")
         try:
             tokens = await exchange(
-                service(), provider, material["client_id"], code=code, verifier=material["verifier"],
+                service(), provider, material.client_id, code=code, verifier=material.verifier,
             )
             await current(request, user)
         except ConnectorError:
             return result(provider, "failed")
+        google = provider in {"gmail", "google_calendar"}
+        proactive = google and material.use_proactively
+        if proactive and runtime.product_automations is not None:
+            await database.dots.open(user)
+        sync_id = None
         async with database.sessions.begin() as db:
-            changed = await db.scalar(update(Connection).where(
+            if google and runtime.product_automations is not None:
+                await runtime.product_automations._writer(db)
+            account = await db.scalar(select(Connection).where(
                 Connection.id == pending.connection_id, Connection.owner_id == user.id,
-                Connection.revision == pending.connection_revision, Connection.shared.is_(False),
-            ).values(enabled=True, revision=Connection.revision + 1).returning(Connection.id))
-            if changed is None:
+            ).with_for_update())
+            credential = await db.get(OAuthCredential, pending.connection_id, populate_existing=True)
+            if (
+                account is None or credential is None or account.shared
+                or account.revision != pending.connection_revision
+                or credential.authorization_revision != material.authorization_revision
+            ):
                 return result(provider, "expired")
-            await db.execute(update(OAuthCredential).where(
-                OAuthCredential.connection_id == changed,
-            ).values(encrypted=security.seal(tokens), revision=OAuthCredential.revision + 1))
+            account.enabled = True
+            account.revision += 1
+            if google:
+                from app.connectors import TOOLS
+                account.read_only = True
+                account.policy = ConnectionPolicy(
+                    oauth=True, use_proactively=proactive,
+                    oauth_account=digest(material.client_id + ":" + tokens["subject"]),
+                    allowed_tools=[
+                        name.removeprefix(provider + "_")
+                        for name, spec in TOOLS.items() if spec[0] == provider and not spec[1]
+                    ],
+                ).model_dump_json()
+            credential.encrypted = security.seal(tokens)
+            credential.revision += 1
+            if google and runtime.product_automations is not None:
+                from .google_attention import configure
+                await db.flush()
+                sync_id = await configure(runtime.product_automations, db, request.state.product_identity_grant)
+        if sync_id is not None and runtime.product_automations is not None:
+            await runtime.product_automations.request_sync(sync_id)
         return result(provider, "success")
+
+    @router.patch("/api/personal-connections/{provider}/attention", operation_id="updatePersonalConnectionAttention")
+    async def attention(
+        provider: OAuthProvider, body: PersonalAttentionEdit, request: Request, user: User = Depends(actor),
+    ) -> PersonalAttentionUpdated:
+        require_individual(request)
+        if provider not in {"gmail", "google_calendar"}:
+            raise HTTPException(422, "Automatic proactive enrollment is supported for Google accounts.")
+        await current(request, user)
+        if body.use_proactively and runtime.product_automations is not None:
+            await database.dots.open(user)
+        sync_id = None
+        async with database.sessions.begin() as db:
+            if runtime.product_automations is not None:
+                await runtime.product_automations._writer(db)
+            account = await db.scalar(select(Connection).where(
+                Connection.id == connection_id(user.id, provider), Connection.owner_id == user.id,
+                Connection.shared.is_(False), Connection.enabled.is_(True),
+            ).with_for_update())
+            if account is None or account.revision != body.revision:
+                raise HTTPException(409, "The connection changed. Refresh and try again.")
+            policy = ConnectionPolicy.model_validate_json(account.policy)
+            policy.use_proactively = body.use_proactively
+            account.policy = policy.model_dump_json()
+            account.revision += 1
+            revision = account.revision
+            await db.flush()
+            if runtime.product_automations is not None:
+                from .google_attention import configure
+                sync_id = await configure(runtime.product_automations, db, request.state.product_identity_grant)
+        if sync_id is not None and runtime.product_automations is not None:
+            await runtime.product_automations.request_sync(sync_id)
+        return PersonalAttentionUpdated(revision=revision, use_proactively=body.use_proactively)
 
     @router.delete("/api/personal-connections/{provider}", operation_id="disconnectPersonalConnection")
     async def disconnect(
         provider: OAuthProvider, request: Request, user: User = Depends(actor),
     ) -> PersonalOAuthDisconnected:
         require_individual(request)
+        await current(request, user)
         identity = connection_id(user.id, provider)
+        sync_id = None
         async with database.sessions.begin() as db:
+            if provider in {"gmail", "google_calendar"} and runtime.product_automations is not None:
+                await runtime.product_automations._writer(db)
             await db.execute(update(Connection).where(
                 Connection.id == identity, Connection.owner_id == user.id,
             ).values(enabled=False, revision=Connection.revision + 1))
@@ -308,6 +435,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             await db.execute(delete(OAuthAuthorization).where(
                 OAuthAuthorization.owner_id == user.id, OAuthAuthorization.provider == provider,
             ))
+            if provider in {"gmail", "google_calendar"} and runtime.product_automations is not None:
+                from .google_attention import configure
+                await db.flush()
+                sync_id = await configure(runtime.product_automations, db, request.state.product_identity_grant)
+        if sync_id is not None and runtime.product_automations is not None:
+            await runtime.product_automations.request_sync(sync_id)
         return PersonalOAuthDisconnected()
 
     return router

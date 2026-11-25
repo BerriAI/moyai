@@ -24,7 +24,7 @@ with workflow.unsafe.imports_passed_through():
     from app.connector_errors import ConnectorError
     from app.repository_identity import repository_origin, repository_provider
     from fastapi import APIRouter, HTTPException, Query, Request
-    from pydantic import BaseModel, ConfigDict, Field, field_validator
+    from pydantic import BaseModel, ConfigDict, Field, Json, ValidationError, field_validator
     from sqlalchemy import select, text
     from sqlalchemy.ext.asyncio import AsyncSession
     from temporalio.client import Client
@@ -35,7 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from ..contracts import RunScope
     from ..models import Effect, Session, Turn, User, now
     from ..product_config import CORE_IDENTITY
-    from ..product_identity import ProductGrant
+    from ..product_identity import ProductGrant, ProductPrincipal
     from .product_automation_context_models import ProductAutomationExecutionContext as ExecutionContext
     from .product_automation_models import (
         ProductAutomationBinding as Binding,
@@ -54,6 +54,8 @@ OLD_TERMINAL = ("idle", "completed", "failed", "cancelled", "interrupted")
 AUTOMATION_ID = r"^[0-9a-f]{32}$"
 REQUEST_KEY = r"^[A-Za-z0-9_-]{8,80}$"
 Action = Literal["create", "update", "migrate", "enable", "pause", "retire"]
+BindingState = Literal["active", "paused", "deleted"]
+EMPTY_ATTENTION_PAUSE = "google_empty_pause_generation"
 AUTOMATION_MUTATIONS = frozenset({
     f"automation_{action}" for action in (
         "create", "update", "migrate", "enable", "pause", "retire", "grant", "self_update", "claim_item", "webhook_setup",
@@ -89,6 +91,14 @@ class Save(Mutation):
 
 class Migration(Mutation):
     activate: bool = False
+
+
+class AttentionRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    id: str
+    owner_id: str
+    revision: int
+    definition: Json[Definition]
 
 
 # Response models. The generated frontend client is built from these; every
@@ -1038,6 +1048,158 @@ class ProductAutomationService:
             await self.check_tool_caller(scope, scope.turn_id, grant)
         return Definition.model_validate(definition.model_dump()), required
 
+    async def _store_definition(
+        self, db: AsyncSession, identity: str, owner: str, definition: Definition,
+        previous_revision: int | None,
+    ) -> int:
+        revision = 1 if previous_revision is None else previous_revision + 1
+        values = {
+            "id": identity, "owner": owner, "definition": definition.model_dump_json(),
+            "revision": revision, "stamp": now(),
+        }
+        if previous_revision is None:
+            await db.execute(text(
+                f"INSERT INTO {self._table('automations')} "
+                "(id,owner_id,definition,revision,paused,synced_revision,synced_schedule_version,"
+                "sync_error,created_at,updated_at) VALUES (:id,:owner,:definition,1,1,0,0,'',:stamp,:stamp)"
+            ), values)
+        else:
+            await db.execute(text(
+                f"UPDATE {self._table('automations')} SET definition=:definition,paused=1,"
+                "revision=:revision,updated_at=:stamp,sync_error='' WHERE id=:id AND owner_id=:owner"
+            ), values)
+        return revision
+
+    async def _transition_binding(
+        self, db: AsyncSession, binding: Binding, definition: Definition, principal: ProductPrincipal,
+        revision: int, state: BindingState, *, capture: bool, revive: bool = False,
+        invalid_context: Literal["raise", "pause"] = "raise",
+    ) -> None:
+        if binding.state == "deleted" and state != "deleted" and not revive:
+            raise HTTPException(409, "Explicitly migrate this retired binding before enabling it again.")
+        previous_generation = binding.generation or 0
+        binding.generation = previous_generation + 1
+        binding.source_revision = revision
+        binding.definition_digest = definition_digest(definition)
+        binding.state = state
+        binding.sync_state, binding.last_error, binding.updated_at = "pending", "", now()
+        try:
+            if capture and definition.kind == "attention":
+                if definition.session_id is None:
+                    raise HTTPException(409, "The Dot conversation is unavailable.")
+                await self.database.dots.own_session(db, principal.id, definition.session_id)
+            await self._capture_context(
+                db, binding, definition, principal, capture=capture, previous_generation=previous_generation,
+            )
+        except HTTPException as error:
+            if invalid_context != "pause" or error.status_code not in {403, 404, 409}:
+                raise
+            binding.state = "paused"
+            binding.last_error = "Review your Dot conversation and selected accounts before resuming attention."
+            await self._capture_context(
+                db, binding, definition, principal, capture=False, previous_generation=previous_generation,
+            )
+        if self.events is not None:
+            await self.events.capture_activation(db, binding, definition)
+
+    async def attention_records(self, db: AsyncSession, owner: str) -> tuple[AttentionRecord, ...]:
+        rows = (await db.execute(text(
+            f"SELECT id,owner_id,revision,definition FROM {self._table('automations')} WHERE owner_id=:owner"
+        ), {"owner": owner})).mappings()
+        records = tuple(AttentionRecord.model_validate(row) for row in rows)
+        return tuple(record for record in records if record.definition.attention_mode == "discovery")
+
+    async def reconcile_attention_accounts(
+        self, db: AsyncSession, grant: ProductGrant, *, managed: frozenset[str],
+        selected: frozenset[str], initial: Definition | None,
+    ) -> str | None:
+        """Apply consent in its transaction, preserving retirement and durable sync intent."""
+        await self._writer(db)
+        principal = await self.identity.authorize_admission(db, grant)
+        if not principal.individual:
+            raise HTTPException(403, "Proactive accounts require an individual sign-in.")
+        records = await self.attention_records(db, principal.id)
+        live: list[tuple[AttentionRecord, Binding | None]] = []
+        for record in records:
+            candidate = await db.get(Binding, record.id)
+            if candidate is None or candidate.state != "deleted":
+                live.append((record, candidate))
+        if not live and (records or not selected):
+            return None  # Retiring attention remains an explicit owner decision.
+        if len(live) > 1:
+            # Fence every conflicting schedule without rolling back account revocation.
+            for record, candidate in live:
+                if candidate is not None:
+                    await self._transition_binding(
+                        db, candidate, record.definition, principal, record.revision, "paused", capture=False,
+                    )
+                    candidate.last_error = "Review duplicate Dot attention checks before resuming."
+            return live[0][0].id
+        record, binding = live[0] if live else (None, None)
+        if record is None:
+            if initial is None:
+                return None
+            definition = self.normalize_definition(initial)
+            identity = uuid4().hex
+        else:
+            identity = record.id
+            definition = Definition.model_validate({
+                **record.definition.model_dump(),
+                "session_id": initial.session_id if initial is not None else record.definition.session_id,
+            })
+        capacity_error = False
+        wanted = (set(definition.connection_ids) - managed) | selected
+        try:
+            definition = Definition.model_validate({
+                **definition.model_dump(), "connection_ids": sorted(wanted),
+                "attention_sources": [
+                    source.model_dump() for source in definition.attention_sources
+                    if source.connection_id in wanted
+                ],
+            })
+        except ValidationError:
+            # Remove revoked accounts even if newly opted-in accounts exceed capacity.
+            # The owner can choose a valid subset before resuming.
+            retained = set(definition.connection_ids) - (managed - selected)
+            definition = Definition.model_validate({
+                **definition.model_dump(), "connection_ids": sorted(retained),
+                "attention_sources": [
+                    source.model_dump() for source in definition.attention_sources
+                    if source.connection_id in retained
+                ],
+            })
+            capacity_error = True
+        is_new = record is None
+        previous_generation = (binding.generation or 0) if binding else 0
+        was_active = (
+            is_new or (binding is not None and binding.state == "active")
+            or definition.metadata.get(EMPTY_ATTENTION_PAUSE) == str(previous_generation)
+        )
+        definition.metadata.pop(EMPTY_ATTENTION_PAUSE, None)
+        if was_active and not definition.connection_ids:
+            definition.metadata[EMPTY_ATTENTION_PAUSE] = str(previous_generation + 1)
+        await self._single_discovery(db, principal.id, identity, definition)
+        revision = await self._store_definition(
+            db, identity, principal.id, definition, record.revision if record else None,
+        )
+        if binding is None and not is_new:
+            return None  # A prepared definition still needs explicit activation.
+        if binding is None:
+            binding = Binding(
+                id=identity, owner_id=principal.id, authority_version=grant.authority_version,
+                source_revision=revision, generation=0, definition_digest=definition_digest(definition),
+            )
+            db.add(binding)
+        binding.authority_version = grant.authority_version
+        active = was_active and bool(definition.connection_ids) and not capacity_error
+        await self._transition_binding(
+            db, binding, definition, principal, revision, "active" if active else "paused",
+            capture=active, invalid_context="pause",
+        )
+        if capacity_error:
+            binding.last_error = "Choose at most four attention accounts before resuming."
+        return identity
+
     async def mutate(
         self, grant: ProductGrant, action: Action, identity: str | None, body: Mutation,
         *, operation_scope: str = "http", scope: RunScope | None = None, effect: str | None = None,
@@ -1093,12 +1255,7 @@ class ProductAutomationService:
                         self._attention_edit(scope, definition)
                     if definition.visibility == "private" and not principal.individual:
                         raise HTTPException(403, "Private automations require an individual account.")
-                    stamp = now()
-                    await db.execute(text(
-                        f"INSERT INTO {self._table('automations')} "
-                        "(id,owner_id,definition,revision,paused,synced_revision,synced_schedule_version,"
-                        "sync_error,created_at,updated_at) VALUES (:id,:owner,:definition,1,1,0,0,'',:stamp,:stamp)"
-                    ), {"id": identity, "owner": principal.id, "definition": definition.model_dump_json(), "stamp": stamp})
+                    await self._store_definition(db, identity, principal.id, definition, None)
                     row = await self._row(db, identity)
                 else:
                     if identity is None:
@@ -1154,30 +1311,22 @@ class ProductAutomationService:
                     await self._single_discovery(db, principal.id, identity, definition)
                 revision = row["revision"] + (action != "create")
                 if action != "create":
-                    await db.execute(text(
-                        f"UPDATE {self._table('automations')} SET definition=:definition,paused=1,"
-                        "revision=:revision,updated_at=:stamp,sync_error='' WHERE id=:id"
-                    ), {"definition": definition.model_dump_json(), "revision": revision, "stamp": now(), "id": identity})
+                    revision = await self._store_definition(
+                        db, identity, row["owner_id"], definition, row["revision"],
+                    )
                 if binding is not None:
                     if binding.owner_id != row["owner_id"]:
                         raise HTTPException(409, "The migration binding owner changed.")
-                    previous_generation = binding.generation or 0
-                    binding.generation = previous_generation + 1
-                    binding.source_revision = revision
-                    binding.definition_digest = definition_digest(definition)
-                    binding.state = (
+                    state: BindingState = (
                         "active" if action == "enable" or (action == "migrate" and isinstance(body, Migration) and body.activate)
                         else "deleted" if action == "retire" or (
                             binding.state == "deleted" and action in {"pause", "update"}
                         ) else "paused"
                     )
-                    binding.sync_state, binding.last_error, binding.updated_at = "pending", "", now()
-                    await self._capture_context(
-                        db, binding, definition, principal,
-                        capture=action in {"migrate", "enable"}, previous_generation=previous_generation,
+                    await self._transition_binding(
+                        db, binding, definition, principal, revision, state,
+                        capture=action in {"migrate", "enable"}, revive=action == "migrate",
                     )
-                    if self.events is not None:
-                        await self.events.capture_activation(db, binding, definition)
                     touched_binding = True
                 elif action == "retire":
                     raise HTTPException(409, "This automation has no native migration to retire.")

@@ -177,14 +177,14 @@ class Definition(BaseModel):
     def distinct_triggers(self):
         if self.attention_sources and (
             self.attention_mode != 'discovery'
-            or {source.connection_id for source in self.attention_sources} != set(self.connection_ids)
+            or not {source.connection_id for source in self.attention_sources}.issubset(set(self.connection_ids))
         ):
-            raise ValueError('Restricted discovery needs an approved repository for every selected account.')
+            raise ValueError('Restricted discovery sources must belong to selected accounts.')
         if self.attention_mode == 'discovery' and (
-            self.kind != 'attention' or len(self.connection_ids) > 2 or len(self.prompt) > 2000
+            self.kind != 'attention' or len(self.connection_ids) > 4 or len(self.prompt) > 2000
             or len(self.triggers) != 1
         ):
-            raise ValueError('Discovery requires one attention schedule, up to two approved accounts, and scan instructions of at most 2000 characters.')
+            raise ValueError('Discovery requires one attention schedule, up to four approved accounts, and scan instructions of at most 2000 characters.')
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
         if self.visibility == 'private' and any(t.event for t in self.triggers):
