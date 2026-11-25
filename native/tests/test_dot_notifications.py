@@ -376,6 +376,36 @@ async def test_unconfirmed_root_has_a_bounded_confirmation_window(dot, kind):
         assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
 
 
+async def test_reconciliation_cannot_make_an_old_send_plausible(dot):
+    await enable(dot)
+    delivery = await publish(dot)
+    old = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status, row.created_at, row.claimed_at = "sending", old, old
+    async def absent(*args, **kwargs):
+        return {"ok": True, "messages": []}
+    dot.service.connectors.request = absent
+    sender, _ = await dot.service.actor("TLOCAL001", "UACTUAL01")
+    stamp = datetime.now(UTC).timestamp()
+    origin = {
+        "team_id": "TLOCAL001", "channel_id": "DLOCAL001",
+        "thread_ts": f"{stamp:.6f}", "message_ts": f"{stamp + 1:.6f}",
+    }
+    assert not await recover_root(dot.service, sender, origin)
+    async with httpx.AsyncClient(
+        base_url="https://slack.example/",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True, "messages": []})),
+    ) as client:
+        await reconcile_one(dot.service.runtime, client, delivery)
+    async with dot.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).claimed_at == old
+    assert not await recover_root(dot.service, sender, origin)
+    with pytest.raises(HTTPException) as rejected:
+        await new_direct_message(dot.service, sender, origin, "Unrelated reply")
+    assert rejected.value.status_code == 403
+
+
 async def test_early_reply_recovers_once_from_exact_parent_even_after_pause(dot, receiver):
     settings = await enable(dot)
     delivery = await publish(dot)

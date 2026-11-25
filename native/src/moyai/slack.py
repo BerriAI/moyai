@@ -335,13 +335,19 @@ async def reconcile_one(
     runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery, *,
     headers: dict[str, str] | None = None, root_ts: str | None = None,
 ) -> None:
+    from .dot_notifications import is_dot_delivery
+    dot = is_dot_delivery(delivery)
     async with runtime.database.sessions.begin() as db:
-        # Ownership stays "sending": this timestamp only throttles read checks.
+        # Product Dot reconciliation is throttled by DeliverySchedule. Keep its
+        # original send claim: early-root admission uses it as dispatch evidence.
+        # Standalone delivery retains its existing timestamp-based read throttle.
         cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
         query = update(Delivery).where(Delivery.id == delivery.id, Delivery.status == "sending")
         if root_ts is None:
             query = query.where(Delivery.claimed_at < cutoff)
-        claimed = await db.scalar(query.values(claimed_at=now()).returning(Delivery.id))
+        claimed = await db.scalar(query.values(
+            claimed_at=Delivery.claimed_at if dot else now(),
+        ).returning(Delivery.id))
     if claimed is None:
         return
     destination = json.loads(delivery.destination)
@@ -355,9 +361,7 @@ async def reconcile_one(
     body = response.json()
     if not body.get("ok"):
         return
-    from .dot_notifications import is_dot_delivery
     product = getattr(runtime, "product_slack", None)
-    dot = is_dot_delivery(delivery)
     expected_bot = None
     if dot:
         if product is None:

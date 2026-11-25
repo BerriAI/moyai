@@ -58,6 +58,8 @@ uncertain-send reconciliation own retries.
 A successful post and a reconciled post use the same transaction to save the
 receipt and bind the Slack root. Reconciliation requires the exact expected bot
 and delivery metadata. Missing or ambiguous history never causes a repost.
+Dot reconciliation uses the existing `DeliverySchedule` for read throttling and
+preserves the original dispatch claim timestamp.
 
 An early thread reply can recover its exact root with one bounded history read.
 Only a recent parent that plausibly belongs to an in-flight send can defer in
@@ -70,3 +72,59 @@ conversation.
 The settings endpoint reports unavailable configuration, a stale identity,
 pending delivery, uncertain delivery, rejection, and suppression distinctly.
 Quiet or duplicate discovery results produce no outgoing message.
+
+## Operator recovery after an account reassignment
+
+A DM reserved for an old owner deliberately returns 409 when a newly verified
+owner tries to opt in. Reassignment does not transfer private Moyai history.
+Recovery requires an authorized operator:
+
+1. Confirm the legitimate reassignment in the workspace's identity system.
+   Have the new owner sign in and use normal notification opt-in; its verified
+   account lookup must reach the specific “already connected to another Dot”
+   conflict. Do not release a pin merely from a claimed email or Slack ID.
+2. Use the existing maintenance/drain procedure to stop Slack admission and
+   delivery workers, and wait for in-flight sends to finish. Record the exact
+   old owner ID, DM destination key, preference revision, and configured native
+   schema. Do not print or decrypt recipient credentials.
+3. In that native schema, lock and conditionally release only the old preference.
+   The following is a `psql` template using explicitly supplied variables:
+
+   ```sql
+   BEGIN;
+   SELECT owner_id, session_id, revision, destination_key
+   FROM :"native_schema".moyai_dot_slack_preferences
+   WHERE owner_id = :'old_owner_id'
+     AND destination_key = :'destination_key'
+   FOR UPDATE;
+
+   UPDATE :"native_schema".moyai_dot_slack_preferences
+   SET enabled = false, recipient = NULL, destination_key = NULL,
+       revision = revision + 1, updated_at = CURRENT_TIMESTAMP::text
+   WHERE owner_id = :'old_owner_id'
+     AND destination_key = :'destination_key'
+     AND revision = :'observed_revision'::integer;
+   -- Require exactly UPDATE 1. Otherwise ROLLBACK and investigate.
+
+   UPDATE :"native_schema".moyai_deliveries
+   SET status = 'suppressed'
+   WHERE status = 'pending'
+     AND identity = 'product-slack:' || turn_id || ':dot'
+     AND session_id IN (
+       SELECT c.session_id
+       FROM :"native_schema".moyai_dot_slack_conversations c
+       JOIN :"native_schema".moyai_dot_slack_preferences p
+         ON p.session_id = c.dot_session_id
+       WHERE p.owner_id = :'old_owner_id'
+     );
+   COMMIT;
+   ```
+
+   Preserve every session, conversation relation, Slack thread binding, and
+   receipt. Leave `sending` rows claimed; never reset an uncertain send to
+   `pending`. Record the recovery in the operator's normal audit log.
+4. Resume workers. Have the new owner opt in again through the normal API/UI,
+   which freshly verifies the account and records new consent. A new DM must
+   create a new private conversation for that owner. Old Slack thread replies
+   must remain rejected, and old Moyai conversations must remain owned by the
+   original owner.
