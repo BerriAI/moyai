@@ -6,7 +6,7 @@ deployment workflows, gates and runbooks live in a private repository.
 ## Native runtime
 
 The native workflow runs lint, type checking and package builds in one job and
-the full pytest collection in four isolated test jobs. Each test job has its own
+the full pytest collection in eight isolated test jobs. Each test job has its own
 PostgreSQL service. `pytest-split` assigns every collected test to one group;
 `least_duration` balances estimated work using the checked-in
 `native/.test_durations` file. New tests receive the mean recorded duration, so
@@ -25,11 +25,11 @@ uv sync --frozen
 uv run pytest -q --tb=short
 ```
 
-Reproduce one CI shard by choosing a group from 1 through 4:
+Reproduce one CI shard by choosing a group from 1 through 8:
 
 ```sh
 uv run pytest -x -q --tb=short --durations=20 \
-  --splits 4 --group 1 --splitting-algorithm least_duration \
+  --splits 8 --group 1 --splitting-algorithm least_duration \
   --durations-path .test_durations
 ```
 
@@ -38,7 +38,7 @@ include database qualification, as CI does. Add `--collect-only` to inspect the
 assignment without running tests. The workflow retains per-shard JUnit artifacts
 and prints the slowest tests to help evaluate balance from actual runner timings.
 
-To refresh the timing file, download all four `native-tests-*` artifacts from one
+To refresh the timing file, download all eight `native-tests-*` artifacts from one
 successful **Native Pydantic runtime** run. From the repository root, run:
 
 ```sh
@@ -48,8 +48,9 @@ python scripts/update_test_durations.py /tmp/native-test-results/native-tests-*/
 
 Replace `RUN_ID` with that run's numeric ID and use an empty download directory.
 The command reports the number of timings written. Commit the updated timing
-file so every shard uses the same data. The initial timings come from public CI
-run `39077937833`; they are scheduling estimates, not performance thresholds.
+file so every shard uses the same data. The checked-in timings were refreshed
+from all six shards of public CI run `45544458484`; they are scheduling estimates,
+not performance thresholds.
 
 ## Docker startup
 

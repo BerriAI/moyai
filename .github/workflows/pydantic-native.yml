@@ -46,17 +46,17 @@ jobs:
         run: sh -n ../deploy/docker/moyai.sh
       - run: uv build
   tests:
-    name: Native tests (${{ matrix.shard }}/6)
+    name: Native tests (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     # Each shard has its own runner and Postgres service. Keep the cold-run
     # allowance while measuring shard balance with durations and JUnit reports.
-    # Four shards now reach the limit while still passing tests; six retain
-    # the full suite and leave room for cold runners without raising timeouts.
+    # Six shards reach the limit while still passing tests. Eight retain the
+    # full suite and leave room for cold runners without raising timeouts.
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
       postgres:
         image: postgres:18-alpine
@@ -91,7 +91,7 @@ jobs:
       # other shards keep running to preserve independent diagnostic coverage.
       - run: >-
           uv run pytest -x -q --tb=short --durations=20
-          --splits 6 --group "$SHARD" --splitting-algorithm least_duration
+          --splits 8 --group "$SHARD" --splitting-algorithm least_duration
           --durations-path .test_durations
           --junitxml="test-results/native-${SHARD}.xml"
       - name: Save shard results
