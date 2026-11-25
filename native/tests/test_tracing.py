@@ -307,6 +307,7 @@ async def test_tool_content_and_diagnostics_follow_flag(monkeypatch, include_con
         if failure:
             raise failure(detail)
         return {"text": "Authentication guide found", "api_key": "unconfigured-sensitive-result",
+                "clientSecret": "unconfigured-camelcase-secret",
                 "gateway": "synthetic-gateway-key", "token_count": 4}
 
     def respond(messages, info):
@@ -357,6 +358,7 @@ async def test_tool_content_and_diagnostics_follow_flag(monkeypatch, include_con
             assert "Authentication guide found" not in payload
         for excluded in (
             "synthetic-gateway-key", "synthetic-export-key", "unconfigured-sensitive-value",
+            "unconfigured-camelcase-secret",
             "unconfigured-sensitive-result", "unconfigured-bearer-value", "private-system-instruction",
         ):
             assert excluded not in payload

@@ -26,6 +26,8 @@ def test_structured_credentials_are_redacted_without_removing_neighboring_diagno
     "Request failed: https://example.com/?token=private-value&error=missing_scope",
     "Request failed: postgresql://user:private-value@localhost/db missing_scope",
     "Request failed: data:image/png;base64,private-value missing_scope",
+    "Request failed: clientSecret=private-value missing_scope",
+    "Request failed: secret_key=private-value missing_scope",
 ])
 def test_inline_credentials_leave_error_context_readable(text):
     cleaned = redact_content(text, [])
@@ -39,3 +41,11 @@ def test_configured_secret_with_json_escaping_is_redacted():
     secret = 'private-"quoted"-credential'
     source = json.dumps({"result": f"Request rejected: {secret}"})
     assert json.loads(redact_content(source, [secret]))["result"] == "Request rejected: [redacted]"
+
+
+@pytest.mark.parametrize("field", ["accessToken", "clientSecret", "apiKey", "privateKey", "secretKey"])
+def test_camelcase_credentials_are_redacted_without_erasing_diagnostics(field):
+    source = {field: "private-value", "tokenCount": 4, "message": "authentication failed"}
+    assert redact_content(source, []) == {
+        field: "[redacted]", "tokenCount": 4, "message": "authentication failed",
+    }

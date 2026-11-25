@@ -9,11 +9,11 @@ from typing import Any
 
 _CREDENTIAL_FIELD = re.compile(
     r"(?i)(?:^|[_. -])(?:password|passwd|secret|token|api[_. -]?key|"
-    r"private[_. -]?key|authorization|cookie|credentials?)$"
+    r"(?:private|secret)[_. -]?key|authorization|cookie|credentials?)$"
 )
 _CREDENTIAL_VALUE = re.compile(
     r"""(?ix)
-    (\b(?:authorization|api[_-]?key|(?:access[_-]?|refresh[_-]?)?token|password|secret)
+    (\b(?:authorization|api[_-]?key|(?:access[_-]?|refresh[_-]?)?token|password|(?:client[_-]?)?secret|secret[_-]?key)
     \s*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:Bearer\s+|Basic\s+)?[^"'\s,;&}]+)
     """
 )
@@ -24,7 +24,8 @@ _DATA_URL = re.compile(r"data:[^\s\"']+")
 
 
 def sensitive_field(name: str) -> bool:
-    return bool(_CREDENTIAL_FIELD.search(name))
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+    return bool(_CREDENTIAL_FIELD.search(separated))
 
 
 def redact_content(value: Any, secrets: list[str]) -> Any:
