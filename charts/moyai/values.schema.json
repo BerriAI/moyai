@@ -83,6 +83,48 @@
     "brokerUrl": {
       "type": "string",
       "pattern": "^$|^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9_-]+)*/?$"
+    },
+    "kubernetesWorkspaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "warmPool": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"
+        },
+        "template": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"
+        },
+        "routerNamespace": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "routerUrl": {
+          "type": "string",
+          "pattern": "^$|^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$"
+        },
+        "routerAudience": {
+          "type": "string",
+          "minLength": 1
+        },
+        "routerPodLabels": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
     }
   },
   "required": [

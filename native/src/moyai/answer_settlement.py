@@ -97,7 +97,9 @@ class ProviderSnapshots:
             await vm.running()
             identity, _ = await vm.checkpoint()
             return identity
-        return await ModalSnapshots().capture(reference, require_live=require_live)
+        if reference.provider == "modal":
+            return await ModalSnapshots().capture(reference, require_live=require_live)
+        raise preparation_blocked("workspace_snapshot_unsupported")
 
 
 class AnswerSettlement:
@@ -111,7 +113,7 @@ class AnswerSettlement:
             return
         ref = TypeAdapter(WorkspaceRef).validate_python(reference)
         if ref.provider not in {"modal", "lambda"}:
-            # Local workspaces are used only by deterministic supplementary tests.
+            # A Kubernetes session retains its bound workspace volume across turns.
             await self.settle(turn_id)
             return
         try:

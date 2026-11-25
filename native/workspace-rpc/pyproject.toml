@@ -1,0 +1,9 @@
+[project]
+name = "workspace-rpc"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["k8s-agent-sandbox[grpc]==1.0.12"]
+
+# The RPC stubs and the existing workspace providers need different protobuf majors.
+[tool.uv.workspace]
+members = []

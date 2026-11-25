@@ -1,0 +1,50 @@
+# Operator-owned resources. Replace the example image and storage settings
+# with a reviewed build of sandboxd v1.0.12 containing /bin/sh and python3.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: session-runtime
+  namespace: session-workspaces
+spec:
+  networkPolicyManagement: Unmanaged
+  envVarsInjectionPolicy: Allowed
+  volumeClaimTemplatesPolicy: Disallowed
+  podTemplate:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: workspace
+          image: registry.example.invalid/workspace-runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          workingDir: /workspace
+          args: ["--root-dir=/workspace", "--auth-token-sha256=$(WORKSPACE_TOKEN_DIGEST)"]
+          ports: [{name: grpc, containerPort: 9090}]
+          readinessProbe:
+            httpGet: {path: /v1/health, port: 8080}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 256Mi}
+            limits: {cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi}
+          volumeMounts: [{name: workspace, mountPath: /workspace}]
+  volumeClaimTemplates:
+    - metadata: {name: workspace}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 4Gi}}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: session-pool
+  namespace: session-workspaces
+spec:
+  replicas: 0
+  sandboxTemplateRef: {name: session-runtime}

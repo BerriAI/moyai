@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 import secrets
 import tempfile
 from functools import cached_property
@@ -93,7 +94,17 @@ class Settings(BaseSettings):
         default="vm",
         validation_alias=AliasChoices("MOYAI_MODAL_RUNTIME", "MODAL_FUNCTION_RUNTIME"),
     )
-    sandbox_provider: Literal["modal", "lambda"] = Field(default="modal", validation_alias="SANDBOX_PROVIDER")
+    sandbox_provider: Literal["modal", "lambda", "kubernetes"] = Field(
+        default="modal", validation_alias="SANDBOX_PROVIDER",
+    )
+    sandbox_installation_id: str = Field(default="", validation_alias="MOYAI_INSTALLATION_ID")
+    sandbox_namespace: str = Field(default="", validation_alias="SANDBOX_NAMESPACE")
+    sandbox_warm_pool: str = Field(default="", validation_alias="SANDBOX_WARM_POOL")
+    sandbox_template: str = Field(default="", validation_alias="SANDBOX_TEMPLATE")
+    sandbox_router_url: str = Field(default="", validation_alias="SANDBOX_ROUTER_URL")
+    sandbox_router_token: SecretStr = Field(default=SecretStr(""), validation_alias="SANDBOX_ROUTER_TOKEN")
+    sandbox_router_token_file: str = Field(default="", validation_alias="SANDBOX_ROUTER_TOKEN_FILE")
+    sandbox_rpc_python: str = Field(default="/opt/workspace-rpc/bin/python", validation_alias="SANDBOX_RPC_PYTHON")
     lambda_region: str = Field(default="us-east-1", validation_alias="LAMBDA_REGION")
     lambda_profile: str = Field(default="", validation_alias="LAMBDA_PROFILE")
     lambda_image: str = Field(default="", validation_alias="LAMBDA_IMAGE")
@@ -235,7 +246,44 @@ class Settings(BaseSettings):
             raise ValueError("Invalid local master key.")
         return value
 
+    def validate_kubernetes_workspace(self) -> None:
+        if not re.fullmatch(r"[a-z][a-z0-9]{0,7}", self.sandbox_installation_id):
+            raise ValueError("Set a stable MOYAI_INSTALLATION_ID for Kubernetes workspaces.")
+        label = r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?"
+        if not re.fullmatch(label, self.sandbox_namespace):
+            raise ValueError("SANDBOX_NAMESPACE must be a Kubernetes namespace name.")
+        for key, name in (("SANDBOX_WARM_POOL", self.sandbox_warm_pool), ("SANDBOX_TEMPLATE", self.sandbox_template)):
+            if len(name) > 253 or not all(re.fullmatch(label, part) for part in name.split(".")):
+                raise ValueError(f"{key} must be a Kubernetes resource name.")
+        try:
+            url = urlsplit(self.sandbox_router_url)
+            valid = (
+                url.scheme == "https" and bool(url.hostname) and url.port != 0
+                and url.username is None and url.password is None and url.path in {"", "/"}
+                and "?" not in self.sandbox_router_url and "#" not in self.sandbox_router_url
+                and "\\" not in self.sandbox_router_url
+                and not any(ord(c) <= 32 or ord(c) == 127 for c in self.sandbox_router_url)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("SANDBOX_ROUTER_URL must be an HTTPS origin without a path or credentials.")
+        if bool(self.sandbox_router_token.get_secret_value()) == bool(self.sandbox_router_token_file):
+            raise ValueError("Configure exactly one of SANDBOX_ROUTER_TOKEN and SANDBOX_ROUTER_TOKEN_FILE.")
+        if self.sandbox_router_token_file and not Path(self.sandbox_router_token_file).is_absolute():
+            raise ValueError("SANDBOX_ROUTER_TOKEN_FILE must be an absolute path.")
+
+    def read_sandbox_router_token(self) -> str:
+        # A projected token rotates while a worker is running.
+        token = (Path(self.sandbox_router_token_file).read_text().strip()
+                 if self.sandbox_router_token_file else self.sandbox_router_token.get_secret_value())
+        if not token or not token.isascii() or any(ord(c) <= 32 or ord(c) == 127 for c in token):
+            raise ValueError("The workspace router credential is missing or invalid.")
+        return token
+
     def validate_worker(self, *, brokered: bool = False) -> None:
+        if self.sandbox_provider == "kubernetes":
+            self.validate_kubernetes_workspace()
         if self.sandbox_provider == "lambda" and not all((
             self.lambda_region, self.lambda_image, self.lambda_image_version, self.lambda_checkpoint_bucket,
         )):

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 
 from .inference_usage import InferenceUsage
-from .models import ComputerOperation, Effect, Turn, now
+from .models import ComputerOperation, Effect, Session, Turn, now
 from .product_drain_models import ProductDrainReceipt, ProductDrainState, ProductDrainWorker
 from .product_inference import ProductInferenceRequest
 from .product_role_authority import ProductRoleAuthority
@@ -262,6 +262,14 @@ class ProductDrainService:
         db: AsyncSession, turn_id: str, generation: int, *, workflow_id: str,
         workflow_run_id: str, boundary: str, phase: str,
     ) -> None:
+        if phase == "parked":
+            # Pre-preparation and deferred waits also count toward release safety.
+            # A retained Kubernetes volume has no verified maintenance capture.
+            workspace = await db.scalar(select(Session.workspace).join(
+                Turn, Turn.session_id == Session.id,
+            ).where(Turn.id == turn_id))
+            if workspace and json.loads(workspace).get("provider") == "kubernetes":
+                phase = "blocked"
         values = {
             "workflow_id": workflow_id, "workflow_run_id": workflow_run_id,
             "boundary": boundary, "phase": phase,

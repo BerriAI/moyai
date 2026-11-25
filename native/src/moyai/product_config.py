@@ -54,6 +54,8 @@ def _source_settings(environment: Mapping[str, str]) -> SourceSettings:
     from app.config import Settings as LegacySettings
 
     snapshot = {key.lower(): value for key, value in environment.items()}
+    if snapshot.get("sandbox_provider") == "kubernetes":
+        snapshot.setdefault("moyai_core", select_core(environment))
 
     class SnapshotSource(EnvSettingsSource):
         def _load_env_vars(self) -> Mapping[str, str | None]:
@@ -164,6 +166,14 @@ class ProductConfig:
                 artifact_secret_access_key=SecretStr(source.object_storage_secret_access_key),
                 artifact_session_token=SecretStr(source.object_storage_session_token),
                 sandbox_provider=source.sandbox_provider,
+                sandbox_installation_id=source.moyai_installation_id,
+                sandbox_namespace=source.sandbox_namespace,
+                sandbox_template=source.sandbox_template,
+                sandbox_warm_pool=source.sandbox_warm_pool,
+                sandbox_router_url=source.sandbox_router_url,
+                sandbox_router_token=SecretStr(source.sandbox_router_token),
+                sandbox_router_token_file=source.sandbox_router_token_file,
+                sandbox_rpc_python=source.sandbox_rpc_python,
                 lambda_region=source.lambda_region,
                 lambda_profile=source.lambda_profile,
                 lambda_image=source.lambda_image,

@@ -1,0 +1,56 @@
+{{- if .Values.kubernetesWorkspaces.enabled }}
+{{- $workspace := .Values.kubernetesWorkspaces }}
+{{- $name := printf "%s-workspaces" (include "moyai.name" .) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $workspace.namespace }}
+rules:
+  - apiGroups: [extensions.agents.x-k8s.io]
+    resources: [sandboxclaims]
+    verbs: [get, create, watch, patch, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get]
+  - apiGroups: [agents.x-k8s.io]
+    resources: [sandboxes]
+    verbs: [get]
+  - apiGroups: [extensions.agents.x-k8s.io]
+    resources: [sandboxwarmpools]
+    resourceNames: [{{ $workspace.warmPool | quote }}]
+    verbs: [get]
+  - apiGroups: [extensions.agents.x-k8s.io]
+    resources: [sandboxtemplates]
+    resourceNames: [{{ $workspace.template | quote }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $workspace.namespace }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "moyai.account" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $workspace.namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress: []
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "kubernetesWorkspaces.routerNamespace is required" $workspace.routerNamespace | quote }}
+          podSelector:
+            matchLabels: {{ $workspace.routerPodLabels | toJson }}
+      ports: [{protocol: TCP, port: 9090}]
+{{- end }}

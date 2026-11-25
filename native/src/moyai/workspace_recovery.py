@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import modal
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic_ai.workspaces import WorkspaceRef, WorkspaceUnavailableError
 from sqlalchemy import select, update
 
 from .continuations.product_continuation_errors import preparation_blocked
@@ -242,7 +243,7 @@ async def prepare_workspace(runtime: Runtime, prepared: PreparedTurn) -> Prepare
                 # immutable event/object remain; a new task gets no old actions.
                 session.snapshot = None
         return prepared
-    if reference.get("provider") not in {"modal", "lambda"}:
+    if reference.get("provider") not in {"modal", "lambda", "kubernetes"}:
         return prepared
     async with computer_timing(runtime.database, prepared.scope, "reuse", preparation=True) as timing:
         return await _prepare_workspace(runtime, prepared, reference, timing)
@@ -269,11 +270,22 @@ async def _prepare_workspace(
                 if held.image_id and held.workspace == reference else "workspace_checkpoint_invalid"
             )
             raise preparation_blocked(code)
+        if reference["provider"] == "kubernetes":
+            if session.workspace_scope != scope.workspace_key:
+                raise PermissionError("The workspace authority changed.")
+            await require_settled(db, session.id)
         preparation, revision = turn.preparation, session.revision
     async with asyncio.timeout(30):
-        if reference["provider"] == "lambda":
-            from pydantic_ai.workspaces import WorkspaceUnavailableError
+        if reference["provider"] == "kubernetes":
+            from .kubernetes_workspace import KubernetesSandbox
 
+            backend = KubernetesSandbox(runtime.settings).resume(scope, WorkspaceRef(**reference))
+            try:
+                await backend.working_dir()
+            except WorkspaceUnavailableError as error:
+                raise preparation_blocked("workspace_volume_unavailable") from error
+            alive = True
+        elif reference["provider"] == "lambda":
             from .lambda_control import LambdaControl
             try:
                 alive = await (await LambdaControl(runtime.settings).get(reference["id"])).alive()
@@ -316,6 +328,8 @@ async def _prepare_workspace(
             raise PermissionError("The computer changed before restoration could be published.")
         if session.revision != revision:
             raise RuntimeError("Preparation changed during restore; retry before executing any model or tool.")
+        if reference["provider"] == "kubernetes":
+            await require_settled(db, session.id)
         if saved is not None:
             if session.snapshot != expected:
                 raise preparation_blocked("workspace_checkpoint_missing")

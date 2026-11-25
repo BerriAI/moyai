@@ -73,6 +73,8 @@ class RunScope:
     # Notifications present when an ordinary Dot turn was prepared. Settlement
     # records this cursor; later deliveries enter the next prepared input.
     dot_notification_cursor: int | None = None
+    # Pin new allocations to the provider selected in the durable preparation.
+    workspace_provider: str | None = None
 
     @property
     def root_run_id(self) -> str:

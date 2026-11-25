@@ -22,7 +22,7 @@ from sqlalchemy import update
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from .computer import DESKTOP_VERSION, authorize
+from .computer import DESKTOP_VERSION, KUBERNETES_DESKTOP_UNAVAILABLE, authorize
 from .models import ComputerDesktop, ComputerLease, ComputerOperation, Session, User, new_id
 
 if TYPE_CHECKING:
@@ -69,6 +69,8 @@ async def bind(
         if not session.workspace or session.workspace != authorized.workspace:
             raise HTTPException(409, "The computer changed. Reopen its panel.")
         ref = TypeAdapter(WorkspaceRef).validate_json(session.workspace)
+        if ref.provider == "kubernetes":
+            raise HTTPException(409, KUBERNETES_DESKTOP_UNAVAILABLE)
         if not desktop or desktop.workspace_id != ref.id or desktop.version != DESKTOP_VERSION:
             raise HTTPException(409, "Open the computer before connecting.")
         epoch = None

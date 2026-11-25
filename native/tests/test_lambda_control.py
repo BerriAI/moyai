@@ -51,7 +51,7 @@ def test_switching_default_does_not_switch_stored_workspace(default, reference, 
     modal = SimpleNamespace(get_workspace=lambda ctx, ref: "modal")
     providers = WorkspaceProviders(settings(sandbox_provider=default), modal)
     providers.lambda_sandbox = SimpleNamespace(get_workspace=lambda ctx, ref: "lambda")
-    assert providers.get_workspace(SimpleNamespace(), ref=reference) == expected
+    assert providers.get_workspace(SimpleNamespace(deps=SimpleNamespace(workspace_provider=None)), ref=reference) == expected
 
 
 async def test_archive_is_never_published_when_s3_checksum_disagrees():

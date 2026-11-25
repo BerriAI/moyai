@@ -8,6 +8,7 @@ dependencies = [
     "pydantic-ai[temporal]==2.55.0",
     "fastmcp-slim[client]>=4.1,<5",
     "openai==3.29.0",
+    "k8s-agent-sandbox[async]==1.0.12",
     "logfire>=5.2,<6",
     "opentelemetry-exporter-otlp-proto-http>=1.45,<2",
     "opentelemetry-instrumentation-fastapi>=0.66b1,<1",

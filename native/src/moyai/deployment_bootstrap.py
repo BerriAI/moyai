@@ -60,8 +60,9 @@ async def provision(values: Mapping[str, str], *, fresh: bool) -> dict:
             await asyncio.to_thread(create_schema)
         # Canonical migration retains historical settings semantics but runs
         # in this installation; no retired executor or second interpreter loads.
+        migration_core = "pydantic" if values.get("SANDBOX_PROVIDER") == "kubernetes" else "legacy"
         migration = {
-            **values, "MOYAI_CORE": "legacy", "MOYAI_RUNTIME_ROLE": "standalone",
+            **values, "MOYAI_CORE": migration_core, "MOYAI_RUNTIME_ROLE": "standalone",
             "MOYAI_DATABASE_INITIALIZE": str(fresh).lower(), "MOYAI_SCHEMA_MODE": "auto",
             "MOYAI_SEPARATE_BROKER": "false", "MOYAI_COORDINATOR_HANDOFF": "false",
         }
