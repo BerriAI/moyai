@@ -21,8 +21,8 @@ VERSION_FIELDS = ("updated_at", "updatedAt", "updated", "last_modified", "lastMo
 COLLECTION_FIELDS = ("data", "items", "result", "results", "records", "events", "messages", "issues", "pull_requests", "nodes", "edges", "node", "comments", "issue", "pull_request")
 
 
-def structured_records(value: object) -> Iterator[dict]:
-    """Traverse provider collections, never decode free-text record fields."""
+def structured_records(value: object) -> Iterator[dict | None]:
+    """Traverse collections; None marks an unsupported row, never silent loss."""
     if isinstance(value, dict):
         yield value
         for key in COLLECTION_FIELDS:
@@ -30,7 +30,12 @@ def structured_records(value: object) -> Iterator[dict]:
                 yield from structured_records(value[key])
     elif isinstance(value, (list, tuple)):
         for child in value:
-            yield from structured_records(child)
+            if isinstance(child, dict):
+                yield from structured_records(child)
+            else:
+                yield None
+    else:
+        yield None
 
 
 def decode_payload(value: str) -> object:
@@ -40,7 +45,7 @@ def decode_payload(value: str) -> object:
         return None
 
 
-def records(value: object) -> Iterator[dict]:
+def records(value: object) -> Iterator[dict | None]:
     """Decode only the returned payload or a top-level MCP result envelope."""
     if isinstance(value, str):
         value = decode_payload(value)
@@ -78,6 +83,7 @@ def connected_records(conversation: str, grants: list[Grant]) -> list[tuple[str,
         for part in message.parts
         if isinstance(part, ToolReturnPart) and part.outcome == "success" and part.tool_name in allowed
         for record in records(part.content)
+        if record is not None
     ]
 
 

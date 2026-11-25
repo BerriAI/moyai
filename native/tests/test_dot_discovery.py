@@ -19,7 +19,7 @@ from moyai.contracts import NewMessage
 from moyai.dot_contracts import DotItemEdit, DotJudgment, DotResearch
 from moyai.dot_discovery import DiscoverySnapshot
 from moyai.dot_discovery_agent import DiscoveryBounds
-from moyai.dot_models import DotAttentionTurn, DotItem, DotNotification
+from moyai.dot_models import DotAttentionTurn, DotDiscoveryTurn, DotItem, DotNotification
 from moyai.dot_sources import GITHUB_MCP, provider_partial, repositories
 from moyai.models import Connection, Message, Session, Turn
 
@@ -428,6 +428,58 @@ async def test_result_cap_cannot_hide_a_reopened_item_from_resolution_guard(runt
         "title": "Item", "summary": "Closed in the older record", "evidence": [{
             "connection_id": account.id, "source": source, "source_version": stamp, "quote": "Item",
         }],
+    }]})
+    snapshot = DiscoverySnapshot.model_validate_json(await runtime.database.dots.discovery.judgment_input(
+        prepared.scope, report.model_dump_json(), conversation,
+    ))
+    assert snapshot.research.coverage == "partial" and snapshot.verified_closed == []
+    with pytest.raises(ValueError, match="closure evidence"):
+        await publish(runtime, prepared, conversation, notify=False, state="resolved")
+
+
+@pytest.mark.parametrize("row", ["unsupported row", None, {}, []])
+@pytest.mark.parametrize("restricted", [False, True])
+async def test_malformed_collection_rows_cannot_turn_an_earlier_read_into_closure(runtime, actor, row, restricted):
+    async with runtime.database.sessions.begin() as db:
+        account = Connection(
+            owner_id=actor.id, kind="mcp", name="GitHub reader", credential=runtime.security.seal("synthetic"),
+            read_only=True, policy=json.dumps({"allowed_tools": ["pull_request_read", "list_issues"],
+                                              "mcp": {"url": GITHUB_MCP}}),
+        )
+        db.add(account)
+        await db.flush()
+    _, _, _, prepared = await observer(runtime, actor, connection=account, discovery=True)
+    if restricted:
+        async with runtime.database.sessions.begin() as db:
+            occurrence = await db.get(DotDiscoveryTurn, prepared.scope.turn_id)
+            occurrence.sources = runtime.security.seal(json.dumps([{
+                "connection_id": account.id, "source": "https://github.com/BerriAI/moyai",
+            }]))
+            (await db.get(Turn, prepared.scope.turn_id)).preparation = None
+        prepared = await runtime.database.admission.prepare(prepared.scope.turn_id)
+    bounds, ctx = DiscoveryBounds(), SimpleNamespace(deps=prepared.scope)
+    source, version = "https://github.com/berriai/moyai/pull/25", "2026-11-24T12:00:00Z"
+    name = f"mcp_{account.id[:8]}_list_issues"
+    call = ToolCallPart(name, {}, "page")
+    args = {"owner": "BerriAI", "repo": "moyai"}
+    empty = await bounds.after_tool_execute(ctx, call=call, tool_def=None, args=args, result={
+        "issues": [], "pageInfo": {"hasNextPage": False},
+    })
+    assert empty["scanned"] and not empty["limited"]
+    malformed = await bounds.after_tool_execute(ctx, call=call, tool_def=None, args=args, result={
+        "issues": [row], "pageInfo": {"hasNextPage": False},
+    })
+    assert malformed["limited"] and malformed["records"] == []
+    conversation = ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=[
+        ToolReturnPart(f"mcp_{account.id[:8]}_pull_request_read", {
+            "dot_scan": True, "scanned": True, "limited": False, "error": False,
+            "records": [{"url": source, "updated_at": version, "title": "Closed", "state": "closed"}],
+        }, tool_call_id="earlier"),
+        ToolReturnPart(name, malformed, tool_call_id="page"),
+    ])])).decode()
+    report = DotResearch.model_validate({"coverage": "complete", "observations": [{
+        "title": "Closed", "summary": "Earlier read",
+        "evidence": [{"connection_id": account.id, "source": source, "source_version": version, "quote": "Closed"}],
     }]})
     snapshot = DiscoverySnapshot.model_validate_json(await runtime.database.dots.discovery.judgment_input(
         prepared.scope, report.model_dump_json(), conversation,

@@ -43,6 +43,8 @@ retried with a fresh model budget. Input and tool limits fail visibly. A partial
 or blocked scan is recorded in run history, never described as a clean quiet scan.
 Provider pagination, next-page cursors and incomplete-result signals also make
 a scan partial, as do failed, denied, interrupted or unrecognized tool results.
+Unsupported rows inside a nonempty collection also make it partial; silently
+dropped rows cannot turn a malformed response into a successful empty scan.
 Known paginated tools also remain partial without explicit
 first-page exhaustion evidence; bare arrays never imply complete coverage.
 A snapshot older than fifteen minutes cannot publish.

@@ -175,22 +175,24 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
         )
         complete = False
         for record in records(value):
+            if record is None:
+                limited = True
+                continue
             limited |= provider_partial(record)
             complete |= provider_complete(record)
             if tool:
                 record = github_record(record)
             identity = next((record[key] for key in IDENTITY_FIELDS if record.get(key)), None)
+            collection = any(isinstance(record.get(key), (list, dict)) for key in COLLECTION_FIELDS)
+            identified = bool(identity and any(record.get(key) for key in VERSION_FIELDS))
+            limited |= not collection and not identified
             if allowed and (not isinstance(identity, str) or not source_allowed(identity, allowed)):
                 # Collection envelopes inform coverage but never expose their
                 # unverified scalar contents as provider evidence.
-                collection = any(isinstance(record.get(key), (list, dict)) for key in COLLECTION_FIELDS)
                 limited |= identity is not None or not collection
                 scanned |= collection
                 continue
-            scanned |= (
-                any(record.get(key) for key in IDENTITY_FIELDS) and any(record.get(key) for key in VERSION_FIELDS)
-                or any(isinstance(record.get(key), (list, dict)) for key in COLLECTION_FIELDS)
-            )
+            scanned |= identified or collection
             # Preserve structured scalar evidence without copying arbitrary
             # nested collections into every record or interpreting text as JSON.
             bounded = {
