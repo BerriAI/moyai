@@ -1,6 +1,8 @@
 """Personal conversation identity and immutable background-check provenance."""
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from typing import Literal
+
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .models import Base, now
@@ -38,3 +40,33 @@ class DotNotification(Base):
     fingerprint: Mapped[str] = mapped_column(String(64))
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class DotDiscoveryTurn(Base):
+    __tablename__ = "moyai_dot_discovery_turns"
+
+    turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_dot_attention_turns.turn_id"), primary_key=True)
+    # Encrypted, host-validated observations and item revisions. Recorded once
+    # before judgment, so retries cannot acquire authority over newer edits.
+    snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sources: Mapped[str] = mapped_column(Text)
+
+
+class DotItem(Base):
+    __tablename__ = "moyai_dot_items"
+    __table_args__ = (UniqueConstraint("owner_id", "source_key", name="dot_item_source"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
+    connection_id: Mapped[str] = mapped_column(ForeignKey("moyai_connections.id"))
+    account_key: Mapped[str] = mapped_column(String(64))
+    source_key: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[str] = mapped_column(Text)  # encrypted
+    content: Mapped[str] = mapped_column(Text)  # encrypted title, summary and evidence
+    state: Mapped[Literal["open", "resolved", "dismissed", "snoozed"]] = mapped_column(String(20), default="open")
+    owner_controlled: Mapped[bool] = mapped_column(Boolean, default=False)
+    owner_revision: Mapped[int] = mapped_column(Integer, default=0)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    snoozed_until: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+    last_seen_at: Mapped[str] = mapped_column(String(40), default=now)

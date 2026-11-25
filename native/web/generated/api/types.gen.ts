@@ -1441,6 +1441,22 @@ export type AskUserRequest = {
 };
 
 /**
+ * AttentionSource
+ */
+export type AttentionSource = {
+    /**
+     * Connection Id
+     */
+    connection_id: string;
+    /**
+     * Source
+     *
+     * Owner-approved GitHub repository URL. Restricted discovery currently supports the official GitHub read-only MCP connection.
+     */
+    source: string;
+};
+
+/**
  * AuthConfig
  */
 export type AuthConfig = {
@@ -1470,6 +1486,18 @@ export type AuthConfig = {
  * AutomationDefinition
  */
 export type AutomationDefinition = {
+    /**
+     * Attention Mode
+     *
+     * Discovery is one standing check of approved accounts for useful developments, without per-item reminders. Its prompt supplies private priorities to judgment and is never sent to the account-reading agent.
+     */
+    attention_mode?: 'focused' | 'discovery';
+    /**
+     * Attention Sources
+     *
+     * Optional owner-approved starting locations for discovery. Omit to check account-native recent activity.
+     */
+    attention_sources?: Array<AttentionSource>;
     /**
      * Connection Ids
      *
@@ -3571,6 +3599,80 @@ export type CredentialSecretMetadata = {
      * Status
      */
     status: string;
+};
+
+/**
+ * DotItemEdit
+ */
+export type DotItemEdit = {
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Snoozed Until
+     */
+    snoozed_until?: string | null;
+    /**
+     * State
+     */
+    state: 'open' | 'resolved' | 'dismissed' | 'snoozed';
+};
+
+/**
+ * DotItemView
+ */
+export type DotItemView = {
+    /**
+     * Connection Id
+     */
+    connection_id: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Last Seen At
+     */
+    last_seen_at: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Snoozed Until
+     */
+    snoozed_until: string | null;
+    /**
+     * Source
+     */
+    source: string;
+    /**
+     * State
+     */
+    state: 'open' | 'resolved' | 'dismissed' | 'snoozed';
+    /**
+     * Summary
+     */
+    summary: string;
+    /**
+     * Title
+     */
+    title: string;
+};
+
+/**
+ * DotItemsView
+ */
+export type DotItemsView = {
+    /**
+     * Items
+     */
+    items: Array<DotItemView>;
+    /**
+     * Limited
+     */
+    limited: boolean;
 };
 
 /**
@@ -6070,6 +6172,18 @@ export type ProductAutomationCapabilities = {
  * A saved canonical definition as returned to the editor.
  */
 export type ProductAutomationDefinition = {
+    /**
+     * Attention Mode
+     *
+     * Discovery is one standing check of approved accounts for useful developments, without per-item reminders. Its prompt supplies private priorities to judgment and is never sent to the account-reading agent.
+     */
+    attention_mode: 'focused' | 'discovery';
+    /**
+     * Attention Sources
+     *
+     * Optional owner-approved starting locations for discovery. Omit to check account-native recent activity.
+     */
+    attention_sources: Array<AttentionSource>;
     /**
      * Connection Ids
      *
@@ -13115,6 +13229,52 @@ export type OpenPersonalDotResponses = {
 };
 
 export type OpenPersonalDotResponse = OpenPersonalDotResponses[keyof OpenPersonalDotResponses];
+
+export type ListDotItemsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/dot/items';
+};
+
+export type ListDotItemsResponses = {
+    /**
+     * Successful Response
+     */
+    200: DotItemsView;
+};
+
+export type ListDotItemsResponse = ListDotItemsResponses[keyof ListDotItemsResponses];
+
+export type EditDotItemData = {
+    body: DotItemEdit;
+    path: {
+        /**
+         * Identity
+         */
+        identity: string;
+    };
+    query?: never;
+    url: '/api/dot/items/{identity}';
+};
+
+export type EditDotItemErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type EditDotItemError = EditDotItemErrors[keyof EditDotItemErrors];
+
+export type EditDotItemResponses = {
+    /**
+     * Successful Response
+     */
+    200: DotItemView;
+};
+
+export type EditDotItemResponse = EditDotItemResponses[keyof EditDotItemResponses];
 
 export type ResolveEffectData = {
     body: EffectResolution;

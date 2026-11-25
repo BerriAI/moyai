@@ -1,5 +1,7 @@
 # Your Dot
 
+For broad discovery without per-item reminders, see [General proactive attention](dot-discovery.md).
+
 **Your Dot** opens one private, persistent conversation per individual account.
 Use it for ordinary work and ask it to keep track of a responsibility. Scheduled
 attention is available in existing-product mode, using the same canonical

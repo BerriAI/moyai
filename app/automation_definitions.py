@@ -3,6 +3,7 @@
 import re
 from datetime import UTC, datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -88,6 +89,24 @@ class Trigger(BaseModel):
         return self
 
 
+class AttentionSource(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid')
+    connection_id: str = Field(pattern=r'^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+    source: str = Field(min_length=1, max_length=1000, pattern=r'^https://[^@\s?#]+$',
+                        description='Owner-approved GitHub repository URL. Restricted discovery currently supports the official GitHub read-only MCP connection.')
+
+    @field_validator('source')
+    @classmethod
+    def github_repository(cls, value):
+        parsed = urlsplit(value)
+        parts = parsed.path.strip('/').removesuffix('.git').split('/')
+        if parsed.netloc.lower() != 'github.com' or len(parts) != 2 or not all(
+            re.fullmatch(r'[A-Za-z0-9_.-]+', part) and part not in {'.', '..'} for part in parts
+        ):
+            raise ValueError('Choose a GitHub repository URL, such as https://github.com/owner/repository.')
+        return f'https://github.com/{parts[0]}/{parts[1]}'
+
+
 class Definition(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True, extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=2, max_length=100)
@@ -95,6 +114,14 @@ class Definition(BaseModel):
     kind: Literal['task', 'attention'] = Field(
         default='task',
         description='Attention checks read selected accounts and quietly decide whether to message the owner in their Dot chat. They cannot take external actions.',
+    )
+    attention_mode: Literal['focused', 'discovery'] = Field(
+        default='focused',
+        description='Discovery is one standing check of approved accounts for useful developments, without per-item reminders. Its prompt supplies private priorities to judgment and is never sent to the account-reading agent.',
+    )
+    attention_sources: list[AttentionSource] = Field(
+        default_factory=list, max_length=4,
+        description='Optional owner-approved starting locations for discovery. Omit to check account-native recent activity.',
     )
     visibility: Literal['private', 'shared'] = Field(
         default='shared', description='Private definitions and runs are visible only to their owner. Fixed after creation.',
@@ -148,6 +175,16 @@ class Definition(BaseModel):
 
     @model_validator(mode='after')
     def distinct_triggers(self):
+        if self.attention_sources and (
+            self.attention_mode != 'discovery'
+            or {source.connection_id for source in self.attention_sources} != set(self.connection_ids)
+        ):
+            raise ValueError('Restricted discovery needs an approved repository for every selected account.')
+        if self.attention_mode == 'discovery' and (
+            self.kind != 'attention' or len(self.connection_ids) > 2 or len(self.prompt) > 2000
+            or len(self.triggers) != 1
+        ):
+            raise ValueError('Discovery requires one attention schedule, up to two approved accounts, and scan instructions of at most 2000 characters.')
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
         if self.visibility == 'private' and any(t.event for t in self.triggers):

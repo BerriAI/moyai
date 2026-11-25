@@ -226,6 +226,10 @@ def definition_payload(definition: Definition) -> dict[str, Any]:
     payload = definition.model_dump(mode="json")
     if payload["kind"] == "task":
         payload.pop("kind")
+    if payload["attention_mode"] == "focused":
+        payload.pop("attention_mode")
+    if not payload["attention_sources"]:
+        payload.pop("attention_sources")
     for field in ("session_id", "gitlab_project_id"):
         if payload[field] is None:
             payload.pop(field)
@@ -325,6 +329,18 @@ class ProductAutomationService:
         if row is None:
             raise HTTPException(404, "Automation not found.")
         return dict(row)
+
+    async def _single_discovery(self, db: AsyncSession, owner: str, identity: str, definition: Definition) -> None:
+        if definition.attention_mode != "discovery":
+            return
+        rows = (await db.execute(text(
+            f"SELECT * FROM {self._table('automations')} WHERE owner_id=:owner AND id<>:id"
+        ), {"owner": owner, "id": identity})).mappings()
+        for row in rows:
+            other = _definition(dict(row))
+            binding = await db.get(Binding, row["id"])
+            if other.attention_mode == "discovery" and (binding is None or binding.state != "deleted"):
+                raise HTTPException(409, "Your Dot already has a discovery check. Edit or resume that check.")
 
     @staticmethod
     def _owner(row: dict[str, Any], principal: Any, *, pausing: bool = False) -> None:
@@ -526,6 +542,11 @@ class ProductAutomationService:
             if definition.kind == "attention":
                 from ..database import grant_fingerprint
                 grants = await self.database.dots.grants(db, binding.owner_id, definition.connection_ids)
+                from ..dot_sources import repositories
+                try:
+                    repositories(grants, [source.model_dump() for source in definition.attention_sources])
+                except ValueError as error:
+                    raise HTTPException(409, str(error)) from None
                 connections = sorted(grant.id for grant in grants)
                 workspace = {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(grants)}
             elif definition.session_id:
@@ -591,6 +612,8 @@ class ProductAutomationService:
                 raise HTTPException(409, "The attention destination is missing.")
             await self.database.dots.own_session(db, binding.owner_id, definition.session_id)
             grants = await self.database.dots.grants(db, binding.owner_id, connections)
+            from ..dot_sources import repositories
+            repositories(grants, [source.model_dump() for source in definition.attention_sources])
             if (
                 connections != sorted(definition.connection_ids)
                 or workspace != {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(grants)}
@@ -1127,6 +1150,8 @@ class ProductAutomationService:
                     )
                     if definition.kind == "attention":
                         await self.database.dots.own_session(db, principal.id, definition.session_id)
+                if action in {"create", "update", "migrate", "enable"}:
+                    await self._single_discovery(db, principal.id, identity, definition)
                 revision = row["revision"] + (action != "create")
                 if action != "create":
                     await db.execute(text(
@@ -1257,6 +1282,8 @@ class ProductAutomationService:
                 raise RuntimeError("Schedule synchronization is pending.")
             if await self._old_active(db, identity):
                 return await receipt(db, row, binding, trigger_id, occurrence, "blocked", "A legacy occurrence is still active.")
+            if definition.attention_mode == "discovery" and await self.database.dots.discovery.active(db, definition.session_id):
+                return await receipt(db, row, binding, trigger_id, occurrence, "skipped", "The previous discovery check is still running.")
             try:
                 connections, workspace = await self._execution_context(db, binding, principal, definition)
             except (HTTPException, ValueError):
@@ -1291,6 +1318,8 @@ class ProductAutomationService:
                 await self.database.dots.bind_attention(
                     db, turn, automation_id=identity, generation=binding.generation,
                     destination=definition.session_id, grants_key=workspace["grants_key"],
+                    discovery=definition.attention_mode == "discovery",
+                    sources=[source.model_dump() for source in definition.attention_sources],
                 )
             elif self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
@@ -1327,6 +1356,8 @@ class ProductAutomationService:
             principal = await self.identity.authorize_admission(db, original)
             if await self._old_active(db, identity):
                 raise HTTPException(409, "A legacy occurrence is still active.")
+            if definition.attention_mode == "discovery" and await self.database.dots.discovery.active(db, definition.session_id):
+                raise HTTPException(409, "The previous discovery check is still running.")
             if definition.max_runs_per_hour is not None and await db.scalar(text(
                 f"SELECT count(*) FROM {self._table('automation_runs')} WHERE automation_id=:id "
                 "AND outcome='started' AND created_at>:since"
@@ -1345,6 +1376,8 @@ class ProductAutomationService:
                 await self.database.dots.bind_attention(
                     db, turn, automation_id=identity, generation=binding.generation,
                     destination=definition.session_id, grants_key=workspace["grants_key"],
+                    discovery=definition.attention_mode == "discovery",
+                    sources=[source.model_dump() for source in definition.attention_sources],
                 )
             elif self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
@@ -1406,12 +1439,17 @@ class ProductAutomationService:
                     and (session.owner_id != principal.id or definition.visibility != "private" or visibility == "shared")
                 )):
                     continue
+                from ..dot_models import DotAttentionTurn
+                attention = await db.get(DotAttentionTurn, turn.id) if turn else None
                 values.append({
                     "occurrence": row["occurrence"], "revision": row["revision"], "outcome": row["outcome"],
                     "created_at": row["created_at"], "engine": CORE_IDENTITY if link else "legacy",
                     "status": turn.status if turn else link.status if link else row["legacy_status"] or row["outcome"],
                     "session_id": destination, "turn_id": link.turn_id if link else None,
-                    "detail": link.detail if link else "",  # Historical provider diagnostics are not exported.
+                    "detail": (
+                        f"Attention check: {attention.outcome}."
+                        if attention and attention.outcome else link.detail if link else ""
+                    ),  # Historical provider diagnostics are not exported.
                 })
         await self.identity.require_current(grant)
         next_cursor = base64.urlsafe_b64encode(json.dumps([

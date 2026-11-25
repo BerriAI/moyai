@@ -24,7 +24,7 @@ async function scenario(t,width=1440){
  await page.goto(fixture.base);
  if(width<600)await page.getByRole('button',{name:'Toggle conversations'}).click();
  await page.getByRole('button',{name:'Your Dot',exact:true}).click();
- await page.getByRole('heading',{name:'What should I help you keep track of?'}).waitFor();
+ await page.getByRole('heading',{name:'What should I know about your day?'}).waitFor();
  return {page,state};
 }
 for(const width of [1440,768,320])test(`Persistent Dot opens and keeps drafts at ${width}px`,async t=>{
@@ -33,10 +33,34 @@ for(const width of [1440,768,320])test(`Persistent Dot opens and keeps drafts at
  await page.getByRole('button',{name:'Help me prepare for my upcoming meetings.',exact:true}).click();
  const input=page.getByRole('textbox',{name:'Message Moyai',exact:true});
  assert.equal(await input.innerText(),'Help me prepare for my upcoming meetings.');
- assert.equal(await page.getByRole('button',{name:'Help me follow up on important unanswered messages.',exact:true}).isEnabled(),false);
+ assert.equal(await page.getByRole('button',{name:'Help me set up proactive attention for my connected accounts.',exact:true}).isEnabled(),false);
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
- await page.reload();await page.getByRole('heading',{name:'What should I help you keep track of?'}).waitFor();
+ await page.reload();await page.getByRole('heading',{name:'What should I know about your day?'}).waitFor();
  assert.equal(state.opened,1,'Reload reads the saved Dot without creating another');
+});
+for(const width of [1440,768,320])test(`Dot follow-up controls preserve the chat draft at ${width}px`,async t=>{
+ const {page}=await scenario(t,width);
+ let item={id:'item-one',revision:1,connection_id:'account-one',title:'Launch review awaits a reply',summary:'The customer asked for a launch review.',source:'https://example.test/review',state:'open',snoozed_until:null,last_seen_at:'2026-11-24T10:00:00Z'};
+ await page.route('**/api/dot/items',route=>route.fulfill({json:{items:[item],limited:false}}));
+ await page.route('**/api/dot/items/item-one',route=>{
+  const edit=route.request().postDataJSON();assert.equal(edit.revision,item.revision);
+  item={...item,...edit,revision:item.revision+1};return route.fulfill({json:item});
+ });
+ await page.getByRole('button',{name:'Help me prepare for my upcoming meetings.',exact:true}).click();
+ await page.getByRole('button',{name:'Following',exact:true}).click();
+ const dialog=page.getByRole('dialog');
+ await dialog.getByRole('heading',{name:item.title}).waitFor();
+ await dialog.getByRole('textbox',{name:'Filter follow-ups'}).fill('missing');
+ await dialog.getByText('No matching follow-ups.').waitFor();
+ await dialog.getByRole('textbox',{name:'Filter follow-ups'}).fill('');
+ await dialog.getByRole('button',{name:'Dismiss',exact:true}).click();
+ await dialog.getByText('dismissed',{exact:true}).waitFor();
+ await dialog.getByRole('button',{name:'Reopen',exact:true}).click();
+ await dialog.getByRole('button',{name:'Snooze 1 day',exact:true}).click();
+ await dialog.getByText(/Snoozed until/).waitFor();
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ await page.keyboard.press('Escape');
+ assert.equal(await page.getByRole('textbox',{name:'Message Moyai',exact:true}).innerText(),'Help me prepare for my upcoming meetings.');
 });
 test('A delivered message renders without an execution turn in the destination',async t=>{
  const {page,state}=await scenario(t);

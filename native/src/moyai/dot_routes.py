@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from .dot_contracts import DotView
+from .dot_contracts import DotItemEdit, DotItemsView, DotItemView, DotView
 from .models import User
 
 
@@ -20,5 +20,13 @@ def routes(runtime, actor) -> APIRouter:
             session_id=await runtime.database.dots.open(user),
             attention_available=runtime.product_automations is not None,
         )
+
+    @router.get("/api/dot/items", operation_id="listDotItems")
+    async def items(user: User = Depends(actor)) -> DotItemsView:
+        return await runtime.database.dots.discovery.list(user)
+
+    @router.patch("/api/dot/items/{identity}", operation_id="editDotItem")
+    async def edit(identity: str, body: DotItemEdit, user: User = Depends(actor)) -> DotItemView:
+        return await runtime.database.dots.discovery.edit(user, identity, body)
 
     return router

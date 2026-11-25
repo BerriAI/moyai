@@ -53,6 +53,13 @@ def test_json_schema_matches_original_public_contract(name):
         kind = definition["properties"].pop("kind")
         assert kind["enum"] == ["task", "attention"] and kind["default"] == "task"
         assert "kind" not in definition.get("required", [])
+        attention = definition["properties"].pop("attention_mode")
+        assert attention["enum"] == ["focused", "discovery"] and attention["default"] == "focused"
+        sources = definition["properties"].pop("attention_sources")
+        assert sources["maxItems"] == 4
+        assert "attention_mode" not in definition.get("required", [])
+        assert "attention_sources" not in definition.get("required", [])
+        schema["$defs"].pop("AttentionSource")
         destination = definition["properties"].pop("session_id")
         assert destination["default"] is None
         assert "session_id" not in definition.get("required", [])
@@ -139,7 +146,8 @@ def test_optional_gitlab_fields_preserve_old_automation_digest():
         }}],
     )
     old_payload = definition.model_dump(
-        mode="json", exclude={"session_id", "gitlab_project_id", "visibility", "connection_ids", "kind"},
+        mode="json", exclude={"session_id", "gitlab_project_id", "visibility", "connection_ids", "kind",
+                             "attention_mode", "attention_sources"},
     )
     old_payload["triggers"][0]["event"].pop("gitlab_origin")
     assert definition_payload(definition) == old_payload

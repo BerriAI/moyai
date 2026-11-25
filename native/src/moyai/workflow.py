@@ -53,7 +53,7 @@ with workflow.unsafe.imports_passed_through():
     from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
     from .deployment_handoff import VERSION as DEPLOYMENT_HANDOFF_VERSION
     from .deployment_handoff import DeploymentHandoff
-    from .dot_contracts import DotDecision
+    from .dot_contracts import DotDecision, DotJudgment, DotResearch
     from .failure_diagnostics import FAILURE_VERSION, capture_failure
     from .history_handoff import VERSION as HISTORY_VERSION
     from .history_handoff import AgentCheckpoint, CheckpointSave, HistoryHandoff, HistoryLimits
@@ -111,7 +111,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             prior_state=handoff.stream_state if handoff else None,
             drain_timeout=timedelta(seconds=1),
         )
-        self.agent_run: AgentRun[RunScope, str | DeferredToolRequests | ResponsibilityDecision | DotDecision] | None = None
+        self.agent_run: AgentRun[RunScope, str | DeferredToolRequests | ResponsibilityDecision | DotDecision | DotResearch] | None = None
         self.scope: RunScope | None = None
         self.pending_agent_mail: list[int] = list(handoff.pending_agent_mail) if handoff else []
         self.enqueued_agent_mail: set[int] = set()
@@ -413,7 +413,11 @@ class TurnWorkflow(PydanticAIWorkflow):
             ) if history_handoff else None
             runtime = current()
             reviewer = prepared.scope.responsibility_id is not None
-            agent = runtime.attention_agent if prepared.scope.attention else runtime.responsibility_agent if reviewer else runtime.agent
+            agent = (
+                runtime.discovery_agent if prepared.scope.discovery else
+                runtime.attention_agent if prepared.scope.attention else
+                runtime.responsibility_agent if reviewer else runtime.agent
+            )
             conversation = (
                 ConversationTypeAdapter.validate_json(resumed.conversation) if resumed else
                 ConversationTypeAdapter.validate_json(prepared.conversation)
@@ -445,8 +449,14 @@ class TurnWorkflow(PydanticAIWorkflow):
                     deferred_tool_results=deferred_results,
                     workspace=workspace,
                     usage_limits=UsageLimits(
-                        request_limit=8 if prepared.scope.attention else 3 if reviewer else
+                        # Discovery may use 12 sequential tools, then needs a
+                        # final structured response and SDK correction headroom.
+                        request_limit=16 if prepared.scope.discovery else
+                        8 if prepared.scope.attention else 3 if reviewer else
                         None if unlimited_model_requests() else runtime.settings.model_request_limit,
+                        tool_calls_limit=12 if prepared.scope.discovery else None,
+                        input_tokens_limit=60_000 if prepared.scope.discovery else None,
+                        output_tokens_limit=12_000 if prepared.scope.discovery else None,
                     ),
                 ) as agent_run,
             ):
@@ -593,6 +603,34 @@ class TurnWorkflow(PydanticAIWorkflow):
                 await workflow.wait_condition(workflow.all_handlers_finished)
                 self.continue_checkpoint(checkpoint_ref, checkpoint_release, checkpoint_maintenance)
             assert result is not None
+            final_conversation = result.conversation
+            final_usage = asdict(result.usage)
+            if prepared.scope.discovery:
+                assert isinstance(result.output, DotResearch)
+                research_conversation = result.conversation
+                judgment_prompt = await workflow.execute_activity(
+                    "moyai_dot_judgment_input_v1",
+                    args=[
+                        prepared.scope, result.output.model_dump_json(),
+                        ConversationTypeAdapter.dump_json(research_conversation).decode(),
+                    ],
+                    result_type=str, **CONTROL,
+                )
+                judgment_scope = replace(prepared.scope, attention_judgment=True)
+                # SDK composition: no external tools in this private phase.
+                # Each phase's activities retain their own replay identities.
+                result = await runtime.dot_judgment_agent.run(
+                    judgment_prompt, deps=judgment_scope, run_id=judgment_scope.root_run_id,
+                    model=runtime.models[prepared.scope.model],
+                    usage_limits=UsageLimits(
+                        request_limit=4, tool_calls_limit=4, input_tokens_limit=60_000,
+                        output_tokens_limit=8000,
+                    ),
+                )
+                final_conversation = result.conversation
+                final_conversation.messages[:0] = research_conversation.messages
+                final_conversation.usage.incr(research_conversation.usage)
+                final_usage = asdict(final_conversation.usage)
             self.finished = True
             await workflow.wait_condition(lambda: workflow.all_handlers_finished())
             waiting = isinstance(result.output, DeferredToolRequests)
@@ -604,11 +642,11 @@ class TurnWorkflow(PydanticAIWorkflow):
                 "moyai_save_answer_v1",
                 CompletedTurn(
                     scope=prepared.scope,
-                    conversation=ConversationTypeAdapter.dump_json(result.conversation).decode(),
-                    output=(result.output.model_dump_json() if isinstance(result.output, (ResponsibilityDecision, DotDecision)) else
+                    conversation=ConversationTypeAdapter.dump_json(final_conversation).decode(),
+                    output=(result.output.model_dump_json() if isinstance(result.output, (ResponsibilityDecision, DotDecision, DotJudgment)) else
                             "" if waiting else str(result.output)),
                     workspace=reference,
-                    usage=asdict(result.usage),
+                    usage=final_usage,
                     deferred=waiting,
                     checkpoint_workspace=checkpoint_workspace and not prepared.scope.attention,
                 ),
@@ -618,7 +656,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             if not accepted:
                 await workflow.execute_activity(
                     "moyai_stopped_turn_v1",
-                    args=[turn_id, ConversationTypeAdapter.dump_json(result.conversation).decode()],
+                    args=[turn_id, ConversationTypeAdapter.dump_json(final_conversation).decode()],
                     **CONTROL,
                 )
                 return {"turn_id": turn_id, "status": "stopped"}
@@ -778,8 +816,8 @@ class TurnWorkflow(PydanticAIWorkflow):
 
     @staticmethod
     def checkpoint(
-        prepared: PreparedTurn, run: AgentRun[RunScope, str | DeferredToolRequests | ResponsibilityDecision | DotDecision],
-        node: ModelRequestNode[RunScope, str | DeferredToolRequests | ResponsibilityDecision | DotDecision],
+        prepared: PreparedTurn, run: AgentRun[RunScope, str | DeferredToolRequests | ResponsibilityDecision | DotDecision | DotResearch],
+        node: ModelRequestNode[RunScope, str | DeferredToolRequests | ResponsibilityDecision | DotDecision | DotResearch],
     ) -> AgentCheckpoint:
         # The next request holds the normalized results of the settled batch;
         # it has not been appended to all_messages() yet.

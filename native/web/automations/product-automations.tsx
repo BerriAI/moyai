@@ -358,6 +358,8 @@ export function UnsupportedSettings({ definition }: { definition: AutomationDefi
     !definition.session_id && definition.plugins.length ? ["Connections", definition.plugins.join(", ")] : null,
     !definition.session_id && (definition.repo_url || definition.github_repository_id || definition.gitlab_project_id) ? ["Repository", definition.repo_url || `Repository ID ${definition.github_repository_id ?? definition.gitlab_project_id}`] : null,
     definition.kind === "attention" ? ["Connections", "Saved personal read-only accounts"] : definition.session_id ? ["Project and connections", "From the selected chat"] : ["Environment", definition.environment_id],
+    definition.attention_mode === "discovery" ? ["Attention", "Discover useful developments without per-item reminders"] : null,
+    definition.attention_mode === "discovery" ? ["Scan scope", definition.attention_sources.length ? definition.attention_sources.map(source => source.source).join("\n") : "Selected accounts"] : null,
     definition.mode !== "modal" ? ["Execution mode", definition.mode] : null,
     definition.self_management.instructions || definition.self_management.schedule ? ["Self-management", "Instructions or schedule permissions are enabled."] : null,
     Object.keys(definition.metadata).length ? ["Metadata", Object.entries(definition.metadata).map(([key, value]) => `${key}: ${value}`).join("\n")] : null,
@@ -429,7 +431,7 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
   onCancel: () => void; onSave: (definition: AutomationDefinition) => Promise<void>
 }) {
   const [definition, setDefinition] = useState<AutomationDefinition>(() => existing ? structuredClone(existing) : {
-    name: "", prompt: "", kind: "task", visibility: "shared", connection_ids: [], session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null, gitlab_project_id: null,
+    name: "", prompt: "", kind: "task", attention_mode: "focused", attention_sources: [], visibility: "shared", connection_ids: [], session_id: null, model: defaultModel, mode: "modal", harness: "pydantic-v1", repo_url: "", github_repository_id: null, gitlab_project_id: null,
     environment_id: "auto", plugins: [], metadata: {}, queue_events: false, max_runs_per_hour: 50,
     self_management: { instructions: false, schedule: false },
     triggers: [{ id: crypto.randomUUID(), schedule: { ...automationDefaultSchedule(), cron: "", run_at: null } }],
@@ -474,7 +476,7 @@ export function DefinitionEditor({ existing, models, defaultModel, chats = [], c
           }
           setError(""); change({ visibility: value === "private" ? "private" : "shared", session_id: null, plugins: [], connection_ids: [] })
         }} /><p className="ns-field-hint">Visibility stays fixed after creation. Runs can continue only a chat with the same visibility.</p></div>
-      <div className="ns-field"><label htmlFor={`${id}-prompt`}>Instructions</label><Textarea id={`${id}-prompt`} rows={6} required minLength={3} maxLength={500000} disabled={busy} value={definition.prompt} onChange={event => change({ prompt: event.target.value })} /></div>
+      <div className="ns-field"><label htmlFor={`${id}-prompt`}>{definition.attention_mode === "discovery" ? "Private priorities" : "Instructions"}</label><Textarea id={`${id}-prompt`} rows={6} required minLength={3} maxLength={definition.attention_mode === "discovery" ? 2000 : 500000} disabled={busy} value={definition.prompt} onChange={event => change({ prompt: event.target.value })} /></div>
       <div className="ns-field"><label htmlFor={`${id}-destination`}>Run in</label><Choice id={`${id}-destination`} label="Run in" value={definition.session_id || "__new__"} options={chatOptions} disabled={busy || chatLoading || definition.kind === "attention"} onChange={value => change({ session_id: value === "__new__" ? null : value })} />
         <p className="ns-field-hint">{definition.kind === "attention" ? "Checks run privately with their saved read-only accounts. Useful updates appear in Your Dot; quiet checks leave it unchanged." : definition.session_id ? "Each run continues this chat with its earlier messages, results, computer and connected accounts. Runs wait while the chat is busy." : `Each run starts a new ${definition.visibility} chat. Choose a recent ${definition.visibility} chat you own to keep context between runs.`}</p>
         {chatLoading && <p role="status" className="ns-field-hint">Loading recent chats…</p>}
