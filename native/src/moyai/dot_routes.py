@@ -1,11 +1,21 @@
 from fastapi import APIRouter, Depends
 
 from .dot_contracts import DotItemEdit, DotItemsView, DotItemView, DotView
+from .dot_notifications import DotNotificationEdit, DotNotifications, DotNotificationSettings
 from .models import User
 
 
 def routes(runtime, actor) -> APIRouter:
     router = APIRouter()
+    notifications = DotNotifications(runtime)
+
+    @router.get("/api/dot/notifications", operation_id="getDotNotifications")
+    async def notification_settings(user: User = Depends(actor)) -> DotNotificationSettings:
+        return await notifications.read(user)
+
+    @router.patch("/api/dot/notifications", operation_id="updateDotNotifications")
+    async def edit_notifications(body: DotNotificationEdit, user: User = Depends(actor)) -> DotNotificationSettings:
+        return await notifications.edit(user, body)
 
     @router.get("/api/dot", operation_id="getPersonalDot")
     async def read(user: User = Depends(actor)) -> DotView:

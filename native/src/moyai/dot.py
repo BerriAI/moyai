@@ -227,6 +227,8 @@ class Dots:
             turn_id=turn.id, session_id=session.id, message_id=message.id, fingerprint=fingerprint,
             content=self.database.security.seal(content),
         ))
+        from .dot_notifications import queue
+        await queue(self.database, db, turn, session.id, content)
         if record.outcome != "partial":
             record.outcome = "notified"
         # Public delivery must not change the SDK checkpoint or its computer

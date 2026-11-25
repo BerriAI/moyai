@@ -21,6 +21,7 @@ from .automations.product_automation_models import ProductAutomationTurn
 from .contracts import RunScope
 from .database import Database
 from .delegation_models import DelegatedSession, DelegatedTurn
+from .dot_models import DotSlackConversation
 from .goal_models import GoalTurn
 from .input_identity import input_identity
 from .models import Message, MessageSource, Session, SlackThread, Turn, User
@@ -59,14 +60,17 @@ class PrivateHistory:
     @staticmethod
     def private_chat(actor_id: str):
         from .responsibilities import ordinary_session
-        # A private-looking delegated or Slack-backed row is not a direct web chat.
+        # Only explicitly verified owner Dot threads can use private recall.
         return (
             ordinary_session(),
             Session.owner_id == actor_id, Session.visibility == "private",
             Session.surface == "web", Session.deleted.is_(False),
             ~select(DelegatedSession.session_id).where(DelegatedSession.session_id == Session.id).exists(),
             ~select(SwarmMember.session_id).where(SwarmMember.session_id == Session.id).exists(),
-            ~select(SlackThread.id).where(SlackThread.session_id == Session.id).exists(),
+            (~select(SlackThread.id).where(SlackThread.session_id == Session.id).exists())
+            | select(DotSlackConversation.session_id).where(
+                DotSlackConversation.session_id == Session.id,
+            ).exists(),
         )
 
     @staticmethod

@@ -6719,6 +6719,79 @@
         "title": "DotItemsView",
         "type": "object"
       },
+      "DotNotificationEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "enabled"
+        ],
+        "title": "DotNotificationEdit",
+        "type": "object"
+      },
+      "DotNotificationSettings": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "last_delivery": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pending",
+                  "sending",
+                  "sent",
+                  "rejected",
+                  "suppressed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Delivery"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "off",
+              "on",
+              "unavailable",
+              "needs_attention"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "enabled",
+          "status",
+          "description",
+          "last_delivery"
+        ],
+        "title": "DotNotificationSettings",
+        "type": "object"
+      },
       "DotView": {
         "properties": {
           "attention_available": {
@@ -22588,6 +22661,60 @@
           }
         },
         "summary": "Edit"
+      }
+    },
+    "/api/dot/notifications": {
+      "get": {
+        "operationId": "getDotNotifications",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DotNotificationSettings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Notification Settings"
+      },
+      "patch": {
+        "operationId": "updateDotNotifications",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DotNotificationEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DotNotificationSettings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Notifications"
       }
     },
     "/api/effects/{effect_id}/resolve": {

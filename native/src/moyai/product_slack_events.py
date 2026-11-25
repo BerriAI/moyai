@@ -131,6 +131,12 @@ class SlackEvents:
             return {"ok": True}
         actor, principal = await self.slack.actor(installed["team_id"], message.origin["user_id"])
         cast(Any, actor).slack_channel_evidence = (message.origin["team_id"], message.origin["channel_id"])
+        if thread is None and message.direct:
+            from .dot_slack_threads import new_direct_message, recover_root
+            await recover_root(self.slack, actor, message.origin)
+            thread = await self.conversations.find(message.origin)
+            if thread is None:
+                thread = await new_direct_message(self.slack, actor, message.origin, message.prompt)
         conversation = await self.conversations.resolve(
             thread, actor, message.origin, installed, mentioned=message.mentioned, command=message.command_name,
         )

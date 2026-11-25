@@ -42,6 +42,31 @@ class DotNotification(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
+class DotSlackPreference(Base):
+    """Explicit notification consent; the existing Delivery table owns sends."""
+
+    __tablename__ = "moyai_dot_slack_preferences"
+
+    owner_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    recipient: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class DotSlackConversation(Base):
+    """One private conversation per Slack root; the personal Dot stays stable."""
+
+    __tablename__ = "moyai_dot_slack_conversations"
+
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), primary_key=True)
+    dot_session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), index=True)
+    notification_turn_id: Mapped[str | None] = mapped_column(
+        ForeignKey("moyai_dot_notifications.turn_id"), nullable=True, unique=True,
+    )
+
+
 class DotDiscoveryTurn(Base):
     __tablename__ = "moyai_dot_discovery_turns"
 
