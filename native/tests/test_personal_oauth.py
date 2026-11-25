@@ -277,7 +277,7 @@ async def test_shared_app_protocol_and_refresh(runtime, oauth, monkeypatch, prov
 async def test_slack_uses_only_the_existing_personal_service(runtime, oauth):
     client, _ = oauth
     rows = (await client.get("/api/personal-connections")).json()
-    assert {row["provider"] for row in rows} == {"linear", "notion", "github"}
+    assert {row["provider"] for row in rows} == {"linear", "notion", "github", "gmail", "google_calendar"}
     assert (await client.post("/api/personal-connections/slack/oauth")).status_code == 422
     assert not personal_oauth.personal_callback(httpx.Request("GET", "https://moyai.test/oauth/slack/callback?state=personal-slack:test"))
 

@@ -516,6 +516,8 @@ class ConnectionPolicyView(ApiView):
     allowed_tools: list[str] | None = None
     require_approval: bool = True
     oauth: bool = False
+    oauth_account: str = ""
+    use_proactively: bool = False
     product: dict[str, JsonValue] | None = None
     mcp: RemoteMCPConfig | None = None
     gateway: GatewayConfig | None = None
@@ -525,7 +527,7 @@ class ConnectionPolicyView(ApiView):
 class ConnectionView(ApiView):
     id: str
     name: str
-    kind: Literal["github", "gitlab", "linear", "notion", "slack", "mcp", "litellm"]
+    kind: Literal["github", "gitlab", "linear", "notion", "slack", "mcp", "litellm", "gmail", "google_calendar"]
     owner_id: str
     shared: bool
     read_only: bool

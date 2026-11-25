@@ -5627,6 +5627,11 @@
             "title": "Oauth",
             "type": "boolean"
           },
+          "oauth_account": {
+            "default": "",
+            "title": "Oauth Account",
+            "type": "string"
+          },
           "product": {
             "anyOf": [
               {
@@ -5642,6 +5647,11 @@
           "require_approval": {
             "default": true,
             "title": "Require Approval",
+            "type": "boolean"
+          },
+          "use_proactively": {
+            "default": false,
+            "title": "Use Proactively",
             "type": "boolean"
           }
         },
@@ -5699,6 +5709,11 @@
             "title": "Oauth",
             "type": "boolean"
           },
+          "oauth_account": {
+            "default": "",
+            "title": "Oauth Account",
+            "type": "string"
+          },
           "product": {
             "anyOf": [
               {
@@ -5717,12 +5732,19 @@
             "default": true,
             "title": "Require Approval",
             "type": "boolean"
+          },
+          "use_proactively": {
+            "default": false,
+            "title": "Use Proactively",
+            "type": "boolean"
           }
         },
         "required": [
           "allowed_tools",
           "require_approval",
           "oauth",
+          "oauth_account",
+          "use_proactively",
           "product",
           "mcp",
           "gateway",
@@ -5774,7 +5796,9 @@
               "notion",
               "slack",
               "mcp",
-              "litellm"
+              "litellm",
+              "gmail",
+              "google_calendar"
             ],
             "title": "Kind",
             "type": "string"
@@ -10784,6 +10808,44 @@
         "title": "PendingToolCall",
         "type": "object"
       },
+      "PersonalAttentionEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "use_proactively": {
+            "title": "Use Proactively",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revision",
+          "use_proactively"
+        ],
+        "title": "PersonalAttentionEdit",
+        "type": "object"
+      },
+      "PersonalAttentionUpdated": {
+        "properties": {
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "use_proactively": {
+            "title": "Use Proactively",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revision",
+          "use_proactively"
+        ],
+        "title": "PersonalAttentionUpdated",
+        "type": "object"
+      },
       "PersonalOAuthDisconnected": {
         "properties": {
           "connected": {
@@ -10796,6 +10858,18 @@
           "connected"
         ],
         "title": "PersonalOAuthDisconnected",
+        "type": "object"
+      },
+      "PersonalOAuthRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "use_proactively": {
+            "default": true,
+            "title": "Use Proactively",
+            "type": "boolean"
+          }
+        },
+        "title": "PersonalOAuthRequest",
         "type": "object"
       },
       "PersonalOAuthStart": {
@@ -10813,6 +10887,24 @@
       },
       "PersonalOAuthView": {
         "properties": {
+          "attention_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "disabled",
+                  "unavailable",
+                  "paused",
+                  "pending",
+                  "active"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attention Status"
+          },
           "configured": {
             "title": "Configured",
             "type": "boolean"
@@ -10840,10 +10932,28 @@
             "enum": [
               "linear",
               "notion",
-              "github"
+              "github",
+              "google_calendar",
+              "gmail"
             ],
             "title": "Provider",
             "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "use_proactively": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Proactively"
           }
         },
         "required": [
@@ -10851,7 +10961,10 @@
           "name",
           "configured",
           "connected",
-          "connection_id"
+          "connection_id",
+          "revision",
+          "use_proactively",
+          "attention_status"
         ],
         "title": "PersonalOAuthView",
         "type": "object"
@@ -23450,7 +23563,9 @@
               "enum": [
                 "linear",
                 "notion",
-                "github"
+                "github",
+                "google_calendar",
+                "gmail"
               ],
               "title": "Provider",
               "type": "string"
@@ -23482,6 +23597,62 @@
         "summary": "Disconnect"
       }
     },
+    "/api/personal-connections/{provider}/attention": {
+      "patch": {
+        "operationId": "updatePersonalConnectionAttention",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "linear",
+                "notion",
+                "github",
+                "google_calendar",
+                "gmail"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalAttentionEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalAttentionUpdated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Attention"
+      }
+    },
     "/api/personal-connections/{provider}/oauth": {
       "post": {
         "operationId": "startPersonalConnection",
@@ -23494,13 +23665,32 @@
               "enum": [
                 "linear",
                 "notion",
-                "github"
+                "github",
+                "google_calendar",
+                "gmail"
               ],
               "title": "Provider",
               "type": "string"
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PersonalOAuthRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

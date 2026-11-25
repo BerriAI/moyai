@@ -214,5 +214,8 @@
 }
 .ns-personal-connections { margin-bottom: 2rem; }
 .ns-personal-connections h3 { margin: 0; font-size: inherit; font-weight: 600; }
+.ns-google-attention { margin-top: 12px; }
+.ns-google-attention label { display: flex; align-items: center; gap: 8px; }
+.ns-google-attention p { margin-top: 6px; }
 .native-settings .ns-oauth-connected { color: var(--ui-success); background: var(--ui-success-bg); display: inline-flex; align-items: center; gap: .25rem; }
 .ns-advanced-connections { margin-top: 2rem; }

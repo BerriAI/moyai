@@ -112,13 +112,27 @@ class RunScope:
     @property
     def workspace_key(self) -> str:
         grants_key = self.grants_key
-        if self.visibility == "shared" and self.authority.surface == "slack":
+        shared_slack = self.visibility == "shared" and self.authority.surface == "slack"
+        private_google = (
+            self.visibility == self.authority.visibility == "private"
+            and self.authority.surface in {"web", "automation"}
+        )
+        if shared_slack or private_google:
             # GitHub OAuth credentials never enter the shared computer. Files
             # and results requested here belong to the Slack conversation,
-            # while tool catalogs, history and memory retain per-user grants.
+            # while private Google read tokens also stay on the trusted worker.
+            # Changing those grants preserves the computer, not tool authority,
+            # history or memory: their keys still include every grant revision.
             grants_key = hashlib.sha256(json.dumps(sorted(
                 (grant.id, grant.revision) for grant in self.grants
-                if not (grant.kind == "github" and grant.policy.get("oauth"))
+                if not (
+                    (shared_slack and grant.kind == "github" and grant.policy.get("oauth"))
+                    or (
+                        private_google and grant.kind in {"gmail", "google_calendar"}
+                        and grant.read_only and grant.policy.get("oauth") is True
+                        and grant.policy.get("product") is None
+                    )
+                )
             )).encode()).hexdigest()
         return hashlib.sha256(json.dumps([
             self.visibility, self.actor_id if self.visibility == "private" else "shared",

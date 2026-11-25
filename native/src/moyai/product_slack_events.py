@@ -244,6 +244,19 @@ class SlackEvents:
                 submission = body
                 if saved is not None:
                     selections = json.loads(saved.connections)
+                    if (
+                        getattr(actor, "slack_web_grant", None) is not None
+                        and await self.slack.runtime.database.dots.is_conversation(
+                            db, actor.id, await db.get(Session, thread.session_id),
+                        )
+                    ):
+                        from .models import Connection
+                        # Dot's implicit Google accounts follow current owner
+                        # consent. Other chats retain their explicit selections.
+                        google_ids = set(await db.scalars(select(Connection.id).where(
+                            Connection.id.in_(selections), Connection.kind.in_(["gmail", "google_calendar"]),
+                        )))
+                        selections = [identity for identity in selections if identity not in google_ids]
                     if getattr(actor, "slack_web_grant", None) is None and self.slack.connections.personal_github:
                         # The shared computer retains organization accounts,
                         # but a previous participant never lends GitHub access.
@@ -258,7 +271,7 @@ class SlackEvents:
                             selections.append(account.id)
                     submission = body.model_copy(update={"connections": selections})
                 turn = await self.slack.runtime.admission.submit(
-                    actor, thread.session_id, submission, db=db,
+                    actor, thread.session_id, submission, db=db, dot_accounts=True,
                 )
                 source = await db.get(SlackTurnSource, turn.id)
                 if source is None:

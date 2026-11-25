@@ -14,7 +14,7 @@ from .automations.product_automation_models import ProductAutomationBinding, Pro
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant, NewSession, RunScope
 from .dot_evidence import validate_decision
-from .dot_models import DotAttentionTurn, DotDiscoveryTurn, DotNotification, PersonalDot
+from .dot_models import DotAttentionTurn, DotDiscoveryTurn, DotNotification, DotSlackConversation, PersonalDot
 from .models import Connection, Message, Session, Turn, User, now
 from .private_instructions import individual
 
@@ -48,6 +48,44 @@ class Dots:
         return bool(await db.scalar(select(DotAttentionTurn.turn_id).join(
             Turn, Turn.id == DotAttentionTurn.turn_id,
         ).where(Turn.session_id == session_id).limit(1)))
+
+    async def is_conversation(self, db: AsyncSession, owner: str, session: Session | None) -> bool:
+        """Identify the owner's current private Dot or one of its Slack roots."""
+        if (
+            session is None or session.owner_id != owner
+            or session.visibility != "private" or session.surface != "web"
+        ):
+            return False
+        dot = await db.get(PersonalDot, owner)
+        if dot is None:
+            return False
+        if session.id == dot.session_id:
+            return True
+        linked = await db.get(DotSlackConversation, session.id)
+        return linked is not None and linked.dot_session_id == dot.session_id
+
+    async def connected_accounts(self, db: AsyncSession, owner: str, session: Session) -> list[str]:
+        """Owner-enabled proactive accounts also support direct Dot follow-ups.
+
+        Only the personal conversation and its private Slack roots qualify.
+        Generated work keeps the exact accounts admitted by its own authority.
+        """
+        if not await self.is_conversation(db, owner, session):
+            return []
+        from .oauth_models import OAuthCredential
+
+        rows = await db.scalars(select(Connection).join(
+            OAuthCredential, OAuthCredential.connection_id == Connection.id,
+        ).where(
+            Connection.owner_id == owner, Connection.shared.is_(False),
+            Connection.enabled.is_(True), Connection.read_only.is_(True),
+            Connection.kind.in_(["gmail", "google_calendar"]),
+        ).execution_options(populate_existing=True))
+        return [
+            row.id for row in rows
+            if (policy := ConnectionPolicy.model_validate_json(row.policy)).oauth
+            and policy.use_proactively and policy.allowed_tools
+        ]
 
     async def delivery_session(self, db: AsyncSession, session_id: str | None, turn_id: str | None) -> str | None:
         """Public run links open the conversation, never the immutable observer."""

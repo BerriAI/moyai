@@ -20,7 +20,7 @@ from moyai.dot_contracts import DotItemEdit, DotJudgment, DotResearch
 from moyai.dot_discovery import DiscoverySnapshot
 from moyai.dot_discovery_agent import DiscoveryBounds
 from moyai.dot_models import DotAttentionTurn, DotDiscoveryTurn, DotItem, DotNotification
-from moyai.dot_sources import GITHUB_MCP, provider_partial, repositories
+from moyai.dot_sources import GITHUB_MCP, provider_complete, provider_partial, repositories
 from moyai.models import Connection, Message, Session, Turn
 
 
@@ -298,9 +298,23 @@ async def test_restricted_github_schema_exposes_only_dispatchable_methods(runtim
     {"nodes": [], "pageInfo": {"hasNextPage": True}},
     {"items": [], "nextPageToken": "later"},
     {"items": [], "has_next_page": True},
+    {"items": [], "coverage": {"has_more": False, "complete": False}},
+    {"messages": [], "coverage": {"has_more": False, "partial": True}},
+    {"id": "message", "content_complete": False},
 ])
 def test_provider_pagination_is_partial(payload):
     assert provider_partial(payload)
+    assert not provider_complete(payload)
+
+
+@pytest.mark.parametrize("payload", [
+    {"items": [], "coverage": {"has_more": False, "complete": True}},
+    {"messages": [], "coverage": {"has_more": False, "partial": False, "page_complete": True}},
+    {"id": "message", "content_complete": True},
+])
+def test_google_complete_reads_keep_explicit_coverage(payload):
+    assert not provider_partial(payload)
+    assert provider_complete(payload)
 
 
 async def test_bare_and_explicit_github_pages_cannot_be_claimed_as_complete(runtime, actor):

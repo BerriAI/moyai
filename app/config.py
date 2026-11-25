@@ -199,6 +199,8 @@ class Settings(BaseSettings):
     password_login_enabled: bool = True
     google_client_id: str = ""
     google_client_secret: str = ""
+    google_apps_client_id: str = ""
+    google_apps_client_secret: str = Field(default="", repr=False)
     google_allowed_domains: str = ""
     google_admin_emails: str = ""
     okta_issuer: str = ""

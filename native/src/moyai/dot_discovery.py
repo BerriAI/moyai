@@ -41,7 +41,10 @@ def account_key(grant: Grant) -> str:
     not inherit a previous account's private summaries or suppression decisions.
     """
     policy = ConnectionPolicy.model_validate(grant.policy)
-    return digest([grant.id, grant.kind, grant.credential, policy.mcp.url if policy.mcp else None])
+    return digest([
+        grant.id, grant.kind, policy.oauth_account or grant.credential,
+        policy.mcp.url if policy.mcp else None,
+    ])
 
 
 class PrivateMessage(BaseModel):
@@ -102,7 +105,8 @@ class Discovery:
             "revisit": [
                 {"connection_id": item.connection_id, "source": self.unpack(item).evidence[0].source}
                 for item in items
-                if not restricted or source_allowed(self.unpack(item).evidence[0].source, restricted[item.connection_id])
+                if item.connection_id not in restricted
+                or source_allowed(self.unpack(item).evidence[0].source, restricted[item.connection_id])
             ],
             "limits": "At most 12 tool calls, 30 records per call. Prefer recent activity and unfinished conversations.",
         }, ensure_ascii=False)
@@ -130,7 +134,7 @@ class Discovery:
             ]
             for observation in research.observations:
                 for account, source, _ in validate_evidence(observation.evidence, conversation, scope.grants):
-                    if scope.discovery_repositories and not source_allowed(source, scope.discovery_repositories[account]):
+                    if account in scope.discovery_repositories and not source_allowed(source, scope.discovery_repositories[account]):
                         raise ValueError("Discovery evidence is outside the approved repositories.")
             if len({(account, source) for account, source, _ in identities}) != len(identities):
                 raise ValueError("Combine findings about the same provider item.")

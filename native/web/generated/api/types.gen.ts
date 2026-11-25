@@ -2979,6 +2979,10 @@ export type ConnectionPolicy = {
      */
     oauth?: boolean;
     /**
+     * Oauth Account
+     */
+    oauth_account?: string;
+    /**
      * Product
      */
     product?: {
@@ -2988,6 +2992,10 @@ export type ConnectionPolicy = {
      * Require Approval
      */
     require_approval?: boolean;
+    /**
+     * Use Proactively
+     */
+    use_proactively?: boolean;
 };
 
 /**
@@ -3006,6 +3014,10 @@ export type ConnectionPolicyView = {
      */
     oauth: boolean;
     /**
+     * Oauth Account
+     */
+    oauth_account: string;
+    /**
      * Product
      */
     product: {
@@ -3015,6 +3027,10 @@ export type ConnectionPolicyView = {
      * Require Approval
      */
     require_approval: boolean;
+    /**
+     * Use Proactively
+     */
+    use_proactively: boolean;
 };
 
 /**
@@ -3046,7 +3062,7 @@ export type ConnectionView = {
     /**
      * Kind
      */
-    kind: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack' | 'mcp' | 'litellm';
+    kind: 'github' | 'gitlab' | 'linear' | 'notion' | 'slack' | 'mcp' | 'litellm' | 'gmail' | 'google_calendar';
     /**
      * Name
      */
@@ -6015,6 +6031,34 @@ export type PendingToolCall = {
 };
 
 /**
+ * PersonalAttentionEdit
+ */
+export type PersonalAttentionEdit = {
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Use Proactively
+     */
+    use_proactively: boolean;
+};
+
+/**
+ * PersonalAttentionUpdated
+ */
+export type PersonalAttentionUpdated = {
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Use Proactively
+     */
+    use_proactively: boolean;
+};
+
+/**
  * PersonalOAuthDisconnected
  */
 export type PersonalOAuthDisconnected = {
@@ -6022,6 +6066,16 @@ export type PersonalOAuthDisconnected = {
      * Connected
      */
     connected: boolean;
+};
+
+/**
+ * PersonalOAuthRequest
+ */
+export type PersonalOAuthRequest = {
+    /**
+     * Use Proactively
+     */
+    use_proactively?: boolean;
 };
 
 /**
@@ -6038,6 +6092,10 @@ export type PersonalOAuthStart = {
  * PersonalOAuthView
  */
 export type PersonalOAuthView = {
+    /**
+     * Attention Status
+     */
+    attention_status: 'disabled' | 'unavailable' | 'paused' | 'pending' | 'active' | null;
     /**
      * Configured
      */
@@ -6057,7 +6115,15 @@ export type PersonalOAuthView = {
     /**
      * Provider
      */
-    provider: 'linear' | 'notion' | 'github';
+    provider: 'linear' | 'notion' | 'github' | 'google_calendar' | 'gmail';
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Use Proactively
+     */
+    use_proactively: boolean | null;
 };
 
 /**
@@ -13813,7 +13879,7 @@ export type DisconnectPersonalConnectionData = {
         /**
          * Provider
          */
-        provider: 'linear' | 'notion' | 'github';
+        provider: 'linear' | 'notion' | 'github' | 'google_calendar' | 'gmail';
     };
     query?: never;
     url: '/api/personal-connections/{provider}';
@@ -13837,13 +13903,46 @@ export type DisconnectPersonalConnectionResponses = {
 
 export type DisconnectPersonalConnectionResponse = DisconnectPersonalConnectionResponses[keyof DisconnectPersonalConnectionResponses];
 
-export type StartPersonalConnectionData = {
-    body?: never;
+export type UpdatePersonalConnectionAttentionData = {
+    body: PersonalAttentionEdit;
     path: {
         /**
          * Provider
          */
-        provider: 'linear' | 'notion' | 'github';
+        provider: 'linear' | 'notion' | 'github' | 'google_calendar' | 'gmail';
+    };
+    query?: never;
+    url: '/api/personal-connections/{provider}/attention';
+};
+
+export type UpdatePersonalConnectionAttentionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdatePersonalConnectionAttentionError = UpdatePersonalConnectionAttentionErrors[keyof UpdatePersonalConnectionAttentionErrors];
+
+export type UpdatePersonalConnectionAttentionResponses = {
+    /**
+     * Successful Response
+     */
+    200: PersonalAttentionUpdated;
+};
+
+export type UpdatePersonalConnectionAttentionResponse = UpdatePersonalConnectionAttentionResponses[keyof UpdatePersonalConnectionAttentionResponses];
+
+export type StartPersonalConnectionData = {
+    /**
+     * Body
+     */
+    body?: PersonalOAuthRequest | null;
+    path: {
+        /**
+         * Provider
+         */
+        provider: 'linear' | 'notion' | 'github' | 'google_calendar' | 'gmail';
     };
     query?: never;
     url: '/api/personal-connections/{provider}/oauth';

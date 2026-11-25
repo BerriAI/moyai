@@ -16,7 +16,24 @@ GITHUB_METHODS = {
     "pull_request_read": frozenset({"get", "get_comments"}),
     "issue_read": frozenset({"get_comments"}),
 }
-MORE_FIELDS = ("incomplete_results", "has_more", "hasMore", "truncated", "hasNextPage", "has_next_page")
+MORE_FIELDS = (
+    "incomplete_results", "has_more", "hasMore", "truncated", "hasNextPage", "has_next_page",
+    "partial", "page_truncated", "records_truncated", "headers_incomplete", "snippet_truncated",
+)
+
+
+def google_reader(grant: Grant) -> bool:
+    from app.gmail_tools import READS as GMAIL_READS
+    from app.google_calendar_tools import READS as CALENDAR_READS
+
+    reads = {"gmail": GMAIL_READS, "google_calendar": CALENDAR_READS}.get(grant.kind)
+    policy = ConnectionPolicy.model_validate(grant.policy)
+    return bool(
+        reads and grant.read_only and policy.oauth and policy.product is None
+        and policy.allowed_tools and set(policy.allowed_tools).issubset(
+            {name.removeprefix(grant.kind + "_") for name in reads}
+        )
+    )
 
 
 def github_reader(grant: Grant) -> bool:
@@ -38,7 +55,10 @@ def repositories(grants: list[Grant], sources: list[dict[str, str]]) -> dict[str
             raise ValueError("Restricted discovery requires the official GitHub read-only MCP with repository-bound read tools.")
         owner, repository = urlsplit(source.source).path.strip("/").split("/")
         result.setdefault(grant.id, []).append((owner.casefold(), repository.casefold()))
-    if set(result) != set(selected):
+    if any(
+        identity not in result and not google_reader(grant)
+        for identity, grant in selected.items()
+    ):
         raise ValueError("Choose a repository for every restricted discovery account.")
     return result
 
@@ -85,10 +105,14 @@ def provider_partial(record: dict) -> bool:
     """Preserve explicit provider truncation signals, even in an empty page."""
     if any(record.get(key) is True for key in MORE_FIELDS):
         return True
+    if any(record.get(key) is False for key in ("complete", "content_complete", "page_complete")):
+        return True
     if any(record.get(key) not in (None, "", False) for key in ("next_cursor", "nextCursor", "next_page", "nextPage", "nextPageToken")):
         return True
-    page = record.get("pageInfo") or record.get("page_info")
-    if isinstance(page, dict) and provider_partial(page):
+    if any(
+        isinstance(record.get(key), dict) and provider_partial(record[key])
+        for key in ("pageInfo", "page_info", "coverage")
+    ):
         return True
     collections = [value for key, value in record.items() if key in (
         "items", "results", "records", "issues", "pull_requests", "nodes", "edges", "data",
@@ -101,7 +125,11 @@ def provider_complete(record: dict) -> bool:
     """An explicit terminal page, never inferred from a short or empty array."""
     if provider_partial(record):
         return False
+    if record.get("complete") is True or record.get("content_complete") is True:
+        return True
     if any(record.get(key) is False for key in ("has_more", "hasMore", "hasNextPage", "has_next_page")):
         return True
-    page = record.get("pageInfo") or record.get("page_info")
-    return isinstance(page, dict) and provider_complete(page)
+    return any(
+        isinstance(record.get(key), dict) and provider_complete(record[key])
+        for key in ("pageInfo", "page_info", "coverage")
+    )

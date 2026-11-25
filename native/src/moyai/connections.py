@@ -57,6 +57,10 @@ def selected_connections(scope: RunScope) -> tuple[SelectedConnection, ...]:
     if any(
         item.grant.kind not in SERVICES
         and item.grant.kind not in {"mcp", "litellm"}
+        and not (
+            item.grant.kind in {"gmail", "google_calendar"} and item.policy.oauth
+            and item.grant.read_only and item.policy.product is None
+        )
         and not (item.grant.kind == "gitlab" and item.policy.product is not None)
         for item in selected
     ):

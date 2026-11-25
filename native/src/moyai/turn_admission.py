@@ -42,6 +42,7 @@ class TurnAdmission:
         responsibility_generated: bool = False,
         delegated_authority: DelegatedAuthority | None = None,
         received_at: str | None = None,
+        dot_accounts: bool = False,
     ) -> Turn:
         admitted_at = now()
         body.validate_event(actor.id)
@@ -59,12 +60,14 @@ class TurnAdmission:
                 responsibility_generated=responsibility_generated,
                 delegated_authority=delegated_authority,
                 received_at=received_at, admitted_at=admitted_at,
+                dot_accounts=dot_accounts,
             )
         if swarm_generated or automation_generated or responsibility_generated or delegated_authority is not None:
             raise ValueError("Generated input requires its admission transaction.")
         try:
             return await self._submit(
                 actor, session_id, body, fingerprint, received_at=received_at, admitted_at=admitted_at,
+                dot_accounts=dot_accounts,
             )
         except IntegrityError:
             # Two requests can race the first lookup. The database's unique identity decides.
@@ -88,6 +91,7 @@ class TurnAdmission:
         automation_generated: bool = False,
         responsibility_generated: bool = False,
         delegated_authority: DelegatedAuthority | None = None,
+        dot_accounts: bool = False,
     ) -> Turn:
         if db is None and not swarm_generated and not automation_generated and delegated_authority is None:
             await self.database.prefetch_session_audiences(actor, [session_id])
@@ -142,6 +146,12 @@ class TurnAdmission:
             selections: list[str] = list(dict.fromkeys([
                 *body.connections, *(gateway_connection_ids(body.prompt) if not responsibility_generated else []),
             ]))
+            if dot_accounts and not (
+                swarm_generated or automation_generated or responsibility_generated or delegated_authority is not None
+            ):
+                selections = list(dict.fromkeys([
+                    *selections, *await self.database.dots.connected_accounts(transaction, actor.id, session),
+                ]))
             if responsibility_generated and selections:
                 raise PermissionError("Responsibility reviews cannot select connected accounts.")
             grants = await self.database.resolve_grants(

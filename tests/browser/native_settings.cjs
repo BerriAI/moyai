@@ -170,7 +170,7 @@ for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Pers
   const connect=apps.getByRole('button',{name:'Connect personal Linear',exact:true});
   await connect.waitFor();assert.equal(await connect.isEnabled(),true);
   assert.equal(await apps.getByRole('button',{name:'Reconnect personal Slack',exact:true}).isEnabled(),true);
-  assert.equal(await apps.locator('input').count(),0);
+  assert.equal(await apps.locator('input:not([type="checkbox"])').count(),0);
   await connect.focus();assert.equal(await connect.evaluate(el=>el===document.activeElement),true);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   await page.route('https://provider.example.test/**',route=>route.fulfill({contentType:'text/html',body:'<h1>Fixture provider consent</h1>'}));
@@ -185,6 +185,33 @@ test('Your apps reuses the existing Personal Slack authorization',async t=>{
   await page.waitForURL('**/?fixture-oauth=1#settings/personal-slack');
   assert.equal(fixture.state.requests.filter(r=>r.path==='/api/connections/slack/personal/oauth'&&r.method==='POST').length,1);
   assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections/slack/oauth').length,0);
+});
+for(const provider of ['google_calendar','gmail'])test(`${provider} connects with explicit proactive preference and no credential form`,async t=>{
+  fixture.reset();const row=fixture.state.personalApps.find(item=>item.provider===provider);
+  row.configured=true;
+  const page=await open(t,'connections');
+  const app=page.getByRole('region',{name:'Your apps',exact:true}).getByRole('article').filter({has:page.getByRole('heading',{name:row.name,exact:true})});
+  const proactive=app.getByRole('switch',{name:'Use proactively',exact:true});
+  await proactive.waitFor();assert.equal(await proactive.getAttribute('aria-checked'),'true');
+  await proactive.click();assert.equal(await proactive.getAttribute('aria-checked'),'false');
+  await page.route('https://provider.example.test/**',route=>route.fulfill({contentType:'text/html',body:'<h1>Fixture provider consent</h1>'}));
+  await app.getByRole('button',{name:`Connect personal ${row.name}`,exact:true}).click();
+  await page.waitForURL(`https://provider.example.test/authorize?provider=${provider}`);
+  const request=fixture.state.requests.find(r=>r.path===`/api/personal-connections/${provider}/oauth`);
+  assert.deepEqual(request.body,{use_proactively:false});
+});
+test('Connected Google app toggles attention with revision and displays pending/off states',async t=>{
+  fixture.reset();const row=fixture.state.personalApps.find(item=>item.provider==='gmail');
+  Object.assign(row,{configured:true,connected:true,connection_id:'gmail-owner',revision:3,attention_status:'active'});
+  const page=await open(t,'connections');
+  const app=page.getByRole('article').filter({has:page.getByRole('heading',{name:'Gmail',exact:true})});
+  await app.getByText('Included in your Dot’s scheduled attention checks.',{exact:true}).waitFor();
+  await app.getByRole('switch',{name:'Use proactively',exact:true}).click();
+  await app.getByText('Available in chat. Automatic checks are off.',{exact:true}).waitFor();
+  assert.deepEqual(fixture.state.requests.find(r=>r.method==='PATCH'&&r.path.endsWith('/attention')).body,{revision:3,use_proactively:false});
+  await app.getByRole('switch',{name:'Use proactively',exact:true}).click();
+  await app.getByText('Saved. Dot is setting up its next check.',{exact:true}).waitFor();
+  assert.equal(row.revision,5);
 });
 test('Personal app errors retry and disconnect requires confirmation',async t=>{
   fixture.reset();fixture.state.personalAppsError=true;

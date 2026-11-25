@@ -105,6 +105,18 @@ class CanonicalConnectorExecution:
         else:
             credentials = await service.credentials(scope, grant, write=write)
             bot_token = None
+        if grant.kind in {"gmail", "google_calendar"}:
+            # Google SDK clients own their transport, so fence both dispatch and
+            # result release here rather than the legacy HTTP request wrapper.
+            from app import gmail_tools, google_calendar_tools
+            await service.check(scope, grant, write=write)
+            try:
+                adapter = gmail_tools if grant.kind == "gmail" else google_calendar_tools
+                result = await adapter.call(name, args, credentials["access_token"])
+            except ConnectorError as error:
+                raise ToolFailed(str(error)) from None
+            await service.check(scope, grant, write=write)
+            return result
         invocation = _Invocation(service.connectors, lambda: service.check(scope, grant, write=write), recheck=not write)
 
         async def operate(bound: Any) -> Any:
