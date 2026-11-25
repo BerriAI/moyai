@@ -23,10 +23,11 @@ from moyai.models import Delivery, DeliverySchedule, Session, SlackThread, Turn,
 from moyai.private_history import PrivateHistory
 from moyai.private_instructions import PrivateInstructions
 from moyai.product_connections import ProductConnections
-from moyai.product_slack import ProductSlack
+from moyai.product_slack import ProductSlack, SlackInstallationUnavailable
 from moyai.product_slack_models import ProductSlackBinding, SlackWebLink, SlackWebTurn
 from moyai.slack import reconcile_one
 from moyai.slack_audience import can_read
+from moyai.slack_delivery_status import retry
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 product_database = support.product_database
@@ -60,6 +61,7 @@ async def dot(linked, monkeypatch):
     service.settings.public_url = "https://moyai.example.test"
     service.stopping = asyncio.Event()
     service.runtime.product_slack = service
+    product.database.slack_dot_installation = service.installation_in
     product.database.product_connections = ProductConnections(SimpleNamespace(
         store_proxy=SimpleNamespace(schema_updates=False), identity=product.adapter,
         security=product.adapter.legacy_security, settings=service.settings,
@@ -782,3 +784,79 @@ async def test_changed_delivery_authority_cannot_send(dot, change):
                 **({"deleted": True} if change == "deleted_child" else {"visibility": "shared"}),
             ))
     assert not await allowed(dot.service, delivery)
+
+
+@pytest.mark.parametrize("signing_secret", ["rotated-dot-signature", ""])
+async def test_dot_signing_change_revokes_queued_turn_and_delivery(dot, dot_ingress, signing_secret):
+    service = dot.service
+    service.settings.slack_dot_signing_secret = "initial-dot-signature"
+    service.product = SimpleNamespace(identity=dot.adapter, security=dot.adapter.legacy_security)
+    service._installation = MethodType(ProductSlack._installation, service)
+    async with dot.source.begin() as db:
+        await db.execute(text("ALTER TABLE moyai.connection_policies ADD COLUMN checked_at TEXT"))
+        await db.execute(text("ALTER TABLE moyai.connection_policies ADD COLUMN check_status TEXT"))
+        for provider, app, bot in [
+            ("slack", "ADEV00001", "UBOT00001"), ("slack_dot", "ADOT00001", "UBOT00002"),
+        ]:
+            credentials = {"bot": {
+                "access_token": "synthetic-bot-token", "app_id": app, "bot_user_id": bot,
+                "team": {"id": "TLOCAL001"},
+            }}
+            await db.execute(text(
+                "INSERT INTO moyai.connections VALUES(:provider,:encrypted) "
+                "ON CONFLICT(provider) DO UPDATE SET encrypted=excluded.encrypted"
+            ), {"provider": provider, "encrypted": dot.adapter.legacy_security.encrypt(json.dumps(credentials))})
+    await dot.source.dispose()
+    await dot.database.engine.dispose()
+    service.installation_in = MethodType(ProductSlack.installation_in, service)
+    dot.database.slack_dot_installation = service.installation_in
+    async with dot.database.sessions.begin() as db:
+        installed = await service.installation_in(db)
+    service.installation = lambda: installed
+
+    await enable(dot)
+    delivery = await publish(dot)
+    await dot_ingress.receive(dm_event("DOT_SIGNING_CHANGE", "1792100000.123"))
+    async with dot.database.sessions.begin() as db:
+        turn = (await db.scalars(select(Turn).where(Turn.request_key.startswith("slack-message:")))).one()
+        assert turn.status == "queued"
+        assert await dot.database._saved_product_grant(db, turn)
+    assert await allowed(service, delivery)
+
+    service.settings.slack_dot_signing_secret = signing_secret
+    async with dot.database.sessions.begin() as db:
+        with pytest.raises(HTTPException) as error:
+            await dot.database._saved_product_grant(db, turn)
+        assert error.value.status_code == 403
+    if signing_secret:
+        assert not await allowed(service, delivery)
+    else:
+        with pytest.raises(SlackInstallationUnavailable):
+            await allowed(service, delivery)
+
+
+async def test_owner_retries_explicit_rejection_only_with_dot_delivery_authority(dot):
+    await enable(dot)
+    delivery = await publish(dot)
+    dev = SimpleNamespace(app="dev", dot=dot.service)
+    dev.for_app = MethodType(ProductSlack.for_app, dev)
+    dev.delivery_allowed = MethodType(ProductSlack.delivery_allowed, dev)
+    dot.service.runtime.product_slack = dev
+
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status = "sending"
+    assert await retry(dot.service.runtime, dot.actor, delivery.session_id) == {"retried": 0}
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status, row.slack_app = "rejected", "dev"
+    with pytest.raises(HTTPException) as conflict:
+        await retry(dot.service.runtime, dot.actor, delivery.session_id)
+    assert conflict.value.status_code == 409
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        assert row.status == "rejected"
+        row.slack_app = "dot"
+    assert await retry(dot.service.runtime, dot.actor, delivery.session_id) == {"retried": 1}
+    async with dot.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).status == "pending"

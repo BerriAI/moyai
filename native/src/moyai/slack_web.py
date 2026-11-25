@@ -37,6 +37,24 @@ async def check_turn(database, db, turn) -> None:
         await database._identity().authorize_admission(
             db, ProductGrant(source.requester_id, source.authority_version),
         )
+        await check_transport_authority(database, db, turn.session_id)
+
+
+async def check_transport_authority(database, db, session_id: str) -> None:
+    link = await db.get(SlackWebLink, session_id)
+    if link is None or link.slack_app != "dot":
+        return
+    from .product_slack import SlackInstallationUnavailable
+
+    installation = database.slack_dot_installation
+    if installation is None:
+        raise HTTPException(403, "Dot Slack authority is unavailable.")
+    try:
+        installed = await installation(db)
+    except SlackInstallationUnavailable as error:
+        raise HTTPException(403, "Dot Slack authority is unavailable.") from error
+    if (installed["authority"] != link.connection_authority or installed["team_id"] != link.team_id):
+        raise HTTPException(403, "The Dot Slack installation changed.")
 
 
 class SlackWeb:

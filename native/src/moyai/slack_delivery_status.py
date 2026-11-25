@@ -45,7 +45,7 @@ async def retry(runtime, actor, session_id):
         )))
     retried = 0
     for row in rows:
-        if not await slack.delivery_allowed(row):
+        if not await slack.for_app(row.slack_app).delivery_allowed(row):
             continue
         async with runtime.database.sessions.begin() as db:
             await runtime.database.allowed_session(db, session_id, actor)

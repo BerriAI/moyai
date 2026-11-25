@@ -19,6 +19,7 @@ from urllib.parse import parse_qsl
 import httpx
 import pytest
 import pytest_asyncio
+from app.connection_authority import set_policy
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import func, select
 from test_product_connections import bridge as canonical_connections
@@ -235,6 +236,50 @@ async def test_dot_hook_is_app_signed_and_durably_dispatches_separately_from_leg
     assert await service.inbox.drain_one()
     assert calls[-1] == ("dev", None)
     assert not await service.inbox.drain_one()
+
+
+async def test_dot_installation_signing_changes_do_not_change_dev_installation(slack):
+    service = slack.service
+    service.settings.slack_dot_signing_secret = "first-dot-signature"
+    service.connectors.save("slack_dot", {"bot": {
+        "access_token": "dot-bot-token", "team": {"id": "TTEST0001"},
+        "bot_user_id": "UDOT00001", "app_id": "ADOT00001",
+    }}, "Local Dot")
+    original, dev = service.dot.installation()["authority"], service.installation()["authority"]
+    service.settings.slack_dot_signing_secret = "rotated-dot-signature"
+    assert service.dot.installation()["authority"] != original
+    assert service.installation()["authority"] == dev
+    service.settings.slack_dot_signing_secret = ""
+    with pytest.raises(HTTPException):
+        service.dot.installation()
+    assert service.installation()["authority"] == dev
+
+
+async def test_disabled_dot_actor_cannot_fall_back_to_eligible_dev_profile(slack, actor, monkeypatch):
+    service = slack.service
+    service.settings.slack_dot_signing_secret = "dot-signature"
+    service.settings.slack_identity_linking_enabled = False
+    service.connectors.save("slack_dot", {"bot": {
+        "access_token": "dot-bot-token", "team": {"id": "TTEST0001"},
+        "bot_user_id": "UDOT00001", "app_id": "ADOT00001",
+    }}, "Local Dot")
+    principal = await service.product.identity.require_current(slack.grant)
+    calls = []
+
+    async def current(user_id):
+        calls.append(user_id)
+        return principal
+
+    async def project(db, value):
+        return actor
+
+    monkeypatch.setattr(service.product.identity, "current", current, raising=False)
+    monkeypatch.setattr(service.product.identity, "project_native_user", project, raising=False)
+    assert (await service.actor("TTEST0001", "UTEST0001"))[0] is actor
+    set_policy(service.store, service.product.security, "slack_dot", False, False)
+    with pytest.raises(HTTPException):
+        await service.dot.actor("TTEST0001", "UTEST0001")
+    assert len(calls) == 1
 
 
 async def test_real_canonical_hook_inbox_signature_dedupe_without_external_side_effects(slack, monkeypatch):

@@ -203,6 +203,7 @@ class ProductSlack:
         self.profile_task: asyncio.Task[None] | None = None
         self.stopping = asyncio.Event()
         self.dot = ProductSlack(runtime, coordinator=self)
+        runtime.database.slack_dot_installation = self.dot.installation_in
 
     def start(self) -> None:
         """Owned by CoordinatorHandoff, or the exclusive loopback rehearsal."""
@@ -295,19 +296,27 @@ class ProductSlack:
         provider = slack_provider(self.app)
         rows = store.rows("SELECT * FROM connections WHERE provider=?", (provider,))
         bot = connectors.slack_installation(app="dot") if self.app == "dot" else connectors.slack_installation()
-        if not rows or not bot.get("installed") or not connectors.policy(provider)["enabled"]:
+        policy = connectors.policy(provider)
+        if not rows or not bot.get("installed") or not policy["enabled"]:
             raise SlackInstallationUnavailable()
+        value = json.loads(self.product.security.decrypt(rows[0]["encrypted"]))
+        state = {
+            "epoch": authority(value, rows[0]["encrypted"]),
+            "team": bot.get("team_id"), "bot": bot.get("user_id"),
+        }
         if self.app == "dot":
             dev = connectors.slack_installation()
-            if (not bot.get("app_id") or not dev.get("app_id") or bot["app_id"] == dev["app_id"]
+            secret = self.settings.slack_dot_signing_secret
+            if (not secret or secret == self.settings.slack_signing_secret
+                    or not bot.get("app_id") or not dev.get("app_id") or bot["app_id"] == dev["app_id"]
                     or not bot.get("user_id") or bot["user_id"] == dev.get("user_id")
                     or bot.get("team_id") != dev.get("team_id")):
                 raise SlackInstallationUnavailable()
-        value = json.loads(self.product.security.decrypt(rows[0]["encrypted"]))
-        bot["authority"] = hashlib.sha256(json.dumps({
-            "epoch": authority(value, rows[0]["encrypted"]),
-            "team": bot.get("team_id"), "bot": bot.get("user_id"),
-        }, sort_keys=True).encode()).hexdigest()
+            state.update(
+                app_id=bot["app_id"], read_only=policy["read_only"],
+                signature_version=hashlib.sha256(secret.encode()).hexdigest(),
+            )
+        bot["authority"] = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
         return bot
 
     async def bot_token(self) -> str:
@@ -342,6 +351,13 @@ class ProductSlack:
         return await db.run_sync(snapshot)
 
     async def actor(self, team: str, user: str, *, refresh_profile: bool = False) -> tuple[User, ProductPrincipal]:
+        dot_installation = None
+        if self.app == "dot":
+            installed = await source_database(self.installation)
+            if installed["team_id"] != team:
+                raise HTTPException(403, "This Slack sender belongs to another workspace.")
+            dot_installation = installed["authority"]
+
         def enroll():
             with self.store.connect() as conn:
                 conn.begin_write()
@@ -357,6 +373,11 @@ class ProductSlack:
                     await self.connections.identities.resolve(rows[0], team)
         principal = await self.product.identity.current(identity)
         async with self.runtime.database.sessions.begin() as db:
+            if dot_installation is not None:
+                principal = await self.product.identity.authorize_admission(db, principal)
+                installed = await self.installation_in(db)
+                if installed["authority"] != dot_installation:
+                    raise HTTPException(403, "The Dot Slack installation changed.")
             actor = await self.product.identity.project_native_user(db, principal)
         return actor, principal
 

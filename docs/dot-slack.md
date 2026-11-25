@@ -59,6 +59,10 @@ and configure `MOYAI_PUBLIC_URL`.
    `POST /api/connections/slack-dot/oauth` endpoint and follow its returned
    URL. OAuth stores a separate encrypted bot installation and rotates tokens
    using the existing Slack refresh path. Reconnect with this same endpoint.
+   Rotating or removing Dot's signing secret revokes work authorized by the old
+   private DM pin; token refresh does not. After a signing-secret rotation,
+   users must re-enable Slack notifications to verify their DM again. Existing
+   private history stays in Moyai.
 3. In Slack, set Dot's Events URL to `/hooks/slack/dot/events` and
    Interactivity URL to `/hooks/slack/dot/interactions`, on the **application**
    origin. The application ingress must forward these paths (and the existing

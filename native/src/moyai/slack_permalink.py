@@ -7,6 +7,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 from app.db import database as source_database
+from app.slack_apps import saved_slack_app
 from fastapi import HTTPException
 
 from .message_sources import public_message
@@ -23,20 +24,21 @@ async def permalink(runtime, actor, session_id: str, message_id: int) -> str:
         if not source or source.get("kind") != "slack":
             raise HTTPException(404, "Slack source unavailable.")
     team, channel, stamp = (source[key] for key in ("team_id", "channel_id", "message_ts"))
+    app = saved_slack_app(source.get("slack_app"))
     params = {"channel": channel, "message_ts": stamp}
     fallback = "https://slack.com/app_redirect?" + urlencode({"team": team, "channel": channel})
     try:
         async with asyncio.timeout(5):
             if runtime.product_slack is not None:
-                slack = runtime.product_slack
+                slack = runtime.product_slack.for_app(app)
                 installed = await source_database(slack.installation)
                 if installed["team_id"] != team:
                     raise HTTPException(404, "Slack source unavailable.")
-                token = await slack.connectors.slack_bot_token()
+                token = await slack.bot_token()
                 result = await slack.connectors.request("GET", "https://slack.com/api/chat.getPermalink",
                     headers={"Authorization": "Bearer " + token}, params=params)
             else:
-                if runtime.settings.slack_team_id != team:
+                if app != "dev" or runtime.settings.slack_team_id != team:
                     raise HTTPException(404, "Slack source unavailable.")
                 token = runtime.settings.slack_bot_token.get_secret_value()
                 async with httpx.AsyncClient(timeout=5) as client:
