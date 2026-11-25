@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import html
 import json
-from time import time
+from asyncio import sleep
+from datetime import timedelta
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Literal
 
 from app.connector_errors import ConnectorError
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
 
 
 DotDeliveryStatus = Literal["pending", "sending", "sent", "rejected", "suppressed"]
+SLACK_CLOCK_GUARD_SECONDS = 2
 
 
 class DotNotificationSettings(BaseModel):
@@ -179,6 +182,7 @@ class DotNotifications:
             if body.revision != (row.revision if row else 0):
                 raise HTTPException(409, "Notification settings changed. Refresh and try again.")
         recipient = None
+        started_ts = None
         slack = self.runtime.product_slack
         if body.enabled:
             if slack is None or not enabled(slack) or not slack.settings.public_url:
@@ -187,13 +191,27 @@ class DotNotifications:
                 installed = await source_database(slack.installation)
                 sender = await lookup(slack, actor, installed)
                 token = await slack.connectors.slack_bot_token()
+                response_headers: dict[str, str] = {}
                 opened = await slack.connectors.request(
                     "POST", "https://slack.com/api/conversations.open",
                     headers={"Authorization": "Bearer " + token}, json={"users": sender.id.split(":")[2]},
+                    response_headers=response_headers,
                 )
                 channel = (opened.get("channel") or {}).get("id", "")
                 if opened.get("ok") is not True or not channel.startswith("D") or not ID.fullmatch(channel):
                     raise HTTPException(502, "Slack did not confirm a direct-message conversation.")
+                try:
+                    provider_time = parsedate_to_datetime(response_headers["date"])
+                    if provider_time.utcoffset() != timedelta(0):
+                        raise ValueError("Slack must provide a UTC clock.")
+                    started_ts = f"{int(provider_time.timestamp()) + SLACK_CLOCK_GUARD_SECONDS}.000000"
+                except (KeyError, TypeError, ValueError, OverflowError) as error:
+                    raise HTTPException(502, "Slack did not confirm its clock. Try connecting again.") from error
+                # HTTP Date has one-second precision. A two-second guard also
+                # allows a small difference between Slack's API/message clocks.
+                # Elapsed waiting keeps messages sent after successful opt-in
+                # past this cutoff without comparing the API host's wall clock.
+                await sleep(SLACK_CLOCK_GUARD_SECONDS)
                 recipient = SlackRecipient(
                     owner_id=actor.id, owner_authority=actor_grant(actor).authority_version,
                     requester_id=sender.id, team_id=installed["team_id"], channel_id=channel,
@@ -222,7 +240,7 @@ class DotNotifications:
                     self.database.security.unseal(row.recipient),
                 ) if row.recipient else None
                 if previous != recipient or row.started_ts is None:
-                    row.started_ts = f"{time():.6f}"
+                    row.started_ts = started_ts
                 row.recipient = self.database.security.seal(recipient.model_dump_json())
                 row.destination_key = f"{recipient.team_id}:{recipient.channel_id}"
             row.updated_at = now()

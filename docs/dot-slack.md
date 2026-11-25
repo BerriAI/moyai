@@ -3,6 +3,8 @@
 Open **Your Dot → Slack notifications → Enable Slack notifications** while
 signed in with your individual account. Moyai verifies the Slack account against
 that identity and opens a DM with the installed workspace bot.
+Wait until opt-in reports success before sending the first DM; messages sent
+during account verification can be rejected by the connection cutoff.
 
 Each new published Dot finding starts a separate Slack thread and a private Moyai
 conversation. Reply in that thread to continue its conversation. A new top-level
@@ -83,11 +85,13 @@ Recovery requires an authorized operator:
    Have the new owner sign in and use normal notification opt-in; its verified
    account lookup must reach the specific “already connected to another Dot”
    conflict. Do not release a pin merely from a claimed email or Slack ID.
-2. Use the existing maintenance/drain procedure to stop Slack admission and
-   delivery workers, and wait for active HTTP sends and reconciliation calls to
-   finish. An uncertain `sending` row is not necessarily an active call and must
-   remain claimed. Keep admission paused through the new owner's successful
-   opt-in in step 4. Record the exact
+2. Follow [role quiescence](role-quiescence.md) to seal and drain **every
+   coordinator**, including standbys, and prevent replacement/restart admission.
+   Leave the API role available for verified opt-in. Wait for captured coordinator
+   identities to report drained and for active HTTP sends and reconciliation
+   calls to finish. An uncertain `sending` row is not necessarily an active call
+   and must remain claimed. Keep coordinator admission sealed through the new
+   owner's successful opt-in in step 4. Record the exact
    old owner ID, DM destination key, preference revision, and configured native
    schema. Do not print or decrypt recipient credentials.
 3. In that native schema, lock the owner before the preference, matching normal
@@ -134,9 +138,15 @@ Recovery requires an authorized operator:
    `pending`. Record the recovery in the operator's normal audit log.
 4. With Slack admission still paused, have the new owner opt in again through
    the normal API/UI, which freshly verifies the account and records new consent
-   and a binding timestamp. Verify the destination is pinned to that owner before
-   resuming workers. The timestamp rejects queued or late unbound messages sent
-   before this opt-in; it survives pause/re-enable for the same account.
+   and a binding timestamp from Slack's HTTP Date, never the API host's clock.
+   Opt-in adds a two-second guard to the provider's second-resolution clock and
+   waits two seconds before returning success. This conservatively allows for
+   small clock differences within Slack; send the first DM after success.
+   Verify the destination is pinned to that owner before qualifying replacement
+   coordinator capacity through the existing role-quiescence procedure; drained
+   processes have no resume command. The timestamp rejects queued or late
+   unbound messages from before this opt-in and survives pause/re-enable for the
+   same account.
    A new DM must create a new private conversation for the new owner. Old Slack
    thread replies must remain rejected, and old Moyai conversations must remain
    owned by the original owner.

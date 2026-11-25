@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from email.utils import formatdate
 from types import MethodType, SimpleNamespace
 
 import httpx
@@ -37,10 +38,22 @@ receiver = local_receiver
 
 @pytest_asyncio.fixture
 async def dot(linked, monkeypatch):
-    # The Slack fixtures use historical signed timestamps; bind before them.
-    monkeypatch.setattr("moyai.dot_notifications.time", lambda: 1792000000.0)
     product = linked
     service = product.service
+    # The signed Slack fixtures use historical timestamps. The provider clock
+    # deliberately differs from the host clock; ingress must use the former.
+    product.provider_date = formatdate(1791999998, usegmt=True)
+    request = service.connectors.request
+    async def with_provider_date(method, url, **kwargs):
+        headers = kwargs.pop("response_headers", None)
+        if headers is not None and product.provider_date is not None:
+            headers["date"] = product.provider_date
+        return await request(method, url, **kwargs)
+    service.connectors.request = with_provider_date
+    product.clock_waits = []
+    async def elapsed_wait(seconds):
+        product.clock_waits.append(seconds)
+    monkeypatch.setattr("moyai.dot_notifications.sleep", elapsed_wait)
     service.settings.public_url = "https://moyai.example.test"
     service.stopping = asyncio.Event()
     service.runtime.product_slack = service
@@ -58,6 +71,58 @@ async def dot(linked, monkeypatch):
 async def enable(dot):
     settings = await dot.notifications.read(dot.actor)
     return await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=settings.revision, enabled=True))
+
+
+@pytest.mark.parametrize("provider_offset", [-3600, 3600])
+async def test_binding_uses_slack_clock_and_accepts_first_dm_after_success(dot, provider_offset):
+    provider_second = int(datetime.now(UTC).timestamp()) + provider_offset
+    dot.provider_date = formatdate(provider_second, usegmt=True)
+    await enable(dot)
+    assert dot.clock_waits == [2]
+    async with dot.database.sessions() as db:
+        assert (await db.get(DotSlackPreference, dot.actor.id)).started_ts == f"{provider_second + 2}.000000"
+    sender, _ = await dot.service.actor("TLOCAL001", "UACTUAL01")
+    def origin(stamp):
+        return {"team_id": "TLOCAL001", "channel_id": "DLOCAL001", "thread_ts": stamp, "message_ts": stamp}
+    with pytest.raises(HTTPException) as old:
+        await new_direct_message(dot.service, sender, origin(f"{provider_second + 1}.900000"), "Queued before cutover")
+    assert old.value.status_code == 403
+    thread = await new_direct_message(
+        dot.service, sender, origin(f"{provider_second + 2}.001000"), "First DM after successful opt-in",
+    )
+    async with dot.database.sessions() as db:
+        assert (await db.get(Session, thread.session_id)).owner_id == dot.actor.id
+
+
+@pytest.mark.parametrize("provider_date", [None, "invalid", "Wed, 25 Nov 2026 03:00:00 -0500"])
+async def test_missing_or_invalid_provider_clock_does_not_enable_notifications(dot, provider_date):
+    dot.provider_date = provider_date
+    with pytest.raises(HTTPException) as unavailable:
+        await enable(dot)
+    assert unavailable.value.status_code == 502
+    assert dot.clock_waits == []
+    async with dot.database.sessions() as db:
+        assert await db.get(DotSlackPreference, dot.actor.id) is None
+
+
+@pytest.mark.parametrize("capture_headers", [False, True])
+async def test_connector_preserves_body_and_exposes_provider_headers(monkeypatch, capture_headers):
+    from app.connectors import Connectors
+
+    provider_date = "Wed, 25 Nov 2026 03:00:00 GMT"
+    original = httpx.AsyncClient
+    def client(**kwargs):
+        return original(**kwargs, transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"ok": True, "channel": {"id": "DLOCAL001"}}, headers={"Date": provider_date},
+        )))
+    monkeypatch.setattr("app.connectors.httpx.AsyncClient", client)
+    headers = {} if capture_headers else None
+    body = await Connectors.__new__(Connectors).request(
+        "POST", "https://slack.example/conversations.open", response_headers=headers,
+    )
+    assert body == {"ok": True, "channel": {"id": "DLOCAL001"}}
+    if headers is not None:
+        assert headers["date"] == provider_date
 
 
 @pytest_asyncio.fixture
@@ -83,6 +148,15 @@ def dm_event(event_id, stamp, **fields):
             "text": "Plan the launch privately.", "ts": stamp, **fields,
         },
     }
+
+
+async def test_dm_during_connection_clock_guard_never_falls_back_to_shared_chat(dot, dot_ingress):
+    with pytest.raises(HTTPException) as early:
+        await dot_ingress.receive(dm_event("DOT_CONNECTING", "1791999999.900000"))
+    assert early.value.status_code == 403
+    async with dot.database.sessions() as db:
+        assert await db.scalar(select(Turn.id).where(Turn.request_key.startswith("slack-message:"))) is None
+        assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
 
 
 @pytest.mark.parametrize("change", ["revoked", "linking_disabled", "remapped"])
@@ -116,7 +190,7 @@ async def test_legacy_receipt_prevents_new_dot_root_admission(dot, dot_ingress):
         assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
 
 
-async def test_operator_release_preserves_old_history_and_rejects_pre_cutover_events(dot, dot_ingress, monkeypatch):
+async def test_operator_release_preserves_old_history_and_rejects_pre_cutover_events(dot, dot_ingress):
     root = "1792100000.021"
     await dot_ingress.receive(dm_event("DOT_OLD_OWNER", root))
     pending = await publish(dot)
@@ -155,7 +229,7 @@ async def test_operator_release_preserves_old_history_and_rejects_pre_cutover_ev
             )), Delivery.status == "pending",
             Delivery.identity == ("product-slack:" + Delivery.turn_id + ":dot"),
         ).values(status="suppressed"))
-    monkeypatch.setattr("moyai.dot_notifications.time", lambda: 1792200000.0)
+    dot.provider_date = formatdate(1792199998, usegmt=True)
     assert (await dot.notifications.edit(successor, DotNotificationEdit(revision=0, enabled=True))).status == "on"
     # Queued or late pre-cutover roots cannot become conversations for the new owner.
     with pytest.raises(HTTPException) as stale:
@@ -356,7 +430,7 @@ async def test_new_dm_roots_are_separate_private_conversations_and_duplicate_saf
             assert (session.owner_id, session.visibility, session.surface) == (dot.actor.id, "private", "web")
 
 
-async def test_pause_cancels_pending_notifications_but_keeps_owner_conversations(dot, monkeypatch):
+async def test_pause_cancels_pending_notifications_but_keeps_owner_conversations(dot):
     settings = await enable(dot)
     pending = await publish(dot)
     await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=settings.revision, enabled=False))
@@ -373,7 +447,7 @@ async def test_pause_cancels_pending_notifications_but_keeps_owner_conversations
     with pytest.raises(HTTPException) as stale:
         await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=settings.revision, enabled=True))
     assert stale.value.status_code == 409
-    monkeypatch.setattr("moyai.dot_notifications.time", lambda: 1792200000.0)
+    dot.provider_date = formatdate(1792199998, usegmt=True)
     paused = await dot.notifications.read(dot.actor)
     await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=paused.revision, enabled=True))
     async with dot.database.sessions() as db:
