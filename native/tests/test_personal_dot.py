@@ -310,6 +310,28 @@ def test_evidence_uses_one_record_and_canonical_account_identity():
         resolve(accounts[0], content={"id": "real-item", "body": json.dumps(record)})
 
 
+def test_focused_evidence_survives_sdk_decoded_mcp_text_blocks():
+    account = Grant(id=str(uuid4()), kind="mcp", revision=1, credential="", policy={"allowed_tools": ["read_item"]})
+    first = {"id": "item-1", "updated_at": "v1", "title": "Review due."}
+    second = {"id": "item-2", "updated_at": "v2", "title": "Another item."}
+    decision = json.dumps({
+        "action": "notify", "message": "Prepare the review.", "evidence": [{
+            "connection_id": account.id, "source": "item-1", "source_version": "v1", "quote": "Review due.",
+        }],
+    })
+    fingerprints = []
+    for content in [
+        [first, second],
+        [[first], [second]],  # SDK decoding of separate JSON-array text blocks.
+        {"content": [{"type": "text", "text": json.dumps([row])} for row in (first, second)]},
+    ]:
+        conversation = ConversationTypeAdapter.dump_json(Conversation(messages=[ModelRequest(parts=[ToolReturnPart(
+            tool_name=f"mcp_{account.id[:8]}_read_item", tool_call_id="read", content=content,
+        )])])).decode()
+        fingerprints.append(validate_decision(decision, conversation, [account])[1])
+    assert fingerprints[0] is not None and len(set(fingerprints)) == 1
+
+
 @pytest.mark.parametrize("patch", [{"read_only": False}, {"shared": True}, {"policy": "{}"}])
 async def test_attention_rejects_broad_connection_policies(runtime, actor, patch):
     async with runtime.database.sessions.begin() as db:

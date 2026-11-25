@@ -30,10 +30,12 @@ def structured_records(value: object) -> Iterator[dict | None]:
                 yield from structured_records(value[key])
     elif isinstance(value, (list, tuple)):
         for child in value:
-            if isinstance(child, dict):
-                yield from structured_records(child)
-            else:
+            if isinstance(child, (list, tuple)):
+                # SDK-decoded MCP text blocks can contain nested collections.
+                # Keep their evidence for focused checks; discovery treats the
+                # ambiguous page boundary as incomplete coverage.
                 yield None
+            yield from structured_records(child)
     else:
         yield None
 

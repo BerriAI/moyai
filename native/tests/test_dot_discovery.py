@@ -194,6 +194,18 @@ async def test_host_bounds_provider_results_and_rejects_oversized_page(runtime, 
     assert result["limited"] and result["scanned"] and len(json.dumps(result)) < 18000
 
 
+async def test_discovery_retains_nested_mcp_records_without_claiming_complete_coverage(runtime, actor):
+    _, _, _, prepared = await observer(runtime, actor, discovery=True)
+    record = {"id": "item", "version": "one", "title": "Review due."}
+    result = await DiscoveryBounds().after_tool_execute(
+        SimpleNamespace(deps=prepared.scope),
+        call=ToolCallPart(f"mcp_{prepared.scope.grants[0].id[:8]}_read_item", {}, "read"),
+        tool_def=None, args={}, result=[[record]],
+    )
+    assert result["records"] == [record]
+    assert result["scanned"] and result["limited"]
+
+
 async def test_repository_scope_is_enforced_before_read_and_on_returned_records(runtime, actor):
     from pydantic_ai.exceptions import ModelRetry
     _, _, _, prepared = await observer(runtime, actor, discovery=True)
