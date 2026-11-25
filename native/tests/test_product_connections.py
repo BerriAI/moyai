@@ -9,18 +9,21 @@ from types import SimpleNamespace
 
 import pytest
 from app.connector_errors import ConnectorError
+from app.connectors import Connectors
 from app.db import Store
 from app.security import Security
 from fastapi import HTTPException
 from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_product_identity import settings_for
 
 from moyai.contracts import RunScope
 from moyai.models import Base, Connection, User, new_id
 from moyai.oauth_models import OAuthCredential
+from moyai.product_connection_store import ConnectionSnapshot
 from moyai.product_connections import ProductConnections, ProductGitHubToolset
 
 
@@ -55,6 +58,25 @@ def bridge(tmp_path, runtime):
 
 def save(service, provider, **extra):
     service.connectors.save(provider, {"access_token": "synthetic-token", "kind": "personal", **extra}, provider)
+
+
+def test_canonical_snapshot_reads_only_named_slack_installations(bridge):
+    engine = create_engine("sqlite://")
+    with engine.begin() as db:
+        db.execute(text("CREATE TABLE connections (provider TEXT PRIMARY KEY, encrypted TEXT NOT NULL)"))
+        snapshot = ConnectionSnapshot(db, "main")
+        connectors = Connectors(snapshot, bridge.security, bridge.settings)
+        for provider, app, user in [("slack", "dev", "UDEV00001"), ("slack_dot", "dot", "UDOT00001")]:
+            credentials = {"bot": {
+                "access_token": "synthetic-token", "team": {"id": "TLOCAL001"}, "bot_user_id": user,
+            }}
+            db.execute(text("INSERT INTO connections VALUES (:provider, :encrypted)"), {
+                "provider": provider, "encrypted": bridge.security.encrypt(json.dumps(credentials)),
+            })
+            assert connectors.slack_installation(app=app)["user_id"] == user
+        with pytest.raises(RuntimeError, match="Slack installation provider is invalid"):
+            snapshot.rows("SELECT encrypted FROM connections WHERE provider=?", ("github",))
+    engine.dispose()
 
 
 @pytest.mark.parametrize('bot', [False, True])

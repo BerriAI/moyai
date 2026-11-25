@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 QUERIES = {
     "SELECT * FROM connections WHERE provider=?": "connections",
+    "SELECT encrypted FROM connections WHERE provider=?": "connections",
     "SELECT enabled,read_only,checked_at,check_status FROM connection_policies WHERE provider=?": "connection_policies",
     "SELECT * FROM users WHERE id=?": "users",
     "SELECT id,email FROM users WHERE kind IN ('google','cloudflare','okta')": "users",
@@ -30,6 +31,10 @@ class ConnectionSnapshot:
     def rows(self, query: str, parameters=(), *, connection=None):
         if connection is not None or query not in QUERIES:
             raise RuntimeError("The canonical grant query changed; review its transaction adapter.")
+        if query == "SELECT encrypted FROM connections WHERE provider=?" and (
+            len(parameters) != 1 or parameters[0] not in ("slack", "slack_dot")
+        ):
+            raise RuntimeError("The canonical Slack installation provider is invalid.")
         table = QUERIES[query]
         qualified = f'"{self.schema}"."{table}"' if self.schema else f'"{table}"'
         query = query.replace("FROM " + table, "FROM " + qualified, 1)
