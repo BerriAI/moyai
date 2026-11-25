@@ -31,7 +31,7 @@ async def client_identity(service: ProductConnections, provider: OAuthProvider) 
 async def authorization_url(
     service: ProductConnections, provider: OAuthProvider, state: str, verifier: str,
 ) -> str:
-    if provider in {"gmail", "google_calendar"}:
+    if provider in ("gmail", "google_calendar"):
         from app.google_apps import authorization_url as google_authorization_url
         return await source_database(google_authorization_url, service.connectors, provider, state, verifier)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
