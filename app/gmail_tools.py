@@ -1,26 +1,38 @@
 """Read-only Gmail operations; OAuth and account selection belong to the caller."""
+from __future__ import annotations
+
 import asyncio
 import base64
 import binascii
 import json
+from collections.abc import Callable, Mapping
 from email.header import decode_header, make_header
 from email.message import Message
-from html.parser import HTMLParser
-from typing import Annotated
+from typing import Annotated, Literal, Protocol, TypeGuard, cast
 
 import google_auth_httplib2
 import httplib2
+from bs4 import BeautifulSoup
 from google.auth.exceptions import GoogleAuthError
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from googleapiclient import discovery
 from googleapiclient.errors import HttpError
-from pydantic import Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
+from typing_extensions import TypedDict
 
 from .connector_errors import ConnectorError
 from .connector_schemas import Args
 
 SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 HTTP_TIMEOUT_SECONDS = 15
+READ_RETRIES = 2
 MAX_PARTS = 100
 MAX_DEPTH = 16
 MAX_BODY_BYTES = 128 * 1024
@@ -36,6 +48,150 @@ ProviderId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")]
 HistoryId = Annotated[str, Field(pattern=r"^[0-9]{1,40}$")]
 _PROVIDER_ID = TypeAdapter(ProviderId)
 _HISTORY_ID = TypeAdapter(HistoryId)
+_OBJECT = TypeAdapter(dict[str, object])
+_TOKEN = TypeAdapter(Annotated[str, Field(min_length=1, strict=True)])
+
+
+class Request(Protocol):
+    def execute(self, *, num_retries: int = 0) -> object: ...
+
+
+class Messages(Protocol):
+    def get(self, *, userId: str, id: str, format: str, fields: str,
+            metadataHeaders: list[str] | None = None) -> Request: ...
+
+    def list(self, *, userId: str, q: str, maxResults: int, pageToken: str | None,
+             includeSpamTrash: bool, fields: str) -> Request: ...
+
+
+class Threads(Protocol):
+    def get(self, *, userId: str, id: str, format: str, fields: str) -> Request: ...
+
+
+class Users(Protocol):
+    def messages(self) -> Messages: ...
+    def threads(self) -> Threads: ...
+
+
+class Service(Protocol):
+    def users(self) -> Users: ...
+    def close(self) -> None: ...
+
+
+class ServiceBuilder(Protocol):
+    def __call__(self, serviceName: str, version: str, *,
+                 http: google_auth_httplib2.AuthorizedHttp, cache_discovery: bool,
+                 static_discovery: bool, num_retries: int) -> Service: ...
+
+
+class ErrorResponse(Protocol):
+    status: int
+    def get(self, key: str, default: str = "") -> str: ...
+
+
+class Discovery(Protocol):
+    build: ServiceBuilder
+
+
+# Discovery constructs resources dynamically; type only the SDK methods we use.
+build = cast(Discovery, discovery).build
+ServiceFactory = Callable[[str], Service]
+
+
+class Header(TypedDict):
+    name: str
+    value: str
+
+
+class Body(TypedDict):
+    text: str
+    format: Literal["plain_text"]
+    complete: bool
+    truncated: bool
+    issues: list[str]
+    attachments_skipped: int
+
+
+Sender = TypedDict("Sender", {"from": str})
+
+
+class MessageRecord(Sender):
+    provider: Literal["gmail"]
+    id: str
+    threadId: str
+    historyId: str
+    revision: str
+    internalDate: str | None
+    labelIds: list[str]
+    headers: list[Header]
+    headers_incomplete: bool
+    snippet: str
+    snippet_truncated: bool
+    subject: str
+    subject_truncated: bool
+    from_truncated: bool
+    text: str | None
+    text_complete: bool
+    text_truncated: bool
+    content_state: Literal["bounded_body", "headers_and_snippet"]
+    body: Body | None
+    attachments_read: bool
+    attachments_skipped: int | None
+    content_complete: bool
+
+
+class Reference(TypedDict):
+    id: str
+    threadId: str
+
+
+class Unread(Reference):
+    code: Literal["not_found"]
+
+
+class Coverage(TypedDict):
+    scope: str
+    has_more: bool
+    page_complete: bool
+    partial: bool
+    consistency: str
+
+
+class SearchCoverage(Coverage):
+    warning: str
+
+
+class SearchResult(TypedDict):
+    messages: list[MessageRecord]
+    unread_messages: list[Unread]
+    result_size_estimate: int | None
+    next_arguments: dict[str, str | int | bool] | None
+    coverage: SearchCoverage
+
+
+class ThreadResult(TypedDict):
+    provider: Literal["gmail"]
+    id: str
+    historyId: str
+    revision: str
+    messages: list[MessageRecord]
+    unread_messages: list[Unread]
+    message_count: int
+    offset: int
+    next_arguments: dict[str, str | int | None] | None
+    coverage: Coverage
+
+
+class WireMessage(BaseModel):
+    model_config = ConfigDict(strict=True)
+    id: ProviderId
+    threadId: ProviderId
+    historyId: HistoryId
+    internalDate: Annotated[str, Field(pattern=r"^[0-9]{1,20}$")] | None = None
+    labelIds: list[Annotated[str, Field(max_length=256)]] = Field(default_factory=list, max_length=1000)
+    snippet: str = ""
+    # MIME parts are validated only as visited, preserving traversal limits.
+    payload: dict[str, object] = Field(default_factory=dict)
 
 
 class GmailSearch(Args):
@@ -58,13 +214,13 @@ class GmailThread(Args):
     max_body_chars: int = Field(default=12000, ge=1, le=24000, strict=True)
 
     @model_validator(mode="after")
-    def continuation_revision(self):
+    def continuation_revision(self) -> GmailThread:
         if self.offset and self.history_id is None:
             raise ValueError("Use next_arguments, including history_id, for thread continuation.")
         return self
 
 
-TOOLS = {
+TOOLS: dict[str, tuple[str, bool, type[GmailSearch | GmailMessage | GmailThread], str]] = {
     "gmail_search": (
         "gmail", False, GmailSearch,
         ("Search/list the connected Gmail account. Returns exact message IDs, history revisions, "
@@ -89,16 +245,18 @@ TOOLS = {
 READS = frozenset(TOOLS)
 
 
-def _invalid_response():
+def _invalid_response() -> ConnectorError:
     return ConnectorError("Gmail returned an invalid or mismatched response.", code="invalid_response")
 
 
-def _service(access_token):
+def _service(access_token: str) -> Service:
     # A transport is private to this worker invocation: httplib2 is not thread-safe.
     # Refresh belongs to the connection owner, never to this token-only adapter.
     credentials = Credentials(token=access_token, scopes=[SCOPE])
+    http = httplib2.Http(timeout=HTTP_TIMEOUT_SECONDS)
+    http.follow_redirects = False
     transport = google_auth_httplib2.AuthorizedHttp(
-        credentials, http=httplib2.Http(timeout=HTTP_TIMEOUT_SECONDS),
+        credentials, http=http,
         refresh_status_codes=(), max_refresh_attempts=0,
     )
     return build(
@@ -107,17 +265,29 @@ def _service(access_token):
     )
 
 
-def _http_error(exc):
-    status = exc.resp.status
+def _object(value: object) -> dict[str, object]:
+    try:
+        return _OBJECT.validate_python(value, strict=True)
+    except ValidationError:
+        raise _invalid_response() from None
+
+
+def _is_list(value: object) -> TypeGuard[list[object]]:
+    return isinstance(value, list)
+
+
+def _http_error(exc: HttpError) -> ConnectorError:
+    response = cast(ErrorResponse, exc.resp)
+    status = response.status
     rate_limited = status == 429
     if status == 403 and len(exc.content) <= 16384:
         try:
-            errors = json.loads(exc.content).get("error", {}).get("errors", [])
+            errors = _object(_object(json.loads(exc.content)).get("error")).get("errors", [])
             rate_limited = any(
-                item.get("reason") in {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"}
-                for item in errors if isinstance(item, dict)
-            )
-        except (ValueError, TypeError, AttributeError):
+                _object(item).get("reason") in {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"}
+                for item in errors
+            ) if _is_list(errors) else False
+        except (ValueError, TypeError, ConnectorError):
             pass
     code, message = {
         400: ("invalid_request", "Gmail rejected the query or page token."),
@@ -127,44 +297,44 @@ def _http_error(exc):
     }.get(status, ("provider_error", "Gmail could not complete the read."))
     if rate_limited:
         code, message = "rate_limited", "Gmail temporarily limited reads. Try again later."
-    retry_after = exc.resp.get("retry-after", "")
-    retry_after = int(retry_after) if str(retry_after).isascii() and str(retry_after).isdigit() else None
+    value = response.get("retry-after", "")
+    retry_after = int(value) if len(value) <= 5 and value.isascii() and value.isdigit() else None
     return ConnectorError(
         message, code=code, status_code=status, retryable=rate_limited or status >= 500,
         retry_after=min(retry_after, 86400) if retry_after is not None else None,
     )
 
 
-def _execute(request):
+def _execute(request: Request) -> dict[str, object]:
     try:
-        result = request.execute(num_retries=0)
+        result = request.execute(num_retries=READ_RETRIES)
     except HttpError as exc:
         raise _http_error(exc) from None
     except (OSError, httplib2.HttpLib2Error, GoogleAuthError):
         raise ConnectorError("Gmail could not be reached.", code="provider_unavailable", retryable=True) from None
     except (ValueError, TypeError):
         raise _invalid_response() from None
-    if not isinstance(result, dict):
-        raise _invalid_response()
-    return result
+    return _object(result)
 
 
-def _identity(value, *, history=False):
+def _identity(value: object, *, history: bool = False) -> str:
     try:
-        return (_HISTORY_ID if history else _PROVIDER_ID).validate_python(value)
+        return (_HISTORY_ID if history else _PROVIDER_ID).validate_python(value, strict=True)
     except ValidationError:
         raise _invalid_response() from None
 
 
-def _headers(payload):
+def _headers(payload: Mapping[str, object]) -> tuple[list[Header], bool]:
     values = payload.get("headers", [])
-    if not isinstance(values, list):
+    if not _is_list(values):
         raise _invalid_response()
-    result, remaining, incomplete = [], MAX_HEADER_CHARS, len(values) > 100
-    for header in values[:100]:
-        if not isinstance(header, dict) or not isinstance(header.get("name"), str) or not isinstance(header.get("value"), str):
+    result: list[Header] = []
+    remaining, incomplete = MAX_HEADER_CHARS, len(values) > 100
+    for raw_header in values[:100]:
+        header = _object(raw_header)
+        name, value = header.get("name"), header.get("value")
+        if not isinstance(name, str) or not isinstance(value, str):
             raise _invalid_response()
-        name, value = header["name"], header["value"]
         if name.lower() not in HEADER_NAMES:
             continue
         if len(value) > remaining:
@@ -179,41 +349,53 @@ def _headers(payload):
     return result, incomplete
 
 
-class _HTMLText(HTMLParser):
-    """Extract text without following URLs or returning executable markup."""
-    HIDDEN = frozenset({"script", "style", "head", "template"})
-    BLOCKS = frozenset({"p", "div", "br", "li", "tr", "h1", "h2", "h3", "blockquote", "pre", "hr"})
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.hidden = []
-        self.text = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.HIDDEN:
-            self.hidden.append(tag)
-        elif not self.hidden and tag in self.BLOCKS:
-            self.text.append("\n")
-
-    def handle_endtag(self, tag):
-        if self.hidden:
-            if tag == self.hidden[-1]:
-                self.hidden.pop()
-        elif tag in self.BLOCKS:
-            self.text.append("\n")
-
-    def handle_data(self, data):
-        if not self.hidden:
-            self.text.append(data)
+def _html_text(text: str) -> str:
+    soup = BeautifulSoup(text, "html5lib")
+    for hidden in soup.find_all(["head", "script", "style", "template"]):
+        hidden.decompose()
+    for block in soup.find_all(["p", "div", "br", "li", "tr", "h1", "h2", "h3", "blockquote", "pre", "hr"]):
+        block.insert_before("\n")
+        block.insert_after("\n")
+    return soup.get_text()
 
 
-def _body(payload, max_chars):
-    stack = [(payload, 0)]
-    chunks, issues, seen, remaining, attachments = [], set(), 0, MAX_BODY_BYTES, 0
+def _alternative(parts: list[object]) -> object:
+    """Prefer plain/HTML bodies; retain containers for bounded traversal."""
+    candidates: list[tuple[int, object]] = []
+    for value in parts[:MAX_PARTS]:
+        try:
+            part = _object(value)
+        except ConnectorError:
+            continue
+        mime = part.get("mimeType")
+        if part.get("filename") or not isinstance(mime, str):
+            continue
+        mime = mime.lower()
+        headers, _ = _headers(part)
+        description = Message()
+        for header in headers:
+            if header["name"].lower() == "content-disposition":
+                description[header["name"]] = header["value"]
+        if description.get_content_disposition() == "attachment":
+            continue
+        if mime in {"text/plain", "text/html"}:
+            candidates.append((0 if mime == "text/plain" else 1, part))
+        elif mime.startswith("multipart/"):
+            candidates.append((2, part))
+    return min(candidates, key=lambda item: item[0])[1] if candidates else parts[-1]
+
+
+def _body(payload: dict[str, object], max_chars: int) -> Body:
+    stack: list[tuple[object, int]] = [(payload, 0)]
+    chunks: list[str] = []
+    issues: set[str] = set()
+    seen, remaining, attachments = 0, MAX_BODY_BYTES, 0
     while stack:
-        part, depth = stack.pop()
+        raw_part, depth = stack.pop()
         seen += 1
-        if not isinstance(part, dict):
+        try:
+            part = _object(raw_part)
+        except ConnectorError:
             issues.add("malformed_mime")
             continue
         mime = part.get("mimeType", "")
@@ -233,7 +415,7 @@ def _body(payload, max_chars):
             continue
         if mime.startswith("multipart/"):
             parts = part.get("parts", [])
-            if not isinstance(parts, list):
+            if not _is_list(parts):
                 issues.add("malformed_mime")
                 continue
             if depth >= MAX_DEPTH:
@@ -245,18 +427,16 @@ def _body(payload, max_chars):
             parts = parts[:max(available, 0)]
             if mime == "multipart/alternative" and parts:
                 # Prefer the plain representation without discarding mixed siblings.
-                plain = next((item for item in parts if isinstance(item, dict)
-                              and item.get("mimeType") == "text/plain"
-                              and not item.get("filename")), None)
-                parts = [plain if plain is not None else parts[-1]]
+                parts = [_alternative(parts)]
             stack.extend((child, depth + 1) for child in reversed(parts))
             continue
         if mime not in {"text/plain", "text/html"}:
             attachments += 1
             issues.add("unsupported_mime_part")
             continue
-        body = part.get("body")
-        if not isinstance(body, dict):
+        try:
+            body = _object(part.get("body"))
+        except ConnectorError:
             issues.add("malformed_mime")
             continue
         if body.get("attachmentId"):
@@ -293,10 +473,7 @@ def _body(payload, max_chars):
             text = decoded.decode("utf-8", errors="replace")
             issues.add("lossy_charset_decoding")
         if mime == "text/html":
-            parser = _HTMLText()
-            parser.feed(text)
-            parser.close()
-            text = "".join(parser.text)
+            text = _html_text(text)
         chunks.append(text.strip())
     text = "\n\n".join(chunk for chunk in chunks if chunk)
     if len(text) > max_chars:
@@ -308,24 +485,19 @@ def _body(payload, max_chars):
     }
 
 
-def _message(data, message_id, *, thread_id=None, max_chars=None):
-    identity = _identity(data.get("id"))
-    thread = _identity(data.get("threadId"))
-    revision = _identity(data.get("historyId"), history=True)
+def _message(data: object, message_id: str, *, thread_id: str | None = None,
+             max_chars: int | None = None) -> MessageRecord:
+    try:
+        source = WireMessage.model_validate(data)
+    except ValidationError:
+        raise _invalid_response() from None
+    identity, thread, revision = source.id, source.threadId, source.historyId
     if identity != message_id or (thread_id is not None and thread != thread_id):
         raise _invalid_response()
-    payload = data.get("payload", {})
-    if not isinstance(payload, dict) or not isinstance(data.get("snippet", ""), str):
-        raise _invalid_response()
+    payload = source.payload
     headers, headers_incomplete = _headers(payload)
-    labels = data.get("labelIds", [])
-    if not isinstance(labels, list) or len(labels) > 1000 or not all(isinstance(label, str) and len(label) <= 256 for label in labels):
-        raise _invalid_response()
-    internal_date = data.get("internalDate")
-    if internal_date is not None and (not isinstance(internal_date, str) or not internal_date.isascii() or not internal_date.isdigit() or len(internal_date) > 20):
-        raise _invalid_response()
     body = _body(payload, max_chars) if max_chars is not None else None
-    snippet = data.get("snippet", "")
+    snippet = source.snippet
     subject = "\n".join(header["value"] for header in headers if header["name"].lower() == "subject")
     sender = "\n".join(header["value"] for header in headers if header["name"].lower() == "from")
     body_text = body["text"] if body is not None else None
@@ -336,8 +508,8 @@ def _message(data, message_id, *, thread_id=None, max_chars=None):
     subject_truncated, sender_truncated = len(subject) > MAX_EVIDENCE_CHARS, len(sender) > MAX_EVIDENCE_CHARS
     return {
         "provider": "gmail", "id": identity, "threadId": thread,
-        "historyId": revision, "revision": revision, "internalDate": internal_date,
-        "labelIds": labels, "headers": headers, "headers_incomplete": headers_incomplete,
+        "historyId": revision, "revision": revision, "internalDate": source.internalDate,
+        "labelIds": source.labelIds, "headers": headers, "headers_incomplete": headers_incomplete,
         "snippet": snippet[:4096], "snippet_truncated": len(snippet) > 4096,
         # Discovery retains scalar evidence alongside its exact identity/revision.
         # Keep the larger nested body for ordinary reads without hiding omissions.
@@ -353,21 +525,20 @@ def _message(data, message_id, *, thread_id=None, max_chars=None):
     }
 
 
-def _messages(service, references, *, max_chars=None):
-    messages, unread = [], []
-    for reference in references:
-        if not isinstance(reference, dict):
-            raise _invalid_response()
+def _messages(service: Service, references: list[object], *,
+              max_chars: int | None = None) -> tuple[list[MessageRecord], list[Unread]]:
+    messages: list[MessageRecord] = []
+    unread: list[Unread] = []
+    for raw_reference in references:
+        reference = _object(raw_reference)
         identity = _identity(reference.get("id"))
         thread = _identity(reference.get("threadId"))
-        params: dict[str, str | list[str]] = {
-            "userId": "me", "id": identity, "format": "full" if max_chars is not None else "metadata",
-            "fields": MESSAGE_FIELDS if max_chars is not None else MESSAGE_FIELDS.replace("payload", "payload(headers)"),
-        }
-        if max_chars is None:
-            params["metadataHeaders"] = list(HEADERS)
         try:
-            data = _execute(service.users().messages().get(**params))
+            data = _execute(service.users().messages().get(
+                userId="me", id=identity, format="full" if max_chars is not None else "metadata",
+                fields=MESSAGE_FIELDS if max_chars is not None else MESSAGE_FIELDS.replace("payload", "payload(headers)"),
+                metadataHeaders=list(HEADERS) if max_chars is None else None,
+            ))
         except ConnectorError as exc:
             if exc.code != "not_found":
                 raise
@@ -377,59 +548,63 @@ def _messages(service, references, *, max_chars=None):
     return messages, unread
 
 
-def _search(service, args):
+def _search(service: Service, args: GmailSearch) -> SearchResult:
     data = _execute(service.users().messages().list(
-        userId="me", q=args["query"], maxResults=args["page_size"],
-        pageToken=args["cursor"] or None, includeSpamTrash=args["include_spam_trash"],
+        userId="me", q=args.query, maxResults=args.page_size,
+        pageToken=args.cursor or None, includeSpamTrash=args.include_spam_trash,
         fields="messages(id,threadId),nextPageToken,resultSizeEstimate",
     ))
     references = data.get("messages", [])
     cursor = data.get("nextPageToken", "")
     estimate = data.get("resultSizeEstimate")
-    if not isinstance(references, list) or len(references) > args["page_size"] or not isinstance(cursor, str) or len(cursor) > 4096:
+    if not _is_list(references) or len(references) > args.page_size or not isinstance(cursor, str) or len(cursor) > 4096:
         raise _invalid_response()
     if estimate is not None and (type(estimate) is not int or estimate < 0):
         raise _invalid_response()
     messages, unread = _messages(service, references)
-    next_args = {**args, "cursor": cursor} if cursor and cursor != args["cursor"] else None
+    next_args: dict[str, str | int | bool] | None = {
+        "query": args.query, "cursor": cursor, "page_size": args.page_size,
+        "include_spam_trash": args.include_spam_trash,
+    } if cursor and cursor != args.cursor else None
     return {
         "messages": messages, "unread_messages": unread,
         "result_size_estimate": estimate, "next_arguments": next_args,
         "coverage": {
             "scope": "matching_message_headers_and_snippets", "has_more": bool(cursor),
-            "page_complete": not unread, "partial": bool(args["cursor"] or cursor or unread),
+            "page_complete": not unread, "partial": bool(args.cursor or cursor or unread),
             "warning": "Gmail repeated a page token; coverage is incomplete." if cursor and not next_args else "",
             "consistency": "Live Gmail pages; concurrent changes can affect enumeration.",
         },
     }
 
 
-def _thread(service, args):
+def _thread(service: Service, args: GmailThread) -> ThreadResult:
     # threads.get has no provider pagination. Fetch only compact identities first,
     # then read a bounded slice; never download every message body in a thread.
     data = _execute(service.users().threads().get(
-        userId="me", id=args["thread_id"], format="minimal",
+        userId="me", id=args.thread_id, format="minimal",
         fields="id,historyId,messages(id)",
     ))
     identity = _identity(data.get("id"))
     history = _identity(data.get("historyId"), history=True)
-    if identity != args["thread_id"] or not isinstance(data.get("messages"), list):
+    references = data.get("messages")
+    if identity != args.thread_id or not _is_list(references):
         raise _invalid_response()
-    if args["history_id"] is not None and history != args["history_id"]:
+    if args.history_id is not None and history != args.history_id:
         raise ConnectorError("The Gmail thread changed. Read it again from offset=0 without history_id.",
                              code="thread_changed")
-    references = data["messages"]
-    offset = args["offset"]
-    page = references[offset:offset + args["page_size"]]
-    if any(not isinstance(item, dict) for item in page):
-        raise _invalid_response()
+    offset = args.offset
+    page = references[offset:offset + args.page_size]
     # Minimal thread reads only promise message IDs. The subsequent full read
     # verifies each message's threadId against this independently returned thread.
-    page_references = [{"id": item.get("id"), "threadId": identity} for item in page]
-    messages, unread = _messages(service, page_references, max_chars=args["max_body_chars"])
+    page_references: list[object] = [{"id": _object(item).get("id"), "threadId": identity} for item in page]
+    messages, unread = _messages(service, page_references, max_chars=args.max_body_chars)
     end = offset + len(page)
     has_more = end < len(references)
-    next_args = {**args, "offset": end, "history_id": history} if has_more else None
+    next_args: dict[str, str | int | None] | None = {
+        "thread_id": args.thread_id, "page_size": args.page_size,
+        "offset": end, "history_id": history, "max_body_chars": args.max_body_chars,
+    } if has_more else None
     return {
         "provider": "gmail", "id": identity, "historyId": history, "revision": history,
         "messages": messages, "unread_messages": unread, "message_count": len(references),
@@ -442,32 +617,39 @@ def _thread(service, args):
     }
 
 
-def _call(name, args, access_token):
-    service = _service(access_token)
+Result = MessageRecord | SearchResult | ThreadResult
+
+
+def _call(args: GmailSearch | GmailMessage | GmailThread, access_token: str,
+          service_factory: ServiceFactory) -> Result:
+    service = service_factory(access_token)
     try:
-        if name == "gmail_search":
+        if isinstance(args, GmailSearch):
             return _search(service, args)
-        if name == "gmail_thread":
+        if isinstance(args, GmailThread):
             return _thread(service, args)
         data = _execute(service.users().messages().get(
-            userId="me", id=args["message_id"], format="full", fields=MESSAGE_FIELDS,
+            userId="me", id=args.message_id, format="full", fields=MESSAGE_FIELDS,
         ))
-        return _message(data, args["message_id"], max_chars=args["max_body_chars"])
+        return _message(data, args.message_id, max_chars=args.max_body_chars)
     finally:
         service.close()
 
 
-async def call(name: str, arguments: dict, access_token: str) -> dict:
+async def call(name: str, arguments: Mapping[str, object], access_token: str, *,
+               service_factory: ServiceFactory = _service) -> Result:
     if name not in READS:
         raise ConnectorError("Unsupported Gmail read operation.", code="unsupported_operation", dispatched=False)
     try:
-        args = TOOLS[name][2].model_validate(arguments).model_dump()
+        args = TOOLS[name][2].model_validate(arguments)
     except ValidationError:
         raise ConnectorError("Invalid Gmail read arguments.", code="invalid_arguments", dispatched=False) from None
-    if not isinstance(access_token, str) or not access_token:
-        raise ConnectorError("Connect Gmail before reading mail.", code="authentication_required", dispatched=False)
     try:
-        return await asyncio.to_thread(_call, name, args, access_token)
+        token = _TOKEN.validate_python(access_token)
+    except ValidationError:
+        raise ConnectorError("Connect Gmail before reading mail.", code="authentication_required", dispatched=False) from None
+    try:
+        return await asyncio.to_thread(_call, args, token, service_factory)
     except ConnectorError:
         raise
     except Exception:  # noqa: BLE001 — sanitize failures at the credential-bearing SDK boundary.

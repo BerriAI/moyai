@@ -8,7 +8,9 @@ administrators can separately restrict third-party app access.
 **Use proactively** is visible before consent and defaults on. After connection,
 Moyai creates or updates the owner's existing Dot discovery automation. It
 preserves existing priorities, repository restrictions, schedule and explicit
-pauses. A new attention automation checks hourly, with its first scheduled
+pauses and retirement. Connecting or disconnecting an account does not restart
+retired attention; the owner must explicitly migrate and activate it again.
+A new attention automation checks hourly, with its first scheduled
 minute approximately one minute after connection. Synchronization is durable
 but asynchronous; Settings reports pending, active, paused or unavailable.
 
@@ -22,6 +24,8 @@ account in a private chat.
 Disconnect removes saved tokens, cancels unfinished consent and advances
 connection/schedule authority. In-flight results must recheck authority before
 release. Google grants do not authorize shared Slack conversations.
+Revocation commits even when remaining accounts exceed the discovery limit or
+the saved conversation is unavailable; attention pauses for repair.
 
 Private read-only Google OAuth credentials stay on the trusted worker; they are
 never installed in the computer. Adding, replacing, opting out of or disconnecting
@@ -76,7 +80,11 @@ Requested grants are OpenID identity/email plus:
 Moyai uses `google-auth-oauthlib` for S256 PKCE, code exchange and offline token
 refresh, and the official Google API Python client for reads. The existing
 owner-scoped OAuth store encrypts tokens; authorization state is single-use and
-fenced by owner/session/client/revision. Verified Google subject plus client ID
+fenced by owner/session/client/revision. Pending authorization has a separate
+generation from the working connection: starting or cancelling a reconnect
+preserves the current grant, while a superseded consent response cannot replace
+newer credentials. Only a successful replacement advances live authority.
+Verified Google subject plus client ID
 identifies the account, so refresh preserves attention history while switching
 accounts does not inherit another account's tracked items.
 
@@ -85,7 +93,9 @@ accounts does not inherit another account's tracked items.
 There is one canonical discovery automation per owner. Google accounts join
 that automation through the existing product writer, captured account context
 and Temporal reconciliation. No provider-specific scheduler or token database
-is introduced. A second Google connection updates the same definition.
+is introduced. A second Google connection updates the same definition. Enrollment
+uses the automation service's shared definition and binding transitions, including
+context capture, generation fencing and durable synchronization intent.
 
 The initial implementation performs scheduled bounded reads. It does not use
 Gmail push, Calendar watch channels or incremental sync tokens. Email bodies,
@@ -98,9 +108,30 @@ proactive use starts. Installations without the automation service support
 private chat reads but show background attention as unavailable. Attention
 delivery still uses the existing Dot conversation/notification configuration.
 
-This release keeps schema v33 and advances native execution protocol to 15.
+This release advances schema to v34 with an additive, nullable pending-consent
+generation on OAuth credentials, and advances native execution protocol to 15.
 Drain incompatible participants before admission; do not overlap older workers
 with Google grants. Follow the installation's existing release controller.
+
+## Adapter choice
+
+Google's official SDKs own OAuth, API transport and bounded transient-read
+retries. Maintained Beautiful Soup/html5lib parsing handles email HTML; Moyai
+owns only its account authority, bounded tool results and evidence normalization.
+Authentication failures are distinguished from temporary provider failures.
+
+Google also offers remote Gmail and Calendar MCP servers. They are not a drop-in
+replacement for this version's evidence contract: the documented Gmail
+`get_thread` tool has no bounded continuation input or thread history revision,
+and Calendar `get_event` does not document an ETag output. Revisit the transport
+when those contracts support the bounded reads and exact source revisions Dot
+uses. MCP still requires operator Google Cloud/OAuth configuration and user
+consent; it does not remove the application registration prerequisite.
+
+Local lifecycle proof can seed synthetic connected accounts and exercise the
+real application endpoints without exchanging credentials with Google. This
+does not verify live Google consent, API reads, token refresh or Google-driven
+proactive delivery; those require a configured OAuth application and real consent.
 
 See [Gmail adapter](gmail.md), [Calendar adapter](google-calendar.md), and
 [Dot discovery](dot-discovery.md) for evidence bounds.
@@ -111,3 +142,7 @@ See [Gmail adapter](gmail.md), [Calendar adapter](google-calendar.md), and
 - [Configure OAuth consent](https://developers.google.com/workspace/guides/configure-oauth-consent)
 - [Google web-server authorization](https://developers.google.com/identity/protocols/oauth2/web-server)
 - [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
+- [OAuth best practices](https://developers.google.com/identity/protocols/oauth2/resources/best-practices)
+- [Gmail MCP configuration](https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server)
+- [Gmail MCP get_thread](https://developers.google.com/workspace/gmail/api/reference/mcp/get_thread)
+- [Calendar MCP get_event](https://developers.google.com/workspace/calendar/api/reference/mcp/get_event)

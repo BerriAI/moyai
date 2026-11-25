@@ -77,7 +77,8 @@ PERSONAL_DOT_SCHEMA_VERSION = "2026-11-24-personal-dot-v30"
 DOT_DISCOVERY_SCHEMA_VERSION = "2026-11-24-dot-discovery-v31"
 DOT_SLACK_SCHEMA_VERSION = "2026-11-24-dot-slack-v32"
 SLACK_APPS_SCHEMA_VERSION = "2026-11-25-slack-apps-v33"
-PRODUCT_SCHEMA_VERSION = SLACK_APPS_SCHEMA_VERSION
+OAUTH_AUTHORIZATION_SCHEMA_VERSION = "2026-11-25-oauth-authorization-v34"
+PRODUCT_SCHEMA_VERSION = OAUTH_AUTHORIZATION_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -175,6 +176,7 @@ MIGRATIONS = (
     (DOT_DISCOVERY_SCHEMA_VERSION, frozenset({"moyai_dot_discovery_turns", "moyai_dot_items"})),
     (DOT_SLACK_SCHEMA_VERSION, frozenset({"moyai_dot_slack_preferences", "moyai_dot_slack_conversations"})),
     (SLACK_APPS_SCHEMA_VERSION, frozenset()),
+    (OAUTH_AUTHORIZATION_SCHEMA_VERSION, frozenset()),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing
@@ -182,6 +184,7 @@ MIGRATIONS = (
 # migration version, alongside a frozen online expansion. No entries are
 # needed for columns introduced with their table.
 COLUMN_MIGRATIONS: dict[str, frozenset[tuple[str, str]]] = {
+    OAUTH_AUTHORIZATION_SCHEMA_VERSION: frozenset({("moyai_oauth_credentials", "authorization_revision")}),
     PRIVATE_AUTOMATION_SCHEMA_VERSION: frozenset({("moyai_product_automation_turns", "visibility")}),
     SLACK_APPS_SCHEMA_VERSION: frozenset({
         ("moyai_deliveries", "slack_app"),

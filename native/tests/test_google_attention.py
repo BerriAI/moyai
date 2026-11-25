@@ -14,6 +14,7 @@ import httpx
 import pytest
 import pytest_asyncio
 import test_product_automations as automation_fixtures
+from app.connector_errors import ConnectorError
 from fastapi import FastAPI, HTTPException, Request
 from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.exceptions import ModelRetry
@@ -32,7 +33,7 @@ from moyai.automations.product_automation_models import ProductAutomationBinding
 from moyai.automations.product_automations import Mutation, Save, native_schedule_id
 from moyai.connection_policy import ConnectionPolicy
 from moyai.dot_discovery_agent import DiscoveryBounds
-from moyai.dot_models import DotNotification, PersonalDot
+from moyai.dot_models import DotAttentionTurn, DotNotification, PersonalDot
 from moyai.dot_sources import GITHUB_MCP
 from moyai.mcp_remote import RemoteMCPConfig
 from moyai.models import Connection, Session, User
@@ -236,6 +237,38 @@ async def test_explicit_pause_survives_adding_another_account(google):
     assert all(schedule.state.paused for schedule in ctx.remote.schedules.values())
 
 
+@pytest.mark.parametrize("change", ["disconnect", "opt_out"])
+async def test_account_removal_does_not_recreate_retired_attention(google, change):
+    ctx = google
+    await connect(ctx, "gmail")
+    calendar = await connect(ctx, "google_calendar")
+    original, _, _, _ = await saved(ctx)
+    await ctx.service.reconcile(original["id"])
+    await ctx.service.mutate(ctx.grant, "retire", original["id"], Mutation(
+        revision=original["revision"], request_key="owner-retires-google-attention",
+    ))
+    await ctx.service.reconcile(original["id"])
+    assert not ctx.remote.schedules
+
+    if change == "disconnect":
+        response = await ctx.client.delete("/api/personal-connections/gmail")
+        await assert_disconnected(ctx, "gmail", response)
+    else:
+        await attention(ctx, "gmail", False)
+        assert not (await inventory(ctx, "gmail"))["use_proactively"]
+
+    async with ctx.product.database.sessions() as db:
+        assert await db.scalar(text("SELECT count(*) FROM moyai.automations")) == 1
+        assert await db.scalar(select(func.count()).select_from(Binding)) == 1
+        retired = await db.get(Binding, original["id"])
+        assert retired is not None and retired.state == "deleted"
+        remaining = await db.get(Connection, calendar["connection_id"])
+        assert remaining.enabled and ConnectionPolicy.model_validate_json(remaining.policy).use_proactively
+    await ctx.service.reconcile(original["id"])
+    assert not ctx.remote.schedules
+    assert (await inventory(ctx, "google_calendar"))["attention_status"] == "paused"
+
+
 @pytest.mark.parametrize("pause_before_opt_out", [True, False])
 async def test_explicit_pause_survives_emptying_and_reenabling_account_scope(google, pause_before_opt_out):
     ctx = google
@@ -297,6 +330,113 @@ async def test_attention_status_requires_account_membership_in_active_definition
     assert gmail["connected"] and gmail["use_proactively"]
     assert gmail["attention_status"] == "paused"
     assert (await inventory(ctx, "google_calendar"))["attention_status"] == "active"
+
+
+@pytest.mark.parametrize("provider", ["gmail", "google_calendar"])
+@pytest.mark.parametrize("outcome", ["cancelled", "failed"])
+async def test_unsuccessful_reconnect_preserves_live_attention_authority(
+    google, monkeypatch, provider, outcome,
+):
+    ctx = google
+    account = await connect(ctx, provider)
+    initial, _, _, _ = await saved(ctx)
+    await ctx.service.reconcile(initial["id"])
+    original, definition, binding, context = await saved(ctx)
+    original_grants = await ctx.runtime.product_connections.resolve_grants(
+        ctx.product.user_id, [account["connection_id"]], surface="automation",
+    )
+    async with ctx.product.database.sessions() as db:
+        credential = await db.get(OAuthCredential, account["connection_id"])
+        encrypted, credential_revision = credential.encrypted, credential.revision
+
+    async def failed_exchange(_service, _provider, _identity, **_kwargs):
+        assert outcome == "failed", "Cancelled consent must not redeem the code."
+        raise ConnectorError("Synthetic token exchange rejection.", code="invalid_grant")
+
+    monkeypatch.setattr(personal_oauth, "exchange", failed_exchange)
+    started = await ctx.client.post(
+        f"/api/personal-connections/{provider}/oauth", json={"use_proactively": True},
+    )
+    assert started.status_code == 200, started.text
+    assert await ctx.runtime.product_connections.resolve_grants(
+        ctx.product.user_id, [account["connection_id"]], surface="automation",
+    ) == original_grants
+    state = parse_qs(urlsplit(started.json()["url"]).query)["state"][0]
+    completed = await ctx.client.get(f"/oauth/personal/{provider}/complete", params={
+        "state": state, "code": "synthetic-consent",
+        **({"error": "access_denied"} if outcome == "cancelled" else {}),
+    })
+    assert completed.status_code == 303, completed.text
+    assert f"personal_connection={outcome}" in completed.headers["location"]
+
+    async with ctx.product.database.sessions() as db:
+        current = await db.get(Connection, account["connection_id"])
+        credential = await db.get(OAuthCredential, account["connection_id"])
+        assert current.enabled and current.revision == account["revision"]
+        assert credential.encrypted == encrypted and credential.revision == credential_revision
+        assert await db.scalar(select(OAuthAuthorization)) is None
+    current, current_definition, current_binding, current_context = await saved(ctx)
+    assert current["revision"] == original["revision"] and current_definition == definition
+    assert current_binding.generation == binding.generation and current_binding.state == "active"
+    assert current_context.fingerprint == context.fingerprint
+    assert (await inventory(ctx, provider))["attention_status"] == "active"
+    _, prepared = await admit(ctx)
+    assert prepared.scope.grants == original_grants
+    await ctx.product.database.authorize_scope(prepared.scope)
+
+
+@pytest.mark.parametrize("provider", ["gmail", "google_calendar"])
+@pytest.mark.parametrize("owner_action", [None, "pause", "retire"], ids=["active", "owner-paused", "retired"])
+async def test_reconnect_after_dot_deletion_retargets_live_attention_and_preserves_owner_state(
+    google, provider, owner_action,
+):
+    ctx = google
+    account = await connect(ctx, provider)
+    original, _, _, _ = await saved(ctx)
+    await ctx.service.reconcile(original["id"])
+    if owner_action is not None:
+        await ctx.service.mutate(ctx.grant, owner_action, original["id"], Mutation(
+            revision=original["revision"], request_key=f"owner-{owner_action}-before-dot-deletion",
+        ))
+        await ctx.service.reconcile(original["id"])
+    original, definition, original_binding, _ = await saved(ctx)
+    await ctx.product.database.delete_session(ctx.product.actor, definition["session_id"])
+
+    reconnected = await connect(ctx, provider)
+    assert reconnected["connected"] and reconnected["revision"] > account["revision"]
+    row, changed, binding, _ = await saved(ctx)
+    assert row["id"] == original["id"]
+    async with ctx.product.database.sessions() as db:
+        dot = await db.get(PersonalDot, ctx.product.user_id)
+        assert dot is not None and dot.session_id != definition["session_id"]
+        destination = await ctx.product.database.dots.own_session(db, ctx.product.user_id, dot.session_id)
+        assert (await db.get(Session, definition["session_id"])).deleted
+        assert await db.scalar(select(func.count()).select_from(Binding)) == 1
+    expected_state = {None: "active", "pause": "paused", "retire": "deleted"}[owner_action]
+    assert binding.state == expected_state
+    if owner_action == "retire":
+        assert changed == definition
+        assert row["revision"] == original["revision"]
+        assert binding.generation == original_binding.generation
+    else:
+        assert changed["session_id"] == destination.id
+        assert changed["connection_ids"] == [account["connection_id"]]
+        assert row["revision"] > original["revision"]
+        assert binding.generation > original_binding.generation
+    await ctx.service.reconcile(row["id"])
+    if owner_action == "retire":
+        assert not ctx.remote.schedules
+    else:
+        schedule_id = native_schedule_id(row["id"], changed["triggers"][0]["id"])
+        assert list(ctx.remote.schedules) == [schedule_id]
+        assert ctx.remote.schedules[schedule_id].state.paused == (owner_action == "pause")
+    assert sum(action == "create" for action, _ in ctx.remote.calls) == 1
+    if owner_action is None:
+        receipt, prepared = await admit(ctx)
+        await ctx.product.database.authorize_scope(prepared.scope)
+        async with ctx.product.database.sessions() as db:
+            attention_turn = await db.get(DotAttentionTurn, receipt["turn_id"])
+            assert attention_turn is not None and attention_turn.destination_session_id == destination.id
 
 
 async def test_disconnect_fences_old_turns_and_keeps_remaining_account_active(google):
@@ -368,6 +508,54 @@ async def assert_disconnected(ctx, provider, response):
             OAuthAuthorization.provider == provider,
         )) == 0
     assert response.status_code == 200, response.text
+
+
+async def test_disconnect_commits_revocation_and_pauses_full_manual_discovery(google):
+    ctx = google
+    await connect(ctx, "gmail")
+    calendar = await connect(ctx, "google_calendar")
+    original, definition, _, _ = await saved(ctx)
+    async with ctx.product.database.sessions.begin() as db:
+        manual_accounts = [
+            Connection(
+                owner_id=ctx.product.user_id, kind="mcp", name=f"Manual account {index}",
+                credential=ctx.product.database.security.seal(f"synthetic-manual-{index}"),
+                read_only=True, shared=False, policy=ConnectionPolicy(
+                    allowed_tools=["list_pull_requests"], mcp=RemoteMCPConfig(url=GITHUB_MCP),
+                ).model_dump_json(),
+            )
+            for index in range(4)
+        ]
+        db.add_all(manual_accounts)
+        await db.flush()
+        selected = sorted(account.id for account in manual_accounts)
+    changed = await ctx.service.mutate(ctx.grant, "update", original["id"], Save(
+        revision=original["revision"], request_key="owner-selects-four-manual-accounts",
+        definition=automation_fixtures.definition(**{**definition, "connection_ids": selected}),
+    ))
+    await ctx.service.mutate(ctx.grant, "enable", original["id"], Mutation(
+        revision=changed["revision"], request_key="owner-enables-four-manual-accounts",
+    ))
+    await ctx.service.reconcile(original["id"])
+    _, _, active_binding, _ = await saved(ctx)
+    assert active_binding.state == "active"
+    assert (await inventory(ctx, "gmail"))["use_proactively"]
+    assert (await inventory(ctx, "google_calendar"))["use_proactively"]
+    pending = await ctx.client.post("/api/personal-connections/gmail/oauth", json={"use_proactively": True})
+    assert pending.status_code == 200, pending.text
+
+    response = await ctx.client.delete("/api/personal-connections/gmail")
+    await assert_disconnected(ctx, "gmail", response)
+    row, definition, binding, _ = await saved(ctx)
+    assert row["id"] == original["id"]
+    assert definition["connection_ids"] == selected
+    assert binding.state == "paused" and binding.generation > active_binding.generation
+    async with ctx.product.database.sessions() as db:
+        remaining = await db.get(Connection, calendar["connection_id"])
+        assert remaining.enabled and ConnectionPolicy.model_validate_json(remaining.policy).use_proactively
+    await ctx.service.reconcile(row["id"])
+    assert len(ctx.remote.schedules) == 1
+    assert all(schedule.state.paused for schedule in ctx.remote.schedules.values())
 
 
 @pytest.mark.parametrize("destination_state", ["archived", "deleted"])

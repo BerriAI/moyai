@@ -9,6 +9,7 @@ import pytest
 from app import gmail_tools as gmail
 from app.connector_errors import ConnectorError
 from googleapiclient.discovery import build
+from googleapiclient.http import HttpRequest
 from pydantic_ai import Conversation, ConversationTypeAdapter, RunContext, RunUsage
 from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.test import TestModel
@@ -44,6 +45,7 @@ class Transport:
         self.responses = list(responses)
         self.requests = []
         self.closed = False
+        self.sleeps = []
 
     def request(self, uri, method="GET", body=None, headers=None, **kwargs):
         parsed = urlsplit(uri)
@@ -63,14 +65,30 @@ class Transport:
 
 
 @pytest.fixture
-def provider(monkeypatch):
-    def configure(*responses):
-        transport = Transport(responses)
-        monkeypatch.setattr(gmail, "_service", lambda token: build(
-            "gmail", "v1", http=transport, static_discovery=True, cache_discovery=False, num_retries=0,
-        ))
-        return transport
-    return configure
+def provider():
+    class Provider:
+        def __call__(self, *responses):
+            self.transport = Transport(responses)
+            return self.transport
+
+        def service(self, token):
+            transport = self.transport
+
+            class Request(HttpRequest):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self._sleep = transport.sleeps.append
+                    self._rand = lambda: 0.5
+
+            return build(
+                "gmail", "v1", http=transport, static_discovery=True,
+                cache_discovery=False, num_retries=0, requestBuilder=Request,
+            )
+
+        async def call(self, name, arguments, token):
+            return await gmail.call(name, arguments, token, service_factory=self.service)
+
+    return Provider()
 
 
 async def test_search_hydrates_metadata_with_exact_revisions_and_explicit_pagination(provider):
@@ -84,7 +102,7 @@ async def test_search_hydrates_metadata_with_exact_revisions_and_explicit_pagina
         record,
         {"resultSizeEstimate": 0},
     )
-    result = await gmail.call("gmail_search", {"query": "is:unread", "page_size": 1}, "private-token")
+    result = await provider.call("gmail_search", {"query": "is:unread", "page_size": 1}, "private-token")
     item = result["messages"][0]
     assert item["revision"] == item["historyId"] == "9007199254740993123"
     assert item["internalDate"] == "1795595162083"
@@ -97,7 +115,7 @@ async def test_search_hydrates_metadata_with_exact_revisions_and_explicit_pagina
     assert result["coverage"]["partial"] is True
     assert result["next_arguments"]["query"] == "is:unread"
     assert result["next_arguments"]["cursor"] == "opaque-token"
-    last = await gmail.call("gmail_search", result["next_arguments"], "private-token")
+    last = await provider.call("gmail_search", result["next_arguments"], "private-token")
     assert last["messages"] == [] and last["next_arguments"] is None
     assert last["coverage"]["has_more"] is False
     assert transport.requests[0]["query"]["maxResults"] == ["1"]
@@ -116,7 +134,7 @@ async def test_search_missing_message_is_partial_and_not_content_evidence(provid
         {"messages": [{"id": "abc", "threadId": "def"}]},
         (404, {"error": {"message": "private email details"}}),
     )
-    result = await gmail.call("gmail_search", {}, "token")
+    result = await provider.call("gmail_search", {}, "token")
     assert result["messages"] == []
     assert result["unread_messages"] == [{"id": "abc", "threadId": "def", "code": "not_found"}]
     assert result["coverage"]["page_complete"] is False
@@ -127,7 +145,7 @@ async def test_search_missing_message_is_partial_and_not_content_evidence(provid
 
 async def test_repeated_page_token_does_not_create_an_endless_continuation(provider):
     provider({"nextPageToken": "same"})
-    result = await gmail.call("gmail_search", {"cursor": "same"}, "token")
+    result = await provider.call("gmail_search", {"cursor": "same"}, "token")
     assert result["next_arguments"] is None
     assert result["coverage"]["has_more"] is True
     assert result["coverage"]["partial"] is True
@@ -139,14 +157,14 @@ async def test_thread_reads_bounded_page_and_checks_revision_on_continuation(pro
         {"id": identity} for identity in ("one", "two", "three")
     ]}
     transport = provider(metadata, message("one"), message("two"), metadata, message("three"))
-    result = await gmail.call("gmail_thread", {"thread_id": "def456", "page_size": 2}, "token")
+    result = await provider.call("gmail_thread", {"thread_id": "def456", "page_size": 2}, "token")
     assert result["message_count"] == 3
     assert [item["id"] for item in result["messages"]] == ["one", "two"]
     assert result["historyId"] == result["revision"] == "888"
     assert result["coverage"]["has_more"] is True
     assert result["next_arguments"]["history_id"] == "888"
     assert result["next_arguments"]["offset"] == 2
-    last = await gmail.call("gmail_thread", result["next_arguments"], "token")
+    last = await provider.call("gmail_thread", result["next_arguments"], "token")
     assert [item["id"] for item in last["messages"]] == ["three"]
     assert last["next_arguments"] is None
     assert last["coverage"]["partial"] is True  # This call did not read earlier pages.
@@ -158,7 +176,7 @@ async def test_thread_reads_bounded_page_and_checks_revision_on_continuation(pro
 async def test_thread_change_does_not_silently_skip_or_duplicate_messages(provider):
     transport = provider({"id": "def456", "historyId": "889", "messages": []})
     with pytest.raises(ConnectorError) as caught:
-        await gmail.call("gmail_thread", {
+        await provider.call("gmail_thread", {
             "thread_id": "def456", "offset": 2, "history_id": "888",
         }, "token")
     assert caught.value.code == "thread_changed"
@@ -171,7 +189,7 @@ async def test_thread_read_rejects_a_message_from_a_different_thread(provider):
         message(thread="wrong-thread"),
     )
     with pytest.raises(ConnectorError) as caught:
-        await gmail.call("gmail_thread", {"thread_id": "def456"}, "token")
+        await provider.call("gmail_thread", {"thread_id": "def456"}, "token")
     assert caught.value.code == "invalid_response"
 
 
@@ -184,7 +202,7 @@ async def test_mime_alternative_prefers_plain_but_retains_other_mixed_content(pr
         {**part("Secret attachment content"), "filename": "notes.txt"},
     ]}
     transport = provider(message(payload=payload))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["body"]["text"] == "Plain original\n\nA different & useful section."
     assert result["body"]["complete"] is True
     assert result["body"]["attachments_skipped"] == 1
@@ -199,10 +217,55 @@ async def test_html_is_text_only_and_cannot_fetch_resources(provider):
         '<a href="https://attacker.test/fetch">Useful link text</a>', "text/html",
     )
     transport = provider(message(payload=payload))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["body"]["text"] == "Reply & confirm\nUseful link text"
     assert result["body"]["complete"]
     assert len(transport.requests) == 1
+
+
+async def test_html_optional_head_end_tag_retains_the_body_and_evidence(provider):
+    provider(message(payload=part(
+        "<html><head><title>Private title</title><body>"
+        "<p>Please reply today.</p><script>hidden()</script></body></html>", "text/html",
+    )))
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
+    assert result["body"]["text"] == "Please reply today."
+    assert result["text"] == "Please reply today."
+    assert result["text_complete"] and result["content_complete"]
+    bounded, conversation, grant = await discovery_result(result)
+    assert not bounded["limited"]
+    assert validate_evidence([DotEvidence(
+        connection_id=grant.id, source=result["id"], source_version=result["revision"],
+        quote="Please reply today.",
+    )], conversation, [grant])
+
+
+@pytest.mark.parametrize("alternative", [
+    part("BEGIN:VCALENDAR", "text/calendar"),
+    {**part("Do not read this attachment"), "headers": [
+        {"name": "Content-Disposition", "value": "attachment"},
+    ]},
+])
+async def test_alternative_selects_readable_html_before_unsupported_or_attachment_part(provider, alternative):
+    provider(message(payload={"mimeType": "multipart/alternative", "parts": [
+        part("<p>Meeting moved to Friday.</p>", "text/html"), alternative,
+    ]}))
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
+    assert result["body"]["text"] == "Meeting moved to Friday."
+    assert result["body"]["complete"] and result["content_complete"]
+
+
+async def test_nested_alternative_keeps_related_body_and_mixed_siblings(provider):
+    provider(message(payload={"mimeType": "multipart/mixed", "parts": [
+        {"mimeType": "multipart/alternative", "parts": [
+            {"mimeType": "multipart/related", "parts": [part("<p>Meeting.</p>", "text/html")]},
+            part("BEGIN:VCALENDAR", "text/calendar"),
+        ]},
+        part("Please confirm."),
+    ]}))
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
+    assert result["body"]["text"] == "Meeting.\n\nPlease confirm."
+    assert result["content_complete"]
 
 
 @pytest.mark.parametrize(("payload", "expected", "issue"), [
@@ -220,7 +283,7 @@ async def test_html_is_text_only_and_cannot_fetch_resources(provider):
 ])
 async def test_mime_encoding_and_missing_content_are_honest(provider, payload, expected, issue):
     transport = provider(message(payload=payload))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["body"]["text"] == expected
     assert result["body"]["complete"] is (issue is None)
     if issue:
@@ -231,7 +294,7 @@ async def test_mime_encoding_and_missing_content_are_honest(provider, payload, e
 
 async def test_decoding_and_output_budgets_are_explicit(provider):
     provider(message(payload=part("x" * (gmail.MAX_BODY_BYTES + 500))))
-    result = await gmail.call("gmail_message", {"message_id": "abc123", "max_body_chars": 30}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123", "max_body_chars": 30}, "token")
     assert result["body"]["text"] == "x" * 30
     assert result["body"]["truncated"] is True
     assert set(result["body"]["issues"]) == {"body_byte_limit", "body_character_limit"}
@@ -247,7 +310,7 @@ async def test_mime_traversal_is_bounded(provider, bound):
     else:
         payload = {"mimeType": "multipart/mixed", "parts": [payload] * (gmail.MAX_PARTS + 5)}
     provider(message(payload=payload))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["body"]["truncated"]
     assert f"mime_{'depth' if bound == 'depth' else 'part'}_limit" in result["body"]["issues"]
     assert not result["content_complete"]
@@ -257,7 +320,7 @@ async def test_header_truncation_does_not_appear_as_complete_evidence(provider):
     payload = part("A body")
     payload["headers"].append({"name": "Subject", "value": "a" * (gmail.MAX_HEADER_CHARS + 1)})
     provider(message(payload=payload))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["headers_incomplete"] and not result["content_complete"]
     assert sum(len(header["value"]) for header in result["headers"]) <= gmail.MAX_HEADER_CHARS
 
@@ -275,7 +338,7 @@ async def test_header_truncation_does_not_appear_as_complete_evidence(provider):
 async def test_read_only_boundary_rejects_unknown_or_unbounded_arguments_before_io(provider, name, args):
     transport = provider()
     with pytest.raises(ConnectorError) as caught:
-        await gmail.call(name, args, "token")
+        await provider.call(name, args, "token")
     assert caught.value.dispatched is False
     assert not transport.requests
     assert gmail.READS == frozenset(gmail.TOOLS)
@@ -295,7 +358,7 @@ async def test_malformed_or_mismatched_message_cannot_become_evidence(provider, 
     record[field] = value
     provider(record)
     with pytest.raises(ConnectorError) as caught:
-        await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+        await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert caught.value.code == "invalid_response"
 
 
@@ -306,33 +369,81 @@ async def test_malformed_or_mismatched_message_cannot_become_evidence(provider, 
     (429, "rate_limited", True),
     (503, "provider_error", True),
 ])
-async def test_provider_errors_are_sanitized_and_not_retried(provider, status, code, retryable):
-    transport = provider((status, {"error": {"message": "secret-token private-email-body"}}))
+async def test_provider_errors_are_sanitized_with_bounded_retries(provider, status, code, retryable):
+    attempts = 1 + gmail.READ_RETRIES if retryable else 1
+    transport = provider(*[(status, {"error": {"message": "secret-token private-email-body"}})] * attempts)
     with pytest.raises(ConnectorError) as caught:
-        await gmail.call("gmail_message", {"message_id": "abc123"}, "secret-token")
+        await provider.call("gmail_message", {"message_id": "abc123"}, "secret-token")
     assert caught.value.code == code
     assert caught.value.retryable is retryable
     assert caught.value.status_code == status
     assert caught.value.retry_after == 17
     assert "secret-token" not in str(caught.value) and "private-email-body" not in str(caught.value)
     assert caught.value.__suppress_context__
-    assert len(transport.requests) == 1 and transport.closed
+    assert len(transport.requests) == attempts and transport.closed
+    assert len(transport.sleeps) == attempts - 1
 
 
 async def test_google_403_quota_failure_is_retryable_without_exposing_body(provider):
-    provider((403, {"error": {"message": "private text", "errors": [{"reason": "userRateLimitExceeded"}]}}))
+    transport = provider(*[(403, {"error": {"message": "private text", "errors": [
+        {"reason": "userRateLimitExceeded"},
+    ]}})] * (gmail.READ_RETRIES + 1))
     with pytest.raises(ConnectorError) as caught:
-        await gmail.call("gmail_search", {}, "token")
+        await provider.call("gmail_search", {}, "token")
     assert caught.value.code == "rate_limited" and caught.value.retryable
+    assert len(transport.requests) == gmail.READ_RETRIES + 1
 
 
 async def test_transport_errors_are_safe_and_close_the_service(provider):
-    transport = provider(TimeoutError("secret-token and private-email-body"))
+    transport = provider(*[TimeoutError("secret-token and private-email-body")] * (gmail.READ_RETRIES + 1))
     with pytest.raises(ConnectorError) as caught:
-        await gmail.call("gmail_search", {}, "secret-token")
+        await provider.call("gmail_search", {}, "secret-token")
     assert caught.value.code == "provider_unavailable"
     assert "secret-token" not in str(caught.value)
     assert transport.closed
+    assert len(transport.requests) == gmail.READ_RETRIES + 1
+
+
+@pytest.mark.parametrize(("status", "reason"), [
+    (429, "rateLimitExceeded"), (503, "backendError"),
+    (403, "userRateLimitExceeded"), (403, "rateLimitExceeded"),
+])
+async def test_sdk_retries_transient_reads_and_returns_recovered_result(provider, status, reason):
+    transport = provider(
+        (status, {"error": {"errors": [{"reason": reason}]}}), message(),
+    )
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
+    assert result["id"] == "abc123" and result["content_complete"]
+    assert len(transport.requests) == 2 and transport.sleeps == [1.0]
+    assert transport.closed
+
+
+async def test_sdk_stops_retrying_when_auth_fails_after_a_transient_error(provider):
+    transport = provider(
+        (503, {"error": {"errors": [{"reason": "backendError"}]}}),
+        (401, {"error": {"message": "private authentication detail"}}),
+        message(),
+    )
+    with pytest.raises(ConnectorError) as failure:
+        await provider.call("gmail_message", {"message_id": "abc123"}, "token")
+    assert failure.value.code == "authentication_required"
+    assert not failure.value.retryable
+    assert len(transport.requests) == 2 and transport.sleeps == [1.0]
+    assert len(transport.responses) == 1 and transport.closed
+
+
+async def test_search_retries_metadata_reads_without_advancing_the_page(provider):
+    transport = provider(
+        {"messages": [{"id": "abc123", "threadId": "def456"}], "nextPageToken": "page-2"},
+        (429, {"error": {"errors": [{"reason": "rateLimitExceeded"}]}}),
+        message(),
+    )
+    result = await provider.call("gmail_search", {"query": "is:unread"}, "token")
+    assert result["messages"][0]["id"] == "abc123"
+    assert result["next_arguments"]["cursor"] == "page-2"
+    assert result["coverage"]["page_complete"] and result["coverage"]["partial"]
+    assert transport.requests[1]["path"] == transport.requests[2]["path"]
+    assert len(transport.requests) == 3 and transport.closed
 
 
 def test_real_service_is_token_only_with_private_timeout_transport_and_no_refresh():
@@ -344,6 +455,7 @@ def test_real_service_is_token_only_with_private_timeout_transport_and_no_refres
         assert first._http.credentials.refresh_token is None
         assert first._http._refresh_status_codes == ()
         assert first._http._max_refresh_attempts == 0
+        assert first._http.http.follow_redirects is False
     finally:
         first.close()
         second.close()
@@ -379,7 +491,7 @@ async def test_full_message_scalar_evidence_survives_actual_discovery_bounds(pro
         {"name": "From", "value": "Owner <owner@example.test>"},
     ])
     provider(message(payload=payload))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert quote not in result["snippet"]
     assert result["subject"] == "Meeting ☕"
     assert result["from"] == "Owner <owner@example.test>"
@@ -412,7 +524,7 @@ async def test_search_header_evidence_is_preserved_but_does_not_claim_body_read(
         {"name": "FROM", "value": "Owner <owner@example.test>"},
     ]})
     provider({"messages": [{"id": "abc123", "threadId": "def456"}]}, record)
-    result = await gmail.call("gmail_search", {}, "token")
+    result = await provider.call("gmail_search", {}, "token")
     item = result["messages"][0]
     assert item["subject"] == "Agenda requested" and item["from"] == "Owner <owner@example.test>"
     assert item["text"] is None and not item["text_complete"]
@@ -428,7 +540,7 @@ async def test_search_header_evidence_is_preserved_but_does_not_claim_body_read(
 @pytest.mark.parametrize("cursor", ["", "previous-page-token"])
 async def test_empty_search_page_preserves_first_page_and_continuation_coverage(provider, cursor):
     provider({"resultSizeEstimate": 0})
-    result = await gmail.call("gmail_search", {"cursor": cursor}, "token")
+    result = await provider.call("gmail_search", {"cursor": cursor}, "token")
     assert result["coverage"]["page_complete"] and result["next_arguments"] is None
     assert result["coverage"]["has_more"] is False
     assert result["coverage"]["partial"] is bool(cursor)
@@ -440,7 +552,7 @@ async def test_empty_search_page_preserves_first_page_and_continuation_coverage(
 
 async def test_scalar_text_limit_is_partial_even_when_nested_body_is_complete(provider):
     provider(message(payload=part("x" * 2000 + "UNSEEN_BODY_SUFFIX")))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["body"]["complete"] and not result["body"]["truncated"]
     assert result["body"]["text"].endswith("UNSEEN_BODY_SUFFIX")
     assert result["text"] == "x" * 2000
@@ -461,7 +573,7 @@ async def test_scalar_header_limits_keep_omissions_explicit(provider, header, fi
     payload = part("Short body")
     payload["headers"].append({"name": header, "value": "a" * 2001})
     provider(message(payload=payload))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result[field] == "a" * 2000 and result[f"{field}_truncated"]
     assert result["text_complete"] and not result["headers_incomplete"]
     assert not result["content_complete"] and provider_partial(result)
@@ -474,7 +586,7 @@ async def test_attachment_omission_remains_partial_after_scalar_normalization(pr
         part("Please review the attached proposal."),
         {**part("Proposal details not read"), "filename": "proposal.txt"},
     ]}))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["text_complete"] and result["body"]["complete"]
     assert result["attachments_skipped"] == 1 and result["content_complete"] is False
     bounded, _, _ = await discovery_result(result)
@@ -485,7 +597,7 @@ async def test_attachment_omission_remains_partial_after_scalar_normalization(pr
 
 async def test_invalid_body_encoding_cannot_become_complete_scalar_evidence(provider):
     provider(message(payload={"mimeType": "text/plain", "body": {"data": "not!base64"}}))
-    result = await gmail.call("gmail_message", {"message_id": "abc123"}, "token")
+    result = await provider.call("gmail_message", {"message_id": "abc123"}, "token")
     assert result["text"] == "" and not result["text_complete"] and not result["content_complete"]
     assert result["body"]["issues"] == ["invalid_body_encoding"]
     assert provider_partial(result) and not provider_complete(result)
@@ -499,7 +611,7 @@ async def test_thread_messages_keep_their_own_scalar_evidence_and_revision(provi
         message("one", payload=part("Original meeting request.")),
         {**message("two", payload=part("The meeting is cancelled.")), "historyId": "9007199254740993124"},
     )
-    result = await gmail.call("gmail_thread", {"thread_id": "def456"}, "token")
+    result = await provider.call("gmail_thread", {"thread_id": "def456"}, "token")
     assert result["coverage"]["page_complete"] and not result["coverage"]["partial"]
     bounded, conversation, grant = await discovery_result(result, "thread")
     assert bounded["scanned"] and not bounded["limited"]

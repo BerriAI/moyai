@@ -15,8 +15,8 @@ from app.connector_errors import ConnectorError
 from app.public_url import app_path, cookie_name
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
-from sqlalchemy import delete, select, update
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -113,6 +113,14 @@ class PersonalOAuthRequest(BaseModel):
     use_proactively: bool = True
 
 
+class AuthorizationMaterial(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    verifier: str
+    client_id: str
+    use_proactively: bool
+    authorization_revision: int = Field(ge=1)
+
+
 class PersonalAttentionEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: int = Field(ge=1)
@@ -165,7 +173,9 @@ async def credentials(database: Database, scope: RunScope, grant: Grant) -> dict
         if tokens.get("expires_at") and tokens["expires_at"] < time.time() + 90:
             try:
                 tokens = await exchange(service, provider, tokens["client_id"], previous=tokens)
-            except ConnectorError:
+            except ConnectorError as error:
+                if provider in {"gmail", "google_calendar"} and error.retryable:
+                    raise
                 raise PermissionError("Your personal connection could not be renewed. Reconnect it in Settings.") from None
             saved.encrypted = database.security.seal(tokens)
             saved.revision += 1
@@ -259,9 +269,16 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             await db.execute(insert(OAuthCredential).values(
                 connection_id=identity, encrypted="", revision=1,
             ).on_conflict_do_nothing(index_elements=["connection_id"]))
-            revision = await db.scalar(update(Connection).where(Connection.id == identity).values(
-                revision=Connection.revision + 1,
-            ).returning(Connection.revision))
+            # Lock the account without revoking working grants while consent is pending.
+            revision = await db.scalar(select(Connection.revision).where(
+                Connection.id == identity,
+            ).with_for_update())
+            authorization_revision = await db.scalar(update(OAuthCredential).where(
+                OAuthCredential.connection_id == identity,
+            ).values(
+                authorization_revision=func.coalesce(OAuthCredential.authorization_revision, 0) + 1,
+            ).returning(OAuthCredential.authorization_revision))
+            assert revision is not None and authorization_revision is not None
             await db.execute(delete(OAuthAuthorization).where(
                 (OAuthAuthorization.expires_at < int(time.time()))
                 | ((OAuthAuthorization.owner_id == user.id) & (OAuthAuthorization.provider == provider)),
@@ -271,10 +288,11 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 session_hash=digest(session), auth_version=user.auth_version,
                 connection_id=identity, connection_revision=revision,
                 expires_at=int(time.time()) + 600,
-                encrypted=security.seal({
-                    "verifier": verifier, "client_id": client,
-                    "use_proactively": (body or PersonalOAuthRequest()).use_proactively,
-                }),
+                encrypted=security.seal(AuthorizationMaterial(
+                    verifier=verifier, client_id=client,
+                    use_proactively=(body or PersonalOAuthRequest()).use_proactively,
+                    authorization_revision=authorization_revision,
+                ).model_dump()),
             ))
         return PersonalOAuthStart(url=await authorization_url(service(), provider, state, verifier))
 
@@ -312,45 +330,50 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             return result(provider, "expired")
         if error or not code:
             return result(provider, "cancelled")
-        material = json.loads(security.unseal(pending.encrypted))
+        try:
+            material = AuthorizationMaterial.model_validate_json(security.unseal(pending.encrypted))
+        except ValidationError:
+            return result(provider, "expired")
         try:
             tokens = await exchange(
-                service(), provider, material["client_id"], code=code, verifier=material["verifier"],
+                service(), provider, material.client_id, code=code, verifier=material.verifier,
             )
             await current(request, user)
         except ConnectorError:
             return result(provider, "failed")
         google = provider in {"gmail", "google_calendar"}
-        proactive = google and material.get("use_proactively", True)
+        proactive = google and material.use_proactively
         if proactive and runtime.product_automations is not None:
             await database.dots.open(user)
         sync_id = None
         async with database.sessions.begin() as db:
             if google and runtime.product_automations is not None:
                 await runtime.product_automations._writer(db)
-            updates = {"enabled": True, "revision": Connection.revision + 1}
+            account = await db.scalar(select(Connection).where(
+                Connection.id == pending.connection_id, Connection.owner_id == user.id,
+            ).with_for_update())
+            credential = await db.get(OAuthCredential, pending.connection_id, populate_existing=True)
+            if (
+                account is None or credential is None or account.shared
+                or account.revision != pending.connection_revision
+                or credential.authorization_revision != material.authorization_revision
+            ):
+                return result(provider, "expired")
+            account.enabled = True
+            account.revision += 1
             if google:
                 from app.connectors import TOOLS
-                updates.update(
-                    read_only=True,
-                    policy=ConnectionPolicy(
-                        oauth=True, use_proactively=proactive,
-                        oauth_account=digest(material["client_id"] + ":" + tokens["subject"]),
-                        allowed_tools=[
-                            name.removeprefix(provider + "_")
-                            for name, spec in TOOLS.items() if spec[0] == provider and not spec[1]
-                        ],
-                    ).model_dump_json(),
-                )
-            changed = await db.scalar(update(Connection).where(
-                Connection.id == pending.connection_id, Connection.owner_id == user.id,
-                Connection.revision == pending.connection_revision, Connection.shared.is_(False),
-            ).values(**updates).returning(Connection.id))
-            if changed is None:
-                return result(provider, "expired")
-            await db.execute(update(OAuthCredential).where(
-                OAuthCredential.connection_id == changed,
-            ).values(encrypted=security.seal(tokens), revision=OAuthCredential.revision + 1))
+                account.read_only = True
+                account.policy = ConnectionPolicy(
+                    oauth=True, use_proactively=proactive,
+                    oauth_account=digest(material.client_id + ":" + tokens["subject"]),
+                    allowed_tools=[
+                        name.removeprefix(provider + "_")
+                        for name, spec in TOOLS.items() if spec[0] == provider and not spec[1]
+                    ],
+                ).model_dump_json()
+            credential.encrypted = security.seal(tokens)
+            credential.revision += 1
             if google and runtime.product_automations is not None:
                 from .google_attention import configure
                 await db.flush()

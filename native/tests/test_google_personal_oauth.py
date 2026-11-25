@@ -202,6 +202,77 @@ async def test_inflight_google_callback_cannot_overwrite_newer_authority(
 
 
 @pytest.mark.parametrize("provider", ["gmail", "google_calendar"])
+@pytest.mark.parametrize("replacement_completed", [False, True])
+async def test_replaced_inflight_reconnect_preserves_live_account_and_newest_consent(
+    runtime, actor, google_oauth, monkeypatch, provider, replacement_completed,
+):
+    client, backend = google_oauth
+    await connect(client, backend, provider)
+    identity = personal_oauth.connection_id(actor.id, provider)
+    original_grants = await runtime.product_connections.resolve_grants(actor.id, [identity])
+    entered, release = asyncio.Event(), asyncio.Event()
+    exchange = personal_oauth.exchange
+
+    async def delayed(*args, **kwargs):
+        value = await exchange(*args, **kwargs)
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return value
+
+    monkeypatch.setattr(personal_oauth, "exchange", delayed)
+    older = await begin(client, provider)
+    authorize(backend, provider, subject="superseded-google-subject")
+    callback = asyncio.create_task(finish(client, older, provider))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        newer = await begin(client, provider)
+        assert await runtime.product_connections.resolve_grants(actor.id, [identity]) == original_grants
+        if replacement_completed:
+            authorize(backend, provider, subject="newest-google-subject")
+            completed = await finish(client, newer, provider)
+            assert completed.status_code == 303
+            assert "personal_connection=success" in completed.headers["location"]
+        expected_grants = await runtime.product_connections.resolve_grants(actor.id, [identity])
+        async with runtime.database.sessions() as db:
+            credential = await db.get(OAuthCredential, identity)
+            encrypted, credential_revision = credential.encrypted, credential.revision
+
+        release.set()
+        stale = await asyncio.wait_for(callback, timeout=5)
+        assert stale.status_code == 303 and "personal_connection=expired" in stale.headers["location"]
+        assert await runtime.product_connections.resolve_grants(actor.id, [identity]) == expected_grants
+        async with runtime.database.sessions() as db:
+            account = await db.get(Connection, identity)
+            credential = await db.get(OAuthCredential, identity)
+            assert account.enabled
+            assert credential.encrypted == encrypted and credential.revision == credential_revision
+            tokens = json.loads(runtime.security.unseal(credential.encrypted))
+            assert tokens["subject"] == ("newest-google-subject" if replacement_completed else SUBJECT)
+            pending = list(await db.scalars(select(OAuthAuthorization)))
+            assert [entry.state_hash for entry in pending] == (
+                [] if replacement_completed else [personal_oauth.digest(newer["state"][0])]
+            )
+        if not replacement_completed:
+            authorize(backend, provider, subject="newest-google-subject")
+            completed = await finish(client, newer, provider)
+            assert completed.status_code == 303
+            assert "personal_connection=success" in completed.headers["location"]
+        current_grants = await runtime.product_connections.resolve_grants(actor.id, [identity])
+        assert current_grants[0].revision > original_grants[0].revision
+        assert current_grants[0].policy["oauth_account"] == personal_oauth.digest(
+            f"{CLIENT_ID}:newest-google-subject",
+        )
+        async with runtime.database.sessions() as db:
+            assert await db.scalar(select(OAuthAuthorization)) is None
+    finally:
+        release.set()
+        if not callback.done():
+            callback.cancel()
+            await asyncio.gather(callback, return_exceptions=True)
+
+
+@pytest.mark.parametrize("provider", ["gmail", "google_calendar"])
 async def test_google_refresh_rejects_changed_subject_and_preserves_stored_credentials(
     runtime, actor, google_oauth, provider,
 ):

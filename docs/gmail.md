@@ -82,32 +82,72 @@ should open it.
 
 ## MIME handling and execution
 
-Plain text is preferred within a `multipart/alternative`; other mixed text
-sections are retained. Python's standard `email` parser handles MIME header
-parameters and encoded headers. Python's standard `HTMLParser` extracts text
-from HTML and omits scripts, styles, document heads and templates. It does not
-render HTML, follow links, load remote images or execute content.
+Gmail supplies the parsed MIME tree. Within `multipart/alternative`, the adapter
+prefers a non-attachment plain-text part, then HTML, then a multipart container
+for further bounded traversal. An unsupported final alternative such as
+`text/calendar` does not displace an available HTML body. Other mixed text
+sections are retained. Python's standard `email` utilities decode encoded
+headers and MIME header parameters.
 
-Parsing visits at most 100 MIME parts and 16 nesting levels, decodes at most
-128 KiB of body bytes, and bounds returned header and body text. Malformed
-encoding, unknown character sets, missing body data, unsupported MIME parts,
-external text attachment bodies and truncation are explicit. File attachments
-are skipped; the attachment endpoint is never called. These are extraction
+Beautiful Soup with the `html5lib` parser extracts HTML text using HTML5 tree
+construction, including implicit closing tags such as an omitted `</head>`.
+It removes document heads, scripts, styles and templates, and inserts line
+breaks around selected block elements. It does not render HTML, follow links,
+load remote images or execute content.
+
+Body traversal processes at most 100 selected MIME parts and 16 nesting levels;
+alternative selection also inspects headers in bounded sibling lists without
+decoding their bodies. Extraction applies a 128 KiB decoded-body budget and
+bounds returned header and body text. Malformed encoding, unknown character
+sets, missing body data, unsupported MIME parts, external text attachment bodies
+and truncation are explicit. File attachments are skipped; the attachment
+endpoint is never called. These are extraction
 bounds after the SDK receives a message response, not a streaming response-size
 limit. `messages.get(format="full")` can contain inline attachment bytes, which
 are neither decoded nor returned by the adapter.
 
 The official Google SDK runs in `asyncio.to_thread`. Each call owns and closes its
-own `httplib2` transport with a 15-second socket timeout. Calls make at most 21
-provider requests for search and 11 for a thread page. This is a per-request
-transport timeout, not a wall-clock deadline for the entire tool call.
-SDK retries are disabled (`num_retries=0`); the token-only authorized transport
-also disables refresh. Existing Moyai execution and connection logic owns
-retry/refresh decisions.
+own `httplib2` transport with a 15-second socket timeout and redirects disabled.
+Search performs at most 21 logical SDK reads and a thread page at most 11,
+including their initial list/identity read. Message hydration remains serial.
+
+Each read uses `execute(num_retries=2)`: at most three SDK attempts, with the
+SDK's randomized exponential backoff for supported transient transport errors,
+HTTP 5xx, HTTP 429, and HTTP 403 reasons `rateLimitExceeded` or
+`userRateLimitExceeded`. HTTP 401 and ordinary permission-denied 403 responses
+are not retried, including when they follow a transient failure. This budget is
+per logical read, not per tool call; the transport can also retry certain
+connection failures internally. The socket timeout is not an aggregate
+wall-clock deadline, and cancelling the awaiting coroutine does not stop an
+already-running worker thread. Multiple reads and retries can therefore
+accumulate latency.
+
+Bundled discovery initialization still uses `num_retries=0`. The token-only
+authorized transport disables credential refresh; the host remains responsible
+for refreshing tokens and deciding whether to attempt a later tool call.
 
 Errors expose safe codes, retryability, status and bounded numeric Retry-After
 metadata. Raw provider error messages, response bodies, access tokens and
-credential-bearing exception chains are not returned.
+credential-bearing exception chains are not returned. Retry-After is returned
+as metadata; retry delays within this adapter follow the SDK's backoff policy.
+
+## Typed boundaries
+
+`call` accepts `Mapping[str, object]` arguments and validates them into
+`GmailSearch`, `GmailMessage` or `GmailThread` before creating a service.
+The internal implementation uses these models rather than untyped argument
+dictionaries. A strict `WireMessage` validates message identity, revision,
+labels, snippet and envelope fields. MIME children remain untrusted objects
+until bounded traversal reaches them, so validation does not recursively walk
+an entire MIME tree before applying extraction limits.
+
+Normalized bodies, messages, coverage and result envelopes have explicit
+`TypedDict` shapes. `Result` is the union of message, search and thread results;
+the returned values remain ordinary dictionaries with the existing field names.
+Small protocols describe the generated SDK methods used by the adapter, with
+the dynamic discovery factory isolated at that boundary. A keyword-only
+`service_factory` allows trusted callers and tests to inject the SDK service;
+it is not part of the model-visible tool arguments.
 
 ## Dependencies and verification
 
@@ -118,12 +158,18 @@ Runtime dependencies are declared in `native/pyproject.toml` and pinned by
 - `google-auth` (tested with 2.62.0)
 - `google-auth-httplib2` (tested with 0.4.4)
 - `httplib2` (tested with 0.32.1; also supplied by the official client)
+- `beautifulsoup4` (tested with 4.15.0)
+- `html5lib` (tested with 1.1)
 
-`native/tests/test_gmail_tools.py` exercises the real SDK against a fixture
+`native/tests/test_gmail_tools.py` exercises the real SDK against an injected fixture
 transport, including its methods, account routing, pagination, message/thread
-identity, MIME extraction limits and sanitized failures. It also passes real
-adapter records through Dot discovery's evidence capture and validation,
-checking retained scalar content and explicit incomplete coverage.
+identity, MIME extraction limits, implicit HTML closing tags and supported
+alternative selection. Retry tests cover transient recovery, exhausted budgets,
+authentication failures and preservation of pagination during retries. They
+replace the SDK request's sleep/random functions per instance to verify backoff
+without waiting. The suite also passes real adapter records through Dot
+discovery's evidence capture and validation, checking retained scalar content
+and explicit incomplete coverage.
 `native/tests/test_google_attention.py` uses disposable PostgreSQL source and
 native schemas to exercise personal-connection endpoints, enrollment,
 revocation and the existing Temporal scheduler.

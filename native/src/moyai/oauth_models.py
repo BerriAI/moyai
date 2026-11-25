@@ -11,6 +11,7 @@ class OAuthCredential(Base):
     connection_id: Mapped[str] = mapped_column(ForeignKey("moyai_connections.id"), primary_key=True)
     encrypted: Mapped[str] = mapped_column(Text)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    authorization_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class OAuthAuthorization(Base):
