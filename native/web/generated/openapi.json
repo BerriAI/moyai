@@ -18909,6 +18909,70 @@
         "title": "SlackDeliveryStatus",
         "type": "object"
       },
+      "SlackDotConnectionStatus": {
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "bot_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot User Id"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "oauth_configured": {
+            "title": "Oauth Configured",
+            "type": "boolean"
+          },
+          "signing_configured": {
+            "title": "Signing Configured",
+            "type": "boolean"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          }
+        },
+        "required": [
+          "connected",
+          "enabled",
+          "oauth_configured",
+          "signing_configured",
+          "app_id",
+          "team_id",
+          "bot_user_id"
+        ],
+        "title": "SlackDotConnectionStatus",
+        "type": "object"
+      },
       "SlackDotHookResponse": {
         "properties": {
           "challenge": {
@@ -18939,6 +19003,20 @@
           "challenge"
         ],
         "title": "SlackDotHookResponse",
+        "type": "object"
+      },
+      "SlackDotPolicyChange": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "SlackDotPolicyChange",
         "type": "object"
       },
       "SlackWebStatus": {
@@ -21898,6 +21976,40 @@
         "summary": "Discover Gitlab"
       }
     },
+    "/api/connections/slack-dot": {
+      "delete": {
+        "operationId": "disconnectSlackDotConnection",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionDisconnected"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Disconnect Dot"
+      },
+      "get": {
+        "operationId": "getSlackDotConnection",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackDotConnectionStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Dot"
+      }
+    },
     "/api/connections/slack-dot/oauth": {
       "post": {
         "operationId": "startSlackDotOAuth",
@@ -21914,6 +22026,44 @@
           }
         },
         "summary": "Dot Oauth"
+      }
+    },
+    "/api/connections/slack-dot/policy": {
+      "patch": {
+        "operationId": "updateSlackDotConnectionPolicy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlackDotPolicyChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackDotConnectionStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dot Policy"
       }
     },
     "/api/connections/slack/personal": {

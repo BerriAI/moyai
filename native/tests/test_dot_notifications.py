@@ -786,8 +786,8 @@ async def test_changed_delivery_authority_cannot_send(dot, change):
     assert not await allowed(dot.service, delivery)
 
 
-@pytest.mark.parametrize("signing_secret", ["rotated-dot-signature", ""])
-async def test_dot_signing_change_revokes_queued_turn_and_delivery(dot, dot_ingress, signing_secret):
+@pytest.mark.parametrize("change", ["rotate_signing_secret", "remove_signing_secret", "disable", "disconnect"])
+async def test_dot_authority_change_revokes_queued_turn_and_delivery(dot, dot_ingress, change):
     service = dot.service
     service.settings.slack_dot_signing_secret = "initial-dot-signature"
     service.product = SimpleNamespace(identity=dot.adapter, security=dot.adapter.legacy_security)
@@ -823,12 +823,22 @@ async def test_dot_signing_change_revokes_queued_turn_and_delivery(dot, dot_ingr
         assert await dot.database._saved_product_grant(db, turn)
     assert await allowed(service, delivery)
 
-    service.settings.slack_dot_signing_secret = signing_secret
+    if change == "rotate_signing_secret":
+        service.settings.slack_dot_signing_secret = "rotated-dot-signature"
+    elif change == "remove_signing_secret":
+        service.settings.slack_dot_signing_secret = ""
+    else:
+        async with dot.source.begin() as db:
+            if change == "disconnect":
+                await db.execute(text("DELETE FROM moyai.connections WHERE provider='slack_dot'"))
+            else:
+                await db.execute(text("INSERT INTO moyai.connection_policies(provider,enabled,read_only) "
+                                      "VALUES ('slack_dot',0,0)"))
     async with dot.database.sessions.begin() as db:
         with pytest.raises(HTTPException) as error:
             await dot.database._saved_product_grant(db, turn)
         assert error.value.status_code == 403
-    if signing_secret:
+    if change == "rotate_signing_secret":
         assert not await allowed(service, delivery)
     else:
         with pytest.raises(SlackInstallationUnavailable):

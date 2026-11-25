@@ -63,6 +63,12 @@ and configure `MOYAI_PUBLIC_URL`.
    private DM pin; token refresh does not. After a signing-secret rotation,
    users must re-enable Slack notifications to verify their DM again. Existing
    private history stays in Moyai.
+   Admins can inspect the installation at `GET /api/connections/slack-dot`,
+   disable or re-enable it with `PATCH /api/connections/slack-dot/policy`
+   (`{"enabled": false}` or `{"enabled": true}`), or disconnect it with
+   `DELETE /api/connections/slack-dot`. Mutations require the existing
+   admin session and CSRF token. Disabling or disconnecting fences old queued
+   work without changing Dev or deleting private history.
 3. In Slack, set Dot's Events URL to `/hooks/slack/dot/events` and
    Interactivity URL to `/hooks/slack/dot/interactions`, on the **application**
    origin. The application ingress must forward these paths (and the existing

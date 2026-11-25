@@ -237,6 +237,19 @@ async def test_dot_hook_is_app_signed_and_durably_dispatches_separately_from_leg
     assert calls[-1] == ("dev", None)
     assert not await service.inbox.drain_one()
 
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+        set_policy(service.store, service.product.security, "slack_dot", False, False)
+        assert (await post_signed_event(client, {**dot, "event_id": "EDISABLED001"},
+                                        dot=True, secret=b"dot-signature")).status_code == 503
+        set_policy(service.store, service.product.security, "slack_dot", True, False)
+        service.store.execute("DELETE FROM connections WHERE provider=?", ("slack_dot",))
+        assert (await post_signed_event(client, {**dot, "event_id": "EDISCON001"},
+                                        dot=True, secret=b"dot-signature")).status_code == 503
+        assert (await post_signed_event(client, {**dev, "event_id": "EDEV001"})).status_code == 200
+    assert await service.inbox.drain_one()
+    assert calls[-1] == ("dev", "ADEV00001")
+    assert not await service.inbox.drain_one()
+
 
 async def test_dot_installation_signing_changes_do_not_change_dev_installation(slack):
     service = slack.service

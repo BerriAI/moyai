@@ -10674,6 +10674,40 @@ export type SlackDeliveryStatus = {
 };
 
 /**
+ * SlackDotConnectionStatus
+ */
+export type SlackDotConnectionStatus = {
+    /**
+     * App Id
+     */
+    app_id: string | null;
+    /**
+     * Bot User Id
+     */
+    bot_user_id: string | null;
+    /**
+     * Connected
+     */
+    connected: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Oauth Configured
+     */
+    oauth_configured: boolean;
+    /**
+     * Signing Configured
+     */
+    signing_configured: boolean;
+    /**
+     * Team Id
+     */
+    team_id: string | null;
+};
+
+/**
  * SlackDotHookResponse
  */
 export type SlackDotHookResponse = {
@@ -10685,6 +10719,16 @@ export type SlackDotHookResponse = {
      * Ok
      */
     ok: boolean | null;
+};
+
+/**
+ * SlackDotPolicyChange
+ */
+export type SlackDotPolicyChange = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
 };
 
 /**
@@ -12773,6 +12817,38 @@ export type DiscoverGitLabProjectsResponses = {
 
 export type DiscoverGitLabProjectsResponse = DiscoverGitLabProjectsResponses[keyof DiscoverGitLabProjectsResponses];
 
+export type DisconnectSlackDotConnectionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot';
+};
+
+export type DisconnectSlackDotConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: OrganizationConnectionDisconnected;
+};
+
+export type DisconnectSlackDotConnectionResponse = DisconnectSlackDotConnectionResponses[keyof DisconnectSlackDotConnectionResponses];
+
+export type GetSlackDotConnectionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot';
+};
+
+export type GetSlackDotConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotConnectionStatus;
+};
+
+export type GetSlackDotConnectionResponse = GetSlackDotConnectionResponses[keyof GetSlackDotConnectionResponses];
+
 export type StartSlackDotOAuthData = {
     body?: never;
     path?: never;
@@ -12788,6 +12864,31 @@ export type StartSlackDotOAuthResponses = {
 };
 
 export type StartSlackDotOAuthResponse = StartSlackDotOAuthResponses[keyof StartSlackDotOAuthResponses];
+
+export type UpdateSlackDotConnectionPolicyData = {
+    body: SlackDotPolicyChange;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot/policy';
+};
+
+export type UpdateSlackDotConnectionPolicyErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateSlackDotConnectionPolicyError = UpdateSlackDotConnectionPolicyErrors[keyof UpdateSlackDotConnectionPolicyErrors];
+
+export type UpdateSlackDotConnectionPolicyResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotConnectionStatus;
+};
+
+export type UpdateSlackDotConnectionPolicyResponse = UpdateSlackDotConnectionPolicyResponses[keyof UpdateSlackDotConnectionPolicyResponses];
 
 export type DisconnectPersonalSlackData = {
     body?: never;

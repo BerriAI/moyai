@@ -1134,15 +1134,22 @@ async def test_dot_oauth_uses_separate_bot_only_installation(bridge, monkeypatch
     bridge.product.identity = SimpleNamespace(authenticate=authorized, require_request_current=authorized)
     bridge.settings.slack_dot_client_id = "dot-client"
     bridge.settings.slack_dot_client_secret = "dot-client-secret"
+    bridge.settings.slack_dot_signing_secret = "dot-signing-secret"
     bridge.connectors.save("slack", {"bot": {
         "access_token": "dev-test-token", "team": {"id": "TTEST0001"},
         "bot_user_id": "UDEV00001", "app_id": "ADEV00001",
     }}, "Local Dev")
     callback = bridge.settings.public_url.rstrip("/") + "/oauth/slack-dot/callback"
 
+    entered, release = asyncio.Event(), asyncio.Event()
+    hold_exchange = False
+
     async def exchange_request(method, url, *, data):
         assert (method, url) == ("POST", "https://slack.com/api/oauth.v2.access")
         assert (data["redirect_uri"], data["client_id"], data["code"]) == (callback, "dot-client", "local-code")
+        if hold_exchange:
+            entered.set()
+            await release.wait()
         return {"access_token": "dot-test-token", "token_type": "bot", "app_id": "ADOT00001",
                 "bot_user_id": "UDOT00001", "team": {"id": "TTEST0001"}}
 
@@ -1164,8 +1171,51 @@ async def test_dot_oauth_uses_separate_bot_only_installation(bridge, monkeypatch
         }
         completed = await client.get("/oauth/slack-dot/callback", params={"state": params["state"][0], "code": "local-code"})
         assert completed.status_code == 303
+        assert await bridge.connectors.slack_bot_token(app="dot") == "dot-test-token"
+        dot_path = "/api/connections/slack-dot"
+        status = await client.get(dot_path)
+        assert status.status_code == 200
+        assert status.json() == {
+            "connected": True, "enabled": True, "oauth_configured": True, "signing_configured": True,
+            "app_id": "ADOT00001", "team_id": "TTEST0001", "bot_user_id": "UDOT00001",
+        }
+        bridge.settings.workspace_member_password = "test-member-password"
+        member = Response()
+        member_sid = bridge.security.new_session(member, role="member")
+        member_cookie = member.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=bridge.settings.public_url,
+                                    cookies={"workspace_session": member_cookie},
+                                    headers={"Origin": bridge.settings.public_url, "X-CSRF-Token": bridge.security.csrf(member_sid)}) as unprivileged:
+            assert (await unprivileged.get(dot_path)).status_code == 403
+            assert (await unprivileged.patch(dot_path + "/policy", json={"enabled": False})).status_code == 403
+            assert (await unprivileged.delete(dot_path)).status_code == 403
+        disabled = await client.patch(dot_path + "/policy", json={"enabled": False})
+        assert disabled.status_code == 200 and disabled.json() == {**status.json(), "enabled": False}
+        enabled = await client.patch(dot_path + "/policy", json={"enabled": True})
+        assert enabled.status_code == 200 and enabled.json() == status.json()
+        disconnected = await client.delete(dot_path)
+        assert disconnected.status_code == 200 and disconnected.json() == {"connected": False}
+        assert (await client.get(dot_path)).json() == {
+            **status.json(), "connected": False, "app_id": None, "team_id": None, "bot_user_id": None,
+        }
+        started = await client.post(dot_path + "/oauth")
+        state = parse_qs(urlsplit(started.json()["url"]).query)["state"][0]
+        hold_exchange = True
+        in_flight = asyncio.create_task(client.get(
+            "/oauth/slack-dot/callback", params={"state": state, "code": "local-code"},
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert (await client.delete(dot_path)).status_code == 200
+        finally:
+            release.set()
+            failed = await in_flight
+        assert failed.status_code == 502
+        assert not (await client.get(dot_path)).json()["connected"]
     assert await bridge.connectors.slack_bot_token() == "dev-test-token"
-    assert await bridge.connectors.slack_bot_token(app="dot") == "dot-test-token"
+    with pytest.raises(ConnectorError):
+        await bridge.connectors.slack_bot_token(app="dot")
+    assert "slack_dot" not in {entry["id"] for entry in bridge.connectors.list()}
 
 
 async def test_slack_reconnect_rechecks_blocked_profiles_without_granting_identity(bridge, monkeypatch):
