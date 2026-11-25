@@ -16,6 +16,7 @@ from .models import Message, Session, SlackThread, User
 from .product_identity import ProductGrant
 from .product_slack_models import ProductSlackBinding, SlackWebLink, SlackWebTurn
 from .slack_messages import session_url
+from .slack_recipient import SlackRecipient, actor_grant, current, lookup
 
 if TYPE_CHECKING:
     from .product_slack import ProductSlack
@@ -27,13 +28,6 @@ class SlackWebStatus(BaseModel):
     title: str
     context: str
     url: str | None = None
-
-
-def actor_grant(actor: User) -> ProductGrant:
-    grant = getattr(actor, "product_grant", None)
-    if not isinstance(grant, ProductGrant) or grant.user_id != actor.id:
-        raise HTTPException(401, "Fresh product authorization is required.")
-    return grant
 
 
 async def check_turn(database, db, turn) -> None:
@@ -86,63 +80,26 @@ class SlackWeb:
             return await self.view(db, session)
 
     async def recipient(self, actor: User, installed: dict) -> User:
-        settings = self.slack.settings
-        if not (settings.slack_bot_enabled and settings.slack_identity_linking_enabled
-                and settings.slack_dm_enabled and settings.slack_thread_chat_enabled):
-            raise HTTPException(409, "Enable Slack identity linking and direct-message conversations first.")
-        principal = await self.identity.require_current(actor_grant(actor))
-        if not principal.individual or principal.email.rpartition("@")[2] not in settings.identity_domains():
-            raise HTTPException(403, "An eligible organization sign-in is required.")
-        token = await self.slack.connectors.slack_bot_token()
-        result = await self.slack.connectors.request(
-            "GET", "https://slack.com/api/users.lookupByEmail",
-            headers={"Authorization": "Bearer " + token}, params={"email": principal.email},
-            allowed_errors=("users_not_found", "missing_scope"),
-        )
-        profile = result.get("user") or {}
-        recipient = profile.get("id")
-        if (result.get("ok") is not True or not isinstance(recipient, str) or not ID.fullmatch(recipient)
-                or profile.get("team_id") != installed["team_id"]):
-            raise HTTPException(409, "Your Slack account could not be verified. Check the bot's profile permissions.")
-        allowed = {value.strip() for value in settings.slack_session_users.split(",")}
-        if "*" not in allowed and recipient not in allowed:
-            raise HTTPException(403, "Your Slack account is not enabled for Moyai conversations.")
-        sender, _ = await self.slack.actor(installed["team_id"], recipient, refresh_profile=True)
-        async with self.database.sessions.begin() as db:
-            individual = await self.identity.individual_for_admission(db, actor_grant(sender))
-            if individual.id != actor.id:
-                raise HTTPException(403, "Your Slack account link needs review.")
-        return sender
+        return await lookup(self.slack, actor, installed)
 
     async def current(self, db, link: SlackWebLink, *, sender: User | None = None) -> User:
-        settings = self.slack.settings
-        if not (settings.slack_bot_enabled and settings.slack_identity_linking_enabled
-                and settings.slack_dm_enabled and settings.slack_thread_chat_enabled):
-            raise HTTPException(403, "Slack continuation is disabled.")
-        installed = await self.slack.installation_in(db)
-        if installed["authority"] != link.connection_authority:
-            raise HTTPException(403, "The linked Slack installation changed.")
-        owner = await self.identity.authorize_admission(db, ProductGrant(link.owner_id, link.owner_authority))
-        if sender is not None:
-            if sender.id != link.requester_id:
-                raise HTTPException(403, "This DM belongs to a different Slack account.")
-            individual = await self.identity.individual_for_admission(db, actor_grant(sender))
-            if individual.id != owner.id:
-                raise HTTPException(403, "Your Slack account link needs review.")
-        else:
-            # Delivery must stop when the verified recipient is revoked or reassigned.
-            raw = await self.identity._current(
-                db, link.requester_id, await self.identity._native_controls(link.requester_id, db),
-            )
-            individual = await self.identity.individual_for_admission(db, raw.grant)
-            if individual.id != owner.id:
-                raise HTTPException(403, "The linked Slack recipient changed.")
+        actor = await current(self.slack, db, SlackRecipient.model_validate(link), sender=sender)
         session = await db.get(Session, link.session_id)
-        if session is None or session.deleted or session.owner_id != owner.id or session.surface != "web":
+        if (session is None or session.deleted or session.owner_id != actor.id
+                or session.surface != "web"):
             raise HTTPException(403, "The linked web session is unavailable.")
-        actor = await self.identity.read_native_user(db, owner)
-        if actor is None:
-            raise HTTPException(403, "The session owner is unavailable.")
+        from .dot_models import DotSlackConversation, DotSlackPreference
+        conversation = await db.get(DotSlackConversation, session.id)
+        if conversation is not None:
+            if session.visibility != "private":
+                raise HTTPException(403, "The connected Dot conversation is no longer private.")
+            preference = await db.get(DotSlackPreference, actor.id)
+            if (preference is None or preference.recipient is None
+                    or preference.session_id != conversation.dot_session_id
+                    or SlackRecipient.model_validate_json(self.database.security.unseal(preference.recipient))
+                    != SlackRecipient.model_validate(link)):
+                raise HTTPException(403, "The connected Dot identity changed.")
+            await self.database.dots.own_session(db, actor.id, conversation.dot_session_id)
         return actor
 
     async def input_actor(self, sender: User, session_id: str) -> User:

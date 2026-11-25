@@ -4,6 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input"
 import { editDotItem, getPersonalDot, listDotItems, openPersonalDot, type DotItemEdit, type DotItemsView, type DotItemView, type DotView, type Me } from "../generated/api"
 import "./personal-dot.css"
+import { DotNotifications } from "./dot-notifications"
 
 export function usePersonalDot(me: Me | null, scope: string, route: string, onError: (message: string) => void) {
   const [state, setState] = useState<{ scope: string; value: DotView } | null>(null)
@@ -135,5 +136,5 @@ export function DotFollowing() {
       </div>}
       <a href="#settings/automations">Manage attention schedule</a>
     </DialogContent>
-  </Dialog></div>
+  </Dialog><DotNotifications /></div>
 }

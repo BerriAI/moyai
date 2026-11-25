@@ -75,7 +75,8 @@ RESPONSIBILITY_SCHEMA_VERSION = "2026-11-23-responsibilities-v28"
 RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION = "2026-11-24-responsibility-workflows-v29"
 PERSONAL_DOT_SCHEMA_VERSION = "2026-11-24-personal-dot-v30"
 DOT_DISCOVERY_SCHEMA_VERSION = "2026-11-24-dot-discovery-v31"
-PRODUCT_SCHEMA_VERSION = DOT_DISCOVERY_SCHEMA_VERSION
+DOT_SLACK_SCHEMA_VERSION = "2026-11-24-dot-slack-v32"
+PRODUCT_SCHEMA_VERSION = DOT_SLACK_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -171,6 +172,7 @@ MIGRATIONS = (
         "moyai_personal_dots", "moyai_dot_attention_turns", "moyai_dot_notifications",
     })),
     (DOT_DISCOVERY_SCHEMA_VERSION, frozenset({"moyai_dot_discovery_turns", "moyai_dot_items"})),
+    (DOT_SLACK_SCHEMA_VERSION, frozenset({"moyai_dot_slack_preferences", "moyai_dot_slack_conversations"})),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing

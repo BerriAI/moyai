@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
 
 import httpx
+from app.slack_format import STAMP
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -314,31 +315,65 @@ async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Del
         ))
 
 
+def confirmed_delivery(
+    delivery_id: str, messages: list[dict], *, bot_user: str | None = None, root_ts: str | None = None,
+) -> dict | None:
+    """An ambiguous provider response never authorizes another post."""
+    matches = [message for message in messages if (
+        message.get("metadata") == {"event_type": "moyai_delivery", "event_payload": {"id": delivery_id}}
+        and (bot_user is None or (
+            message.get("user") == bot_user
+            and isinstance(message.get("ts"), str) and STAMP.fullmatch(message["ts"])
+            and message.get("thread_ts", message["ts"]) == message["ts"]
+            and (root_ts is None or message["ts"] == root_ts)
+        ))
+    )]
+    return matches[0] if len(matches) == 1 else None
+
+
 async def reconcile_one(
     runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery, *,
-    headers: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None, root_ts: str | None = None,
 ) -> None:
+    from .dot_notifications import is_dot_delivery
+    dot = is_dot_delivery(delivery)
     async with runtime.database.sessions.begin() as db:
-        # Ownership stays "sending": this timestamp only throttles read checks.
+        # Product Dot reconciliation is throttled by DeliverySchedule. Keep its
+        # original send claim: early-root admission uses it as dispatch evidence.
+        # Standalone delivery retains its existing timestamp-based read throttle.
         cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
-        claimed = await db.scalar(update(Delivery).where(
-            Delivery.id == delivery.id, Delivery.status == "sending", Delivery.claimed_at < cutoff,
-        ).values(claimed_at=now()).returning(Delivery.id))
+        query = update(Delivery).where(Delivery.id == delivery.id, Delivery.status == "sending")
+        if root_ts is None:
+            query = query.where(Delivery.claimed_at < cutoff)
+        claimed = await db.scalar(query.values(
+            claimed_at=Delivery.claimed_at if dot else now(),
+        ).returning(Delivery.id))
     if claimed is None:
         return
     destination = json.loads(delivery.destination)
-    response = await client.get("conversations.replies", headers=headers, params={
-        "channel": destination["channel"], "ts": destination["thread_ts"],
+    thread = destination.get("thread_ts")
+    response = await client.get("conversations.replies" if thread else "conversations.history", headers=headers, params={
+        "channel": destination["channel"], **({"ts": thread} if thread else {}),
+        **({"oldest": root_ts, "latest": root_ts, "inclusive": "true"} if root_ts else {}),
         "limit": 100, "include_all_metadata": "true",
     })
     response.raise_for_status()
     body = response.json()
     if not body.get("ok"):
         return
-    found = next((message for message in body.get("messages", []) if (
-        (message.get("metadata") or {}).get("event_payload") or {}
-    ).get("id") == delivery.id), None)
+    product = getattr(runtime, "product_slack", None)
+    expected_bot = None
+    if dot:
+        if product is None:
+            return
+        from app.db import database as source_database
+        expected_bot = (await source_database(product.installation))["user_id"]
+    found = confirmed_delivery(delivery.id, body.get("messages", []), bot_user=expected_bot, root_ts=root_ts)
     if found:
+        if dot:
+            assert product is not None
+            await product._settle(delivery.id, "sent", {**found, "channel": destination["channel"]})
+            return
         async with runtime.database.sessions.begin() as db:
             await db.execute(update(Delivery).where(
                 Delivery.id == delivery.id, Delivery.status == "sending"

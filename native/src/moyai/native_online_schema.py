@@ -48,6 +48,7 @@ RESPONSIBILITY_VERSION = "2026-11-23-responsibilities-v28"
 RESPONSIBILITY_WORKFLOW_VERSION = "2026-11-24-responsibility-workflows-v29"
 PERSONAL_DOT_VERSION = "2026-11-24-personal-dot-v30"
 DOT_DISCOVERY_VERSION = "2026-11-24-dot-discovery-v31"
+DOT_SLACK_VERSION = "2026-11-24-dot-slack-v32"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -355,6 +356,27 @@ def _dot_discovery_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _dot_slack_tables(metadata: MetaData, schema: str) -> None:
+    Table(
+        "moyai_dot_slack_preferences", metadata,
+        Column("owner_id", String(512), ForeignKey(f"{schema}.moyai_users.id"), primary_key=True),
+        Column("session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), nullable=False),
+        Column("revision", Integer, nullable=False),
+        Column("enabled", Boolean, nullable=False),
+        Column("recipient", Text, nullable=True),
+        Column("destination_key", String(201), nullable=True, unique=True),
+        Column("started_ts", String(40), nullable=True),
+        Column("updated_at", String(40), nullable=False), schema=schema,
+    )
+    Table(
+        "moyai_dot_slack_conversations", metadata,
+        Column("session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), primary_key=True),
+        Column("dot_session_id", String(36), ForeignKey(f"{schema}.moyai_sessions.id"), nullable=False, index=True),
+        Column("notification_turn_id", String(36), ForeignKey(f"{schema}.moyai_dot_notifications.turn_id"),
+               nullable=True, unique=True), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -379,6 +401,8 @@ EXPANSIONS = (
     }), (), _personal_dot_tables),
     Expansion(PERSONAL_DOT_VERSION, DOT_DISCOVERY_VERSION,
               frozenset({"moyai_dot_discovery_turns", "moyai_dot_items"}), (), _dot_discovery_tables),
+    Expansion(DOT_DISCOVERY_VERSION, DOT_SLACK_VERSION,
+              frozenset({"moyai_dot_slack_preferences", "moyai_dot_slack_conversations"}), (), _dot_slack_tables),
 )
 
 

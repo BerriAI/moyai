@@ -22,6 +22,7 @@ from temporalio import workflow
 from .contracts import RunScope
 from .database import Database
 from .delegation_models import DelegatedSession
+from .dot_models import DotSlackConversation
 from .goal_models import GoalTurn
 from .models import Session, SlackThread, Turn, User
 from .preferences.general_preferences import GeneralPreferences, general_preferences, read_instructions
@@ -83,7 +84,8 @@ class PrivateInstructions(AbstractCapability[RunScope]):
                 or scope.execution_context is not None
                 or await db.get(DelegatedSession, session.id) is not None
                 or await db.get(SwarmMember, session.id) is not None
-                or await db.scalar(select(SlackThread.id).where(SlackThread.session_id == session.id))
+                or (await db.scalar(select(SlackThread.id).where(SlackThread.session_id == session.id))
+                    and await db.get(DotSlackConversation, session.id) is None)
                 or not await individual(self.database, db, user, grant=scope.product_grant)
             ):
                 return ""

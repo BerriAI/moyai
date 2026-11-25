@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
-from agentchat.channels.slack.rendering import message_request
+from agentchat.channels.slack.rendering import message_request, rich_payload
 from agentchat.models import RichReply
 from app.db import database as source_database
 from app.slack_format import ID, STAMP
@@ -191,7 +191,7 @@ class ProductSlack:
         self.stopping = asyncio.Event()
 
     def start(self) -> None:
-        """Call only inside the parent's CoordinatorHandoff background context."""
+        """Owned by CoordinatorHandoff, or the exclusive loopback rehearsal."""
         if self.delivery_task is not None or self.stopping.is_set():
             raise RuntimeError("Product Slack background lifecycle already started.")
         self.inbox.start()
@@ -722,6 +722,9 @@ class ProductSlack:
         await resume_replies(self.runtime, resumed_actor, turn)
 
     async def delivery_allowed(self, delivery: Delivery) -> bool:
+        from .dot_notifications import allowed, is_dot_delivery
+        if is_dot_delivery(delivery):
+            return await allowed(self, delivery)
         bot = await source_database(self.installation)
         async with self.runtime.database.sessions() as db:
             binding = await db.get(ProductSlackBinding, delivery.session_id)
@@ -767,6 +770,10 @@ class ProductSlack:
 
         if self.stopping.is_set():
             return None
+        from .dot_notifications import is_dot_delivery
+        if is_dot_delivery(delivery):
+            from .dot_slack_threads import refresh_recipient
+            await refresh_recipient(self, delivery)
         token = await self.connectors.slack_bot_token()
         if not await self.delivery_allowed(delivery):
             return None
@@ -796,6 +803,9 @@ class ProductSlack:
 
         destination = json.loads(delivery.destination)
         content = json.loads(self.runtime.security.unseal(delivery.content))
+        from .dot_notifications import is_dot_delivery, slack_content
+        if is_dot_delivery(delivery):
+            content = slack_content(content, self.settings.public_url, delivery.session_id)
         if SlackFileDelivery.is_content(content):
             if not await SlackFileDelivery.ready(self.runtime, content):
                 return
@@ -829,13 +839,20 @@ class ProductSlack:
         ready, reply_ts = await reply_target(self.runtime, delivery, product=True)
         if not ready:
             return
-        request = message_request(
-            RichReply(
-                text=content["text"], blocks=tuple(content.get("blocks") or ()),
-                attachments=tuple(content.get("attachments") or ()),
-            ),
+        reply = RichReply(
+            text=content["text"], blocks=tuple(content.get("blocks") or ()),
+            attachments=tuple(content.get("attachments") or ()),
+        )
+        metadata = {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}}
+        # AgentChat's thread renderer requires a root. A new Dot conversation
+        # uses its same rich payload in Slack's native top-level post operation.
+        request = {
+            "method": "chat.postMessage",
+            "payload": {**rich_payload(reply), "channel": destination["channel"], "metadata": metadata},
+        } if is_dot_delivery(delivery) else message_request(
+            reply,
             channel_id=destination["channel"], thread_ts=destination["thread_ts"], message_ts=reply_ts,
-            metadata={"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
+            metadata=metadata,
             username=content.get("username"),
             icon_url=content.get("icon_url"),
             fallback_blocks=False,
@@ -865,6 +882,11 @@ class ProductSlack:
             "sent" if result.get("ok") and result.get("ts")
             else "rejected" if result.get("ok") is False else "sending"
         )
+        if is_dot_delivery(delivery) and status == "sent" and (
+            result.get("channel") != destination["channel"]
+            or not isinstance(result.get("ts"), str) or not STAMP.fullmatch(result["ts"])
+        ):
+            status = "sending"
         if result.get("ok") is False and result.get("error") == "ratelimited":
             await self._retry_rejected(delivery.id, result.get("retry_after", 30))
             return
@@ -890,6 +912,13 @@ class ProductSlack:
     async def _settle(self, identity: str, status: str, receipt: dict[str, Any] | None = None):
         async def write():
             async with self.runtime.database.sessions.begin() as db:
+                from .dot_notifications import is_dot_delivery
+                from .dot_slack_threads import finalize
+                delivery = await db.get(Delivery, identity, with_for_update=True)
+                if delivery is None or delivery.status != "sending":
+                    return
+                if status == "sent" and is_dot_delivery(delivery):
+                    await finalize(self.runtime.database, db, delivery, receipt or {})
                 values: dict[str, Any] = {"status": status}
                 if receipt is not None:
                     values["receipt"] = self.runtime.security.seal(receipt)
@@ -950,7 +979,14 @@ class ProductSlack:
                     continue
                 channels.add(channel)
                 await self.deliver(client, delivery)
-            elif await self.delivery_allowed(delivery):
+            else:
+                from .dot_notifications import allowed, is_dot_delivery
+                permitted = (
+                    await allowed(self, delivery, reconcile=True) if is_dot_delivery(delivery)
+                    else await self.delivery_allowed(delivery)
+                )
+                if not permitted:
+                    continue
                 token = await self.connectors.slack_bot_token()
                 # Reconciliation is a read and may retry; never post again.
                 await reconcile_one(

@@ -313,7 +313,7 @@ class Connectors:
                 bot = credentials["bot"]
             return bot["access_token"]
 
-    async def request(self, method, url, *, allowed_errors=(), **kwargs):
+    async def request(self, method, url, *, allowed_errors=(), response_headers=None, **kwargs):
         dispatched = False
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -337,6 +337,8 @@ class Connectors:
                 if data.get('errors'):
                     raise ConnectorError('The app returned GraphQL errors. Read the destination to verify any mutation.',
                                          code='graphql_errors', dispatched=True)
+                if response_headers is not None:
+                    response_headers.update(response.headers)
                 return data
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise ConnectorError('Could not connect to the app. No request was sent.',

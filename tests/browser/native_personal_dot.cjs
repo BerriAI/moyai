@@ -68,3 +68,43 @@ test('A delivered message renders without an execution turn in the destination',
  await page.reload();await page.getByText(state.messages[0].content,{exact:true}).waitFor();
  assert.equal(await page.getByRole('textbox',{name:'Message Moyai',exact:true}).isEnabled(),true);
 });
+for(const width of [1440,768,320])test(`Dot Slack opt-in and pause preserve the chat at ${width}px`,async t=>{
+ const {page}=await scenario(t,width);
+ let settings={revision:0,enabled:false,status:'off',description:'Receive useful updates in Slack.',last_delivery:null};
+ const writes=[];
+ await page.route('**/api/dot/notifications',route=>{
+  if(route.request().method()==='PATCH'){
+   const edit=route.request().postDataJSON();writes.push(edit);
+   assert.equal(edit.revision,settings.revision);
+   settings={...settings,revision:settings.revision+1,enabled:edit.enabled,status:edit.enabled?'on':'off',
+    description:edit.enabled?'Your Dot sends updates to your Slack DM.':'Proactive messages are paused.'};
+  }
+  return route.fulfill({json:settings});
+ });
+ await page.getByRole('button',{name:'Help me prepare for my upcoming meetings.',exact:true}).click();
+ await page.getByRole('button',{name:'Slack notifications',exact:true}).click();
+ const dialog=page.getByRole('dialog');
+ await dialog.getByRole('button',{name:'Enable Slack notifications',exact:true}).click();
+ await dialog.getByText('Your Dot sends updates to your Slack DM.',{exact:true}).waitFor();
+ await dialog.getByRole('button',{name:'Pause notifications',exact:true}).click();
+ await dialog.getByText('Proactive messages are paused.',{exact:true}).waitFor();
+ assert.deepEqual(writes,[{enabled:true,revision:0},{enabled:false,revision:1}]);
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ await page.keyboard.press('Escape');
+ assert.equal(await page.getByRole('textbox',{name:'Message Moyai',exact:true}).innerText(),'Help me prepare for my upcoming meetings.');
+});
+test('Slack setup failure refreshes state before another write',async t=>{
+ const {page}=await scenario(t);let writes=0;
+ await page.route('**/api/dot/notifications',route=>{
+  if(route.request().method()==='PATCH'){writes++;return route.fulfill({status:409,json:{detail:'Your Slack account could not be verified.'}});}
+  return route.fulfill({json:{revision:0,enabled:false,status:'off',description:'Connect your Slack DM.',last_delivery:null}});
+ });
+ await page.getByRole('button',{name:'Slack notifications',exact:true}).click();
+ await page.getByRole('button',{name:'Enable Slack notifications',exact:true}).click();
+ await page.getByRole('alert').filter({hasText:'Your Slack account could not be verified.'}).waitFor();
+ assert.equal(writes,1);
+ assert.equal(await page.getByRole('button',{name:'Enable Slack notifications',exact:true}).count(),0);
+ await page.getByRole('button',{name:'Retry',exact:true}).click();
+ await page.getByRole('button',{name:'Enable Slack notifications',exact:true}).waitFor();
+ assert.equal(writes,1);
+});

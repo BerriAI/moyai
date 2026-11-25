@@ -3676,6 +3676,46 @@ export type DotItemsView = {
 };
 
 /**
+ * DotNotificationEdit
+ */
+export type DotNotificationEdit = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
+ * DotNotificationSettings
+ */
+export type DotNotificationSettings = {
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Last Delivery
+     */
+    last_delivery: 'pending' | 'sending' | 'sent' | 'rejected' | 'suppressed' | null;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Status
+     */
+    status: 'off' | 'on' | 'unavailable' | 'needs_attention';
+};
+
+/**
  * DotView
  */
 export type DotView = {
@@ -13275,6 +13315,47 @@ export type EditDotItemResponses = {
 };
 
 export type EditDotItemResponse = EditDotItemResponses[keyof EditDotItemResponses];
+
+export type GetDotNotificationsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/dot/notifications';
+};
+
+export type GetDotNotificationsResponses = {
+    /**
+     * Successful Response
+     */
+    200: DotNotificationSettings;
+};
+
+export type GetDotNotificationsResponse = GetDotNotificationsResponses[keyof GetDotNotificationsResponses];
+
+export type UpdateDotNotificationsData = {
+    body: DotNotificationEdit;
+    path?: never;
+    query?: never;
+    url: '/api/dot/notifications';
+};
+
+export type UpdateDotNotificationsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateDotNotificationsError = UpdateDotNotificationsErrors[keyof UpdateDotNotificationsErrors];
+
+export type UpdateDotNotificationsResponses = {
+    /**
+     * Successful Response
+     */
+    200: DotNotificationSettings;
+};
+
+export type UpdateDotNotificationsResponse = UpdateDotNotificationsResponses[keyof UpdateDotNotificationsResponses];
 
 export type ResolveEffectData = {
     body: EffectResolution;

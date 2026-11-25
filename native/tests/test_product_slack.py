@@ -60,9 +60,17 @@ async def slack(runtime, actor, bridge):
             actor.id, "slack", "slack", "", "Local sender", "member", True, grant.authority_version,
         )
 
+    async def individual_for_admission(_db, value):
+        await require_current(value)
+        # This protocol fixture is an unlinked Slack sender, not a Dot owner.
+        raise HTTPException(403, "No verified individual is linked to this local sender.")
+
+    actor.product_grant = grant
     runtime.product = SimpleNamespace(
         store_proxy=bridge.store, security=bridge.security, settings=settings,
-        identity=SimpleNamespace(require_current=require_current),
+        identity=SimpleNamespace(
+            require_current=require_current, individual_for_admission=individual_for_admission,
+        ),
     )
     runtime.product_connections = bridge
     service = ProductSlack(runtime)

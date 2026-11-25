@@ -193,9 +193,20 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if run_dispatcher and runtime.product is None and runtime.settings.slack_bot_token.get_secret_value():
             tasks.append(asyncio.create_task(slack_dispatcher(runtime)))
             tasks.append(asyncio.create_task(runtime.slack_activity.watch()))
+        # Distributed product roles start Slack under CoordinatorHandoff.
+        # The explicit loopback-only combined rehearsal owns its local product
+        # store exclusively and must run the same inbox/outbox service too.
+        local_slack = runtime.product_slack if (
+            run_dispatcher and runtime.product_config is not None
+            and runtime.product_config.local_rehearsal and runtime.product_config.role == "standalone"
+        ) else None
         try:
+            if local_slack is not None:
+                local_slack.start()
             yield
         finally:
+            if local_slack is not None:
+                await local_slack.close()
             for task in tasks:
                 task.cancel()
             if tasks:
