@@ -4,21 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, MutableMapping
-from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import logfire
 import requests
+from logfire.types import ExceptionCallbackHelper
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.trace import Event, ReadableSpan
+from opentelemetry.sdk.trace import Span as SDKSpan
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import Span, Status, get_current_span
+from opentelemetry.trace import Span, Status, StatusCode, get_current_span
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pydantic import SecretStr
 from pydantic_ai.durable_exec.temporal import LogfirePlugin
+from pydantic_ai.exceptions import ModelRetry, ToolFailed, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import (
     BaseToolCallPart,
     BaseToolReturnPart,
@@ -26,19 +28,26 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelRequestPart,
     ModelResponsePart,
+    RetryPromptPart,
     TextContent,
     TextPart,
     UserPromptPart,
 )
 from pydantic_ai.models.instrumented import InstrumentationSettings
+from temporalio import workflow
 
-from .presentation import redact
+from .presentation import private_tool
 from .settings import Settings
+from .trace_content import redact_content, sensitive_field
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
 TRACE_CONTEXT = TraceContextTextMapPropagator()
+TOOL_CONTENT_ATTRIBUTES = {
+    "gen_ai.tool.call.arguments", "gen_ai.tool.call.result",
+    "tool_arguments", "tool_response",
+}
 
 
 def trace_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -65,12 +74,40 @@ class _NoRedirectSession(requests.Session):
         return super().send(request, **kwargs)
 
 
+def _record_handled_tool_exception(helper: ExceptionCallbackHelper) -> None:
+    """Keep handled Pydantic AI failures visible through Temporal's tracer.
+
+    Temporal 1.34's replay-safe span treats every recorded non-workflow failure
+    as a workflow-task failure and suppresses its end. These exceptions are
+    consumed by Pydantic AI as tool responses; they do not fail a workflow task.
+    Use the OTel SDK's event serializer via Logfire's public callback, without
+    changing Temporal's failure types, tracer, span lifetime or replay guard.
+    """
+    if workflow.in_workflow() and isinstance(helper.exception, (ToolFailed, ModelRetry, ToolFailedError, ToolRetryError)):
+        SDKSpan.record_exception(
+            helper.span, helper.exception, attributes=helper.event_attributes, escaped=True,
+        )
+        helper.no_record_exception()
+
+
 class _ContentSafeBatchSpanProcessor(BatchSpanProcessor):
-    """Keep framework diagnostics without exporting request or exception content."""
+    """Apply the content policy to every export, including framework exceptions."""
+
+    def __init__(self, *args: Any, include_content: bool, secrets: list[str], **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._include_content = include_content
+        self._secrets = secrets
 
     def on_end(self, span: ReadableSpan) -> None:
-        hidden = {"exception.message", "exception.stacktrace"}
-        attributes = {key: value for key, value in (span.attributes or {}).items() if key not in hidden}
+        source = span.attributes or {}
+        capture = self._include_content and not private_tool(str(source.get("gen_ai.tool.name", "")))
+        hidden = {"gen_ai.system_instructions", "gen_ai.tool.deferral.metadata"}
+        if not capture:
+            hidden |= TOOL_CONTENT_ATTRIBUTES | {"exception.message", "exception.stacktrace"}
+        attributes = {
+            key: value if key == "logfire.json_schema" else redact_content(value, self._secrets)
+            for key, value in source.items() if key not in hidden
+        }
         if span.instrumentation_scope and span.instrumentation_scope.name == "opentelemetry.instrumentation.fastapi":
             # Route templates, methods and status suffice for request diagnostics.
             # Raw URLs can contain file names, login codes or signed query values.
@@ -82,15 +119,25 @@ class _ContentSafeBatchSpanProcessor(BatchSpanProcessor):
             attributes["logfire.msg"] = span.name
         events = [
             Event(event.name, attributes={
-                key: value for key, value in (event.attributes or {}).items() if key not in hidden
+                key: redact_content(value, self._secrets)
+                for key, value in (event.attributes or {}).items() if key not in hidden
             }, timestamp=event.timestamp)
             for event in span.events
         ]
-        # Frameworks put the exception text in status.description as well.
+        # Some receivers retain attributes but drop events. Keep the diagnostic
+        # on its existing span as well, without creating another error span.
+        for event in events:
+            if event.name == "exception":
+                for key in ("exception.type", "exception.message"):
+                    if event.attributes and key in event.attributes:
+                        attributes[key] = event.attributes[key]
+        if span.status.status_code == StatusCode.ERROR and "exception.type" in attributes:
+            attributes.setdefault("error.type", attributes["exception.type"])
+        description = redact_content(span.status.description, self._secrets) if capture else None
         super().on_end(ReadableSpan(
             name=span.name, context=span.context, parent=span.parent, resource=span.resource,
             attributes=attributes, events=events, links=span.links, kind=span.kind,
-            status=Status(span.status.status_code), start_time=span.start_time, end_time=span.end_time,
+            status=Status(span.status.status_code, description), start_time=span.start_time, end_time=span.end_time,
             instrumentation_scope=span.instrumentation_scope,
         ))
 
@@ -119,12 +166,15 @@ def _keep_session_id(match: logfire.ScrubMatch) -> str | None:
     return None
 
 
-class _PromptResponseInstrumentation(InstrumentationSettings):
-    """Opt in to conversation text without enabling tool or instruction capture."""
+class _ContentInstrumentation(InstrumentationSettings):
+    """Capture conversation and tool content while excluding private context."""
 
     def __init__(self, *, secrets: list[str], **kwargs: Any):
         super().__init__(**kwargs)
         self._secrets = secrets
+
+    def system_instructions_attributes(self, instructions: str | None) -> dict[str, str]:
+        return {}
 
     def messages_to_otel_messages(self, messages: list[ModelMessage]):
         visible: list[ModelMessage] = []
@@ -143,29 +193,51 @@ class _PromptResponseInstrumentation(InstrumentationSettings):
                                     continue
                                 item = item.content
                             if isinstance(item, str):
-                                texts.append(str(redact(item, self._secrets)))
+                                texts.append(str(redact_content(item, self._secrets)))
                         parts.append(replace(part, content=texts))
                     elif isinstance(part, BaseToolReturnPart):
-                        parts.append(replace(part, content=None))
+                        parts.append(replace(part, content=(
+                            None if private_tool(part.tool_name) else redact_content(part.content, self._secrets)
+                        )))
+                    elif isinstance(part, RetryPromptPart):
+                        parts.append(replace(part, content=(
+                            "[private tool error omitted]" if private_tool(part.tool_name)
+                            else redact_content(part.content, self._secrets)
+                        )))
                 visible.append(replace(message, parts=parts))
             else:
                 response_parts: list[ModelResponsePart] = []
                 for part in message.parts:
                     if isinstance(part, TextPart):
-                        response_parts.append(replace(part, content=str(redact(part.content, self._secrets))))
+                        response_parts.append(replace(part, content=str(redact_content(part.content, self._secrets))))
                     elif isinstance(part, BaseToolCallPart):
-                        response_parts.append(replace(part, args=None))
+                        response_parts.append(replace(part, args=(
+                            None if private_tool(part.tool_name) else redact_content(part.args, self._secrets)
+                        )))
                 visible.append(replace(message, parts=response_parts))
-        # The SDK's cached model serialization and agent summary both use this
-        # hook. Enable text only on this sanitized copy; tool spans, exceptions,
-        # deferral metadata and system instructions keep include_content=False.
-        content_settings = copy(self)
-        content_settings.include_content = True
-        return InstrumentationSettings.messages_to_otel_messages(content_settings, visible)
+        return super().messages_to_otel_messages(visible)
 
 
 class LensTracing:
     def __init__(self, settings: Settings):
+        secrets = [
+            value.get_secret_value()
+            for name in type(settings).model_fields
+            if isinstance(value := getattr(settings, name), SecretStr) and value.get_secret_value()
+        ]
+
+        def scrub(match: logfire.ScrubMatch) -> Any:
+            # Logfire otherwise removes an entire tool result containing words
+            # such as "authentication". Scrub credential values, not that prose.
+            if (
+                settings.trace_include_content and len(match.path) >= 2
+                and match.path[:1] == ("attributes",)
+                and match.path[1] in TOOL_CONTENT_ATTRIBUTES | {"final_result"}
+                and not (len(match.path) > 2 and sensitive_field(str(match.path[-1])))
+            ):
+                return redact_content(match.value, secrets)
+            return _keep_session_id(match)
+
         exporter = OTLPSpanExporter(
             endpoint=settings.trace_endpoint,
             headers={"Authorization": "Bearer " + settings.trace_api_key.get_secret_value()},
@@ -175,24 +247,23 @@ class LensTracing:
         self.logfire = logfire.configure(
             local=True, send_to_logfire=False, console=False, metrics=False,
             service_name="moyai", inspect_arguments=False,
-            scrubbing=logfire.ScrubbingOptions(callback=_keep_session_id),
+            advanced=logfire.AdvancedOptions(exception_callback=_record_handled_tool_exception),
+            scrubbing=logfire.ScrubbingOptions(callback=scrub),
             additional_span_processors=[_ContentSafeBatchSpanProcessor(
-                exporter, max_queue_size=2048, max_export_batch_size=128,
+                exporter, include_content=settings.trace_include_content, secrets=secrets,
+                max_queue_size=2048, max_export_batch_size=128,
                 schedule_delay_millis=1000, export_timeout_millis=3000,
             )],
         )
         options: dict[str, Any] = {}
         instrumentation_type = InstrumentationSettings
         if settings.trace_include_content:
-            instrumentation_type = _PromptResponseInstrumentation
-            options["secrets"] = [
-                value.get_secret_value()
-                for name in type(settings).model_fields
-                if isinstance(value := getattr(settings, name), SecretStr) and value.get_secret_value()
-            ]
+            instrumentation_type = _ContentInstrumentation
+            options["secrets"] = secrets
         self.instrumentation = instrumentation_type(
             tracer_provider=self.logfire.config.get_tracer_provider(),
-            include_content=False, include_binary_content=False,
+            version=6,
+            include_content=settings.trace_include_content, include_binary_content=False,
             include_model_request_parameters=False,
             **options,
         )

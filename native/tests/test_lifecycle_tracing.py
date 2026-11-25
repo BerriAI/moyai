@@ -19,11 +19,12 @@ from moyai.models import Session, Turn
 
 
 @pytest.fixture
-def exporter(runtime, monkeypatch):
+def exporter(runtime, monkeypatch, request):
     result = InMemorySpanExporter()
     monkeypatch.setattr(tracing, "OTLPSpanExporter", lambda **kwargs: result)
     runtime.settings = runtime.settings.model_copy(update={
         "trace_endpoint": "http://127.0.0.1:4318/v1/traces", "trace_api_key": SecretStr("private-export-key"),
+        "trace_include_content": getattr(request, "param", False),
     })
     runtime.configure_tracing()
     return result
@@ -41,7 +42,8 @@ def serialized(values):
     } for span in values])
 
 
-async def test_official_fastapi_spans_keep_context_without_request_or_exception_content(runtime, exporter, monkeypatch):
+@pytest.mark.parametrize("exporter", [False, True], indirect=True)
+async def test_official_fastapi_spans_keep_context_and_follow_exception_content_policy(runtime, exporter, monkeypatch):
     provider = runtime.tracing
     app = FastAPI()
     provider.instrument_app(app)
@@ -49,7 +51,7 @@ async def test_official_fastapi_spans_keep_context_without_request_or_exception_
 
     @app.get("/api/sessions/{session_id}/diagnostic")
     async def diagnostic(session_id: str):
-        raise RuntimeError("private-exception-content")
+        raise RuntimeError("diagnostic-failure private-export-key")
 
     # Global OTel header capture must not override this application's policy.
     monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST", ".*")
@@ -72,6 +74,8 @@ async def test_official_fastapi_spans_keep_context_without_request_or_exception_
     assert not any("http send" in span.name or "http receive" in span.name for span in captured)
     payload = serialized(captured)
     assert "private-" not in payload
+    assert ("diagnostic-failure" in payload) is runtime.settings.trace_include_content
+    assert ("exception.message" in server[0].attributes) is runtime.settings.trace_include_content
 
 
 @pytest.mark.parametrize("mode", ["restored", "fresh", "failed", "fenced"])
