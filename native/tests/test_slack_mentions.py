@@ -43,7 +43,8 @@ def profiles(bridge, monkeypatch):
     monkeypatch.setattr(bridge.connectors, 'slack_bot_token', token)
     monkeypatch.setattr(bridge.connectors, 'request', request)
     resolver = SlackMentionNames(SimpleNamespace(store=bridge.store, connectors=bridge.connectors,
-                                                installation=lambda: dict(state['installed'])))
+                                                installation=lambda: dict(state['installed']),
+                                                app="dev", bot_token=token))
     return resolver, state, bridge.store
 
 

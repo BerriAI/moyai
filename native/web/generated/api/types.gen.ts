@@ -10674,6 +10674,20 @@ export type SlackDeliveryStatus = {
 };
 
 /**
+ * SlackDotHookResponse
+ */
+export type SlackDotHookResponse = {
+    /**
+     * Challenge
+     */
+    challenge: string | null;
+    /**
+     * Ok
+     */
+    ok: boolean | null;
+};
+
+/**
  * SlackWebStatus
  */
 export type SlackWebStatus = {
@@ -12758,6 +12772,22 @@ export type DiscoverGitLabProjectsResponses = {
 };
 
 export type DiscoverGitLabProjectsResponse = DiscoverGitLabProjectsResponses[keyof DiscoverGitLabProjectsResponses];
+
+export type StartSlackDotOAuthData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot/oauth';
+};
+
+export type StartSlackDotOAuthResponses = {
+    /**
+     * Successful Response
+     */
+    200: OrganizationConnectionOAuthStart;
+};
+
+export type StartSlackDotOAuthResponse = StartSlackDotOAuthResponses[keyof StartSlackDotOAuthResponses];
 
 export type DisconnectPersonalSlackData = {
     body?: never;
@@ -17732,6 +17762,38 @@ export type EventHooksSlackPostResponses = {
      */
     200: unknown;
 };
+
+export type ReceiveSlackDotEventData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/hooks/slack/dot/events';
+};
+
+export type ReceiveSlackDotEventResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotHookResponse;
+};
+
+export type ReceiveSlackDotEventResponse = ReceiveSlackDotEventResponses[keyof ReceiveSlackDotEventResponses];
+
+export type ReceiveSlackDotInteractionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/hooks/slack/dot/interactions';
+};
+
+export type ReceiveSlackDotInteractionResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotHookResponse;
+};
+
+export type ReceiveSlackDotInteractionResponse = ReceiveSlackDotInteractionResponses[keyof ReceiveSlackDotInteractionResponses];
 
 export type EventHooksSlackEventsPostData = {
     body?: never;

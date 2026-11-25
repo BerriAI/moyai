@@ -23,8 +23,10 @@ import httpx
 from agentchat.channels.slack.rendering import message_request, rich_payload
 from agentchat.models import RichReply
 from app.db import database as source_database
+from app.slack_apps import SlackApp, saved_slack_app, slack_provider
 from app.slack_format import ID, STAMP
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 from pydantic_ai import ConversationTypeAdapter
 from sqlalchemy import String, cast, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -61,6 +63,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 DELIVERY_POLL_SECONDS = 3.0
 MIN_DELIVERY_INTERVAL = 1.0
+
+
+class SlackDotHookResponse(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    ok: bool | None = None
+    challenge: str | None = None
 
 
 def interaction_key(action: dict[str, Any], message_ts: str) -> str:
@@ -146,9 +155,10 @@ class ProductSlackAuthority:
 class ProductSlack:
     """Compose intake services with shared identity and durable Slack delivery."""
 
-    def __init__(self, runtime: Runtime):
+    def __init__(self, runtime: Runtime, *, coordinator: ProductSlack | None = None):
         from app.coordinator_handoff import HookInbox
 
+        self.app: SlackApp = "dev" if coordinator is None else "dot"
         self.runtime = runtime
         product = runtime.product
         assert product is not None
@@ -165,6 +175,9 @@ class ProductSlack:
         self.web = SlackWeb(self)
         from .slack_mentions import SlackMentionNames
         self.mention_names = SlackMentionNames(self)
+        if coordinator is not None:
+            self.stopping = coordinator.stopping
+            return
         runtime.database.slack_mentions = self.mention_names.decorate
         from .slack_audience import (
             can_read,
@@ -189,6 +202,7 @@ class ProductSlack:
         self.delivery_wakeup = asyncio.Event()
         self.profile_task: asyncio.Task[None] | None = None
         self.stopping = asyncio.Event()
+        self.dot = ProductSlack(runtime, coordinator=self)
 
     def start(self) -> None:
         """Owned by CoordinatorHandoff, or the exclusive loopback rehearsal."""
@@ -263,7 +277,9 @@ class ProductSlack:
             recent = abs(time.time() - int(stamp)) <= 300
         except ValueError:
             recent = False
-        secret = self.settings.slack_signing_secret
+        secret = self.settings.slack_dot_signing_secret if self.app == "dot" else self.settings.slack_signing_secret
+        if self.settings.slack_dot_signing_secret and self.settings.slack_dot_signing_secret == self.settings.slack_signing_secret:
+            raise HTTPException(401, "Invalid Slack request.")
         expected = "v0=" + hmac.new(
             secret.encode(), b"v0:" + stamp.encode() + b":" + body, hashlib.sha256,
         ).hexdigest()
@@ -276,16 +292,41 @@ class ProductSlack:
     def _installation(self, store, connectors) -> dict[str, Any]:
         from app.connection_authority import authority
 
-        rows = store.rows("SELECT * FROM connections WHERE provider=?", ("slack",))
-        bot = connectors.slack_installation()
-        if not rows or not bot.get("installed") or not connectors.policy("slack")["enabled"]:
+        provider = slack_provider(self.app)
+        rows = store.rows("SELECT * FROM connections WHERE provider=?", (provider,))
+        bot = connectors.slack_installation(app="dot") if self.app == "dot" else connectors.slack_installation()
+        if not rows or not bot.get("installed") or not connectors.policy(provider)["enabled"]:
             raise SlackInstallationUnavailable()
+        if self.app == "dot":
+            dev = connectors.slack_installation()
+            if (not bot.get("app_id") or not dev.get("app_id") or bot["app_id"] == dev["app_id"]
+                    or not bot.get("user_id") or bot["user_id"] == dev.get("user_id")
+                    or bot.get("team_id") != dev.get("team_id")):
+                raise SlackInstallationUnavailable()
         value = json.loads(self.product.security.decrypt(rows[0]["encrypted"]))
         bot["authority"] = hashlib.sha256(json.dumps({
             "epoch": authority(value, rows[0]["encrypted"]),
             "team": bot.get("team_id"), "bot": bot.get("user_id"),
         }, sort_keys=True).encode()).hexdigest()
         return bot
+
+    async def bot_token(self) -> str:
+        if self.app == "dot":
+            return await self.connectors.slack_bot_token(app="dot")
+        return await self.connectors.slack_bot_token()
+
+    def for_app(self, app: str | None) -> ProductSlack:
+        selected = saved_slack_app(app)
+        if self.app == selected:
+            return self
+        if selected == "dot":
+            return self.dot
+        raise ValueError("The Dot transport cannot select the Dev app.")
+
+    async def verify_envelope(self, payload: dict[str, Any], team: Any) -> None:
+        installed = await source_database(self.installation)
+        if team != installed["team_id"] or payload.get("api_app_id") != installed["app_id"]:
+            raise HTTPException(403, "This Slack request belongs to another installation.")
 
     async def installation_in(self, db) -> dict[str, Any]:
         """Use the caller's canonical snapshot without borrowing another pool slot."""
@@ -310,7 +351,10 @@ class ProductSlack:
         if self.settings.slack_identity_linking_enabled:
             rows = await source_database(self.store.rows, "SELECT * FROM users WHERE id=?", (identity,))
             if rows and (refresh_profile or rows[0].get("profile_next_check", 0) <= time.time()):
-                await self.connections.identities.resolve(rows[0], team)
+                if self.app == "dot":
+                    await self.connections.identities.resolve(rows[0], team, app="dot")
+                else:
+                    await self.connections.identities.resolve(rows[0], team)
         principal = await self.product.identity.current(identity)
         async with self.runtime.database.sessions.begin() as db:
             actor = await self.product.identity.project_native_user(db, principal)
@@ -318,6 +362,13 @@ class ProductSlack:
 
     async def receive_payload(self, payload: dict[str, Any], _missing_cloud: Any = None) -> dict[str, Any]:
         """Only HookInbox's authenticated durable drain calls this method."""
+        interaction = payload.get("type") == "native_interaction"
+        envelope = payload["payload"] if interaction else payload
+        if self.app == "dot" or "api_app_id" in envelope:
+            team = envelope.get("team") if interaction else envelope.get("team_id")
+            if interaction:
+                team = team.get("id") if isinstance(team, dict) else None
+            await self.verify_envelope(envelope, team)
         return await self.events.receive(payload)
 
     async def automation_channel_allowed(self, channel_id: str, installed: dict[str, Any]) -> bool:
@@ -457,7 +508,7 @@ class ProductSlack:
                 for key, content in parts:
                     db.add(Delivery(
                         id=new_id(), identity=f"product-slack:{turn.id}:{key}",
-                        session_id=thread.session_id, turn_id=turn.id,
+                        session_id=thread.session_id, turn_id=turn.id, slack_app=saved_slack_app(thread.slack_app),
                         destination=json.dumps({
                             "channel": thread.channel_id, "thread_ts": thread.thread_ts, "control": control,
                             **({"input": True, "input_message": key.removeprefix("web-input:").rsplit(":", 2)[0],
@@ -510,7 +561,9 @@ class ProductSlack:
                     text_value = "Task completed."
             url = session_url(self.settings.public_url, turn.session_id, binding.source_run_id or "")
             cards = pr_cards(text_value, url) if turn.status == "completed" else []
-            content: dict[str, Any] = {"text": await format_reply(self.runtime, thread, text_value, product=self)}
+            content: dict[str, Any] = {
+                "text": await format_reply(self.runtime, thread, text_value, product=self.for_app(thread.slack_app)),
+            }
             controls = []
             question_blocks: list[dict[str, Any]] | None = None
             if turn.status == "waiting" and turn.conversation:
@@ -572,18 +625,22 @@ class ProductSlack:
             ).exists()).order_by(Message.id).limit(100))).all()
         if not rows:
             return
-        try:
-            bot = await source_database(self.installation)
-        except SlackInstallationUnavailable:
-            bot = {}
-        scopes = set(bot.get("scopes", []))
-        post_as_author = "chat:write.customize" in scopes
+        scopes_by_app: dict[SlackApp, set[str]] = {}
         for message, source, turn, thread, author in rows:
+            ingress = self.for_app(thread.slack_app)
+            if ingress.app not in scopes_by_app:
+                try:
+                    bot = await source_database(ingress.installation)
+                except SlackInstallationUnavailable:
+                    bot = {}
+                scopes_by_app[ingress.app] = set(bot.get("scopes", []))
+            scopes = scopes_by_app[ingress.app]
+            post_as_author = "chat:write.customize" in scopes
             origin = json.loads(self.runtime.security.unseal(source.data))
             if origin.get("kind") != "web" and origin.get("edited_in") != "web":
                 continue
             content = await format_reply(
-                self.runtime, thread, display_text(self.runtime.security.unseal(message.content).decode()), product=self,
+                self.runtime, thread, display_text(self.runtime.security.unseal(message.content).decode()), product=ingress,
             )
             from app.slack_format import split_reply
             async with self.runtime.database.sessions() as db:
@@ -593,7 +650,7 @@ class ProductSlack:
                 ).order_by(TurnImage.position)):
                     content += f"\n<{self.settings.public_url.rstrip('/')}/api/uploads/{upload.id}|{html.escape(upload.name).replace('|', '¦')}>"
             segments = split_reply(content, limit=2800) or ["Attached files"]
-            avatar_url = await self._slack_avatar_url(author, scopes) if post_as_author else None
+            avatar_url = await ingress._slack_avatar_url(author, scopes) if post_as_author else None
             staged = []
             for index, part in enumerate(segments):
                 if post_as_author:
@@ -616,7 +673,7 @@ class ProductSlack:
             return None
         try:
             async with asyncio.timeout(8):
-                token = await self.connectors.slack_bot_token()
+                token = await self.bot_token()
                 result = await self.connectors.request(
                     "GET",
                     "https://slack.com/api/users.info",
@@ -680,8 +737,11 @@ class ProductSlack:
             if (
                 turn is None or turn.status != "waiting" or not turn.conversation
                 or thread is None or thread.team_id != team or thread.channel_id != channel
+                or saved_slack_app(thread.slack_app) != self.app
                 or (payload.get("message") or {}).get("thread_ts") != thread.thread_ts
                 or binding is None or binding.paused or binding.connection_authority != bot["authority"]
+                or saved_slack_app(binding.slack_app) != self.app
+                or (self.app == "dot" and not thread.channel_id.startswith("D"))
             ):
                 raise HTTPException(403, "This approval is unavailable to this Slack sender.")
             delivery = await db.scalar(select(Delivery).where(
@@ -696,7 +756,8 @@ class ProductSlack:
                 for element in block.get("elements", [])
             ]
             if (
-                receipt.get("ts") != message_ts or destination.get("channel") != channel
+                delivery is None or saved_slack_app(delivery.slack_app) != self.app
+                or receipt.get("ts") != message_ts or destination.get("channel") != channel
                 or destination.get("thread_ts") != thread.thread_ts
                 or not any(item.get("action_id") == action and item.get("value") == turn.id for item in actions_sent)
             ):
@@ -723,6 +784,8 @@ class ProductSlack:
 
     async def delivery_allowed(self, delivery: Delivery) -> bool:
         from .dot_notifications import allowed, is_dot_delivery
+        if saved_slack_app(delivery.slack_app) != self.app:
+            return False
         if is_dot_delivery(delivery):
             return await allowed(self, delivery)
         bot = await source_database(self.installation)
@@ -751,8 +814,9 @@ class ProductSlack:
         control = destination.get("control") is True
         if (
             binding is None or binding.connection_authority != bot["authority"]
+            or saved_slack_app(binding.slack_app) != self.app
             or (binding.paused and not control) or session is None or session.deleted
-            or not (web_allowed or (session.visibility == "shared" and session.surface == "slack"))
+            or not (web_allowed or (self.app == "dev" and session.visibility == "shared" and session.surface == "slack"))
             or actor is None or not actor.enabled or admitted is None
             or (not control and turn and turn.finished_at and turn.finished_at <= binding.delivery_after)
         ):
@@ -774,7 +838,7 @@ class ProductSlack:
         if is_dot_delivery(delivery):
             from .dot_slack_threads import refresh_recipient
             await refresh_recipient(self, delivery)
-        token = await self.connectors.slack_bot_token()
+        token = await self.bot_token()
         if not await self.delivery_allowed(delivery):
             return None
         if self.stopping.is_set():
@@ -968,6 +1032,7 @@ class ProductSlack:
         for delivery in deliveries:
             if self.stopping.is_set():
                 break
+            ingress = self.for_app(delivery.slack_app)
             # Rotate even entries blocked behind another message in the same
             # channel. Unknown sends never occupy the entire pending-send lane.
             await self._schedule(delivery.id, 30 if delivery.status == "sending" else 3)
@@ -978,16 +1043,22 @@ class ProductSlack:
                 if channel in channels:
                     continue
                 channels.add(channel)
-                await self.deliver(client, delivery)
+                try:
+                    await ingress.deliver(client, delivery)
+                except SlackInstallationUnavailable:
+                    continue
             else:
                 from .dot_notifications import allowed, is_dot_delivery
-                permitted = (
-                    await allowed(self, delivery, reconcile=True) if is_dot_delivery(delivery)
-                    else await self.delivery_allowed(delivery)
-                )
-                if not permitted:
+                try:
+                    permitted = (
+                        await allowed(ingress, delivery, reconcile=True) if is_dot_delivery(delivery)
+                        else await ingress.delivery_allowed(delivery)
+                    )
+                    if not permitted:
+                        continue
+                    token = await ingress.bot_token()
+                except SlackInstallationUnavailable:
                     continue
-                token = await self.connectors.slack_bot_token()
                 # Reconciliation is a read and may retry; never post again.
                 await reconcile_one(
                     self.runtime, client, delivery, headers={"Authorization": "Bearer " + token},
@@ -1093,10 +1164,21 @@ class ProductSlack:
         async def event(request: Request):
             return await self.inbox.receive_event(request)
 
+        @router.post("/hooks/slack/dot/events", operation_id="receiveSlackDotEvent", response_model_exclude_none=True)
+        async def dot_event(request: Request) -> SlackDotHookResponse:
+            return SlackDotHookResponse.model_validate(await self.inbox.receive_event(request, dot=True))
+
         @router.post("/hooks/slack/interactions")
         async def interaction(request: Request):
+            return await enqueue_interaction(request, self)
+
+        @router.post("/hooks/slack/dot/interactions", operation_id="receiveSlackDotInteraction", response_model_exclude_none=True)
+        async def dot_interaction(request: Request) -> SlackDotHookResponse:
+            return SlackDotHookResponse.model_validate(await enqueue_interaction(request, self.dot))
+
+        async def enqueue_interaction(request: Request, ingress: ProductSlack):
             raw = await bounded_body(request, 65536)
-            self.verify_signature(raw, request.headers)
+            ingress.verify_signature(raw, request.headers)
             try:
                 values = parse_qs(raw.decode(), strict_parsing=True)
                 if len(values["payload"]) != 1:
@@ -1106,8 +1188,16 @@ class ProductSlack:
                     raise TypeError()
             except (ValueError, TypeError, KeyError, UnicodeDecodeError):
                 raise HTTPException(400, "Invalid Slack interaction.") from None
-            key = "native-interaction:" + hashlib.sha256(raw).hexdigest()
-            await database(self.inbox.enqueue, key, {"type": "native_interaction", "payload": payload})
+            prefix = "native-interaction:"
+            if ingress.app == "dot" or "api_app_id" in payload:
+                team = payload.get("team")
+                await ingress.verify_envelope(payload, team.get("id") if isinstance(team, dict) else None)
+            if ingress.app == "dot":
+                prefix = "dot:native-interaction:"
+            key = prefix + hashlib.sha256(raw).hexdigest()
+            await database(self.inbox.enqueue, key, self.inbox.envelope(
+                {"type": "native_interaction", "payload": payload}, dot=ingress.app == "dot",
+            ))
             self.inbox.wake.set()
             return {"ok": True}
 

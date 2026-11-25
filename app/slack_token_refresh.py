@@ -8,7 +8,7 @@ from .connection_authority import authority, refresh_connection
 from .connector_errors import ConnectorError
 
 
-def refresh_slack_token(connectors, original, *, bot=False):
+def refresh_slack_token(connectors, original, *, bot=False, provider='slack'):
     """Called through drained database work, with no database handle on the event loop.
 
     Acquire write ownership before consuming a rotating provider credential.
@@ -18,9 +18,9 @@ def refresh_slack_token(connectors, original, *, bot=False):
     the exclusive canonical writer lock and the saved installation epoch.
     """
     previous = json.loads(connectors.security.decrypt(original['encrypted']))
-    with connectors.store.connect(write_scope='connection-refresh:slack') as connection:
+    with connectors.store.connect(write_scope=f'connection-refresh:{provider}') as connection:
         connection.begin_write()
-        row = connection.execute("SELECT * FROM connections WHERE provider='slack'").fetchone()
+        row = connection.execute("SELECT * FROM connections WHERE provider=?", (provider,)).fetchone()
         if row is None:
             raise ConnectorError('The Slack connection changed.', code='access_changed', dispatched=False)
         row = dict(row)
@@ -33,7 +33,7 @@ def refresh_slack_token(connectors, original, *, bot=False):
                 raise ConnectorError('The Slack connection expired. Reconnect Slack.', dispatched=False)
             # The caller drains this entire operation. A browser timeout must
             # not discard the replacement after Slack consumes the old token.
-            fresh = asyncio.run(connectors.exchange('slack', refresh_token=selected['refresh_token']))
+            fresh = asyncio.run(connectors.exchange(provider, refresh_token=selected['refresh_token']))
             if bot:
                 credentials['bot'] = {**selected, **fresh}
             else:
@@ -41,6 +41,6 @@ def refresh_slack_token(connectors, original, *, bot=False):
                     fresh['bot'] = credentials['bot']
                 credentials = fresh
             credentials = refresh_connection(
-                connectors.store, connectors.security, 'slack', row, credentials, connection=connection,
+                connectors.store, connectors.security, provider, row, credentials, connection=connection,
             )
         return credentials

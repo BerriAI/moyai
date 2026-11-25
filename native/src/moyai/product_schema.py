@@ -76,7 +76,8 @@ RESPONSIBILITY_WORKFLOW_SCHEMA_VERSION = "2026-11-24-responsibility-workflows-v2
 PERSONAL_DOT_SCHEMA_VERSION = "2026-11-24-personal-dot-v30"
 DOT_DISCOVERY_SCHEMA_VERSION = "2026-11-24-dot-discovery-v31"
 DOT_SLACK_SCHEMA_VERSION = "2026-11-24-dot-slack-v32"
-PRODUCT_SCHEMA_VERSION = DOT_SLACK_SCHEMA_VERSION
+SLACK_APPS_SCHEMA_VERSION = "2026-11-25-slack-apps-v33"
+PRODUCT_SCHEMA_VERSION = SLACK_APPS_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -173,6 +174,7 @@ MIGRATIONS = (
     })),
     (DOT_DISCOVERY_SCHEMA_VERSION, frozenset({"moyai_dot_discovery_turns", "moyai_dot_items"})),
     (DOT_SLACK_SCHEMA_VERSION, frozenset({"moyai_dot_slack_preferences", "moyai_dot_slack_conversations"})),
+    (SLACK_APPS_SCHEMA_VERSION, frozenset()),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing
@@ -181,6 +183,13 @@ MIGRATIONS = (
 # needed for columns introduced with their table.
 COLUMN_MIGRATIONS: dict[str, frozenset[tuple[str, str]]] = {
     PRIVATE_AUTOMATION_SCHEMA_VERSION: frozenset({("moyai_product_automation_turns", "visibility")}),
+    SLACK_APPS_SCHEMA_VERSION: frozenset({
+        ("moyai_deliveries", "slack_app"),
+        ("moyai_dot_slack_preferences", "slack_app"),
+        ("moyai_product_slack_bindings", "slack_app"),
+        ("moyai_slack_threads", "slack_app"),
+        ("moyai_slack_web_links", "slack_app"),
+    }),
 }
 
 

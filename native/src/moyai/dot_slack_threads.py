@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from app.connector_errors import ConnectorError
 from app.db import database as source_database
+from app.slack_apps import saved_slack_app
 from app.slack_format import STAMP
 from fastapi import HTTPException
 from pydantic_ai import Conversation, ConversationTypeAdapter
@@ -65,18 +66,20 @@ async def bind(db: AsyncSession, session: Session, link: SlackWebLink, stamp: st
         raise HTTPException(409, "Slack has not confirmed the conversation root.")
     existing = await db.scalar(select(SlackThread).where(SlackThread.session_id == session.id))
     if existing is not None:
-        if existing.thread_ts != stamp:
+        if existing.thread_ts != stamp or saved_slack_app(existing.slack_app) != saved_slack_app(link.slack_app):
             raise HTTPException(409, "The Slack conversation root changed.")
         return existing
     link.thread_ts, link.status, session.archived = stamp, "linked", False
     thread = SlackThread(
         session_id=session.id, team_id=link.team_id, channel_id=link.channel_id, thread_ts=stamp,
+        slack_app=saved_slack_app(link.slack_app),
     )
     db.add(thread)
     db.add(ProductSlackBinding(
         session_id=session.id, requester_id=link.requester_id, team_id=link.team_id,
         channel_id=link.channel_id, thread_ts=stamp, started_ts=stamp,
         connection_authority=link.connection_authority, delivery_after=link.created_at,
+        slack_app=saved_slack_app(link.slack_app),
     ))
     await db.flush()
     return thread
@@ -88,7 +91,7 @@ async def finalize(database: Database, db: AsyncSession, delivery: Delivery, rec
     link = await db.get(SlackWebLink, delivery.session_id, populate_existing=True)
     if session is None or link is None:
         raise RuntimeError("A Dot delivery must retain its private conversation.")
-    if receipt.get("channel") != link.channel_id:
+    if receipt.get("channel") != link.channel_id or saved_slack_app(delivery.slack_app) != saved_slack_app(link.slack_app):
         raise ValueError("Slack confirmed a different conversation.")
     await bind(db, session, link, receipt.get("ts", ""))
 
@@ -117,6 +120,7 @@ async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]
         ).where(
             SlackWebLink.requester_id == sender.id, SlackWebLink.team_id == origin["team_id"],
             SlackWebLink.channel_id == origin["channel_id"], Delivery.status == "sending",
+            (Delivery.slack_app == slack.app) | (Delivery.slack_app.is_(None) & (slack.app == "dev")),
             Delivery.identity == ("product-slack:" + Delivery.turn_id + ":dot"),
         ).limit(100)))
     if not rows:
@@ -125,6 +129,8 @@ async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]
     from .slack import confirmed_delivery
     rows = [delivery for delivery in rows if await allowed(slack, delivery, reconcile=True)]
     if not rows:
+        if slack.app == "dev":
+            raise HTTPException(403, "This Slack root could belong to a private conversation.")
         return False
     root = recent_root(origin["thread_ts"])
     # Only claimed sends can already have a Slack parent. A pending queue item
@@ -137,7 +143,7 @@ async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]
     )
     installed = await source_database(slack.installation)
     try:
-        token = await slack.connectors.slack_bot_token()
+        token = await slack.bot_token()
         result = await slack.connectors.request(
             "GET", "https://slack.com/api/conversations.history",
             headers={"Authorization": "Bearer " + token}, params={
@@ -148,6 +154,8 @@ async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]
     except ConnectorError:
         # HookInbox owns retries; an unverified parent has only this short
         # confirmation window, not the inbox's generic seven-day retention.
+        if slack.app == "dev" and not plausible:
+            raise HTTPException(403, "This Slack root could belong to a private conversation.") from None
         return plausible
     messages = result.get("messages", [])
     for delivery in rows:
@@ -159,6 +167,10 @@ async def recover_root(slack: ProductSlack, sender: User, origin: dict[str, str]
             return False
     # A visible unrelated/ambiguous parent is definitive; never keep it alive
     # merely because this DM also has an unsettled outgoing notification.
+    if slack.app == "dev" and (not messages or any(
+        (message.get("metadata") or {}).get("event_type") == "moyai_delivery" for message in messages
+    )) and not (plausible and not messages):
+        raise HTTPException(403, "This Slack root could belong to a private conversation.")
     return plausible and not messages
 
 
@@ -166,13 +178,13 @@ async def new_direct_message(
     slack: ProductSlack, sender: User, origin: dict[str, str], title: str, *, waiting_for_root: bool = False,
 ) -> SlackThread | None:
     """Only a previously opted-in, currently verified owner gets private Dot DMs."""
-    if not origin["channel_id"].startswith("D"):
+    if slack.app != "dot" or not origin["channel_id"].startswith("D"):
         return None
     database = slack.runtime.database
     async with database.sessions.begin() as db:
-        destination = f"{origin['team_id']}:{origin['channel_id']}"
+        destination = f"dot:{origin['team_id']}:{origin['channel_id']}"
         preference = await db.scalar(select(DotSlackPreference).where(
-            DotSlackPreference.destination_key == destination,
+            DotSlackPreference.destination_key == destination, DotSlackPreference.slack_app == "dot",
         ))
         if preference is None:
             return None
@@ -184,7 +196,7 @@ async def new_direct_message(
         actor = await current(slack, db, recipient, sender=sender)
         # Owner authority is locked before this row, matching opt-in/publication.
         await db.refresh(preference, with_for_update=True)
-        if (preference.destination_key != destination or preference.recipient is None
+        if (preference.destination_key != destination or preference.slack_app != "dot" or preference.recipient is None
                 or SlackRecipient.model_validate_json(database.security.unseal(preference.recipient)) != recipient
                 or recipient.team_id != origin["team_id"] or recipient.channel_id != origin["channel_id"]):
             raise HTTPException(403, "This is not your connected Dot DM.")
@@ -197,6 +209,8 @@ async def new_direct_message(
             SlackThread.thread_ts == origin["thread_ts"],
         ))
         if existing is not None:
+            if saved_slack_app(existing.slack_app) != slack.app:
+                raise HTTPException(403, "The thread belongs to another Slack app.")
             return existing
         if origin["thread_ts"] != origin["message_ts"]:
             # Never turn an unconfirmed proactive root into an unrelated/shared chat.

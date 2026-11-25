@@ -18909,6 +18909,38 @@
         "title": "SlackDeliveryStatus",
         "type": "object"
       },
+      "SlackDotHookResponse": {
+        "properties": {
+          "challenge": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Challenge"
+          },
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          }
+        },
+        "required": [
+          "ok",
+          "challenge"
+        ],
+        "title": "SlackDotHookResponse",
+        "type": "object"
+      },
       "SlackWebStatus": {
         "properties": {
           "context": {
@@ -21864,6 +21896,24 @@
           }
         },
         "summary": "Discover Gitlab"
+      }
+    },
+    "/api/connections/slack-dot/oauth": {
+      "post": {
+        "operationId": "startSlackDotOAuth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationConnectionOAuthStart"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Dot Oauth"
       }
     },
     "/api/connections/slack/personal": {
@@ -29770,6 +29820,42 @@
           }
         },
         "summary": "Event"
+      }
+    },
+    "/hooks/slack/dot/events": {
+      "post": {
+        "operationId": "receiveSlackDotEvent",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackDotHookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Dot Event"
+      }
+    },
+    "/hooks/slack/dot/interactions": {
+      "post": {
+        "operationId": "receiveSlackDotInteraction",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackDotHookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Dot Interaction"
       }
     },
     "/hooks/slack/events": {

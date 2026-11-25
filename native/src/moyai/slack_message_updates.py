@@ -33,12 +33,20 @@ async def receive_update(events, payload: dict, installed: dict) -> bool:
     slack = events.slack
     actor, _ = await slack.actor(installed["team_id"], user)
     cast(Any, actor).slack_channel_evidence = (installed["team_id"], channel)
-    thread = await events.conversations.find({
+    origin = {
         "team_id": installed["team_id"], "channel_id": channel,
         "thread_ts": original.get("thread_ts") or current.get("thread_ts") or stamp,
-    })
+        "message_ts": stamp,
+    }
+    thread = await events.conversations.find(origin)
     if thread is not None:
+        if slack.app == "dot" and await events.conversations.existing(
+            thread, actor, origin, installed, mentioned=True, command="",
+        ) is None:
+            return False
         actor = await slack.web.input_actor(actor, thread.session_id)
+    elif slack.app == "dot":
+        return False
     key = hashlib.sha256(json.dumps([installed["team_id"], channel, stamp]).encode()).hexdigest()
     changed_at = str((None if deleted else (current.get("edited") or {}).get("ts"))
                      or event.get("event_ts") or payload.get("event_time", ""))
@@ -69,7 +77,7 @@ async def receive_update(events, payload: dict, installed: dict) -> bool:
         if source is None or message is None or source.kind != "slack":
             return False
         metadata = json.loads(database.security.unseal(source.data))
-        if any(metadata.get(field) != value for field, value in (
+        if metadata.get("slack_app", "dev") != slack.app or any(metadata.get(field) != value for field, value in (
             ("team_id", installed["team_id"]), ("channel_id", channel), ("message_ts", stamp), ("user_id", user),
         )):
             return False

@@ -46,7 +46,7 @@ async def slack(runtime, actor, bridge):
     bridge.connectors.save("slack", {
         "access_token": "synthetic-user-token",
         "bot": {
-            "access_token": "synthetic-bot-token", "bot_user_id": "UBOT00001",
+            "access_token": "synthetic-bot-token", "bot_user_id": "UBOT00001", "app_id": "ADEV00001",
             "team": {"id": "TTEST0001"}, "scope": "chat:write",
         },
     }, "Local Slack")
@@ -183,18 +183,58 @@ def event_payload(event_id, event):
     }
 
 
-async def post_signed_event(client, payload, *, valid=True):
+async def post_signed_event(client, payload, *, valid=True, dot=False, secret=b"local-slack-signature"):
     body = json.dumps(payload).encode()
     stamp = str(int(time.time()))
     signature = "v0=" + hmac.new(
-        b"local-slack-signature", b"v0:" + stamp.encode() + b":" + body, hashlib.sha256,
+        secret, b"v0:" + stamp.encode() + b":" + body, hashlib.sha256,
     ).hexdigest()
     if not valid:
         signature = "v0=invalid"
     return await client.post(
-        "/hooks/slack/events", content=body,
+        "/hooks/slack/dot/events" if dot else "/hooks/slack/events", content=body,
         headers={"x-slack-request-timestamp": stamp, "x-slack-signature": signature},
     )
+
+
+async def test_dot_hook_is_app_signed_and_durably_dispatches_separately_from_legacy_dev(slack, monkeypatch):
+    service = slack.service
+    service.settings.slack_dot_signing_secret = "dot-signature"
+    service.connectors.save("slack_dot", {"bot": {
+        "access_token": "dot-bot-token", "team": {"id": "TTEST0001"},
+        "bot_user_id": "UDOT00001", "app_id": "ADOT00001",
+    }}, "Local Dot")
+    assert await service.bot_token() == "synthetic-bot-token"
+    assert await service.dot.bot_token() == "dot-bot-token"
+    calls = []
+
+    async def dev_event(payload):
+        calls.append(("dev", payload.get("api_app_id")))
+
+    async def dot_event(payload):
+        calls.append(("dot", payload["api_app_id"]))
+
+    monkeypatch.setattr(service.events, "receive", dev_event)
+    monkeypatch.setattr(service.dot.events, "receive", dot_event)
+    app = FastAPI()
+    app.include_router(service.routes())
+    event = event_payload("EAPP001", {"type": "message", "channel_type": "im"})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+        dev = {**event, "api_app_id": "ADEV00001"}
+        dot = {**event, "api_app_id": "ADOT00001"}
+        assert (await post_signed_event(client, dot, dot=True)).status_code == 401
+        assert (await post_signed_event(client, dev, dot=True, secret=b"dot-signature")).status_code == 403
+        assert (await post_signed_event(client, dot)).status_code == 403
+        assert (await post_signed_event(client, dev)).status_code == 200
+        for _ in range(2):
+            assert (await post_signed_event(client, dot, dot=True, secret=b"dot-signature")).status_code == 200
+    for _ in range(2):
+        assert await service.inbox.drain_one()
+    assert sorted(calls) == [("dev", "ADEV00001"), ("dot", "ADOT00001")]
+    assert service.inbox.enqueue("event:TTEST0001:ELEGACY001", {**event, "event_id": "ELEGACY001"})
+    assert await service.inbox.drain_one()
+    assert calls[-1] == ("dev", None)
+    assert not await service.inbox.drain_one()
 
 
 async def test_real_canonical_hook_inbox_signature_dedupe_without_external_side_effects(slack, monkeypatch):
@@ -223,7 +263,9 @@ async def test_real_canonical_hook_inbox_signature_dedupe_without_external_side_
     rows = service.store.rows("SELECT id,status,payload FROM coordinator_hooks")
     assert rows[0]["payload"].startswith("sealed:v1:")
     assert "local-only input" not in rows[0]["payload"]
-    assert service.inbox.decode(rows[0]["payload"])["event"]["text"].endswith("local-only input")
+    envelope = service.inbox.decode(rows[0]["payload"])
+    assert envelope["slack_app"] == "dev"
+    assert envelope["payload"]["event"]["text"].endswith("local-only input")
     assert len(rows) == 1 and rows[0]["status"] == "pending"
     async with slack.runtime.database.sessions() as db:
         assert await db.scalar(select(func.count()).select_from(Turn)) == 0
@@ -653,6 +695,12 @@ async def test_approval_actions_are_scoped_to_original_requester_and_native_pend
         assert content["blocks"] and "linear_123_create_issue" in content["text"]
         delivery.status = "sent"
         delivery.receipt = slack.runtime.security.seal({"ok": True, "channel": thread.channel_id, "ts": "1792100000.001"})
+        delivery.slack_app = "dot"
+    with pytest.raises(HTTPException) as wrong_app:
+        await slack.service.interact(payload)
+    assert wrong_app.value.status_code == 403
+    async with slack.runtime.database.sessions.begin() as db:
+        (await db.get(Delivery, delivery.id)).slack_app = "dev"
     with pytest.raises(HTTPException):
         await slack.service.interact({**payload, "message": {**payload["message"], "ts": "1792100000.002"}})
     await slack.service.interact(payload)

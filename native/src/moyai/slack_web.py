@@ -90,6 +90,8 @@ class SlackWeb:
             raise HTTPException(403, "The linked web session is unavailable.")
         from .dot_models import DotSlackConversation, DotSlackPreference
         conversation = await db.get(DotSlackConversation, session.id)
+        if self.slack.app == "dot" and conversation is None:
+            raise HTTPException(403, "Dot only continues private Dot conversations.")
         if conversation is not None:
             if session.visibility != "private":
                 raise HTTPException(403, "The connected Dot conversation is no longer private.")
@@ -106,6 +108,8 @@ class SlackWeb:
         async with self.database.sessions.begin() as db:
             link = await db.get(SlackWebLink, session_id)
             if link is None:
+                if self.slack.app == "dot":
+                    raise HTTPException(403, "This Dot conversation has no linked direct message.")
                 return sender
             if link.status != "linked":
                 raise HTTPException(409, "This session is still connecting to Slack.")
@@ -117,7 +121,7 @@ class SlackWeb:
         await self.status(actor, session_id)  # Authorize before looking up a recipient.
         installed = await source_database(self.slack.installation)
         sender = await self.recipient(actor, installed)
-        token = await self.slack.connectors.slack_bot_token()
+        token = await self.slack.bot_token()
         opened = await self.slack.connectors.request(
             "POST", "https://slack.com/api/conversations.open",
             headers={"Authorization": "Bearer " + token},
@@ -135,7 +139,7 @@ class SlackWeb:
                 link = SlackWebLink(
                     session_id=session_id, owner_id=actor.id, owner_authority=actor_grant(actor).authority_version,
                     requester_id=sender.id, team_id=installed["team_id"], channel_id=channel,
-                    connection_authority=installed["authority"], status="sending",
+                    connection_authority=installed["authority"], status="sending", slack_app="dev",
                 )
                 db.add(link)
                 await db.flush()
@@ -190,11 +194,12 @@ class SlackWeb:
             if link.status != "linked":
                 link.status, link.thread_ts = "linked", stamp
                 db.add(SlackThread(session_id=session_id, team_id=link.team_id,
-                                   channel_id=channel, thread_ts=stamp))
+                                   channel_id=channel, thread_ts=stamp, slack_app="dev"))
                 db.add(ProductSlackBinding(
                     session_id=session_id, requester_id=sender.id, team_id=link.team_id,
                     channel_id=channel, thread_ts=stamp, started_ts=stamp,
                     connection_authority=link.connection_authority, delivery_after=link.created_at,
+                    slack_app="dev",
                 ))
             return await self.view(db, session)
 

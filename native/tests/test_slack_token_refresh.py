@@ -84,6 +84,31 @@ async def test_independent_callers_rotate_each_token_once_without_losing_the_oth
     assert sorted(p.calls) == ['rotate-bot', 'rotate-user']
 
 
+async def test_dot_rotation_keeps_its_epoch_and_leaves_dev_credentials_unchanged(rotating):
+    p = rotating
+    await database(p.first.save, 'slack_dot', {'bot': {
+        'access_token': 'old-dot', 'refresh_token': 'rotate-dot', 'expires_at': 1,
+        'team': {'id': 'TLOCAL001'}, 'bot_user_id': 'UDOT00001', 'app_id': 'ADOT00001',
+    }}, 'Synthetic Dot installation')
+
+    async def exchange(provider, *, refresh_token):
+        assert (provider, refresh_token) == ('slack_dot', 'rotate-dot')
+        p.calls.append(refresh_token)
+        return {'access_token': 'new-dot', 'refresh_token': 'next-dot', 'expires_at': time.time() + 3600}
+
+    p.first.exchange = p.second.exchange = exchange
+    before = await database(p.first.connection_revision, 'slack_dot')
+    assert await asyncio.gather(p.first.slack_bot_token(app='dot'), p.second.slack_bot_token(app='dot')) == [
+        'new-dot', 'new-dot',
+    ]
+    after = await database(p.first.connection_revision, 'slack_dot')
+    current = json.loads(p.security.decrypt(after))
+    assert authority(current, after) == authority(json.loads(p.security.decrypt(before)), before)
+    assert current['bot']['app_id'] == 'ADOT00001'
+    assert await database(p.first.connection_revision, 'slack') == p.original['encrypted']
+    assert p.calls == ['rotate-dot']
+
+
 async def test_bot_refresh_completes_while_its_browser_holds_canonical_admission(rotating):
     p = rotating
     if not p.url:

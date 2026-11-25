@@ -65,7 +65,7 @@ class SlackActivityService:
                 return None
         async with runtime.database.sessions() as db:
             thread = await db.get(SlackThread, thread_id)
-            if thread is None:
+            if thread is None or thread.slack_app == "dot":
                 return None
             session = await db.get(Session, thread.session_id)
             if session is None:

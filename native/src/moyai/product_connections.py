@@ -1179,8 +1179,15 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(connectors.record_check, provider, "healthy")
         return OrganizationConnectionCheck(healthy=True, label=label)
 
+    @router.post("/api/connections/slack-dot/oauth", operation_id="startSlackDotOAuth")
+    async def dot_oauth(request: Request) -> OrganizationConnectionOAuthStart:
+        return await start_oauth("slack_dot", request)
+
     @router.post("/api/connections/{provider}/oauth", operation_id="startOrganizationConnectionOAuth")
     async def oauth(provider: Provider, request: Request) -> OrganizationConnectionOAuthStart:
+        return await start_oauth(provider, request)
+
+    async def start_oauth(provider: Provider | Literal["slack_dot"], request: Request) -> OrganizationConnectionOAuthStart:
         sid = await source_database(security.require, request, mutation=True, admin=True)
         if not connectors.configured_oauth(provider):
             raise HTTPException(409, "Configure this app's OAuth client or connect using a token.")
@@ -1192,10 +1199,17 @@ def routes(service: ProductConnections) -> APIRouter:
         )
         return OrganizationConnectionOAuthStart(url=connectors.authorization_url(provider, state))
 
+    @router.get("/oauth/slack-dot/callback", include_in_schema=False)
+    async def dot_callback(request: Request, state: str = "", code: str = "", error: str = "") -> RedirectResponse:
+        return await complete_oauth("slack_dot", request, state, code, error)
+
     @router.get("/oauth/{provider}/callback")
     async def callback(provider: Provider, request: Request, state: str = "", code: str = "", error: str = ""):
         if provider == "slack" and connectors.personal_slack.is_oauth_state(state):
             return await personal_callback(request, state=state, code=code, error=error)
+        return await complete_oauth(provider, request, state, code, error)
+
+    async def complete_oauth(provider: Provider | Literal["slack_dot"], request: Request, state: str, code: str, error: str) -> RedirectResponse:
         sid = await source_database(security.require, request, admin=True)
 
         def consume():
@@ -1212,7 +1226,17 @@ def routes(service: ProductConnections) -> APIRouter:
             return RedirectResponse(app_path(service.product.settings.public_url, "/?connection=cancelled#connections"), status_code=303)
         expected = await source_database(connectors.connection_revision, provider)
         value = await connectors.exchange(provider, code=code)
-        label = await connectors.verify(provider, value)
+        if provider == "slack_dot":
+            from app.connector_errors import ConnectorError
+
+            dev = await source_database(connectors.slack_installation)
+            bot = value["bot"]
+            if (not dev.get("app_id") or dev["app_id"] == bot["app_id"]
+                    or dev.get("team_id") != bot["team"]["id"] or dev.get("user_id") == bot["bot_user_id"]):
+                raise ConnectorError("Install Moyai Dot as a separate bot in the Moyai Dev workspace.", dispatched=False)
+            label = "Moyai Dot"
+        else:
+            label = await connectors.verify(provider, value)
         await service.product.identity.require_request_current(request)
         await source_database(save_if_unchanged, store, security, provider, value, label, expected)
         await source_database(connectors.record_check, provider, "healthy")

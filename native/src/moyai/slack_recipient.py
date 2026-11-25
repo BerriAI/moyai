@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.slack_apps import SlackApp
 from app.slack_format import ID
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from .models import User
 from .product_identity import ProductGrant
@@ -26,6 +27,12 @@ class SlackRecipient(BaseModel):
     team_id: str
     channel_id: str
     connection_authority: str
+    slack_app: SlackApp = "dev"
+
+    @field_validator("slack_app", mode="before")
+    @classmethod
+    def legacy_app(cls, value: object) -> object:
+        return "dev" if value is None else value
 
 
 def actor_grant(actor: User) -> ProductGrant:
@@ -47,7 +54,7 @@ async def lookup(slack: ProductSlack, actor: User, installed: dict) -> User:
     principal = await slack.product.identity.require_current(actor_grant(actor))
     if not principal.individual or principal.email.rpartition("@")[2] not in slack.settings.identity_domains():
         raise HTTPException(403, "An eligible organization sign-in is required.")
-    token = await slack.connectors.slack_bot_token()
+    token = await slack.bot_token()
     result = await slack.connectors.request(
         "GET", "https://slack.com/api/users.lookupByEmail",
         headers={"Authorization": "Bearer " + token}, params={"email": principal.email},
@@ -74,6 +81,8 @@ async def current(
 ) -> User:
     if not enabled(slack):
         raise HTTPException(403, "Slack direct-message delivery is disabled.")
+    if slack.app != recipient.slack_app:
+        raise HTTPException(403, "This direct message belongs to another Slack app.")
     installed = await slack.installation_in(db)
     if installed["authority"] != recipient.connection_authority or installed["team_id"] != recipient.team_id:
         raise HTTPException(403, "The linked Slack installation changed.")

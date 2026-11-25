@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from app.db import database as source_database
+from app.slack_apps import saved_slack_app
 from fastapi import HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -39,11 +40,14 @@ class SlackConversations:
 
     async def find(self, origin: dict[str, str]) -> SlackThread | None:
         async with self.database.sessions() as db:
-            return await db.scalar(select(SlackThread).where(
+            thread = await db.scalar(select(SlackThread).where(
                 SlackThread.team_id == origin["team_id"],
                 SlackThread.channel_id == origin["channel_id"],
                 SlackThread.thread_ts == origin["thread_ts"],
             ))
+        if thread is not None and saved_slack_app(thread.slack_app) != self.slack.app:
+            raise HTTPException(403, "This Slack thread belongs to another app.")
+        return thread
 
     async def resolve(
         self, thread: SlackThread | None, actor: User, origin: dict[str, str], installed: dict,
@@ -92,7 +96,9 @@ class SlackConversations:
             session = await db.get(Session, thread.session_id)
         if binding is None or session is None or session.deleted:
             raise HTTPException(403, "This Slack thread cannot be continued.")
-        if binding.connection_authority != installed["authority"]:
+        if (saved_slack_app(thread.slack_app) != self.slack.app
+                or saved_slack_app(binding.slack_app) != self.slack.app
+                or binding.connection_authority != installed["authority"]):
             raise HTTPException(403, "This thread belongs to a changed Slack installation.")
         if Decimal(origin["message_ts"]) < Decimal(binding.started_ts):
             return None
@@ -147,13 +153,14 @@ class SlackConversations:
         if row is None or installed["team_id"] != row["team_id"]:
             raise HTTPException(403, "The original Slack destination is unavailable.")
         thread = SlackThread(session_id=session.id, team_id=row["team_id"],
-                             channel_id=row["channel"], thread_ts=row["thread_ts"])
+                             channel_id=row["channel"], thread_ts=row["thread_ts"], slack_app="dev")
         binding = ProductSlackBinding(
             session_id=session.id, source_run_id=source_id,
             requester_id=f"slack:{row['team_id']}:{row['sender']}" if row["sender"] else row["owner_id"],
             team_id=row["team_id"], channel_id=row["channel"], thread_ts=row["thread_ts"],
             started_ts=provenance.get("message_ts", row["thread_ts"]),
             connection_authority=installed["authority"], paused=bool(row["paused"]),
+            slack_app="dev",
         )
         from .slack_audience import can_read_binding
         if not await can_read_binding(self.slack, db, binding, actor):
@@ -167,6 +174,8 @@ class SlackConversations:
         *, wake: bool, uploads: list[str],
     ) -> SlackThread | None:
         """Persist the resolved destination with an already prepared, immutable input."""
+        if self.slack.app != "dev":
+            raise HTTPException(403, "Dot requires an owner-verified private thread.")
         source = conversation.source
         try:
             async with self.database.sessions.begin() as db:
@@ -179,7 +188,7 @@ class SlackConversations:
                     return existing
                 thread = SlackThread(
                     id=new_id(), session_id=session.id, team_id=origin["team_id"],
-                    channel_id=origin["channel_id"], thread_ts=origin["thread_ts"],
+                    channel_id=origin["channel_id"], thread_ts=origin["thread_ts"], slack_app="dev",
                 )
                 db.add(thread)
                 db.add(ProductSlackBinding(
@@ -188,6 +197,7 @@ class SlackConversations:
                     channel_id=origin["channel_id"], thread_ts=origin["thread_ts"],
                     started_ts=origin["message_ts"], connection_authority=installed["authority"],
                     paused=bool(source and source["paused"] and not wake),
+                    slack_app="dev",
                 ))
             return thread
         except HTTPException as error:

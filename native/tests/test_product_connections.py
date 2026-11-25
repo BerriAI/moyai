@@ -1098,6 +1098,54 @@ async def test_onboarding_reuses_canonical_auth_csrf_and_provider_routes(bridge,
             await bridge.require_scope(scope)
 
 
+async def test_dot_oauth_uses_separate_bot_only_installation(bridge, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    import httpx
+    from fastapi import FastAPI, Response
+
+    from moyai.product_connections import routes
+
+    async def authorized(*args, **kwargs):
+        return None
+
+    bridge.product.identity = SimpleNamespace(authenticate=authorized, require_request_current=authorized)
+    bridge.settings.slack_dot_client_id = "dot-client"
+    bridge.settings.slack_dot_client_secret = "dot-client-secret"
+    bridge.connectors.save("slack", {"bot": {
+        "access_token": "dev-test-token", "team": {"id": "TTEST0001"},
+        "bot_user_id": "UDEV00001", "app_id": "ADEV00001",
+    }}, "Local Dev")
+    callback = bridge.settings.public_url.rstrip("/") + "/oauth/slack-dot/callback"
+
+    async def exchange_request(method, url, *, data):
+        assert (method, url) == ("POST", "https://slack.com/api/oauth.v2.access")
+        assert (data["redirect_uri"], data["client_id"], data["code"]) == (callback, "dot-client", "local-code")
+        return {"access_token": "dot-test-token", "token_type": "bot", "app_id": "ADOT00001",
+                "bot_user_id": "UDOT00001", "team": {"id": "TTEST0001"}}
+
+    monkeypatch.setattr(bridge.connectors, "request", exchange_request)
+    app = FastAPI()
+    app.include_router(routes(bridge))
+    response = Response()
+    sid = bridge.security.new_session(response)
+    cookie = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=bridge.settings.public_url) as client:
+        client.cookies.set("workspace_session", cookie)
+        client.headers.update({"Origin": bridge.settings.public_url, "X-CSRF-Token": bridge.security.csrf(sid)})
+        started = await client.post("/api/connections/slack-dot/oauth")
+        assert started.status_code == 200
+        params = parse_qs(urlsplit(started.json()["url"]).query)
+        assert "user_scope" not in params and params["redirect_uri"] == [callback]
+        assert set(params["scope"][0].split(",")) == {
+            "chat:write", "im:write", "im:history", "users:read", "users:read.email", "files:read", "files:write",
+        }
+        completed = await client.get("/oauth/slack-dot/callback", params={"state": params["state"][0], "code": "local-code"})
+        assert completed.status_code == 303
+    assert await bridge.connectors.slack_bot_token() == "dev-test-token"
+    assert await bridge.connectors.slack_bot_token(app="dot") == "dot-test-token"
+
+
 async def test_slack_reconnect_rechecks_blocked_profiles_without_granting_identity(bridge, monkeypatch):
     from app.connection_authority import save_if_unchanged
     bridge.settings.slack_identity_linking_enabled = True
