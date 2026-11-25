@@ -425,7 +425,9 @@ class TurnAdmission:
             turn.accepted_at = turn.accepted_at or now()
             session.status = "running"
             reference = json.loads(session.workspace) if session.workspace else None
-            scope.workspace_provider = reference["provider"] if reference else self.database.settings.sandbox_provider
+            scope.workspace_provider = (
+                reference.get("provider") if reference is not None else self.database.settings.sandbox_provider
+            )
             prepared = PreparedTurn(
                 scope=scope,
                 prompt=self.database.security.unseal(turn.prompt).decode(),

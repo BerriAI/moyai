@@ -149,6 +149,8 @@ async def test_second_participant_reaches_execution_in_existing_slack_workspace(
     continuation = await runtime.admission.prepare(followup.id)
     assert continuation.prompt == "Add the requested text to the existing image."
     assert continuation.scope.actor_id == second.id
+    assert continuation.scope.workspace_provider is None
+    assert continuation.workspace == {"id": "retained-computer"}
     assert continuation.scope.workspace_key == prepared.scope.workspace_key
     assert all(g.policy["product"]["personal_owner"] is None for g in continuation.scope.grants)
     if legacy_bot:
