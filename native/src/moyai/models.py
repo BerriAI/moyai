@@ -268,6 +268,7 @@ class SlackThread(Base):
     channel_id: Mapped[str] = mapped_column(String(100))
     thread_ts: Mapped[str] = mapped_column(String(50))
     session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), unique=True)
+    slack_app: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
 
 class SlackInbox(Base):
@@ -304,6 +305,7 @@ class Delivery(Base):
     receipt: Mapped[str | None] = mapped_column(Text, nullable=True)
     claimed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
+    slack_app: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
 
 class DeliverySchedule(Base):
@@ -334,4 +336,3 @@ class Effect(Base):
     resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
     settled_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
-

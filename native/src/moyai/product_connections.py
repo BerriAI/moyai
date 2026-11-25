@@ -865,6 +865,11 @@ class PolicyChange(BaseModel):
     read_only: bool
 
 
+class SlackDotPolicyChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
 class OrganizationConnectionResponse(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
@@ -895,6 +900,16 @@ class OrganizationConnectionPolicy(OrganizationConnectionResponse):
     read_only: bool
     checked_at: str | None
     check_status: str | None
+
+
+class SlackDotConnectionStatus(OrganizationConnectionResponse):
+    connected: bool
+    enabled: bool
+    oauth_configured: bool
+    signing_configured: bool
+    app_id: str | None
+    team_id: str | None
+    bot_user_id: str | None
 
 
 class OrganizationConnection(OrganizationConnectionPolicy):
@@ -1134,8 +1149,33 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(connectors.audit, provider, "Connected for the organization")
         return OrganizationConnectionConnected(connected=True, label=label)
 
+    def dot_status() -> SlackDotConnectionStatus:
+        installation = connectors.slack_installation(app="dot")
+        secret = service.settings.slack_dot_signing_secret
+        return SlackDotConnectionStatus(
+            connected=bool(installation.get("installed")), enabled=connectors.policy("slack_dot")["enabled"],
+            oauth_configured=connectors.configured_oauth("slack_dot"),
+            signing_configured=bool(secret and secret != service.settings.slack_signing_secret),
+            app_id=installation.get("app_id"), team_id=installation.get("team_id"),
+            bot_user_id=installation.get("user_id"),
+        )
+
+    @router.get("/api/connections/slack-dot", operation_id="getSlackDotConnection")
+    async def get_dot(request: Request) -> SlackDotConnectionStatus:
+        await source_database(security.require, request, admin=True)
+        return await source_database(dot_status)
+
+    @router.delete("/api/connections/slack-dot", operation_id="disconnectSlackDotConnection")
+    async def disconnect_dot(request: Request) -> OrganizationConnectionDisconnected:
+        return await disconnect_connection("slack_dot", request)
+
     @router.delete("/api/connections/{provider}", operation_id="disconnectOrganizationConnection")
     async def disconnect(provider: Provider, request: Request) -> OrganizationConnectionDisconnected:
+        return await disconnect_connection(provider, request)
+
+    async def disconnect_connection(
+        provider: Provider | Literal["slack_dot"], request: Request,
+    ) -> OrganizationConnectionDisconnected:
         await source_database(security.require, request, mutation=True, admin=True)
         async with connectors.locks[provider]:
             def revoke():
@@ -1144,9 +1184,17 @@ def routes(service: ProductConnections) -> APIRouter:
                     conn.execute("DELETE FROM connections WHERE provider=?", (provider,))
                     conn.execute("DELETE FROM oauth_states WHERE provider=?", (provider,))
             await source_database(revoke)
-        await source_database(connectors.expire_approvals, provider)
+        if provider != "slack_dot":
+            await source_database(connectors.expire_approvals, provider)
         await source_database(connectors.audit, provider, "Disconnected from the organization")
         return OrganizationConnectionDisconnected(connected=False)
+
+    @router.patch("/api/connections/slack-dot/policy", operation_id="updateSlackDotConnectionPolicy")
+    async def dot_policy(body: SlackDotPolicyChange, request: Request) -> SlackDotConnectionStatus:
+        await source_database(security.require, request, mutation=True, admin=True)
+        await source_database(set_policy, store, security, "slack_dot", body.enabled, False)
+        await source_database(connectors.audit, "slack_dot", "Updated Dot connection policy")
+        return await source_database(dot_status)
 
     @router.patch("/api/connections/{provider}/policy", operation_id="updateOrganizationConnectionPolicy")
     async def policy(provider: Provider, body: PolicyChange, request: Request) -> OrganizationConnectionPolicy:
@@ -1179,8 +1227,15 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(connectors.record_check, provider, "healthy")
         return OrganizationConnectionCheck(healthy=True, label=label)
 
+    @router.post("/api/connections/slack-dot/oauth", operation_id="startSlackDotOAuth")
+    async def dot_oauth(request: Request) -> OrganizationConnectionOAuthStart:
+        return await start_oauth("slack_dot", request)
+
     @router.post("/api/connections/{provider}/oauth", operation_id="startOrganizationConnectionOAuth")
     async def oauth(provider: Provider, request: Request) -> OrganizationConnectionOAuthStart:
+        return await start_oauth(provider, request)
+
+    async def start_oauth(provider: Provider | Literal["slack_dot"], request: Request) -> OrganizationConnectionOAuthStart:
         sid = await source_database(security.require, request, mutation=True, admin=True)
         if not connectors.configured_oauth(provider):
             raise HTTPException(409, "Configure this app's OAuth client or connect using a token.")
@@ -1192,18 +1247,32 @@ def routes(service: ProductConnections) -> APIRouter:
         )
         return OrganizationConnectionOAuthStart(url=connectors.authorization_url(provider, state))
 
+    @router.get("/oauth/slack-dot/callback", include_in_schema=False)
+    async def dot_callback(request: Request, state: str = "", code: str = "", error: str = "") -> RedirectResponse:
+        return await complete_oauth("slack_dot", request, state, code, error)
+
     @router.get("/oauth/{provider}/callback")
     async def callback(provider: Provider, request: Request, state: str = "", code: str = "", error: str = ""):
         if provider == "slack" and connectors.personal_slack.is_oauth_state(state):
             return await personal_callback(request, state=state, code=code, error=error)
+        return await complete_oauth(provider, request, state, code, error)
+
+    async def complete_oauth(provider: Provider | Literal["slack_dot"], request: Request, state: str, code: str, error: str) -> RedirectResponse:
         sid = await source_database(security.require, request, admin=True)
+        oauth_state = (digest(state), digest(sid))
 
         def consume():
             with store.connect() as conn:
+                if provider == "slack_dot" and not error and code:
+                    return conn.execute(
+                        """SELECT state_hash FROM oauth_states WHERE state_hash=? AND provider=?
+                           AND session_id=? AND expires>?""",
+                        (oauth_state[0], provider, oauth_state[1], time.time()),
+                    ).fetchone()
                 return conn.execute(
                     """DELETE FROM oauth_states WHERE state_hash=? AND provider=?
                        AND session_id=? AND expires>? RETURNING state_hash""",
-                    (digest(state), provider, digest(sid), time.time()),
+                    (oauth_state[0], provider, oauth_state[1], time.time()),
                 ).fetchone()
 
         if not await source_database(consume):
@@ -1212,9 +1281,22 @@ def routes(service: ProductConnections) -> APIRouter:
             return RedirectResponse(app_path(service.product.settings.public_url, "/?connection=cancelled#connections"), status_code=303)
         expected = await source_database(connectors.connection_revision, provider)
         value = await connectors.exchange(provider, code=code)
-        label = await connectors.verify(provider, value)
+        if provider == "slack_dot":
+            from app.connector_errors import ConnectorError
+
+            dev = await source_database(connectors.slack_installation)
+            bot = value["bot"]
+            if (not dev.get("app_id") or dev["app_id"] == bot["app_id"]
+                    or dev.get("team_id") != bot["team"]["id"] or dev.get("user_id") == bot["bot_user_id"]):
+                raise ConnectorError("Install Moyai Dot as a separate bot in the Moyai Dev workspace.", dispatched=False)
+            label = "Moyai Dot"
+        else:
+            label = await connectors.verify(provider, value)
         await service.product.identity.require_request_current(request)
-        await source_database(save_if_unchanged, store, security, provider, value, label, expected)
+        await source_database(
+            save_if_unchanged, store, security, provider, value, label, expected,
+            oauth_state=oauth_state if provider == "slack_dot" else None,
+        )
         await source_database(connectors.record_check, provider, "healthy")
         await source_database(connectors.audit, provider, "Authorized an organization connection")
         return RedirectResponse(app_path(service.product.settings.public_url, "/?connection=success#connections"), status_code=303)

@@ -77,9 +77,14 @@ class HookInbox:
             value = self.security.decrypt(value.removeprefix('sealed:v1:'))
         return json.loads(value)
 
-    async def receive_event(self, request, *, on_enqueued=None):
+    @staticmethod
+    def envelope(payload, *, dot):
+        return {'slack_app': 'dot' if dot else 'dev', 'payload': payload}
+
+    async def receive_event(self, request, *, on_enqueued=None, dot=False):
         body = await bounded_body(request, MAX_EVENT_BYTES)
-        self.slack.verify_signature(body, request.headers)
+        ingress = self.slack.dot if dot else self.slack
+        ingress.verify_signature(body, request.headers)
         try:
             payload = json.loads(body)
             if not isinstance(payload, dict):
@@ -94,9 +99,12 @@ class HookInbox:
         if not all(isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,100}', value)
                    for value in (team, event_id)):
             raise HTTPException(400, 'Invalid Slack event identifier.')
+        if dot or 'api_app_id' in payload:
+            await ingress.verify_envelope(payload, team)
         # Signature freshness is checked only at intake. A saved, authenticated
         # event may wait through a deploy or provider outage longer than 5 min.
-        inserted = await database(self.enqueue, f'event:{team}:{event_id}', payload)
+        prefix = 'dot:event' if dot else 'event'
+        inserted = await database(self.enqueue, f'{prefix}:{team}:{event_id}', self.envelope(payload, dot=dot))
         self.wake.set()
         if inserted and on_enqueued is not None:
             on_enqueued(payload)
@@ -157,7 +165,14 @@ class HookInbox:
         try:
             # Only the lock holder calls this private path. The HTTP route has
             # no option to skip signature verification or enqueue raw headers.
-            await self.slack.receive_payload(self.decode(row['payload']), self.missing_cloud())
+            envelope = self.decode(row['payload'])
+            dot = row['id'].startswith('dot:')
+            if 'slack_app' in envelope or dot:
+                if envelope.get('slack_app') != ('dot' if dot else 'dev') or not isinstance(envelope.get('payload'), dict):
+                    raise HTTPException(403, 'Invalid Slack inbox app.')
+                envelope = envelope['payload']
+            ingress = self.slack.dot if dot else self.slack
+            await ingress.receive_payload(envelope, self.missing_cloud())
         except HTTPException as exc:
             if exc.status_code >= 500 or exc.status_code == 429:
                 await database(self.store.execute, 'UPDATE coordinator_hooks SET retry_at=? WHERE id=?',

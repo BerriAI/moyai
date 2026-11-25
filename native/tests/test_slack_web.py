@@ -75,6 +75,7 @@ async def linked(slack_admission):
     )
     runtime.skill_invocations = SkillInvocations(runtime)
     service = SimpleNamespace(
+        app="dev", bot_token=token,
         product=SimpleNamespace(identity=product.adapter), runtime=runtime, settings=settings,
         installation=lambda: installed, installation_in=installation_in,
         connectors=SimpleNamespace(request=request, slack_bot_token=token), actor=actor,

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 
 from app.connector_errors import ConnectorError
 from app.db import database as source_database
+from app.slack_apps import saved_slack_app
 from app.slack_format import ID
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -63,6 +64,8 @@ async def queue(
     if not preference or not preference.enabled or preference.session_id != session_id or not preference.recipient:
         return
     recipient = SlackRecipient.model_validate_json(database.security.unseal(preference.recipient))
+    if recipient.slack_app != "dot" or saved_slack_app(preference.slack_app) != "dot":
+        return
     principal = await database._identity().authorize_admission(db, await database._saved_product_grant(db, turn))
     actor = await database._identity().read_native_user(db, principal)
     assert actor is not None
@@ -74,7 +77,7 @@ async def queue(
         database, db, actor, preference, recipient, title=content.splitlines()[0], notification=notification,
     )
     db.add(Delivery(
-        identity=f"product-slack:{turn.id}:dot", session_id=conversation.id, turn_id=turn.id,
+        identity=f"product-slack:{turn.id}:dot", session_id=conversation.id, turn_id=turn.id, slack_app="dot",
         destination=json.dumps({
             "channel": recipient.channel_id, "thread_ts": "", "dot_revision": preference.revision,
         }),
@@ -84,6 +87,8 @@ async def queue(
 
 
 async def allowed(slack: ProductSlack, delivery: Delivery, *, reconcile: bool = False) -> bool:
+    if saved_slack_app(delivery.slack_app) != slack.app or (slack.app == "dev" and not reconcile):
+        return False
     database = slack.runtime.database
     try:
         async with database.sessions.begin() as db:
@@ -100,14 +105,15 @@ async def allowed(slack: ProductSlack, delivery: Delivery, *, reconcile: bool = 
                 return False
             preference = await db.get(DotSlackPreference, turn.actor_id)
             destination = json.loads(delivery.destination)
-            if (preference is None or not preference.recipient
+            recipient = SlackRecipient.model_validate(link)
+            if not (reconcile and slack.app == "dev") and (
+                    preference is None or not preference.recipient
+                    or saved_slack_app(preference.slack_app) != slack.app
                     or preference.session_id != conversation.dot_session_id
                     or (not reconcile and (
                         not preference.enabled or preference.revision != destination.get("dot_revision")
-                    ))):
-                return False
-            recipient = SlackRecipient.model_validate_json(database.security.unseal(preference.recipient))
-            if recipient != SlackRecipient.model_validate(link):
+                    ))
+                    or SlackRecipient.model_validate_json(database.security.unseal(preference.recipient)) != recipient):
                 return False
             if destination.get("channel") != recipient.channel_id or destination.get("thread_ts") != "":
                 return False
@@ -148,10 +154,17 @@ class DotNotifications:
                 revision=row.revision if row else 0, enabled=bool(row and row.enabled),
                 status="off", description="Get updates in your Slack DM. Reply in each message’s thread, or send a new DM to start another chat.",
             )
-            slack = self.runtime.product_slack
+            slack = self.runtime.product_slack.dot if self.runtime.product_slack else None
             if slack is None or not enabled(slack) or not slack.settings.public_url:
                 result.status = "unavailable"
                 result.description = "Slack notifications need the workspace bot, verified account linking, and a Moyai URL."
+                return result
+            from .product_slack import SlackInstallationUnavailable
+            try:
+                await slack.installation_in(db)
+            except SlackInstallationUnavailable:
+                result.status = "unavailable"
+                result.description = "Connect the Moyai Dot Slack app before enabling notifications."
                 return result
             if row and row.enabled:
                 try:
@@ -183,14 +196,14 @@ class DotNotifications:
                 raise HTTPException(409, "Notification settings changed. Refresh and try again.")
         recipient = None
         started_ts = None
-        slack = self.runtime.product_slack
+        slack = self.runtime.product_slack.dot if self.runtime.product_slack else None
         if body.enabled:
             if slack is None or not enabled(slack) or not slack.settings.public_url:
                 raise HTTPException(409, "Configure Slack direct messages and the Moyai URL first.")
             try:
                 installed = await source_database(slack.installation)
                 sender = await lookup(slack, actor, installed)
-                token = await slack.connectors.slack_bot_token()
+                token = await slack.bot_token()
                 response_headers: dict[str, str] = {}
                 opened = await slack.connectors.request(
                     "POST", "https://slack.com/api/conversations.open",
@@ -213,6 +226,7 @@ class DotNotifications:
                     owner_id=actor.id, owner_authority=actor_grant(actor).authority_version,
                     requester_id=sender.id, team_id=installed["team_id"], channel_id=channel,
                     connection_authority=installed["authority"],
+                    slack_app="dot",
                 )
             except ConnectorError as error:
                 raise HTTPException(502, "Could not verify your Slack DM. Check the bot connection and try again.") from error
@@ -239,7 +253,8 @@ class DotNotifications:
                 if previous != recipient or row.started_ts is None:
                     row.started_ts = started_ts
                 row.recipient = self.database.security.seal(recipient.model_dump_json())
-                row.destination_key = f"{recipient.team_id}:{recipient.channel_id}"
+                row.slack_app = "dot"
+                row.destination_key = f"dot:{recipient.team_id}:{recipient.channel_id}"
             row.updated_at = now()
             try:
                 await db.flush()

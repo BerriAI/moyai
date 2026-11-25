@@ -335,8 +335,17 @@ async def reconcile_one(
     runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery, *,
     headers: dict[str, str] | None = None, root_ts: str | None = None,
 ) -> None:
-    from .dot_notifications import is_dot_delivery
+    from .dot_notifications import allowed, is_dot_delivery
     dot = is_dot_delivery(delivery)
+    product = getattr(runtime, "product_slack", None)
+    ingress = product.for_app(delivery.slack_app) if product else None
+    expected_bot = None
+    if dot or (ingress is not None and ingress.app == "dot"):
+        if ingress is None:
+            return
+        from app.db import database as source_database
+
+        expected_bot = (await source_database(ingress.installation))["user_id"]
     async with runtime.database.sessions.begin() as db:
         # Product Dot reconciliation is throttled by DeliverySchedule. Keep its
         # original send claim: early-root admission uses it as dispatch evidence.
@@ -361,18 +370,16 @@ async def reconcile_one(
     body = response.json()
     if not body.get("ok"):
         return
-    product = getattr(runtime, "product_slack", None)
-    expected_bot = None
-    if dot:
-        if product is None:
-            return
-        from app.db import database as source_database
-        expected_bot = (await source_database(product.installation))["user_id"]
-    found = confirmed_delivery(delivery.id, body.get("messages", []), bot_user=expected_bot, root_ts=root_ts)
+    messages = body.get("messages", [])
+    if expected_bot is not None and not dot:
+        messages = [message for message in messages if message.get("user") == expected_bot
+                    and (message.get("thread_ts") == thread or message.get("ts") == thread)]
+    found = confirmed_delivery(delivery.id, messages, bot_user=expected_bot if dot else None, root_ts=root_ts)
     if found:
         if dot:
-            assert product is not None
-            await product._settle(delivery.id, "sent", {**found, "channel": destination["channel"]})
+            assert ingress is not None
+            if await allowed(ingress, delivery, reconcile=True):
+                await ingress._settle(delivery.id, "sent", {**found, "channel": destination["channel"]})
             return
         async with runtime.database.sessions.begin() as db:
             await db.execute(update(Delivery).where(

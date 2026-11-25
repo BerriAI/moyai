@@ -12,6 +12,7 @@ import re
 import time
 
 from app.db import database as source_database
+from app.slack_apps import SlackApp, saved_slack_app
 from app.slack_mentions import MAX_MENTIONS, MENTION, profile_name
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class SlackMentionNames:
                             ON CONFLICT(team_id,user_id) DO UPDATE SET next_check=excluded.next_check
                         ''', (team, user, name, time.time() + retry))
                         try:
-                            token = await self.slack.connectors.slack_bot_token()
+                            token = await self.slack.bot_token()
                             result = await self.slack.connectors.request(
                                 'GET', 'https://slack.com/api/users.info',
                                 headers={'Authorization': 'Bearer ' + token}, params={'user': user},
@@ -100,7 +101,7 @@ class SlackMentionNames:
         return names
 
     async def decorate(self, messages: list[dict], sources: dict[int, dict | None]) -> bool:
-        groups: dict[str, list[tuple[dict, list[str]]]] = {}
+        groups: dict[tuple[SlackApp, str], list[tuple[dict, list[str]]]] = {}
         for message in messages:
             source = sources.get(message['id']) or {}
             team = source.get('team_id', '')
@@ -109,11 +110,12 @@ class SlackMentionNames:
                 continue
             users = list(dict.fromkeys(MENTION.findall(message['content'])))[:MAX_MENTIONS]
             if users:
-                groups.setdefault(team, []).append((message, users))
-        for team, entries in groups.items():
+                groups.setdefault((saved_slack_app(source.get('slack_app')), team), []).append((message, users))
+        for (app, team), entries in groups.items():
             users = list(dict.fromkeys(user for _, ids in entries for user in ids))
             try:
-                names = await self.names(team, users)
+                service = self if app == self.slack.app else self.slack.for_app(app).mention_names
+                names = await service.names(team, users)
             except Exception as error:  # noqa: BLE001 - optional display cache must not hide messages
                 logger.debug('Slack mention cache unavailable (%s)', type(error).__name__)
                 continue
@@ -157,6 +159,7 @@ async def format_reply(runtime, thread, text: str, *, product=None) -> str:
                 source = json.loads(runtime.security.unseal(data))
                 if (source.get('kind') == 'slack' and not source.get('deleted')
                         and source.get('edited_in') != 'web'
+                        and saved_slack_app(source.get('slack_app')) == saved_slack_app(thread.slack_app)
                         and all(source.get(key) == getattr(thread, key)
                                 for key in ('team_id', 'channel_id', 'thread_ts'))):
                     mentions.update(mention_ids(runtime.security.unseal(content).decode()) & users)

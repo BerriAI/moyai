@@ -25,6 +25,7 @@ from .github import GitHub
 from .github_coding import READS as GITHUB_CODING_READS
 from .gitlab import GitLab
 from .personal_slack import PersonalSlack
+from .slack_apps import slack_provider
 from .slack_origin import metadata as slack_metadata
 
 
@@ -160,7 +161,7 @@ def linear_page(data, args, collection, scope):
 class Connectors:
     def __init__(self, store: Store, security, settings):
         self.store, self.security, self.settings = store, security, settings
-        self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion", "github", "gitlab")}
+        self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "slack_dot", "notion", "github", "gitlab")}
         self.github = GitHub(store, security, settings, self)
         self.gitlab = GitLab(store, security, settings, self)
         self.slack_identities = None
@@ -291,8 +292,8 @@ class Connectors:
                     refresh_connection, self.store, self.security, provider, rows[0], fresh)
             return credentials
 
-    def slack_installation(self, *, connection=None):
-        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='slack'", connection=connection)
+    def slack_installation(self, *, connection=None, app="dev"):
+        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider=?", (slack_provider(app),), connection=connection)
         if not rows:
             return {}
         credentials = json.loads(self.security.decrypt(rows[0]["encrypted"]))
@@ -300,16 +301,17 @@ class Connectors:
         return {"installed": bool(bot.get("access_token")), "team_id": bot.get("team", {}).get("id"),
                 "user_id": bot.get("bot_user_id"), "bot_id": bot.get("bot_id"), "app_id": bot.get("app_id"), "scopes": bot.get("scope", "").split(",")}
 
-    async def slack_bot_token(self):
-        async with self.locks["slack"]:
-            rows = await database(self.store.rows, "SELECT * FROM connections WHERE provider='slack'")
+    async def slack_bot_token(self, *, app="dev"):
+        provider = slack_provider(app)
+        async with self.locks[provider]:
+            rows = await database(self.store.rows, "SELECT * FROM connections WHERE provider=?", (provider,))
             credentials = json.loads(self.security.decrypt(rows[0]["encrypted"])) if rows else {}
             bot = credentials.get("bot", {})
             if not bot.get("access_token"):
                 raise ConnectorError("Reconnect Slack to install the workspace bot.", dispatched=False)
             if bot.get("expires_at", 0) and bot["expires_at"] < time.time() + 90:
                 from .slack_token_refresh import refresh_slack_token
-                credentials = await database(refresh_slack_token, self, rows[0], bot=True)
+                credentials = await database(refresh_slack_token, self, rows[0], bot=True, provider=provider)
                 bot = credentials["bot"]
             return bot["access_token"]
 
@@ -705,6 +707,9 @@ class Connectors:
                 if self.settings.slack_thread_chat_enabled:
                     params["scope"] += ",channels:history,groups:history,channels:read,groups:read"
             base = "https://slack.com/oauth/v2/authorize"
+        elif provider == "slack_dot":
+            params["scope"] = "chat:write,im:write,im:history,users:read,users:read.email,files:read,files:write"
+            base = "https://slack.com/oauth/v2/authorize"
         else:
             params["owner"] = "user"
             base = "https://api.notion.com/v1/oauth/authorize"
@@ -713,7 +718,8 @@ class Connectors:
         return base + "?" + urlencode(params)
 
     def redirect_uri(self, provider):
-        return f"{self.settings.public_url.rstrip('/')}/oauth/{provider}/callback"
+        path = "slack-dot" if provider == "slack_dot" else provider
+        return f"{self.settings.public_url.rstrip('/')}/oauth/{path}/callback"
 
     async def exchange(self, provider, *, code=None, refresh_token=None, code_verifier=None, personal=False):
         client_id, client_secret = self.oauth_client(provider, personal=personal)
@@ -733,6 +739,14 @@ class Connectors:
         else:
             payload.update(client_id=client_id, client_secret=client_secret)
             result = await self.request("POST", "https://api.linear.app/oauth/token" if provider == "linear" else "https://slack.com/api/oauth.v2.access", data=payload)
+        if provider == "slack_dot" and not refresh_token:
+            if (not result.get("access_token") or result.get("token_type") != "bot"
+                    or not result.get("app_id") or not result.get("bot_user_id") or not (result.get("team") or {}).get("id")):
+                raise ConnectorError("Slack did not return a Dot bot installation.", dispatched=False)
+            bot = {key: result[key] for key in ("access_token", "refresh_token", "expires_in", "bot_user_id", "app_id", "bot_id", "team", "scope") if key in result}
+            if bot.get("expires_in"):
+                bot["expires_at"] = time.time() + bot["expires_in"]
+            return {"bot": bot, "kind": "oauth"}
         if provider == "slack" and result.get("authed_user"):
             # Preserve the workspace bot independently from the user token used
             # by Slack search. User-token refresh must not erase the bot grant.

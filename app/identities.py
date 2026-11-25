@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from .db import database, now
 from .database import DatabaseError
 from .connector_errors import ConnectorError
+from .slack_apps import slack_provider
 
 PROFILE_SCOPES = {'users:read', 'users:read.email'}
 # Refresh with headroom for worker delays and retries, without extending the
@@ -172,21 +173,30 @@ class SlackIdentities:
         if len(rows) == 10:
             self.wake.set()
 
-    async def resolve(self, row, team):
+    async def resolve(self, row, team, *, app='dev'):
         user = row['id'].removeprefix(f'slack:{team}:')
         if not re.fullmatch(r'[UW][A-Z0-9]{7,30}', user):
             await database(self.store.execute, "UPDATE users SET profile_next_check=?,link_status='ineligible',profile_eligible=0 WHERE id=?", (int(time.time()) + 86400, row['id']))
             return
         checked = now()
         try:
+            installed = await database(self.connectors.slack_installation, app='dot') if app == 'dot' else None
             async with asyncio.timeout(8):
-                token = await self.connectors.slack_bot_token()
+                token = (await self.connectors.slack_bot_token(app='dot') if app == 'dot'
+                         else await self.connectors.slack_bot_token())
                 result = await self.connectors.request('GET', 'https://slack.com/api/users.info',
                     headers={'Authorization': f'Bearer {token}'}, params={'user': user},
                     allowed_errors=('user_not_found', 'missing_scope', 'ratelimited'))
-            connection_status = await database(self.status)
-            if not connection_status['ready'] or connection_status['team_id'] != team:
-                return  # Connection/policy changed while the request was in flight.
+            if installed is not None:
+                current = await database(self.connectors.slack_installation, app='dot')
+                policy = await database(self.connectors.policy, slack_provider(app))
+                if (not current.get('installed') or not self.settings.slack_identity_linking_enabled or not policy['enabled']
+                        or current.get('team_id') != team or current != installed):
+                    raise ConnectorError('The Dot profile installation changed.', dispatched=False)
+            else:
+                connection_status = await database(self.status)
+                if not connection_status['ready'] or connection_status['team_id'] != team:
+                    return  # Connection/policy changed while the request was in flight.
             if result.get('error') == 'ratelimited':
                 raise ConnectorError('Slack profile lookup is rate limited.', code='ratelimited', retryable=True)
             if result.get('error') == 'missing_scope':

@@ -2,7 +2,8 @@
 
 Open **Your Dot → Slack notifications → Enable Slack notifications** while
 signed in with your individual account. Moyai verifies the Slack account against
-that identity and opens a DM with the installed workspace bot.
+that identity and opens a DM with **Moyai Dot**. New top-level DMs to
+**Moyai Dev** remain ordinary Moyai chat, even after you enable Dot.
 Wait until opt-in reports success before sending the first DM; messages sent
 during account verification can be rejected by the connection cutoff.
 The verified private DM binding commits before the clock guard elapses, so a
@@ -36,20 +37,53 @@ stops that work.
 
 ## Deployment
 
-Use the existing workspace bot with `chat:write`, `im:write`, `im:history`,
-`users:read`, and `users:read.email`. Enable `SLACK_BOT_ENABLED`,
+Keep the existing Moyai Dev installation and `SLACK_SIGNING_SECRET`. Install
+Moyai Dot as a **separate Slack app in the same workspace**, with a distinct
+app ID, bot identity, and signing secret. Enable token rotation for both apps.
+Enable `SLACK_BOT_ENABLED`,
 `SLACK_DM_ENABLED`, `SLACK_THREAD_CHAT_ENABLED`, and
 `SLACK_IDENTITY_LINKING_ENABLED`; include the owner in `SLACK_SESSION_USERS`
-and configure `MOYAI_PUBLIC_URL`. Normal Slack event subscriptions and signed
-webhook routing must already be configured. The feature does not install an app
-or change its OAuth scopes or webhook URL.
+and configure `MOYAI_PUBLIC_URL`.
 
-Native schema v32 adds the encrypted recipient preference, unique DM destination,
-account binding timestamp, and the relation between each private thread and its
-canonical Dot. Apply the registered additive
-expansion with the existing migration tooling. Native protocol 13 fences older
-pollers that cannot interpret top-level Dot deliveries; drain them before this
-cutover and before any rollback.
+1. On the Dot app, enable App Home's **Messages** tab and allow users to
+   send messages to it. Subscribe to the bot event `message.im`. Request
+   only the bot scopes `chat:write`, `im:write`, `im:history`,
+   `users:read`, `users:read.email`, `files:read`, and `files:write`.
+   Dot does not request a user token, public/private channel scopes, or
+   `assistant:write`: assistant thread-status calls stay on Dev.
+2. Set `SLACK_DOT_CLIENT_ID`, `SLACK_DOT_CLIENT_SECRET`, and
+   `SLACK_DOT_SIGNING_SECRET` in the app configuration. Add
+   `/oauth/slack-dot/callback` on the public application origin as the Dot
+   OAuth redirect. Use the authenticated, CSRF-protected administrator
+   `POST /api/connections/slack-dot/oauth` endpoint and follow its returned
+   URL. OAuth stores a separate encrypted bot installation and rotates tokens
+   using the existing Slack refresh path. Reconnect with this same endpoint.
+   Rotating or removing Dot's signing secret revokes work authorized by the old
+   private DM pin; token refresh does not. After a signing-secret rotation,
+   users must re-enable Slack notifications to verify their DM again. Existing
+   private history stays in Moyai.
+   Admins can inspect the installation at `GET /api/connections/slack-dot`,
+   disable or re-enable it with `PATCH /api/connections/slack-dot/policy`
+   (`{"enabled": false}` or `{"enabled": true}`), or disconnect it with
+   `DELETE /api/connections/slack-dot`. Mutations require the existing
+   admin session and CSRF token. Disabling or disconnecting fences old queued
+   work without changing Dev or deleting private history.
+3. In Slack, set Dot's Events URL to `/hooks/slack/dot/events` and
+   Interactivity URL to `/hooks/slack/dot/interactions`, on the **application**
+   origin. The application ingress must forward these paths (and the existing
+   Dev webhook paths); do not point them at a broker-only hostname.
+
+**Cutover:** Seal and drain the old API/coordinator release using the existing
+[role quiescence procedure](role-quiescence.md), and apply additive native
+schema v33 before serving the new release. Protocol 14 prevents mixing pollers
+that do and don't understand Slack app ownership. Old inbox keys and rows with
+no app recorded remain Dev, including old Dot notifications; never relabel or
+repost a legacy root. Old unsent proactive notices are suppressed, and
+uncertain legacy sends are reconciled read-only with Dev only. Users must
+re-enable Slack notifications from Your Dot to pin the new app's DM with a new
+Slack-time cutoff. Repinning ends old Dev-app Slack continuation, but the old
+private conversation remains available in Moyai. Do not resume a pre-v33
+coordinator against app-scoped records during rollback.
 
 The explicit loopback-only combined local rehearsal runs the existing Slack
 inbox, delivery, and profile services alongside its native worker. Distributed

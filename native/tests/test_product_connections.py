@@ -9,18 +9,21 @@ from types import SimpleNamespace
 
 import pytest
 from app.connector_errors import ConnectorError
+from app.connectors import Connectors
 from app.db import Store
 from app.security import Security
 from fastapi import HTTPException
 from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_product_identity import settings_for
 
 from moyai.contracts import RunScope
 from moyai.models import Base, Connection, User, new_id
 from moyai.oauth_models import OAuthCredential
+from moyai.product_connection_store import ConnectionSnapshot
 from moyai.product_connections import ProductConnections, ProductGitHubToolset
 
 
@@ -55,6 +58,25 @@ def bridge(tmp_path, runtime):
 
 def save(service, provider, **extra):
     service.connectors.save(provider, {"access_token": "synthetic-token", "kind": "personal", **extra}, provider)
+
+
+def test_canonical_snapshot_reads_only_named_slack_installations(bridge):
+    engine = create_engine("sqlite://")
+    with engine.begin() as db:
+        db.execute(text("CREATE TABLE connections (provider TEXT PRIMARY KEY, encrypted TEXT NOT NULL)"))
+        snapshot = ConnectionSnapshot(db, "main")
+        connectors = Connectors(snapshot, bridge.security, bridge.settings)
+        for provider, app, user in [("slack", "dev", "UDEV00001"), ("slack_dot", "dot", "UDOT00001")]:
+            credentials = {"bot": {
+                "access_token": "synthetic-token", "team": {"id": "TLOCAL001"}, "bot_user_id": user,
+            }}
+            db.execute(text("INSERT INTO connections VALUES (:provider, :encrypted)"), {
+                "provider": provider, "encrypted": bridge.security.encrypt(json.dumps(credentials)),
+            })
+            assert connectors.slack_installation(app=app)["user_id"] == user
+        with pytest.raises(RuntimeError, match="Slack installation provider is invalid"):
+            snapshot.rows("SELECT encrypted FROM connections WHERE provider=?", ("github",))
+    engine.dispose()
 
 
 @pytest.mark.parametrize('bot', [False, True])
@@ -1096,6 +1118,104 @@ async def test_onboarding_reuses_canonical_auth_csrf_and_provider_routes(bridge,
         assert not bridge.store.rows("SELECT 1 FROM oauth_states WHERE provider='linear'")
         with pytest.raises(HTTPException):
             await bridge.require_scope(scope)
+
+
+async def test_dot_oauth_uses_separate_bot_only_installation(bridge, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    import httpx
+    from fastapi import FastAPI, Response
+
+    from moyai.product_connections import routes
+
+    async def authorized(*args, **kwargs):
+        return None
+
+    bridge.product.identity = SimpleNamespace(authenticate=authorized, require_request_current=authorized)
+    bridge.settings.slack_dot_client_id = "dot-client"
+    bridge.settings.slack_dot_client_secret = "dot-client-secret"
+    bridge.settings.slack_dot_signing_secret = "dot-signing-secret"
+    bridge.connectors.save("slack", {"bot": {
+        "access_token": "dev-test-token", "team": {"id": "TTEST0001"},
+        "bot_user_id": "UDEV00001", "app_id": "ADEV00001",
+    }}, "Local Dev")
+    callback = bridge.settings.public_url.rstrip("/") + "/oauth/slack-dot/callback"
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    hold_exchange = False
+
+    async def exchange_request(method, url, *, data):
+        assert (method, url) == ("POST", "https://slack.com/api/oauth.v2.access")
+        assert (data["redirect_uri"], data["client_id"], data["code"]) == (callback, "dot-client", "local-code")
+        if hold_exchange:
+            entered.set()
+            await release.wait()
+        return {"access_token": "dot-test-token", "token_type": "bot", "app_id": "ADOT00001",
+                "bot_user_id": "UDOT00001", "team": {"id": "TTEST0001"}}
+
+    monkeypatch.setattr(bridge.connectors, "request", exchange_request)
+    app = FastAPI()
+    app.include_router(routes(bridge))
+    response = Response()
+    sid = bridge.security.new_session(response)
+    cookie = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=bridge.settings.public_url) as client:
+        client.cookies.set("workspace_session", cookie)
+        client.headers.update({"Origin": bridge.settings.public_url, "X-CSRF-Token": bridge.security.csrf(sid)})
+        started = await client.post("/api/connections/slack-dot/oauth")
+        assert started.status_code == 200
+        params = parse_qs(urlsplit(started.json()["url"]).query)
+        assert "user_scope" not in params and params["redirect_uri"] == [callback]
+        assert set(params["scope"][0].split(",")) == {
+            "chat:write", "im:write", "im:history", "users:read", "users:read.email", "files:read", "files:write",
+        }
+        completed = await client.get("/oauth/slack-dot/callback", params={"state": params["state"][0], "code": "local-code"})
+        assert completed.status_code == 303
+        assert await bridge.connectors.slack_bot_token(app="dot") == "dot-test-token"
+        dot_path = "/api/connections/slack-dot"
+        status = await client.get(dot_path)
+        assert status.status_code == 200
+        assert status.json() == {
+            "connected": True, "enabled": True, "oauth_configured": True, "signing_configured": True,
+            "app_id": "ADOT00001", "team_id": "TTEST0001", "bot_user_id": "UDOT00001",
+        }
+        bridge.settings.workspace_member_password = "test-member-password"
+        member = Response()
+        member_sid = bridge.security.new_session(member, role="member")
+        member_cookie = member.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=bridge.settings.public_url,
+                                    cookies={"workspace_session": member_cookie},
+                                    headers={"Origin": bridge.settings.public_url, "X-CSRF-Token": bridge.security.csrf(member_sid)}) as unprivileged:
+            assert (await unprivileged.get(dot_path)).status_code == 403
+            assert (await unprivileged.patch(dot_path + "/policy", json={"enabled": False})).status_code == 403
+            assert (await unprivileged.delete(dot_path)).status_code == 403
+        disabled = await client.patch(dot_path + "/policy", json={"enabled": False})
+        assert disabled.status_code == 200 and disabled.json() == {**status.json(), "enabled": False}
+        enabled = await client.patch(dot_path + "/policy", json={"enabled": True})
+        assert enabled.status_code == 200 and enabled.json() == status.json()
+        disconnected = await client.delete(dot_path)
+        assert disconnected.status_code == 200 and disconnected.json() == {"connected": False}
+        assert (await client.get(dot_path)).json() == {
+            **status.json(), "connected": False, "app_id": None, "team_id": None, "bot_user_id": None,
+        }
+        started = await client.post(dot_path + "/oauth")
+        state = parse_qs(urlsplit(started.json()["url"]).query)["state"][0]
+        hold_exchange = True
+        in_flight = asyncio.create_task(client.get(
+            "/oauth/slack-dot/callback", params={"state": state, "code": "local-code"},
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert (await client.delete(dot_path)).status_code == 200
+        finally:
+            release.set()
+            failed = await in_flight
+        assert failed.status_code == 502
+        assert not (await client.get(dot_path)).json()["connected"]
+    assert await bridge.connectors.slack_bot_token() == "dev-test-token"
+    with pytest.raises(ConnectorError):
+        await bridge.connectors.slack_bot_token(app="dot")
+    assert "slack_dot" not in {entry["id"] for entry in bridge.connectors.list()}
 
 
 async def test_slack_reconnect_rechecks_blocked_profiles_without_granting_identity(bridge, monkeypatch):

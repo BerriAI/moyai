@@ -347,6 +347,9 @@ class Settings(BaseSettings):
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_signing_secret: str = ""
+    slack_dot_client_id: str = ""
+    slack_dot_client_secret: str = Field(default="", repr=False)
+    slack_dot_signing_secret: str = Field(default="", repr=False)
     slack_bot_enabled: bool = False
     slack_thread_chat_enabled: bool = True
     slack_dm_enabled: bool = True

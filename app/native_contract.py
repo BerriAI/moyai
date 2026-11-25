@@ -9,9 +9,8 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Dot roots introduce top-level Slack deliveries and private owner conversation
-# routes. Drain old pollers before writing these records or rolling back.
-NATIVE_PROTOCOL_REVISION = 13
+# Drain old pollers before writing app-scoped Slack inbox and delivery records.
+NATIVE_PROTOCOL_REVISION = 14
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

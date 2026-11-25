@@ -10674,6 +10674,64 @@ export type SlackDeliveryStatus = {
 };
 
 /**
+ * SlackDotConnectionStatus
+ */
+export type SlackDotConnectionStatus = {
+    /**
+     * App Id
+     */
+    app_id: string | null;
+    /**
+     * Bot User Id
+     */
+    bot_user_id: string | null;
+    /**
+     * Connected
+     */
+    connected: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Oauth Configured
+     */
+    oauth_configured: boolean;
+    /**
+     * Signing Configured
+     */
+    signing_configured: boolean;
+    /**
+     * Team Id
+     */
+    team_id: string | null;
+};
+
+/**
+ * SlackDotHookResponse
+ */
+export type SlackDotHookResponse = {
+    /**
+     * Challenge
+     */
+    challenge: string | null;
+    /**
+     * Ok
+     */
+    ok: boolean | null;
+};
+
+/**
+ * SlackDotPolicyChange
+ */
+export type SlackDotPolicyChange = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+};
+
+/**
  * SlackWebStatus
  */
 export type SlackWebStatus = {
@@ -12758,6 +12816,79 @@ export type DiscoverGitLabProjectsResponses = {
 };
 
 export type DiscoverGitLabProjectsResponse = DiscoverGitLabProjectsResponses[keyof DiscoverGitLabProjectsResponses];
+
+export type DisconnectSlackDotConnectionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot';
+};
+
+export type DisconnectSlackDotConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: OrganizationConnectionDisconnected;
+};
+
+export type DisconnectSlackDotConnectionResponse = DisconnectSlackDotConnectionResponses[keyof DisconnectSlackDotConnectionResponses];
+
+export type GetSlackDotConnectionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot';
+};
+
+export type GetSlackDotConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotConnectionStatus;
+};
+
+export type GetSlackDotConnectionResponse = GetSlackDotConnectionResponses[keyof GetSlackDotConnectionResponses];
+
+export type StartSlackDotOAuthData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot/oauth';
+};
+
+export type StartSlackDotOAuthResponses = {
+    /**
+     * Successful Response
+     */
+    200: OrganizationConnectionOAuthStart;
+};
+
+export type StartSlackDotOAuthResponse = StartSlackDotOAuthResponses[keyof StartSlackDotOAuthResponses];
+
+export type UpdateSlackDotConnectionPolicyData = {
+    body: SlackDotPolicyChange;
+    path?: never;
+    query?: never;
+    url: '/api/connections/slack-dot/policy';
+};
+
+export type UpdateSlackDotConnectionPolicyErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateSlackDotConnectionPolicyError = UpdateSlackDotConnectionPolicyErrors[keyof UpdateSlackDotConnectionPolicyErrors];
+
+export type UpdateSlackDotConnectionPolicyResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotConnectionStatus;
+};
+
+export type UpdateSlackDotConnectionPolicyResponse = UpdateSlackDotConnectionPolicyResponses[keyof UpdateSlackDotConnectionPolicyResponses];
 
 export type DisconnectPersonalSlackData = {
     body?: never;
@@ -17732,6 +17863,38 @@ export type EventHooksSlackPostResponses = {
      */
     200: unknown;
 };
+
+export type ReceiveSlackDotEventData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/hooks/slack/dot/events';
+};
+
+export type ReceiveSlackDotEventResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotHookResponse;
+};
+
+export type ReceiveSlackDotEventResponse = ReceiveSlackDotEventResponses[keyof ReceiveSlackDotEventResponses];
+
+export type ReceiveSlackDotInteractionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/hooks/slack/dot/interactions';
+};
+
+export type ReceiveSlackDotInteractionResponses = {
+    /**
+     * Successful Response
+     */
+    200: SlackDotHookResponse;
+};
+
+export type ReceiveSlackDotInteractionResponse = ReceiveSlackDotInteractionResponses[keyof ReceiveSlackDotInteractionResponses];
 
 export type EventHooksSlackEventsPostData = {
     body?: never;

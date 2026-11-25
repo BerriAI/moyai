@@ -7,6 +7,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from app.slack_apps import saved_slack_app
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -133,13 +134,13 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
             primary if anchor is None and legacy is None
             else prefix + hashlib.sha256(latest["id"].encode()).hexdigest()[:32]
         )
-        message = await format_reply(
-            runtime, thread, latest["text"][:2400], product=runtime.product_slack if product else None,
-        )
+        ingress = runtime.product_slack.for_app(thread.slack_app) if product and runtime.product_slack else None
+        message = await format_reply(runtime, thread, latest["text"][:2400], product=ingress)
         try:
             async with runtime.database.sessions.begin() as db:
                 db.add(Delivery(
                     id=new_id(), identity=identity, session_id=turn.session_id,
+                    slack_app=thread.slack_app,
                     turn_id=segment.id if identity == primary else turn.id,
                     destination=json.dumps({
                         "channel": thread.channel_id, "thread_ts": thread.thread_ts, "progress": True,
@@ -263,6 +264,8 @@ async def reply_target(runtime: Runtime, delivery: Delivery, *, product: bool) -
             ))
         if anchor is None or anchor.status in {"suppressed", "rejected"}:
             return (destination.get("progress") is not True), None
+        if saved_slack_app(anchor.slack_app) != saved_slack_app(delivery.slack_app):
+            return False, None
         if anchor.status != "sent" or not anchor.receipt:
             return False, None
         receipt = json.loads(runtime.security.unseal(anchor.receipt))

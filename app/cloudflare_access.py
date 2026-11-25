@@ -25,6 +25,7 @@ class CloudflareAccess:
         self.audience = settings.cloudflare_access_audience
         self.broker_audience = settings.cloudflare_access_broker_audience
         self.webhooks = {'/hooks/slack/events', '/hooks/slack/interactions',
+                         '/hooks/slack/dot/events', '/hooks/slack/dot/interactions',
                          *settings.cloudflare_access_webhook_paths}
         self.keys = {}
         self.expires = 0

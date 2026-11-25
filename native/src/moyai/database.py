@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -100,6 +100,7 @@ class Database:
         self.dispatch_timings = DispatchRecorder(self)
         self.product_identity: ProductIdentityAdapter | None = None
         self.slack_access: Any = None
+        self.slack_dot_installation: Callable[[AsyncSession], Awaitable[dict[str, Any]]] | None = None
         self.slack_prefetch: Any = None
         self.slack_mentions: Any = None
         self.product_connections: ProductConnections | None = None

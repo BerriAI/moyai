@@ -117,7 +117,8 @@ class SlackEvents:
             exclude_prefixes=ASIDE_PREFIXES,
         )
         message = SlackMessage.parse(payload, event, host)
-        await self._automation(payload, event, installed)
+        if self.slack.app == "dev":
+            await self._automation(payload, event, installed)
         if message is None:
             return {"ok": True}
         if message.origin["channel_id"].startswith("D") and (
@@ -138,14 +139,19 @@ class SlackEvents:
         )
         if conversation is None:
             return {"ok": True}
+        if self.slack.app == "dot" and conversation.source is not None:
+            raise HTTPException(403, "Dot cannot continue historical Slack chats.")
         if thread is None and message.direct and conversation.source is None:
             from .dot_slack_threads import new_direct_message, recover_root
             waiting = await recover_root(self.slack, actor, message.origin)
             thread = await self.conversations.find(message.origin)
-            if thread is None:
+            if thread is None and self.slack.app == "dot":
                 thread = await new_direct_message(
                     self.slack, actor, message.origin, message.prompt, waiting_for_root=waiting,
                 )
+            if thread is None and waiting:
+                raise HTTPException(503, "This Slack thread is still confirming delivery.",
+                                    headers={"Retry-After": "5"})
             if thread is not None:
                 conversation = await self.conversations.resolve(
                     thread, actor, message.origin, installed,
@@ -153,6 +159,8 @@ class SlackEvents:
                 )
         if conversation is None:
             return {"ok": True}
+        if thread is None and self.slack.app == "dot":
+            raise HTTPException(403, "This is not a connected Dot conversation.")
         return await self._admit(message, conversation, actor, principal, installed)
 
     def _eligible_event(self, payload: dict, installed: dict) -> dict | None:
@@ -165,6 +173,11 @@ class SlackEvents:
             if event.get(key) is not None and not isinstance(event[key], dict):
                 raise HTTPException(400, "Invalid Slack event metadata.")
         user = event.get("user", "")
+        if self.slack.app == "dot" and (
+            event.get("type") != "message" or event.get("channel_type") != "im"
+            or not isinstance(event.get("channel"), str) or not event["channel"].startswith("D")
+        ):
+            return None
         allowed = {value.strip() for value in self.slack.settings.slack_session_users.split(",")}
         if (
             payload.get("team_id") != installed["team_id"] or payload.get("is_ext_shared_channel")
@@ -207,7 +220,7 @@ class SlackEvents:
             text=prompt, model_context=attachments["context"],
             attachments=tuple(attachments["images"]),
             provenance={
-                **message.origin, "files": attachments.get("files", []),
+                **message.origin, "slack_app": self.slack.app, "files": attachments.get("files", []),
                 "skill_references": [mention.reference for mention in mentions(prompt)],
             },
         ), connections=selections)

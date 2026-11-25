@@ -26,7 +26,8 @@ subject. Conflicting identities fail closed. Saved roles remain authoritative;
 CSRF, current authorization and session visibility checks still apply.
 
 Keep webhook exceptions exact. Existing-product Slack retains `/hooks/slack`,
-`/hooks/slack/events` and `/hooks/slack/interactions`; requests still require
+`/hooks/slack/events`, `/hooks/slack/interactions`, `/hooks/slack/dot/events`
+and `/hooks/slack/dot/interactions`; requests still require
 Slack signature verification. Automation exceptions apply only to configured
 individual webhook paths. Never bypass Access for all `/api/*` or `/hooks/*`.
 Provider OAuth callbacks and all new paths need their actual deployed policies.

@@ -224,7 +224,9 @@ class TurnAdmission:
             raw = getattr(actor, "slack_web_grant", None)
             if raw is not None:
                 from .product_slack_models import SlackWebTurn
+                from .slack_web import check_transport_authority
                 await self.database._identity().authorize_admission(transaction, raw)
+                await check_transport_authority(self.database, transaction, turn.session_id)
                 transaction.add(SlackWebTurn(
                     turn_id=turn.id, requester_id=raw.user_id, authority_version=raw.authority_version,
                 ))

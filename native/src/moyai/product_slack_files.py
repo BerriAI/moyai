@@ -31,11 +31,16 @@ logger = logging.getLogger(__name__)
 class FileConnectors:
     def __init__(self, slack: ProductSlack):
         self.service = slack.connections
+        self.app = slack.app
 
     def slack_installation(self, *, connection=None):
+        if self.app == "dot":
+            return self.service.connectors.slack_installation(connection=connection, app="dot")
         return self.service.connectors.slack_installation(connection=connection)
 
     async def slack_bot_token(self):
+        if self.app == "dot":
+            return await self.service.execution.call(lambda bound: bound.slack_bot_token(app="dot"))
         return await self.service.execution.call(lambda bound: bound.slack_bot_token())
 
     async def request(self, *args, **kwargs):

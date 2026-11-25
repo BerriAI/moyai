@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import secrets
+import time
 
 from .connector_errors import ConnectorError
 from .db import now
@@ -40,11 +41,20 @@ def refresh_connection(store, security, provider, original, credentials, *, conn
     return fresh
 
 
-def save_if_unchanged(store, security, provider, credentials, label, expected):
+def save_if_unchanged(store, security, provider, credentials, label, expected, *, oauth_state=None):
     """A verified onboarding result cannot overwrite a concurrent revocation."""
     encrypted = security.encrypt(json.dumps(new_credentials(credentials)))
     with store.connect() as conn:
         conn.begin_write()
+        if oauth_state is not None:
+            state, session = oauth_state
+            if not conn.execute(
+                """DELETE FROM oauth_states WHERE state_hash=? AND provider=?
+                   AND session_id=? AND expires>? RETURNING state_hash""",
+                (state, provider, session, time.time()),
+            ).fetchone():
+                raise ConnectorError("The connection request changed. Start again from Connections.",
+                                     dispatched=False)
         if expected is None:
             changed = conn.execute(
                 "INSERT INTO connections VALUES(?,?,?,?) ON CONFLICT(provider) DO NOTHING",

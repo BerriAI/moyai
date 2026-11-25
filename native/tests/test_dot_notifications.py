@@ -11,9 +11,12 @@ import httpx
 import pytest
 import pytest_asyncio
 import test_slack_web as support
-from fastapi import HTTPException
+from app.coordinator_handoff import initialize_schema
+from app.db import Store
+from fastapi import FastAPI, HTTPException
 from sqlalchemy import func, select, text, update
 from test_personal_dot import finish, observer
+from test_product_slack import post_signed_event
 from test_product_slack import receiver as local_receiver
 
 from moyai.dot_models import DotSlackConversation, DotSlackPreference
@@ -23,10 +26,11 @@ from moyai.models import Delivery, DeliverySchedule, Session, SlackThread, Turn,
 from moyai.private_history import PrivateHistory
 from moyai.private_instructions import PrivateInstructions
 from moyai.product_connections import ProductConnections
-from moyai.product_slack import ProductSlack
-from moyai.product_slack_models import SlackWebLink, SlackWebTurn
+from moyai.product_slack import ProductSlack, SlackInstallationUnavailable
+from moyai.product_slack_models import ProductSlackBinding, SlackWebLink, SlackWebTurn
 from moyai.slack import reconcile_one
 from moyai.slack_audience import can_read
+from moyai.slack_delivery_status import retry
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 product_database = support.product_database
@@ -40,6 +44,9 @@ receiver = local_receiver
 async def dot(linked, monkeypatch):
     product = linked
     service = product.service
+    service.app = "dot"
+    service.dot = service
+    service.for_app = MethodType(ProductSlack.for_app, service)
     # The signed Slack fixtures use historical timestamps. The provider clock
     # deliberately differs from the host clock; ingress must use the former.
     product.provider_date = formatdate(1791999998, usegmt=True)
@@ -57,6 +64,7 @@ async def dot(linked, monkeypatch):
     service.settings.public_url = "https://moyai.example.test"
     service.stopping = asyncio.Event()
     service.runtime.product_slack = service
+    product.database.slack_dot_installation = service.installation_in
     product.database.product_connections = ProductConnections(SimpleNamespace(
         store_proxy=SimpleNamespace(schema_updates=False), identity=product.adapter,
         security=product.adapter.legacy_security, settings=service.settings,
@@ -133,6 +141,28 @@ async def dot_ingress(dot):
     return ingress_for(dot)
 
 
+async def test_dot_admits_only_pinned_private_im_and_rejects_cross_app_thread(dot, dot_ingress):
+    from moyai.product_slack_conversations import SlackConversations
+
+    stamp = "1792100000.001"
+    await dot_ingress.receive(dm_event("DOT_CHANNEL", stamp, channel_type="channel"))
+    await dot_ingress.receive(dm_event("DOT_MPIM", stamp, channel_type="mpim"))
+    with pytest.raises(HTTPException) as unpinned:
+        await dot_ingress.receive(dm_event("DOT_UNPINNED", stamp, channel="DOTHER001"))
+    assert unpinned.value.status_code == 403
+    async with dot.database.sessions() as db:
+        assert not (await db.scalars(select(SlackThread))).all()
+    await dot_ingress.receive(dm_event("DOT_OWNER_IM", stamp))
+    async with dot.database.sessions() as db:
+        thread = (await db.scalars(select(SlackThread))).one()
+        assert thread.slack_app == "dot"
+        assert (await db.get(Session, thread.session_id)).visibility == "private"
+    dev = SlackConversations(SimpleNamespace(app="dev", runtime=dot.service.runtime))
+    with pytest.raises(HTTPException) as wrong_app:
+        await dev.find({"team_id": thread.team_id, "channel_id": thread.channel_id, "thread_ts": stamp})
+    assert wrong_app.value.status_code == 403
+
+
 def ingress_for(dot):
     from moyai.product_slack_events import SlackEvents
 
@@ -144,6 +174,161 @@ def ingress_for(dot):
     dot.service.connections = SimpleNamespace(catalog=catalog, personal_github=False)
     dot.database.slack_access = slack_access
     return SlackEvents(dot.service)
+
+
+async def test_dev_top_level_dm_stays_shared_after_dot_opt_in(dot, dot_ingress):
+    dot.service.app = "dev"
+    await dot_ingress.receive(dm_event("DEV_NORMAL_DM", "1792100000.001", channel="DDEV00001"))
+    async with dot.database.sessions() as db:
+        thread = (await db.scalars(select(SlackThread))).one()
+        session = await db.get(Session, thread.session_id)
+        assert (thread.slack_app, session.visibility, session.surface) == ("dev", "shared", "slack")
+        assert await db.get(DotSlackConversation, session.id) is None
+
+
+async def test_dot_signed_inbox_drains_and_replay_does_not_repeat_effects(dot, tmp_path, monkeypatch):
+    fixture = dot.service
+    runtime = fixture.runtime
+    settings = fixture.settings
+    settings.slack_dot_signing_secret = "local-dot-signature"
+    store = Store(tmp_path / "inbox")
+    try:
+        initialize_schema(store)
+        runtime.product = SimpleNamespace(
+            store_proxy=store, settings=settings, security=dot.adapter.legacy_security, identity=dot.adapter,
+        )
+        runtime.product_history = None
+        runtime.product_connections = ProductConnections(runtime.product, dot.database)
+        connections = runtime.product_connections
+
+        async def catalog(*args, **kwargs):
+            return []
+
+        monkeypatch.setattr(connections, "catalog", catalog)
+        monkeypatch.setattr(connections.connectors, "request", fixture.connectors.request)
+        for provider, app_id, bot_id in (
+            ("slack", "ADEV00001", "UBOT00001"), ("slack_dot", "ADOT00001", "UDOT00001"),
+        ):
+            connections.connectors.save(provider, {"bot": {
+                "access_token": "local-bot-token", "team": {"id": "TLOCAL001"},
+                "app_id": app_id, "bot_user_id": bot_id,
+            }}, provider)
+        coordinator = runtime.product_slack = ProductSlack(runtime)
+        for ingress in (coordinator, coordinator.dot):
+            monkeypatch.setattr(ingress, "actor", fixture.actor)
+
+            async def installation_in(db, transport=ingress):
+                return transport.installation()
+
+            monkeypatch.setattr(ingress, "installation_in", installation_in)
+        dot.database.slack_dot_installation = coordinator.dot.installation_in
+        assert (await enable(dot)).status == "on"
+
+        app = FastAPI()
+        app.include_router(coordinator.routes())
+        event = {**dm_event("EDRAIN", "1792100000.001"), "api_app_id": "ADOT00001"}
+        key = "dot:event:TLOCAL001:EDRAIN"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+            assert (await post_signed_event(
+                client, event, dot=True, secret=b"local-dot-signature",
+            )).status_code == 200
+            assert await coordinator.inbox.drain_one()
+            assert store.rows("SELECT status FROM coordinator_hooks WHERE id=?", (key,))[0]["status"] == "done"
+            assert coordinator.delivery_wakeup.is_set()
+            async with dot.database.sessions.begin() as db:
+                thread = (await db.scalars(select(SlackThread))).one()
+                assert (thread.slack_app, (await db.get(Session, thread.session_id)).visibility) == ("dot", "private")
+                turn = (await db.scalars(select(Turn).where(Turn.session_id == thread.session_id))).one()
+                turn.status, turn.finished_at = "completed", datetime.now(UTC).isoformat()
+                turn_id = turn.id
+            await coordinator.stage()
+
+            assert (await post_signed_event(
+                client, event, dot=True, secret=b"local-dot-signature",
+            )).status_code == 200
+            assert not await coordinator.inbox.drain_one()
+            assert store.rows("SELECT status FROM coordinator_hooks WHERE id=?", (key,))[0]["status"] == "done"
+            await coordinator.stage()
+
+            dev = {**dm_event("EDEV", "1792100000.002", channel="DDEV00001"), "api_app_id": "ADEV00001"}
+            assert (await post_signed_event(
+                client, dev, secret=settings.slack_signing_secret.encode(),
+            )).status_code == 200
+        assert await coordinator.inbox.drain_one()
+        assert store.rows("SELECT status FROM coordinator_hooks WHERE id=?", ("event:TLOCAL001:EDEV",))[0]["status"] == "done"
+        async with dot.database.sessions() as db:
+            assert list(await db.scalars(select(Turn.id).where(Turn.session_id == thread.session_id))) == [turn_id]
+            delivery = (await db.scalars(select(Delivery).where(Delivery.turn_id == turn_id))).one()
+            assert delivery.slack_app == "dot"
+            dev_thread = (await db.scalars(select(SlackThread).where(SlackThread.slack_app == "dev"))).one()
+            assert (await db.get(Session, dev_thread.session_id)).visibility == "shared"
+    finally:
+        store.close()
+
+
+async def test_dot_pin_retires_legacy_dev_thread_without_changing_private_history(dot, dot_ingress):
+    root = "1792100000.001"
+    await dot_ingress.receive(dm_event("LEGACY_DOT_ROOT", root))
+    async with dot.database.sessions.begin() as db:
+        thread = (await db.scalars(select(SlackThread))).one()
+        thread.slack_app = None
+        link = await db.get(SlackWebLink, thread.session_id)
+        binding = await db.get(ProductSlackBinding, thread.session_id)
+        link.slack_app = binding.slack_app = None
+    dot.service.app = "dev"
+    with pytest.raises(HTTPException) as closed:
+        await dot_ingress.receive(dm_event("LEGACY_DOT_REPLY", "1792100000.002", thread_ts=root))
+    assert closed.value.status_code == 403
+    async with dot.database.sessions() as db:
+        session = await db.get(Session, thread.session_id)
+        assert (session.owner_id, session.visibility, session.deleted) == (dot.actor.id, "private", False)
+        assert await db.scalar(select(func.count()).select_from(Turn).where(Turn.session_id == session.id)) == 1
+
+
+async def test_dot_approval_requires_dot_receipt_and_resumes_as_verified_owner(dot, dot_ingress, monkeypatch):
+    from pydantic_ai import Conversation, ConversationTypeAdapter, DeferredToolRequests
+    from pydantic_ai.messages import ToolCallPart
+
+    monkeypatch.setattr(dot.service.runtime, "product", dot.service.product, raising=False)
+    await dot_ingress.receive(dm_event("DOT_APPROVAL_ROOT", "1792100000.001"))
+    async with dot.database.sessions.begin() as db:
+        thread = (await db.scalars(select(SlackThread))).one()
+        turn = (await db.scalars(select(Turn).where(Turn.session_id == thread.session_id))).one()
+        turn.status = "waiting"
+        conversation = Conversation(deferred_tool_requests=DeferredToolRequests(approvals=[
+            ToolCallPart("local_tool", {}, tool_call_id="dot-call"),
+        ]))
+        turn.conversation = dot.database.security.seal(ConversationTypeAdapter.dump_json(conversation).decode())
+        action = {"action_id": "moyai_native_approve", "value": turn.id}
+        stamp = "1792100000.002"
+        delivery = Delivery(
+            identity=f"product-slack:{turn.id}:waiting:0", session_id=thread.session_id, turn_id=turn.id,
+            destination=json.dumps({"channel": thread.channel_id, "thread_ts": thread.thread_ts}),
+            content=dot.database.security.seal({"blocks": [{"type": "actions", "elements": [action]}]}),
+            receipt=dot.database.security.seal({"ts": stamp}), status="sent", slack_app="dev",
+        )
+        db.add(delivery)
+    payload = {
+        "team": {"id": thread.team_id}, "channel": {"id": thread.channel_id}, "user": {"id": "UACTUAL01"},
+        "message": {"ts": stamp, "thread_ts": thread.thread_ts}, "actions": [action],
+    }
+    with pytest.raises(HTTPException) as wrong_app:
+        await ProductSlack.interact(dot.service, payload)
+    assert wrong_app.value.status_code == 403
+    async with dot.database.sessions.begin() as db:
+        (await db.get(Delivery, delivery.id)).slack_app = "dot"
+    called = []
+
+    async def record(runtime, actor, waiting, *, approvals):
+        called.append((actor.id, waiting.id, approvals))
+
+    async def resume(runtime, actor, waiting):
+        called.append((actor.id, waiting.id))
+
+    monkeypatch.setattr("moyai.product_slack_controls.record_replies", record)
+    monkeypatch.setattr("moyai.product_slack_controls.resume_replies", resume)
+    await ProductSlack.interact(dot.service, payload)
+    assert called == [(dot.actor.id, turn.id, {"dot-call": True}), (dot.actor.id, turn.id)]
 
 
 def dm_event(event_id, stamp, **fields):
@@ -211,7 +396,7 @@ async def test_pause_during_opt_in_wait_is_not_overwritten(dot, monkeypatch):
     assert not settings.enabled and settings.revision == 2
     async with dot.database.sessions() as db:
         preference = await db.get(DotSlackPreference, dot.actor.id)
-        assert not preference.enabled and preference.destination_key == "TLOCAL001:DLOCAL001"
+        assert not preference.enabled and preference.destination_key == "dot:TLOCAL001:DLOCAL001"
 
 
 @pytest.mark.parametrize("change", ["revoked", "linking_disabled", "remapped"])
@@ -275,7 +460,7 @@ async def test_operator_release_preserves_old_history_and_rejects_pre_cutover_ev
     async with dot.database.sessions.begin() as db:
         await db.get(User, dot.actor.id, with_for_update=True)
         preference = await db.get(DotSlackPreference, dot.actor.id, with_for_update=True)
-        assert preference.destination_key == "TLOCAL001:DLOCAL001" and preference.revision == 1
+        assert preference.destination_key == "dot:TLOCAL001:DLOCAL001" and preference.revision == 1
         preference.enabled, preference.recipient, preference.destination_key = False, None, None
         preference.started_ts, preference.revision = None, preference.revision + 1
         await db.execute(update(Delivery).where(
@@ -323,13 +508,13 @@ async def test_historical_dm_is_resolved_before_creating_dot_chat(dot, dot_ingre
         continued.append(conversation.source)
         return {"ok": True}
     monkeypatch.setattr(dot_ingress, "_admit", admit)
-    if kind in {"private", "deleted", "deleting", "wrong_owner"}:
+    if kind in {"private", "deleted", "deleting", "wrong_owner", "eligible"}:
         with pytest.raises(HTTPException) as error:
             await dot_ingress.receive(dm_event("DOT_HISTORY", "1792100000.022"))
         assert error.value.status_code == 403
     else:
         await dot_ingress.receive(dm_event("DOT_HISTORY", "1792100000.022"))
-    assert continued == ([source] if kind == "eligible" else [])
+    assert continued == []
     async with dot.database.sessions() as db:
         assert await db.scalar(select(func.count()).select_from(DotSlackConversation)) == 0
 
@@ -605,13 +790,21 @@ async def test_reconciliation_cannot_make_an_old_send_plausible(dot):
     assert rejected.value.status_code == 403
 
 
-async def test_immediate_pumps_throttle_reconciliation_without_changing_dispatch_claim(dot):
+@pytest.mark.parametrize("app", ["dot", "dev"])
+async def test_immediate_pumps_throttle_reconciliation_without_changing_dispatch_claim(dot, app):
     await enable(dot)
     delivery = await publish(dot)
     old = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     async with dot.database.sessions.begin() as db:
         row = await db.get(Delivery, delivery.id)
         row.status, row.created_at, row.claimed_at = "sending", old, old
+        if app == "dev":
+            row.slack_app = None
+            (await db.get(SlackWebLink, delivery.session_id)).slack_app = None
+    dot.service.app = app
+    async def token():
+        return f"{app}-token"
+    dot.service.bot_token = token
     for name in ("pump", "_deliver_batch"):
         setattr(dot.service, name, MethodType(getattr(ProductSlack, name), dot.service))
     async def no_stage(*args, **kwargs):
@@ -627,6 +820,7 @@ async def test_immediate_pumps_throttle_reconciliation_without_changing_dispatch
         await dot.service.pump(client)
         await dot.service.pump(client)
     assert len(requests) == 1 and requests[0].method == "GET"
+    assert requests[0].headers["Authorization"] == f"Bearer {app}-token"
     async with dot.database.sessions() as db:
         assert (await db.get(Delivery, delivery.id)).claimed_at == old
         schedule = await db.get(DeliverySchedule, delivery.id)
@@ -673,3 +867,89 @@ async def test_changed_delivery_authority_cannot_send(dot, change):
                 **({"deleted": True} if change == "deleted_child" else {"visibility": "shared"}),
             ))
     assert not await allowed(dot.service, delivery)
+
+
+@pytest.mark.parametrize("change", ["rotate_signing_secret", "remove_signing_secret", "disable", "disconnect"])
+async def test_dot_authority_change_revokes_queued_turn_and_delivery(dot, dot_ingress, change):
+    service = dot.service
+    service.settings.slack_dot_signing_secret = "initial-dot-signature"
+    service.product = SimpleNamespace(identity=dot.adapter, security=dot.adapter.legacy_security)
+    service._installation = MethodType(ProductSlack._installation, service)
+    async with dot.source.begin() as db:
+        await db.execute(text("ALTER TABLE moyai.connection_policies ADD COLUMN checked_at TEXT"))
+        await db.execute(text("ALTER TABLE moyai.connection_policies ADD COLUMN check_status TEXT"))
+        for provider, app, bot in [
+            ("slack", "ADEV00001", "UBOT00001"), ("slack_dot", "ADOT00001", "UBOT00002"),
+        ]:
+            credentials = {"bot": {
+                "access_token": "synthetic-bot-token", "app_id": app, "bot_user_id": bot,
+                "team": {"id": "TLOCAL001"},
+            }}
+            await db.execute(text(
+                "INSERT INTO moyai.connections VALUES(:provider,:encrypted) "
+                "ON CONFLICT(provider) DO UPDATE SET encrypted=excluded.encrypted"
+            ), {"provider": provider, "encrypted": dot.adapter.legacy_security.encrypt(json.dumps(credentials))})
+    await dot.source.dispose()
+    await dot.database.engine.dispose()
+    service.installation_in = MethodType(ProductSlack.installation_in, service)
+    dot.database.slack_dot_installation = service.installation_in
+    async with dot.database.sessions.begin() as db:
+        installed = await service.installation_in(db)
+    service.installation = lambda: installed
+
+    await enable(dot)
+    delivery = await publish(dot)
+    await dot_ingress.receive(dm_event("DOT_SIGNING_CHANGE", "1792100000.123"))
+    async with dot.database.sessions.begin() as db:
+        turn = (await db.scalars(select(Turn).where(Turn.request_key.startswith("slack-message:")))).one()
+        assert turn.status == "queued"
+        assert await dot.database._saved_product_grant(db, turn)
+    assert await allowed(service, delivery)
+
+    if change == "rotate_signing_secret":
+        service.settings.slack_dot_signing_secret = "rotated-dot-signature"
+    elif change == "remove_signing_secret":
+        service.settings.slack_dot_signing_secret = ""
+    else:
+        async with dot.source.begin() as db:
+            if change == "disconnect":
+                await db.execute(text("DELETE FROM moyai.connections WHERE provider='slack_dot'"))
+            else:
+                await db.execute(text("INSERT INTO moyai.connection_policies(provider,enabled,read_only) "
+                                      "VALUES ('slack_dot',0,0)"))
+    async with dot.database.sessions.begin() as db:
+        with pytest.raises(HTTPException) as error:
+            await dot.database._saved_product_grant(db, turn)
+        assert error.value.status_code == 403
+    if change == "rotate_signing_secret":
+        assert not await allowed(service, delivery)
+    else:
+        with pytest.raises(SlackInstallationUnavailable):
+            await allowed(service, delivery)
+
+
+async def test_owner_retries_explicit_rejection_only_with_dot_delivery_authority(dot):
+    await enable(dot)
+    delivery = await publish(dot)
+    dev = SimpleNamespace(app="dev", dot=dot.service)
+    dev.for_app = MethodType(ProductSlack.for_app, dev)
+    dev.delivery_allowed = MethodType(ProductSlack.delivery_allowed, dev)
+    dot.service.runtime.product_slack = dev
+
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status = "sending"
+    assert await retry(dot.service.runtime, dot.actor, delivery.session_id) == {"retried": 0}
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status, row.slack_app = "rejected", "dev"
+    with pytest.raises(HTTPException) as conflict:
+        await retry(dot.service.runtime, dot.actor, delivery.session_id)
+    assert conflict.value.status_code == 409
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        assert row.status == "rejected"
+        row.slack_app = "dot"
+    assert await retry(dot.service.runtime, dot.actor, delivery.session_id) == {"retried": 1}
+    async with dot.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).status == "pending"

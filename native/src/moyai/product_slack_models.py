@@ -20,6 +20,7 @@ class ProductSlackBinding(Base):
     connection_authority: Mapped[str] = mapped_column(String(64))
     delivery_after: Mapped[str] = mapped_column(String(40), default=now)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
+    slack_app: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
 
 class SlackTurnSource(Base):
@@ -48,6 +49,7 @@ class SlackWebLink(Base):
     status: Mapped[str] = mapped_column(String(30))
     thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
+    slack_app: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
 
 class SlackWebTurn(Base):

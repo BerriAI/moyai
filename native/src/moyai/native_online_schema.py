@@ -49,6 +49,7 @@ RESPONSIBILITY_WORKFLOW_VERSION = "2026-11-24-responsibility-workflows-v29"
 PERSONAL_DOT_VERSION = "2026-11-24-personal-dot-v30"
 DOT_DISCOVERY_VERSION = "2026-11-24-dot-discovery-v31"
 DOT_SLACK_VERSION = "2026-11-24-dot-slack-v32"
+SLACK_APPS_VERSION = "2026-11-25-slack-apps-v33"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -377,6 +378,20 @@ def _dot_slack_tables(metadata: MetaData, schema: str) -> None:
     )
 
 
+SLACK_APP_COLUMNS = (
+    ("moyai_deliveries", "slack_app"),
+    ("moyai_dot_slack_preferences", "slack_app"),
+    ("moyai_product_slack_bindings", "slack_app"),
+    ("moyai_slack_threads", "slack_app"),
+    ("moyai_slack_web_links", "slack_app"),
+)
+
+
+def _slack_app_columns(metadata: MetaData, schema: str) -> None:
+    for table, column in SLACK_APP_COLUMNS:
+        metadata.tables[f"{schema}.{table}"].append_column(Column(column, String(8), nullable=True))
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -403,6 +418,7 @@ EXPANSIONS = (
               frozenset({"moyai_dot_discovery_turns", "moyai_dot_items"}), (), _dot_discovery_tables),
     Expansion(DOT_DISCOVERY_VERSION, DOT_SLACK_VERSION,
               frozenset({"moyai_dot_slack_preferences", "moyai_dot_slack_conversations"}), (), _dot_slack_tables),
+    Expansion(DOT_SLACK_VERSION, SLACK_APPS_VERSION, frozenset(), SLACK_APP_COLUMNS, _slack_app_columns),
 )
 
 

@@ -55,6 +55,7 @@ class DotSlackPreference(Base):
     destination_key: Mapped[str | None] = mapped_column(String(201), nullable=True, unique=True)
     started_ts: Mapped[str | None] = mapped_column(String(40), nullable=True)
     updated_at: Mapped[str] = mapped_column(String(40), default=now)
+    slack_app: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
 
 class DotSlackConversation(Base):
