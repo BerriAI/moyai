@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from app.connector_errors import ConnectorError
@@ -187,6 +188,8 @@ async def new_direct_message(
                 or SlackRecipient.model_validate_json(database.security.unseal(preference.recipient)) != recipient
                 or recipient.team_id != origin["team_id"] or recipient.channel_id != origin["channel_id"]):
             raise HTTPException(403, "This is not your connected Dot DM.")
+        if preference.started_ts is None or Decimal(origin["message_ts"]) < Decimal(preference.started_ts):
+            raise HTTPException(403, "This message predates the connected Dot account.")
         await database.dots.own_session(db, actor.id, preference.session_id)
         # Serialize duplicate first events with owner opt-in/out and publication.
         existing = await db.scalar(select(SlackThread).where(

@@ -39,8 +39,8 @@ webhook routing must already be configured. The feature does not install an app
 or change its OAuth scopes or webhook URL.
 
 Native schema v32 adds the encrypted recipient preference, unique DM destination,
-and the relation
-between each private thread and its canonical Dot. Apply the registered additive
+account binding timestamp, and the relation between each private thread and its
+canonical Dot. Apply the registered additive
 expansion with the existing migration tooling. Native protocol 13 fences older
 pollers that cannot interpret top-level Dot deliveries; drain them before this
 cutover and before any rollback.
@@ -84,14 +84,23 @@ Recovery requires an authorized operator:
    account lookup must reach the specific “already connected to another Dot”
    conflict. Do not release a pin merely from a claimed email or Slack ID.
 2. Use the existing maintenance/drain procedure to stop Slack admission and
-   delivery workers, and wait for in-flight sends to finish. Record the exact
+   delivery workers, and wait for active HTTP sends and reconciliation calls to
+   finish. An uncertain `sending` row is not necessarily an active call and must
+   remain claimed. Keep admission paused through the new owner's successful
+   opt-in in step 4. Record the exact
    old owner ID, DM destination key, preference revision, and configured native
    schema. Do not print or decrypt recipient credentials.
-3. In that native schema, lock and conditionally release only the old preference.
+3. In that native schema, lock the owner before the preference, matching normal
+   opt-in, then conditionally release only the old preference.
    The following is a `psql` template using explicitly supplied variables:
 
    ```sql
    BEGIN;
+   UPDATE :"native_schema".moyai_users
+   SET auth_version = auth_version
+   WHERE id = :'old_owner_id';
+   -- Require exactly UPDATE 1. Otherwise ROLLBACK and investigate.
+
    SELECT owner_id, session_id, revision, destination_key
    FROM :"native_schema".moyai_dot_slack_preferences
    WHERE owner_id = :'old_owner_id'
@@ -99,7 +108,7 @@ Recovery requires an authorized operator:
    FOR UPDATE;
 
    UPDATE :"native_schema".moyai_dot_slack_preferences
-   SET enabled = false, recipient = NULL, destination_key = NULL,
+   SET enabled = false, recipient = NULL, destination_key = NULL, started_ts = NULL,
        revision = revision + 1, updated_at = CURRENT_TIMESTAMP::text
    WHERE owner_id = :'old_owner_id'
      AND destination_key = :'destination_key'
@@ -123,8 +132,11 @@ Recovery requires an authorized operator:
    Preserve every session, conversation relation, Slack thread binding, and
    receipt. Leave `sending` rows claimed; never reset an uncertain send to
    `pending`. Record the recovery in the operator's normal audit log.
-4. Resume workers. Have the new owner opt in again through the normal API/UI,
-   which freshly verifies the account and records new consent. A new DM must
-   create a new private conversation for that owner. Old Slack thread replies
-   must remain rejected, and old Moyai conversations must remain owned by the
-   original owner.
+4. With Slack admission still paused, have the new owner opt in again through
+   the normal API/UI, which freshly verifies the account and records new consent
+   and a binding timestamp. Verify the destination is pinned to that owner before
+   resuming workers. The timestamp rejects queued or late unbound messages sent
+   before this opt-in; it survives pause/re-enable for the same account.
+   A new DM must create a new private conversation for the new owner. Old Slack
+   thread replies must remain rejected, and old Moyai conversations must remain
+   owned by the original owner.

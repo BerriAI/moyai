@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+from time import time
 from typing import TYPE_CHECKING, Literal
 
 from app.connector_errors import ConnectorError
@@ -151,7 +152,7 @@ class DotNotifications:
                 return result
             if row and row.enabled:
                 try:
-                    if row.session_id != session_id or not row.recipient:
+                    if row.session_id != session_id or not row.recipient or not row.started_ts:
                         raise HTTPException(409, "Your Dot changed.")
                     await current(slack, db, SlackRecipient.model_validate_json(self.database.security.unseal(row.recipient)))
                     result.status = "on"
@@ -217,6 +218,11 @@ class DotNotifications:
                 await current(slack, db, recipient)
             row.session_id, row.enabled, row.revision = session_id, body.enabled, row.revision + 1
             if recipient:
+                previous = SlackRecipient.model_validate_json(
+                    self.database.security.unseal(row.recipient),
+                ) if row.recipient else None
+                if previous != recipient or row.started_ts is None:
+                    row.started_ts = f"{time():.6f}"
                 row.recipient = self.database.security.seal(recipient.model_dump_json())
                 row.destination_key = f"{recipient.team_id}:{recipient.channel_id}"
             row.updated_at = now()

@@ -15,10 +15,10 @@ from sqlalchemy import func, select, text, update
 from test_personal_dot import finish, observer
 from test_product_slack import receiver as local_receiver
 
-from moyai.dot_models import DotSlackConversation
+from moyai.dot_models import DotSlackConversation, DotSlackPreference
 from moyai.dot_notifications import DotNotificationEdit, DotNotifications, allowed
 from moyai.dot_slack_threads import new_direct_message, recover_root
-from moyai.models import Delivery, Session, SlackThread, Turn
+from moyai.models import Delivery, DeliverySchedule, Session, SlackThread, Turn, User
 from moyai.private_history import PrivateHistory
 from moyai.private_instructions import PrivateInstructions
 from moyai.product_connections import ProductConnections
@@ -36,7 +36,9 @@ receiver = local_receiver
 
 
 @pytest_asyncio.fixture
-async def dot(linked):
+async def dot(linked, monkeypatch):
+    # The Slack fixtures use historical signed timestamps; bind before them.
+    monkeypatch.setattr("moyai.dot_notifications.time", lambda: 1792000000.0)
     product = linked
     service = product.service
     service.settings.public_url = "https://moyai.example.test"
@@ -112,6 +114,69 @@ async def test_legacy_receipt_prevents_new_dot_root_admission(dot, dot_ingress):
     async with dot.database.sessions() as db:
         assert await db.scalar(select(Turn.id).where(Turn.request_key.startswith("slack-message:"))) is None
         assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
+
+
+async def test_operator_release_preserves_old_history_and_rejects_pre_cutover_events(dot, dot_ingress, monkeypatch):
+    root = "1792100000.021"
+    await dot_ingress.receive(dm_event("DOT_OLD_OWNER", root))
+    pending = await publish(dot)
+    async with dot.database.sessions() as db:
+        old_turn = (await db.scalars(select(Turn).where(Turn.request_key.startswith("slack-message:")))).one()
+    successor_id = "google:successor"
+    async with dot.source.begin() as db:
+        await db.execute(text("UPDATE moyai.users SET email='former@example.test' WHERE id=:id"), {
+            "id": dot.actor.id,
+        })
+        await db.execute(text(
+            "INSERT INTO moyai.users(id,kind,email,name,linked_user_id,created_at,updated_at) "
+            "VALUES (:id,'google','admin@example.test','Current owner',NULL,'c','u')",
+        ), {"id": successor_id})
+    principal = await dot.adapter.current(successor_id)
+    sender, _ = await dot.service.actor("TLOCAL001", "UACTUAL01")
+    async with dot.database.sessions.begin() as db:
+        successor = await dot.adapter.project_native_user(db, principal)
+        assert (await dot.adapter.individual_for_admission(db, sender.product_grant)).id == successor.id
+    await dot.database.dots.open(successor)
+    with pytest.raises(HTTPException) as conflict:
+        await dot.notifications.edit(successor, DotNotificationEdit(revision=0, enabled=True))
+    assert conflict.value.status_code == 409
+
+    # The documented operator transaction runs while admission/delivery is
+    # drained; no event is admitted during the temporary unpinned interval.
+    async with dot.database.sessions.begin() as db:
+        await db.get(User, dot.actor.id, with_for_update=True)
+        preference = await db.get(DotSlackPreference, dot.actor.id, with_for_update=True)
+        assert preference.destination_key == "TLOCAL001:DLOCAL001" and preference.revision == 1
+        preference.enabled, preference.recipient, preference.destination_key = False, None, None
+        preference.started_ts, preference.revision = None, preference.revision + 1
+        await db.execute(update(Delivery).where(
+            Delivery.session_id.in_(select(DotSlackConversation.session_id).where(
+                DotSlackConversation.dot_session_id == preference.session_id,
+            )), Delivery.status == "pending",
+            Delivery.identity == ("product-slack:" + Delivery.turn_id + ":dot"),
+        ).values(status="suppressed"))
+    monkeypatch.setattr("moyai.dot_notifications.time", lambda: 1792200000.0)
+    assert (await dot.notifications.edit(successor, DotNotificationEdit(revision=0, enabled=True))).status == "on"
+    # Queued or late pre-cutover roots cannot become conversations for the new owner.
+    with pytest.raises(HTTPException) as stale:
+        await dot_ingress.receive(dm_event("DOT_QUEUED_OLD_ROOT", "1792150000.001"))
+    assert stale.value.status_code == 403
+    with pytest.raises(HTTPException) as closed:
+        await dot_ingress.receive(dm_event("DOT_OLD_REPLY", "1792300000.022", thread_ts=root))
+    assert closed.value.status_code in {401, 403}
+    await dot_ingress.receive(dm_event("DOT_NEW_OWNER", "1792300000.023"))
+    async with dot.database.sessions() as db:
+        old_session = await db.get(Session, old_turn.session_id)
+        saved_turn = await db.get(Turn, old_turn.id)
+        thread = (await db.scalars(select(SlackThread).where(SlackThread.session_id == old_session.id))).one()
+        assert (old_session.owner_id, old_session.visibility, old_session.deleted) == (dot.actor.id, "private", False)
+        assert (saved_turn.actor_id, saved_turn.prompt, thread.thread_ts) == (dot.actor.id, old_turn.prompt, root)
+        assert await db.scalar(select(func.count()).select_from(Turn).where(Turn.session_id == old_session.id)) == 1
+        assert (await db.get(Delivery, pending.id)).status == "suppressed"
+        new_thread = await db.scalar(select(SlackThread).where(SlackThread.thread_ts == "1792300000.023"))
+        new_session = await db.get(Session, new_thread.session_id)
+        assert new_session.owner_id == successor.id and new_session.visibility == "private"
+        assert new_session.id != old_session.id
 
 
 @pytest.mark.parametrize("kind", ["private", "deleted", "deleting", "wrong_owner", "paused", "eligible"])
@@ -291,7 +356,7 @@ async def test_new_dm_roots_are_separate_private_conversations_and_duplicate_saf
             assert (session.owner_id, session.visibility, session.surface) == (dot.actor.id, "private", "web")
 
 
-async def test_pause_cancels_pending_notifications_but_keeps_owner_conversations(dot):
+async def test_pause_cancels_pending_notifications_but_keeps_owner_conversations(dot, monkeypatch):
     settings = await enable(dot)
     pending = await publish(dot)
     await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=settings.revision, enabled=False))
@@ -308,6 +373,11 @@ async def test_pause_cancels_pending_notifications_but_keeps_owner_conversations
     with pytest.raises(HTTPException) as stale:
         await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=settings.revision, enabled=True))
     assert stale.value.status_code == 409
+    monkeypatch.setattr("moyai.dot_notifications.time", lambda: 1792200000.0)
+    paused = await dot.notifications.read(dot.actor)
+    await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=paused.revision, enabled=True))
+    async with dot.database.sessions() as db:
+        assert (await db.get(DotSlackPreference, dot.actor.id)).started_ts == "1792000000.000000"
 
 
 @pytest.mark.parametrize("kind", ["correct", "wrong_bot", "wrong_metadata", "ambiguous", "absent"])
@@ -404,6 +474,34 @@ async def test_reconciliation_cannot_make_an_old_send_plausible(dot):
     with pytest.raises(HTTPException) as rejected:
         await new_direct_message(dot.service, sender, origin, "Unrelated reply")
     assert rejected.value.status_code == 403
+
+
+async def test_immediate_pumps_throttle_reconciliation_without_changing_dispatch_claim(dot):
+    await enable(dot)
+    delivery = await publish(dot)
+    old = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    async with dot.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status, row.created_at, row.claimed_at = "sending", old, old
+    for name in ("pump", "_deliver_batch"):
+        setattr(dot.service, name, MethodType(getattr(ProductSlack, name), dot.service))
+    async def no_stage(*args, **kwargs):
+        return None
+    dot.service.stage = dot.service.source_notices = no_stage
+    requests = []
+    def history(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "messages": []})
+    async with httpx.AsyncClient(
+        base_url="https://slack.example/", transport=httpx.MockTransport(history),
+    ) as client:
+        await dot.service.pump(client)
+        await dot.service.pump(client)
+    assert len(requests) == 1 and requests[0].method == "GET"
+    async with dot.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).claimed_at == old
+        schedule = await db.get(DeliverySchedule, delivery.id)
+        assert schedule.next_attempt > datetime.now(UTC).timestamp()
 
 
 async def test_early_reply_recovers_once_from_exact_parent_even_after_pause(dot, receiver):
