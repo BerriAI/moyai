@@ -160,6 +160,13 @@ async def test_dot_message_updates_use_verified_owner_turn(dot, dot_ingress, rep
                 "UPDATE moyai.users SET profile_eligible=0, link_status='unavailable' WHERE id=:id",
             ), {"id": "slack:TLOCAL001:UACTUAL01"})
     if operation == "wrong_sender":
+        async with dot.source.begin() as db:
+            await db.execute(text(
+                "INSERT INTO moyai.users(id,kind,email,name,linked_user_id,created_at,updated_at,"
+                "profile_eligible,profile_checked_at,profile_conflict,link_status) "
+                "VALUES ('slack:TLOCAL001:UWRONG001','slack','other@example.test','Other sender',NULL,"
+                "'c','u',1,:stamp,0,'unavailable')",
+            ), {"stamp": datetime.now(UTC).isoformat()})
         previous = {**previous, "user": "UWRONG001"}
     updated = {**previous, "text": "Prepare the revised launch plan.", "edited": {"ts": "1792100000.025"}}
     payload = dm_event(
