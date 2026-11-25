@@ -236,14 +236,16 @@ async def test_failed_turn_posts_error_then_uploads_debug_file(runtime, active, 
 async def test_lost_send_ack_is_reconciled_without_reposting(runtime, active):
     delivery = await make_delivery(runtime, active)
     calls = []
+    posted = {}
 
     async def handler(request):
         calls.append(request.method)
         if request.method == "POST":
+            posted.update(json.loads(request.content))
             raise httpx.ReadTimeout("Acknowledgment lost after dispatch.", request=request)
         return httpx.Response(200, json={
             "ok": True, "messages": [{
-                "ts": "123.999", "metadata": {"event_payload": {"id": delivery.id}},
+                "ts": "123.999", "metadata": posted["metadata"],
             }],
         })
 
