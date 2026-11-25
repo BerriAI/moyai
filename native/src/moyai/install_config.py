@@ -24,7 +24,7 @@ SECRETS = (
     "GITHUB_CLIENT_SECRET", "LINEAR_CLIENT_SECRET", "NOTION_CLIENT_SECRET",
     "GOOGLE_APPS_CLIENT_SECRET",
     "CLOUDFLARE_ACCESS_CLIENT_ID", "CLOUDFLARE_ACCESS_CLIENT_SECRET", *SECRET_NAMES,
-    "OKTA_CLIENT_SECRET",
+    "OKTA_CLIENT_SECRET", "SANDBOX_ROUTER_TOKEN",
 )
 DEFAULTS = {
     "MOYAI_INSTALLATION_ID": "moyai",
@@ -44,6 +44,12 @@ DEFAULTS = {
     "MODAL_APP_NAME": "",
     "MOYAI_MODAL_RUNTIME": "vm",
     "SANDBOX_PROVIDER": "modal",
+    "SANDBOX_NAMESPACE": "",
+    "SANDBOX_WARM_POOL": "",
+    "SANDBOX_TEMPLATE": "",
+    "SANDBOX_ROUTER_URL": "",
+    "SANDBOX_ROUTER_TOKEN_FILE": "",
+    "SANDBOX_RPC_PYTHON": "/opt/workspace-rpc/bin/python",
     "LAMBDA_REGION": "us-east-1",
     "LAMBDA_PROFILE": "",
     "LAMBDA_IMAGE": "",
@@ -94,6 +100,14 @@ SANDBOX_PROMPTS = {
     "modal": (
         ("MODAL_TOKEN_ID", "Modal token ID", True),
         ("MODAL_TOKEN_SECRET", "Modal token secret", True),
+    ),
+    "kubernetes": (
+        ("SANDBOX_NAMESPACE", "Workspace namespace", False),
+        ("SANDBOX_WARM_POOL", "Workspace warm pool", False),
+        ("SANDBOX_TEMPLATE", "Reviewed workspace template", False),
+        ("SANDBOX_ROUTER_URL", "Private HTTPS router origin", False),
+        ("SANDBOX_ROUTER_TOKEN_FILE", "Mounted router token path (blank for explicit token)", False),
+        ("SANDBOX_ROUTER_TOKEN", "Router bearer token (blank for mounted token)", True),
     ),
     "lambda": (
         ("LAMBDA_REGION", "Lambda MicroVM region", False),
@@ -245,7 +259,7 @@ def main() -> None:
             else choice("Temporal", ("bundled", "external"), "bundled")
         )
         if not args.from_env:
-            values["SANDBOX_PROVIDER"] = choice("Sandbox provider", ("modal", "lambda"), values["SANDBOX_PROVIDER"])
+            values["SANDBOX_PROVIDER"] = choice("Sandbox provider", tuple(SANDBOX_PROMPTS), values["SANDBOX_PROVIDER"])
             for field, label, hidden in (*PROMPTS, *SANDBOX_PROMPTS[values["SANDBOX_PROVIDER"]]):
                 if not (args.secrets_from_env and field in SECRETS):
                     values[field] = prompt(label, values[field], secret=hidden)

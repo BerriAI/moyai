@@ -29,3 +29,7 @@ securityContext:
   allowPrivilegeEscalation: false
   capabilities: {drop: [ALL]}
 {{- end -}}
+{{- define "moyai.workspaceMounts" -}}
+- {name: workspace-api, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true}
+- {name: workspace-router, mountPath: /var/run/secrets/workspace-router, readOnly: true}
+{{- end -}}

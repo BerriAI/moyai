@@ -127,3 +127,71 @@ def test_default_does_not_expose_a_separate_listener():
 def test_unsafe_or_incompatible_broker_chart_urls_are_rejected(url):
     with pytest.raises(subprocess.CalledProcessError):
         render('bundled', 'test', '--set-string', 'brokerUrl=' + url)
+
+
+WORKSPACE_VALUES = (
+    '--set', 'kubernetesWorkspaces.enabled=true',
+    '--set-string', 'kubernetesWorkspaces.namespace=workspaces',
+    '--set-string', 'kubernetesWorkspaces.template=shell',
+    '--set-string', 'kubernetesWorkspaces.warmPool=pool',
+    '--set-string', 'kubernetesWorkspaces.routerUrl=https://router.routing.svc',
+    '--set-string', 'kubernetesWorkspaces.routerNamespace=routing',
+)
+
+
+def test_workspace_permissions_and_projected_tokens_are_opt_in():
+    default = render()
+    assert not any(item['kind'] in {'Role', 'RoleBinding', 'NetworkPolicy'} for item in default)
+    objects = render('bundled', 'test', *WORKSPACE_VALUES)
+    pod = named(objects, 'Deployment', 'test-moyai')['spec']['template']['spec']
+    assert pod['automountServiceAccountToken'] is False
+    for item in [*pod['initContainers'], *pod['containers']]:
+        mounted = {entry['name'] for entry in item['volumeMounts']}
+        assert mounted.intersection({'workspace-api', 'workspace-router'}) == (
+            {'workspace-api', 'workspace-router'} if item['name'] in {'initialize', 'worker'} else set()
+        )
+    volumes = {item['name']: item for item in pod['volumes']}
+    router = volumes['workspace-router']['projected']['sources']
+    assert router == [{'serviceAccountToken': {'path': 'token', 'expirationSeconds': 3600, 'audience': 'workspace-router'}}]
+    assert 'audience' not in volumes['workspace-api']['projected']['sources'][0]['serviceAccountToken']
+    config = named(objects, 'ConfigMap', 'test-moyai-config')['data']
+    assert config['SANDBOX_PROVIDER'] == 'kubernetes' and config['SANDBOX_WARM_POOL'] == 'pool'
+    assert config['SANDBOX_TEMPLATE'] == 'shell' and config['SANDBOX_NAMESPACE'] == 'workspaces'
+    assert config['SANDBOX_ROUTER_TOKEN_FILE'] == '/var/run/secrets/workspace-router/token'
+    assert 'SANDBOX_ROUTER_TOKEN' not in config
+    binding = named(objects, 'RoleBinding', 'test-moyai-workspaces')
+    role = named(objects, 'Role', binding['roleRef']['name'])
+    assert binding['metadata']['namespace'] == role['metadata']['namespace'] == 'workspaces'
+    assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': pod['serviceAccountName'], 'namespace': 'default'}]
+    assert {tuple(rule['resources']): set(rule['verbs']) for rule in role['rules']} == {
+        ('sandboxclaims',): {'get', 'create', 'watch', 'patch', 'delete'}, ('sandboxes',): {'get'},
+        ('persistentvolumeclaims',): {'get'},
+        ('sandboxwarmpools',): {'get'}, ('sandboxtemplates',): {'get'},
+    }
+    assert not any(item['kind'] in {'ClusterRole', 'ClusterRoleBinding', 'Secret'} for item in objects)
+    policy = named(objects, 'NetworkPolicy', 'test-moyai-workspaces')
+    assert policy['metadata']['namespace'] == 'workspaces'
+    network = policy['spec']
+    assert network['podSelector'] == {} and network['egress'] == []
+    assert network['ingress'] == [{
+        'from': [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'routing'}},
+                  'podSelector': {'matchLabels': {'app': 'sandbox-router'}}}],
+        'ports': [{'protocol': 'TCP', 'port': 9090}],
+    }]
+
+
+@pytest.mark.parametrize('override', [
+    'kubernetesWorkspaces.namespace=default', 'kubernetesWorkspaces.namespace=routing', 'serviceAccount.name=default',
+    'kubernetesWorkspaces.routerUrl=http://router.routing.svc', 'kubernetesWorkspaces.template=',
+])
+def test_workspace_chart_rejects_incomplete_or_overlapping_scopes(override):
+    with pytest.raises(subprocess.CalledProcessError):
+        render('bundled', 'test', *WORKSPACE_VALUES, '--set-string', override)
+
+
+def test_changing_default_provider_keeps_existing_workspace_access():
+    objects = render('bundled', 'test', *WORKSPACE_VALUES, '--set-string', 'config.SANDBOX_PROVIDER=modal')
+    config = named(objects, 'ConfigMap', 'test-moyai-config')['data']
+    assert config['SANDBOX_PROVIDER'] == 'modal'
+    assert config['SANDBOX_NAMESPACE'] == 'workspaces'
+    assert named(objects, 'RoleBinding', 'test-moyai-workspaces')

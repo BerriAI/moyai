@@ -271,6 +271,9 @@ class ProductContinuationService:
         blockers: list[dict[str, str]] = []
         def block(code: str, message: str, action: str) -> None:
             blockers.append({"code": code, "message": message, "action": action})
+        if self.runtime.settings.sandbox_provider == "kubernetes":
+            block("workspace_import_unsupported", "Kubernetes workspaces do not support importing an earlier session.",
+                  "Keep using the original session or start a fresh Kubernetes workspace.")
         if any(
             row["private_owner_id"] and (
                 not root["private_owner_id"] or not principal.individual or row["private_owner_id"] != principal.id

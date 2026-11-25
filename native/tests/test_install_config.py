@@ -54,16 +54,21 @@ def test_slack_configuration_survives_installation_without_leaking_external_secr
             assert values[name] == value
 
 
-@pytest.mark.parametrize("provider", ["modal", "lambda"])
+@pytest.mark.parametrize("provider", ["modal", "lambda", "kubernetes"])
 def test_interactive_installer_requests_only_selected_sandbox_credentials(
     install_environment, tmp_path, monkeypatch, provider,
 ):
     environment = {**install_environment, "SANDBOX_PROVIDER": provider}
-    if provider == "lambda":
+    if provider != "modal":
         environment.pop("MODAL_TOKEN_ID", None)
         environment.pop("MODAL_TOKEN_SECRET", None)
     answers = {
-        "Sandbox provider (modal/lambda)": provider,
+        "Sandbox provider (modal/kubernetes/lambda)": provider,
+        "Workspace namespace": "workspaces",
+        "Workspace warm pool": "runner-pool",
+        "Reviewed workspace template": "runner",
+        "Private HTTPS router origin": "https://router.routing.svc",
+        "Router bearer token (blank for mounted token)": "workspace-test-token",
         "Lambda MicroVM image ARN": "arn:aws:lambda:us-east-1:123456789012:microvm-image:test",
         "Pinned Lambda MicroVM image version": "1.0",
         "Private S3 checkpoint bucket": "test-checkpoints",
@@ -82,6 +87,7 @@ def test_interactive_installer_requests_only_selected_sandbox_credentials(
     ])
     install_config.main()
     assert ("Modal token ID" in labels) is (provider == "modal")
+    assert ("Reviewed workspace template" in labels) is (provider == "kubernetes")
     assert ("Lambda MicroVM image ARN" in labels) is (provider == "lambda")
     assert f"SANDBOX_PROVIDER={provider}\n" in (tmp_path / ".env").read_text()
 

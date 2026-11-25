@@ -36,6 +36,7 @@ REMOTE_GUEST = f"/opt/moyai/desktop-{DESKTOP_VERSION}.py"
 REMOTE_BROWSER = f"/opt/moyai/browser-{DESKTOP_VERSION}.py"
 REMOTE_DRIVER = f"/opt/moyai/browser-driver-{DESKTOP_VERSION}.py"
 REMOTE_OCU = f"/opt/moyai/ocu-{DESKTOP_VERSION}.py"
+KUBERNETES_DESKTOP_UNAVAILABLE = "Kubernetes workspaces do not provide a live desktop or shared browser."
 LEASE_SECONDS = 180
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,8 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str, clie
             raise HTTPException(409, "This computer is preserved for maintenance. Wait for execution to resume.")
         current = await db.get(ComputerLease, session_id)
         reference = TypeAdapter(WorkspaceRef).validate_json(session.workspace)
+        if reference.provider == "kubernetes":
+            raise HTTPException(409, KUBERNETES_DESKTOP_UNAVAILABLE)
         desktop = await db.get(ComputerDesktop, session_id)
         if desktop is None:
             desktop = ComputerDesktop(
@@ -250,6 +253,8 @@ async def request(runtime: Runtime, session: Session, body: dict) -> dict:
     if not session.workspace:
         raise HTTPException(409, "Send Moyai a task to start this conversation's computer.")
     reference = TypeAdapter(WorkspaceRef).validate_json(session.workspace)
+    if reference.provider == "kubernetes":
+        raise HTTPException(409, KUBERNETES_DESKTOP_UNAVAILABLE)
     if reference.provider == "lambda":
         from .lambda_workspace import LambdaBackend
         workspace = Workspace(LambdaBackend(runtime.settings, ref=reference))

@@ -861,8 +861,21 @@ class Database:
         ).limit(1))
 
     async def save_workspace_reference(self, scope: RunScope, reference: dict[str, Any]) -> None:
-        await self.authorize_scope(scope)
         async with self.sessions.begin() as db:
+            await self.authorize_scope(scope, db=db)
+            if reference.get("provider") == "kubernetes" or scope.workspace_provider == "kubernetes":
+                from .workspace_recovery import locked_scope
+
+                session, _ = await locked_scope(self, db, scope, status="running")
+                if reference.get("provider") != "kubernetes" or (
+                    session.workspace and (
+                        json.loads(session.workspace) != reference or session.workspace_scope != scope.workspace_key
+                    )
+                ):
+                    raise PermissionError("The session already owns a different workspace.")
+                session.workspace = json.dumps(reference)
+                session.workspace_scope = scope.workspace_key
+                return
             await db.execute(update(Session).where(
                 Session.id == scope.session_id, Session.active_turn == scope.turn_id,
                 Session.status == "running",

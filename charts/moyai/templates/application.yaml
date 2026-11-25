@@ -74,6 +74,9 @@ spec:
           command: [/app/.venv/bin/python, -m, moyai.deployment, {{ . }}]
           {{- include "moyai.env" $ | nindent 10 }}
           {{- include "moyai.mounts" $ | nindent 10 }}
+          {{- if and $.Values.kubernetesWorkspaces.enabled (eq . "initialize") }}
+          {{- include "moyai.workspaceMounts" $ | nindent 12 }}
+          {{- end }}
           {{- include "moyai.security" $ | nindent 10 }}
           resources: {{ $.Values.resources | toJson }}
         {{- end }}
@@ -85,6 +88,9 @@ spec:
           command: [/app/.venv/bin/python, -m, moyai.kubernetes_runtime, {{ $role }}]
           {{- include "moyai.env" $ | nindent 10 }}
           {{- include "moyai.mounts" $ | nindent 10 }}
+          {{- if and $.Values.kubernetesWorkspaces.enabled (eq $role "worker") }}
+          {{- include "moyai.workspaceMounts" $ | nindent 12 }}
+          {{- end }}
           {{- include "moyai.security" $ | nindent 10 }}
           ports: [{name: {{ $role }}, containerPort: {{ $port }}}]
           startupProbe:
@@ -126,6 +132,24 @@ spec:
             httpGet: {path: /health, port: http}
           resources: {{ .Values.proxy.resources | toJson }}
       volumes:
+        {{- if .Values.kubernetesWorkspaces.enabled }}
+        - name: workspace-api
+          projected:
+            sources:
+              - serviceAccountToken: {path: token, expirationSeconds: 3600}
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: ca.crt}]
+              - downwardAPI:
+                  items: [{path: namespace, fieldRef: {fieldPath: metadata.namespace}}]
+        - name: workspace-router
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ required "kubernetesWorkspaces.routerAudience is required" .Values.kubernetesWorkspaces.routerAudience | quote }}
+                  expirationSeconds: 3600
+        {{- end }}
         - name: state
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-state" $name) .Values.persistence.existingClaim }}

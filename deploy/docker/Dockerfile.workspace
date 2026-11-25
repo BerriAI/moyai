@@ -1,0 +1,16 @@
+FROM registry.k8s.io/agent-sandbox/sandboxd:v1.0.12@sha256:eebd3ae239396bff33cfc86a942d36d0939432530193a5587deeb76450479db0 AS runtime
+FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS node
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git jq patch ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 workspace \
+    && install -d -o workspace -g workspace /workspace
+COPY --from=runtime /usr/local/bin/sandboxd /usr/local/bin/sandboxd
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+COPY native/skills /opt/moyai/skills
+USER 1000:1000
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/sandboxd"]

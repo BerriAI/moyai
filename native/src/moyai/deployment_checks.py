@@ -55,6 +55,14 @@ def settings(values: Mapping[str, str]) -> Settings:
         artifact_secret_access_key=SecretStr(values.get("OBJECT_STORAGE_SECRET_ACCESS_KEY", "")),
         artifact_session_token=SecretStr(values.get("OBJECT_STORAGE_SESSION_TOKEN", "")),
         sandbox_provider=values.get("SANDBOX_PROVIDER", "modal"),
+        sandbox_installation_id=values.get("MOYAI_INSTALLATION_ID", "moyai"),
+        sandbox_namespace=values.get("SANDBOX_NAMESPACE", ""),
+        sandbox_template=values.get("SANDBOX_TEMPLATE", ""),
+        sandbox_warm_pool=values.get("SANDBOX_WARM_POOL", ""),
+        sandbox_router_url=values.get("SANDBOX_ROUTER_URL", ""),
+        sandbox_router_token=SecretStr(values.get("SANDBOX_ROUTER_TOKEN", "")),
+        sandbox_router_token_file=values.get("SANDBOX_ROUTER_TOKEN_FILE", ""),
+        sandbox_rpc_python=values.get("SANDBOX_RPC_PYTHON", "/opt/workspace-rpc/bin/python"),
         modal_runtime=values.get("MOYAI_MODAL_RUNTIME", "vm"),
         lambda_region=values.get("LAMBDA_REGION", "us-east-1"),
         lambda_profile=values.get("LAMBDA_PROFILE", ""),
@@ -128,7 +136,12 @@ async def check(values: Mapping[str, str], *, providers: bool = True) -> dict[st
                     ):
                         raise InstallationError("The selected model is not available to the supplied key.")
                 report[component] = "model_listed"
-                if configured.sandbox_provider == "lambda":
+                if configured.sandbox_provider == "kubernetes":
+                    from .kubernetes_preflight import check_workspace
+                    component = "kubernetes"
+                    await check_workspace(configured)
+                    report[component] = "pool_template_permissions_and_router_health_verified"
+                elif configured.sandbox_provider == "lambda":
                     from .lambda_control import LambdaControl
                     component = "lambda"
                     control = LambdaControl(configured)

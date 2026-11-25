@@ -25,6 +25,17 @@ databaseSecret: moyai-database
 # config.CLOUDFLARE_ACCESS_UI_MODE: private-network (requires the matching app release).
 # Keep both Access audiences and broker credentials; the broker remains JWT-protected.
 config: {}
+# Opt in to an operator-provisioned pool, template and private TLS router.
+# The workspace namespace must be dedicated to this release.
+kubernetesWorkspaces:
+  enabled: false
+  namespace: ""
+  warmPool: ""
+  template: ""
+  routerUrl: ""
+  routerNamespace: ""
+  routerPodLabels: {app: sandbox-router}
+  routerAudience: workspace-router
 serviceAccount:
   create: true
   name: ""

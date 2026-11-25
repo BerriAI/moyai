@@ -156,8 +156,11 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
     elif provider == "lambda":
         for field in ("LAMBDA_REGION", "LAMBDA_IMAGE", "LAMBDA_IMAGE_VERSION", "LAMBDA_CHECKPOINT_BUCKET"):
             _required(values, field)
+    elif provider == "kubernetes":
+        for field in ("SANDBOX_NAMESPACE", "SANDBOX_WARM_POOL", "SANDBOX_TEMPLATE", "SANDBOX_ROUTER_URL"):
+            _required(values, field)
     else:
-        raise InstallationError("SANDBOX_PROVIDER must be modal or lambda.")
+        raise InstallationError("SANDBOX_PROVIDER must be modal, lambda, or kubernetes.")
     modal_runtime = values.get("MOYAI_MODAL_RUNTIME", values.get("MODAL_FUNCTION_RUNTIME", "vm"))
     if modal_runtime not in {"gvisor", "vm"}:
         raise InstallationError("MOYAI_MODAL_RUNTIME must be gvisor or vm.")
@@ -212,6 +215,7 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
                 raise InstallationError(f"{field} differs from the persisted installation key; restore the original value.")
         values.update(state["secrets"])
     values.update(
+        MOYAI_INSTALLATION_ID=name,
         MOYAI_CORE="pydantic",
         MOYAI_PRODUCT_MODE="existing" if topology == "split" else "standalone",
         MOYAI_RUNTIME_ROLE=role if topology == "split" else "standalone",

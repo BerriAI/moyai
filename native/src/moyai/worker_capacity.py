@@ -31,6 +31,7 @@ CHAT_CONTROL_OPERATIONS = (
     "__capability__moyai_commentary__save",
     "__toolset__planning__call_tool",
 )
+PRIVATE_SETTINGS_ROUTING = "moyai-private-settings-control-v1"
 WORKER_SHUTDOWN_VERSION = "moyai-worker-shared-drain-v1"
 DELEGATION_RETRY_VERSION = "moyai-delegation-receipt-retries-v1"
 ActivityPool = Literal["model", "tools", "control"]
@@ -105,9 +106,13 @@ class CapacityOutbound(WorkflowOutboundInterceptor):
                 input.activity.endswith(CHAT_CONTROL_OPERATIONS)
                 and not workflow.patched(CHAT_CONTROL_ROUTING_VERSION)
             ):
-                # Existing split histories used tool capacity for these local
-                # database operations. Preserve their recorded queue on replay.
-                pool = "tools"
+                # Before v2 these ran on tools, except for private settings
+                # in installations that recorded the earlier control marker.
+                pilot_control = (
+                    input.activity == "agent__moyai__capability__moyai_private_instructions__load"
+                    and workflow.patched(PRIVATE_SETTINGS_ROUTING)
+                )
+                pool = "control" if pilot_control else "tools"
             input = replace(input, task_queue=f"{queue}-{pool}")
         if (
             input.activity in {
