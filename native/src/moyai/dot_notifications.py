@@ -6,7 +6,7 @@ import html
 import json
 from asyncio import sleep
 from datetime import timedelta
-from email.utils import parsedate_to_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from typing import TYPE_CHECKING, Literal
 
 from app.connector_errors import ConnectorError
@@ -201,17 +201,14 @@ class DotNotifications:
                 if opened.get("ok") is not True or not channel.startswith("D") or not ID.fullmatch(channel):
                     raise HTTPException(502, "Slack did not confirm a direct-message conversation.")
                 try:
-                    provider_time = parsedate_to_datetime(response_headers["date"])
-                    if provider_time.utcoffset() != timedelta(0):
-                        raise ValueError("Slack must provide a UTC clock.")
+                    provider_date = response_headers["date"]
+                    provider_time = parsedate_to_datetime(provider_date)
+                    if (provider_time.utcoffset() != timedelta(0)
+                            or format_datetime(provider_time, usegmt=True) != provider_date):
+                        raise ValueError("Slack must provide a complete HTTP Date.")
                     started_ts = f"{int(provider_time.timestamp()) + SLACK_CLOCK_GUARD_SECONDS}.000000"
                 except (KeyError, TypeError, ValueError, OverflowError) as error:
                     raise HTTPException(502, "Slack did not confirm its clock. Try connecting again.") from error
-                # HTTP Date has one-second precision. A two-second guard also
-                # allows a small difference between Slack's API/message clocks.
-                # Elapsed waiting keeps messages sent after successful opt-in
-                # past this cutoff without comparing the API host's wall clock.
-                await sleep(SLACK_CLOCK_GUARD_SECONDS)
                 recipient = SlackRecipient(
                     owner_id=actor.id, owner_authority=actor_grant(actor).authority_version,
                     requester_id=sender.id, team_id=installed["team_id"], channel_id=channel,
@@ -255,6 +252,13 @@ class DotNotifications:
                 )), Delivery.status == "pending",
                 Delivery.identity == ("product-slack:" + Delivery.turn_id + ":dot"),
             ).values(status="suppressed"))
+        if recipient is not None:
+            # Commit the verified pin before waiting: incoming DMs must already
+            # fail closed during setup. Cancellation retains this committed
+            # setting, and a concurrent pause cannot be overwritten afterward.
+            # HTTP Date has one-second precision; this elapsed guard also allows
+            # a small difference between Slack's API/message clocks.
+            await sleep(SLACK_CLOCK_GUARD_SECONDS)
         return await self.read(actor)
 
 

@@ -5,6 +5,10 @@ signed in with your individual account. Moyai verifies the Slack account against
 that identity and opens a DM with the installed workspace bot.
 Wait until opt-in reports success before sending the first DM; messages sent
 during account verification can be rejected by the connection cutoff.
+The verified private DM binding commits before the clock guard elapses, so a
+message arriving during that wait cannot fall back to shared Slack chat.
+Cancelling the HTTP request after that commit does not undo the setting; refresh
+the settings to see its current state.
 
 Each new published Dot finding starts a separate Slack thread and a private Moyai
 conversation. Reply in that thread to continue its conversation. A new top-level

@@ -94,7 +94,9 @@ async def test_binding_uses_slack_clock_and_accepts_first_dm_after_success(dot, 
         assert (await db.get(Session, thread.session_id)).owner_id == dot.actor.id
 
 
-@pytest.mark.parametrize("provider_date", [None, "invalid", "Wed, 25 Nov 2026 03:00:00 -0500"])
+@pytest.mark.parametrize("provider_date", [
+    None, "invalid", "Wed, 25 Nov 2026 03:00:00 -0500", "Wed, 25 Nov 2026 03:00:00 GMT junk",
+])
 async def test_missing_or_invalid_provider_clock_does_not_enable_notifications(dot, provider_date):
     dot.provider_date = provider_date
     with pytest.raises(HTTPException) as unavailable:
@@ -127,9 +129,13 @@ async def test_connector_preserves_body_and_exposes_provider_headers(monkeypatch
 
 @pytest_asyncio.fixture
 async def dot_ingress(dot):
+    await enable(dot)
+    return ingress_for(dot)
+
+
+def ingress_for(dot):
     from moyai.product_slack_events import SlackEvents
 
-    await enable(dot)
     async def catalog(*args, **kwargs):
         return []
     async def slack_access(db, session, actor):
@@ -157,6 +163,55 @@ async def test_dm_during_connection_clock_guard_never_falls_back_to_shared_chat(
     async with dot.database.sessions() as db:
         assert await db.scalar(select(Turn.id).where(Turn.request_key.startswith("slack-message:"))) is None
         assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
+
+
+async def test_dm_arriving_while_opt_in_is_waiting_finds_the_committed_private_pin(dot, monkeypatch):
+    ingress = ingress_for(dot)
+    async def during_wait(seconds):
+        assert seconds == 2
+        with pytest.raises(HTTPException) as early:
+            await ingress.receive(dm_event("DOT_IN_FLIGHT_OPT_IN", "1791999999.900000"))
+        assert early.value.status_code == 403
+        async with dot.database.sessions() as db:
+            assert await db.scalar(select(func.count()).select_from(SlackThread)) == 0
+            assert await db.scalar(select(Turn.id).where(Turn.request_key.startswith("slack-message:"))) is None
+    monkeypatch.setattr("moyai.dot_notifications.sleep", during_wait)
+    assert (await enable(dot)).status == "on"
+    await ingress.receive(dm_event("DOT_AFTER_OPT_IN", "1792000001.001000"))
+    async with dot.database.sessions() as db:
+        thread = (await db.scalars(select(SlackThread))).one()
+        session = await db.get(Session, thread.session_id)
+        assert (session.owner_id, session.visibility) == (dot.actor.id, "private")
+
+
+async def test_cancellation_after_binding_commit_keeps_the_private_route(dot, monkeypatch):
+    ingress = ingress_for(dot)
+    async def cancelled_wait(_seconds):
+        raise asyncio.CancelledError
+    monkeypatch.setattr("moyai.dot_notifications.sleep", cancelled_wait)
+    with pytest.raises(asyncio.CancelledError):
+        await enable(dot)
+    settings = await dot.notifications.read(dot.actor)
+    assert settings.status == "on" and settings.revision == 1
+    with pytest.raises(HTTPException) as early:
+        await ingress.receive(dm_event("DOT_CANCELLED_EARLY", "1791999999.900000"))
+    assert early.value.status_code == 403
+    await ingress.receive(dm_event("DOT_CANCELLED_LATER", "1792000001.001000"))
+    async with dot.database.sessions() as db:
+        thread = (await db.scalars(select(SlackThread))).one()
+        assert (await db.get(Session, thread.session_id)).visibility == "private"
+
+
+async def test_pause_during_opt_in_wait_is_not_overwritten(dot, monkeypatch):
+    async def pause_during_wait(_seconds):
+        current = await dot.notifications.read(dot.actor)
+        await dot.notifications.edit(dot.actor, DotNotificationEdit(revision=current.revision, enabled=False))
+    monkeypatch.setattr("moyai.dot_notifications.sleep", pause_during_wait)
+    settings = await enable(dot)
+    assert not settings.enabled and settings.revision == 2
+    async with dot.database.sessions() as db:
+        preference = await db.get(DotSlackPreference, dot.actor.id)
+        assert not preference.enabled and preference.destination_key == "TLOCAL001:DLOCAL001"
 
 
 @pytest.mark.parametrize("change", ["revoked", "linking_disabled", "remapped"])
