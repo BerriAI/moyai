@@ -29,6 +29,7 @@ def capabilities(config: ProductConfig) -> dict:
         ROLE_CONTROL_PROTOCOL,
     )
 
+    from .automations.product_automation_sync import SYNC_CONCURRENCY
     from .continuations.product_continuation_restore import RESTORE_CONCURRENCY
     from .fleet_registry import PROTOCOL as ADMISSION_PROTOCOL
     from .product_start import _settings
@@ -41,7 +42,9 @@ def capabilities(config: ProductConfig) -> dict:
     kubernetes = os.environ.get("MOYAI_FLEET_PROVIDER") == "kubernetes"
     # Each of these pools is separately bounded. The Harness stores share one
     # pool; they do not each allocate another. Identity/history share the product
-    # engine. The two restore locks use NullPool under the restorer semaphore.
+    # engine. Restore and automation sync locks use NullPool under their own
+    # semaphores. Budget both on every role that constructs these services,
+    # even though ordinary reconciliation runs as a worker activity.
     pools = {
         "canonical": source.moyai_database_pool_size,
         "native": settings.database_pool_size,
@@ -51,6 +54,7 @@ def capabilities(config: ProductConfig) -> dict:
     dedicated = {
         "canonical_owner": 1,
         "workspace_restore_locks": RESTORE_CONCURRENCY,
+        "automation_sync_locks": SYNC_CONCURRENCY,
         "coordinator_listener": int(config.role == "coordinator"),
         "broker_model_slots": int(config.role == "broker"),
     }

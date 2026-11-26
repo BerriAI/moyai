@@ -8,6 +8,7 @@ introduces a second transaction or lock protocol for the same product state.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from sqlalchemy import select, text, update
+from sqlalchemy.pool import NullPool
 from temporalio.api.common.v1 import Payload
 from temporalio.client import (
     Client,
@@ -30,6 +32,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from ..models import now
+from ..postgres import create_engine
 from ..product_config import CORE_IDENTITY
 from ..product_identity import ProductGrant
 from .product_automation_models import ProductAutomationBinding as Binding
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     from .product_automations import ProductAutomationService
 
 RPC_TIMEOUT = timedelta(seconds=3)
+SYNC_CONCURRENCY = 2
 
 
 class ProductAutomationSync:
@@ -49,6 +53,7 @@ class ProductAutomationSync:
 
     def __init__(self, service: ProductAutomationService):
         self.service = service
+        self.slots = asyncio.Semaphore(SYNC_CONCURRENCY)
 
     async def request_sync(self, identity: str) -> bool:
         from .product_automations import ProductAutomationSyncWorkflow
@@ -75,15 +80,21 @@ class ProductAutomationSync:
 
     @asynccontextmanager
     async def _sync_lock(self, identity: str):
-        # Transaction-level remote-operation lock survives across RPC awaits and
-        # is automatically released on connection loss. Mutations remain short.
-        async with self.service.database.engine.begin() as connection:
-            acquired = await connection.scalar(text(
-                "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"
-            ), {"key": f"moyai-product-automation-sync:{self.service.schema}:{identity}"})
-            if not acquired:
-                raise RuntimeError("Another automation synchronization is in progress.")
-            yield
+        # Like workspace restoration, hold only the advisory transaction on a
+        # dedicated connection. A normal pool slot here would starve the short
+        # data/authority transactions when the native pool has one connection.
+        async with self.slots:
+            engine = create_engine(self.service.database.engine.url, poolclass=NullPool)
+            try:
+                async with engine.begin() as connection:
+                    acquired = await connection.scalar(text(
+                        "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"
+                    ), {"key": f"moyai-product-automation-sync:{self.service.schema}:{identity}"})
+                    if not acquired:
+                        raise RuntimeError("Another automation synchronization is in progress.")
+                    yield
+            finally:
+                await engine.dispose()
 
     async def _pause_remote(self, client: Client, identity: str) -> None:
         handle = client.get_schedule_handle(identity)
