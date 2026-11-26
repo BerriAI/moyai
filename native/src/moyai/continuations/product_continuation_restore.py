@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import modal
+from app.repository_identity import canonical_repository_url
 from pydantic import TypeAdapter
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
@@ -178,6 +180,39 @@ class ModalRecoveryTransport:
             if error.status != RPCStatusCode.NOT_FOUND:
                 raise ValueError("The old execution owner could not be verified; native work is blocked.") from None
 
+    async def verify_prepared_repository(self, sandbox: Any, context: dict[str, Any]) -> None:
+        """Verify a fresh image's checkout before the model receives it."""
+        expected = context.get("commit_sha")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{40}", expected):
+            raise ValueError("The prepared environment needs an exact validated commit.")
+        results = []
+        for arguments in (
+            ("rev-parse", "--verify", "HEAD"),
+            ("config", "--local", "--get", "remote.origin.url"),
+        ):
+            process = await sandbox.exec.aio(
+                "git", "-C", "/workspace/repo", "-c", "core.fsmonitor=false", *arguments, timeout=15,
+            )
+            await process.wait.aio()
+            value = await process.stdout.read.aio()
+            if process.returncode or len(value) > 2048:
+                raise ValueError("The prepared environment's Git checkout could not be verified.")
+            results.append(value.strip())
+        try:
+            origin = canonical_repository_url(results[1])
+            expected_origin = canonical_repository_url(context["repo_url"])
+        except (KeyError, TypeError, ValueError):
+            # Credential-bearing origins must not reach the error or its chain.
+            raise ValueError("The prepared environment has an invalid repository origin.") from None
+        matches = origin == expected_origin
+        if expected_origin.startswith("https://github.com/"):
+            matches = origin.casefold() == expected_origin.casefold()
+        if results[0] != expected or not matches:
+            raise ValueError(
+                "The prepared image's repository or commit does not match its validated build. "
+                "Rebuild the environment or select a bare checkout."
+            )
+
     async def native(self, scope: RunScope, context: dict[str, Any], reference: dict | None) -> Any:
         provider = reference.get("provider") if reference else self.runtime.settings.sandbox_provider
         if provider == "lambda":
@@ -203,19 +238,31 @@ class ModalRecoveryTransport:
             return sandbox
         name = "product-" + scope.session_id + "-" + scope.workspace_key[:12]
         try:
-            return await modal.Sandbox.from_name.aio(self.runtime.settings.modal_app, name)
+            sandbox = await modal.Sandbox.from_name.aio(self.runtime.settings.modal_app, name)
         except modal.exception.NotFoundError:
-            pass
+            app = await modal.App.lookup.aio(self.runtime.settings.modal_app, create_if_missing=True)
+            image = context.get("environment_snapshot_id")
+            try:
+                sandbox = await modal.Sandbox.create.aio(
+                    app=app, name=name, image=runtime_image(modal.Image.from_id(image) if image else None),
+                    workdir="/workspace", timeout=self.runtime.settings.computer_lifetime,
+                    idle_timeout=self.runtime.settings.computer_idle_timeout,
+                )
+            except modal.exception.AlreadyExistsError:
+                sandbox = await modal.Sandbox.from_name.aio(self.runtime.settings.modal_app, name)
+        # A retry can recover a named sandbox created before publication. It
+        # still needs verification. Existing admitted workspaces above retain
+        # the user's subsequent commits and are never reset to the image SHA.
         image = context.get("environment_snapshot_id")
-        app = await modal.App.lookup.aio(self.runtime.settings.modal_app, create_if_missing=True)
-        try:
-            return await modal.Sandbox.create.aio(
-                app=app, name=name, image=runtime_image(modal.Image.from_id(image) if image else None),
-                workdir="/workspace", timeout=self.runtime.settings.computer_lifetime,
-                idle_timeout=self.runtime.settings.computer_idle_timeout,
-            )
-        except modal.exception.AlreadyExistsError:
-            return await modal.Sandbox.from_name.aio(self.runtime.settings.modal_app, name)
+        if image:
+            try:
+                await self.verify_prepared_repository(sandbox, context)
+            except ValueError:
+                # This named computer has never been published for model/user
+                # work. Retire a rejected image so a rebuild can retry cleanly.
+                await sandbox.terminate.aio()
+                raise preparation_blocked("prepared_environment_unverified") from None
+        return sandbox
 
     async def restore(self, sandbox: Any, package: Path, destination: str, digest: str) -> dict[str, Any]:
         remote = "/tmp/moyai-recovery-" + digest + ".zip"
@@ -493,7 +540,17 @@ class ProductWorkspaceRestorer:
                 "Original files and recovery packages remain available from the preserved session link."
             )
         if context.get("environment_snapshot_id") and "[Prepared project]" not in prepared.prompt:
-            prepared.prompt += "\n\n[Prepared project]\nThe validated project checkout is /workspace/repo."
+            prepared.prompt += (
+                "\n\n[Prepared project]\nCheckout: /workspace/repo."
+                "\nSelected repository: " + str(context.get("repo_url", "")) +
+                "\nPrepared build: " + str(context.get("environment_build_id", "")) +
+                "\nInitial image commit: " + str(context.get("commit_sha", "")) +
+                "\nThis identifies the selected image, not the current working tree. "
+                "Existing working files may have changed since preparation; inspect Git before editing. "
+                "A filesystem image does not preserve running processes or establish current service health. "
+                "Check the repository's setup instructions and dependency lockfiles, start the services needed "
+                "for this task, and verify their health and relevant tests before claiming readiness."
+            )
         elif context.get("repo_url") and "[Earlier project reference]" not in prepared.prompt:
             prepared.prompt += (
                 "\n\n[Earlier project reference]\n" + context["repo_url"] +
