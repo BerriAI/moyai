@@ -18,11 +18,14 @@ from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from temporalio.client import WorkflowExecutionStatus
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
 from moyai.contracts import NewMessage, NewSession
+from moyai.history_handoff import AgentCheckpoint
 from moyai.inference_usage import InferenceUsage
+from moyai.maintenance_workspace import preserve, wait_reason
 from moyai.models import Effect, Session, Turn, User, now
 from moyai.product_drain import ProductDrainError, ProductDrainService
 from moyai.product_drain_models import ProductDrainReceipt, ProductDrainState
@@ -540,6 +543,52 @@ async def test_accepted_steering_never_hides_outstanding_effects_or_requests(dra
     async with product.database.sessions() as db:
         saved = await db.get(type(row), row.id)
         assert (saved.state if kind == "effect" else saved.status) == "pending"
+
+
+@pytest.mark.parametrize("boundary", ["before_prepare", "settled_graph", "deferred_waiting"])
+async def test_kubernetes_pause_can_resume_but_cannot_retire_worker(drain, boundary):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, turn, prepared = await authority_fixtures.active_turn(product)
+    reference = {"provider": "kubernetes", "id": "test-volume"}
+    await product.database.save_workspace_reference(prepared.scope, reference)
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    run = {"workflow_id": turn.workflow_id, "workflow_run_id": "original-run"}
+    runtime = SimpleNamespace(database=product.database, product_drain=service)
+    graph = AgentCheckpoint(prepared=prepared, conversation="{}", workspace=reference, run_step=0, output_retries_used=0)
+    if boundary == "settled_graph":
+        with pytest.raises(ApplicationError) as denied:
+            await preserve(runtime, graph, **run, boundary=boundary)
+        assert wait_reason(denied.value) == "workspace_snapshot_unsupported"
+    elif boundary == "deferred_waiting":
+        async with product.database.sessions.begin() as db:
+            stored = await db.get(Turn, turn.id)
+            stored.status, stored.result_accepted, stored.conversation = "waiting", True, "saved-conversation"
+        await service.park_deferred(turn.id, 2, **run)
+    else:
+        assert (await service.checkpoint(turn.id, **run, boundary=boundary)).paused
+
+    status = await service.status()
+    assert status["state"] == "draining" and status["counts"]["parked"] == 0
+    with pytest.raises(ProductDrainError, match="unsafe work"):
+        await service.require_checkpoint_retirement("pause")
+    async with product.database.sessions.begin() as db:
+        db.add(Effect(id="outstanding", session_id=session.id, turn_id=turn.id, actor_id=product.actor.id,
+                      tool_name="shell", arguments="{}", fingerprint="e" * 64, state="pending"))
+    with pytest.raises(ProductDrainError, match="unknown outcomes"):
+        await service.request(paused=False, expected_generation=2, request_key="resume")
+    async with product.database.sessions.begin() as db:
+        (await db.get(Effect, "outstanding")).state = "confirmed"
+    resumed = await service.request(paused=False, expected_generation=2, request_key="resume")
+    assert resumed["generation"] == 3 and not resumed["paused"]
+    if boundary == "settled_graph":
+        assert (await preserve(runtime, graph, **run, boundary=boundary)).reference is None
+    elif boundary == "before_prepare":
+        assert not (await service.checkpoint(turn.id, **run, boundary=boundary)).paused
+    async with product.database.sessions() as db:
+        assert (await db.get(Session, session.id)).snapshot is None
+        if boundary != "deferred_waiting":
+            assert (await db.get(ProductDrainReceipt, (turn.id, 2))).resumed_generation == 3
 
 
 async def test_checkpoint_is_idempotent_and_resume_preserves_generation_receipts(drain):

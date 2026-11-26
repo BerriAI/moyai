@@ -179,11 +179,8 @@ async def test_maintenance_never_marks_a_live_volume_as_preserved(runtime, activ
         await preserve(runtime, graph, workflow_id=turn.workflow_id, workflow_run_id="run", boundary="settled")
     assert wait_reason(denied.value) == "workspace_snapshot_unsupported"
     async with runtime.database.sessions.begin() as db:
-        assert (await db.get(ProductDrainReceipt, (turn.id, generation))).phase == "blocked"
+        assert (await db.get(ProductDrainReceipt, (turn.id, generation))).phase == "resume_only"
         assert (await db.get(Session, session.id)).snapshot is None
-        (await db.get(ProductDrainState, 1)).paused = False
-    result = await preserve(runtime, graph, workflow_id=turn.workflow_id, workflow_run_id="run", boundary="settled")
-    assert result.reference is None
     saved_graph.assert_not_awaited()
 
 

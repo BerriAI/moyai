@@ -172,7 +172,9 @@ The native UI can start a coding session without a repository selection.
 Desktop and browser controls, credential-bearing commands, automatic repository
 imports, prepared environments, and machine snapshots are unavailable with this
 provider. Finish active sessions before a release that requires a maintenance
-snapshot. An unresolved command receipt requires reconciliation before resuming.
+snapshot. If a pause interrupts a session, use the maintenance resume command
+once outstanding requests and effects have settled. The session can continue
+on its original volume. Worker retirement still requires a completed drain.
 
 Build the coding image from the same source revision as the worker. The supplied
 Dockerfile includes the runtime, shell, Python, Git, Node, npm and the bundled
