@@ -10,7 +10,7 @@ from datetime import datetime
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.messages import ToolReturnPart
 
-from .connection_policy import ConnectionPolicy
+from .attention_policy import attention_reads
 from .contracts import Grant
 from .dot_contracts import DotDecision, DotEvidence
 
@@ -18,7 +18,7 @@ from .dot_contracts import DotDecision, DotEvidence
 # An unsupported record shape fails closed instead of guessing its identity.
 IDENTITY_FIELDS = ("html_url", "web_url", "permalink", "url", "id", "uid", "uuid")
 VERSION_FIELDS = ("updated_at", "updatedAt", "updated", "last_modified", "lastModified", "version", "revision", "etag")
-COLLECTION_FIELDS = ("data", "items", "result", "results", "records", "events", "messages", "issues", "pull_requests", "nodes", "edges", "node", "comments", "issue", "pull_request")
+COLLECTION_FIELDS = ("data", "items", "result", "results", "records", "events", "messages", "matches", "issues", "pull_requests", "nodes", "edges", "node", "comments", "issue", "pull_request")
 
 
 def structured_records(value: object) -> Iterator[dict | None]:
@@ -77,7 +77,7 @@ def connected_records(conversation: str, grants: list[Grant]) -> list[tuple[str,
     allowed = {
         f"{grant.kind}_{grant.id[:8]}_{name}": grant.id
         for grant in grants
-        for name in (ConnectionPolicy.model_validate(grant.policy).allowed_tools or [])
+        for name in attention_reads(grant)
     }
     return [
         (allowed[part.tool_name], record)

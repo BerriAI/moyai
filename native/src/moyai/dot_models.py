@@ -98,3 +98,25 @@ class DotItem(Base):
     snoozed_until: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
     last_seen_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class DotCanonicalItem(Base):
+    """Canonical grants keep their real identity, without a native account projection."""
+
+    __tablename__ = "moyai_dot_canonical_items"
+    __table_args__ = (UniqueConstraint("owner_id", "source_key", name="dot_canonical_item_source"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
+    connection_id: Mapped[str] = mapped_column(String(512))
+    account_key: Mapped[str] = mapped_column(String(64))
+    source_key: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    state: Mapped[Literal["open", "resolved", "dismissed", "snoozed"]] = mapped_column(String(20), default="open")
+    owner_controlled: Mapped[bool] = mapped_column(Boolean, default=False)
+    owner_revision: Mapped[int] = mapped_column(Integer, default=0)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    snoozed_until: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+    last_seen_at: Mapped[str] = mapped_column(String(40), default=now)

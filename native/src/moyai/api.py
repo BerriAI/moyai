@@ -368,7 +368,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         app.include_router(product_auth_routes(runtime, actor))
     if runtime.product_connections is not None:
         from .product_connections import routes as product_connection_routes
-        app.include_router(product_connection_routes(runtime.product_connections))
+        app.include_router(product_connection_routes(runtime.product_connections, runtime=runtime))
     if runtime.product_secrets is not None:
         app.include_router(runtime.product_secrets.routes())
     if runtime.product_inference is not None:
@@ -394,6 +394,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     app.include_router(settings_routes(runtime, actor))
     from .personal_oauth import routes as personal_oauth_routes
     app.include_router(personal_oauth_routes(runtime, actor))
+    from .connection_attention_api import routes as connection_attention_routes
+    app.include_router(connection_attention_routes(runtime, actor))
     from .swarm_routes import routes as swarm_routes
     app.include_router(swarm_routes(runtime, actor))
 
@@ -1004,16 +1006,36 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 from .personal_oauth import native_connections
                 query = query.where(native_connections())
             rows = await db.scalars(query.order_by(Connection.id))
-            return canonical + [
+            result = canonical + [
                 ConnectionView.model_validate(connection_view(row)) for row in rows if not shared or row.shared
             ]
+            from .connection_attention import view as attention_view
+            from .contracts import Grant
+            for item in result:
+                item.attention = await attention_view(
+                    runtime.product_automations, runtime.database, db, user.id,
+                    Grant(
+                        id=item.id, kind=item.kind, revision=item.revision, credential="",
+                        read_only=item.read_only, policy=item.policy.model_dump(),
+                    ),
+                    shared=item.shared or item.owner_id != user.id, enabled=item.enabled,
+                )
+            return result
 
     @app.post("/api/connections", operation_id="createConnection")
-    async def create_connection(body: ConnectionInput, user: User = Depends(actor)) -> ConnectionView:
+    async def create_connection(
+        body: ConnectionInput, request: Request, user: User = Depends(actor),
+    ) -> ConnectionView:
+        from .connection_attention import authorize_mutation, configure, native_grant
+        from .connection_attention import view as attention_view
+        from .connection_attention_discovery import prepare_policy
+
         if runtime.product_connections is not None and body.kind not in {"mcp", "litellm"}:
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
         if body.shared and user.role != "admin":
             raise HTTPException(403, "Only administrators can publish a shared connection.")
+        if body.shared and body.policy.use_proactively:
+            raise HTTPException(422, "Proactive checks require a private personal account.")
         if body.kind != "mcp" and not body.credential.get_secret_value():
             raise HTTPException(422, "Provide a credential.")
         if body.policy.mcp is not None:
@@ -1023,27 +1045,51 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 raise HTTPException(422, str(error)) from None
         if body.kind == "litellm":
             body.policy.gateway_discovery = await discover_gateway(body, user)
+        row = Connection(
+            id=new_id(), owner_id=user.id, kind=body.kind, name=body.name,
+            credential=runtime.security.seal(body.credential.get_secret_value()),
+            shared=body.shared, read_only=body.read_only, enabled=body.enabled,
+            revision=1, policy=body.policy.model_dump_json(),
+        )
+        if body.policy.use_proactively:
+            if not body.enabled:
+                raise HTTPException(422, "Enable the connection before opting into proactive checks.")
+            policy = await prepare_policy(runtime, request, user, native_grant(row))
+            row.policy = policy.model_dump_json()
+            await runtime.database.dots.open(user)
+        sync_id = None
         async with runtime.database.sessions.begin() as db:
-            row = Connection(
-                id=new_id(), owner_id=user.id, kind=body.kind, name=body.name,
-                credential=runtime.security.seal(body.credential.get_secret_value()),
-                shared=body.shared, read_only=body.read_only, enabled=body.enabled,
-                policy=body.policy.model_dump_json(),
-            )
+            await authorize_mutation(runtime, db, request, user)
             db.add(row)
-        return ConnectionView.model_validate(connection_view(row))
+            await db.flush()
+            if runtime.product_automations is not None and body.policy.use_proactively:
+                sync_id = await configure(runtime.product_automations, db, request.state.product_identity_grant)
+            result = ConnectionView.model_validate(connection_view(row))
+            result.attention = await attention_view(
+                runtime.product_automations, runtime.database, db, user.id, native_grant(row),
+                shared=row.shared, enabled=row.enabled,
+            )
+        if sync_id is not None and runtime.product_automations is not None:
+            await runtime.product_automations.request_sync(sync_id)
+        return result
 
     @app.put("/api/connections/{connection_id}", operation_id="updateConnection")
     async def edit_connection(
-        connection_id: str, body: ConnectionInput, user: User = Depends(actor),
+        connection_id: str, body: ConnectionInput, request: Request, user: User = Depends(actor),
     ) -> ConnectionView:
+        from .connection_attention import authorize_mutation, configure, native_grant
+        from .connection_attention import view as attention_view
+        from .connection_attention_discovery import prepare_policy
+
         if runtime.product_connections is not None and body.kind not in {"mcp", "litellm"}:
             raise HTTPException(409, "Manage the existing product accounts in Connections.")
-        async with runtime.database.sessions.begin() as db:
+        async with runtime.database.sessions() as db:
             row = await db.get(Connection, connection_id)
             if row is None or row.owner_id != user.id:
                 raise HTTPException(404, "Connection not found.")
-            if ConnectionPolicy.model_validate_json(row.policy).oauth:
+            original = native_grant(row)
+            previous = ConnectionPolicy.model_validate_json(row.policy)
+            if previous.oauth:
                 raise HTTPException(409, "Manage this account through personal Connect and Disconnect.")
             if runtime.product_connections is not None and row.kind not in {"mcp", "litellm"}:
                 raise HTTPException(409, "Manage the existing product accounts in Connections.")
@@ -1051,50 +1097,89 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 raise HTTPException(422, "Create a new connection to change its service.")
             if (row.shared or body.shared) and user.role != "admin":
                 raise HTTPException(403, "Only administrators can change a shared connection.")
-            if body.kind == "litellm":
-                previous = ConnectionPolicy.model_validate_json(row.policy)
-                if (
-                    previous.gateway and body.policy.gateway
-                    and previous.gateway.url != body.policy.gateway.url
-                    and not body.credential.get_secret_value()
-                ):
-                    raise HTTPException(422, "Enter a replacement key when changing the gateway URL.")
-                # Discovery is server-authored; never accept a client-supplied catalog.
-                body.policy.gateway_discovery = previous.gateway_discovery
-                if body.enabled:
-                    body.policy.gateway_discovery = await discover_gateway(
-                        body, user, runtime.security.unseal(row.credential).decode(),
-                    )
-            if body.policy.mcp is not None:
-                try:
-                    validate_mcp_endpoint(body.policy.mcp, runtime.settings.mcp_allowed_origins)
-                except ValueError as error:
-                    raise HTTPException(422, str(error)) from None
-                previous = ConnectionPolicy.model_validate_json(row.policy)
-                if (
-                    previous.mcp is not None and previous.mcp.url != body.policy.mcp.url
-                    and not body.credential.get_secret_value() and not body.clear_credential
-                    and runtime.security.unseal(row.credential)
-                ):
-                    raise HTTPException(422, "Replace or clear the saved credential when changing the MCP endpoint.")
-            values: dict[str, Any] = {
-                "name": body.name, "enabled": body.enabled,
-                "shared": body.shared, "read_only": body.read_only,
-                "policy": body.policy.model_dump_json(), "revision": Connection.revision + 1,
-            }
-            if body.clear_credential:
-                values["credential"] = runtime.security.seal("")
-            elif body.credential.get_secret_value():
-                values["credential"] = runtime.security.seal(body.credential.get_secret_value())
-            # Concurrent edits must not share a revision or invalidate the
-            # endpoint/retained-token decision made against this exact row.
+        if "use_proactively" not in body.policy.model_fields_set:
+            body.policy.use_proactively = previous.use_proactively
+            if (
+                body.clear_credential or body.credential.get_secret_value()
+                or previous.mcp != body.policy.mcp or previous.gateway != body.policy.gateway
+            ):
+                # A replacement account needs explicit consent on this save.
+                body.policy.use_proactively = False
+        if "attention_tools" not in body.policy.model_fields_set:
+            body.policy.attention_tools = previous.attention_tools
+        if body.shared and body.policy.use_proactively:
+            raise HTTPException(422, "Proactive checks require a private personal account.")
+        if body.kind == "litellm":
+            if (
+                previous.gateway and body.policy.gateway
+                and previous.gateway.url != body.policy.gateway.url
+                and not body.credential.get_secret_value()
+            ):
+                raise HTTPException(422, "Enter a replacement key when changing the gateway URL.")
+            # Both gateway and read-tool discovery happen before the write transaction.
+            body.policy.gateway_discovery = previous.gateway_discovery
+            if body.enabled:
+                body.policy.gateway_discovery = await discover_gateway(
+                    body, user, runtime.security.unseal(original.credential).decode(),
+                )
+        if body.policy.mcp is not None:
+            try:
+                validate_mcp_endpoint(body.policy.mcp, runtime.settings.mcp_allowed_origins)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from None
+            if (
+                previous.mcp is not None and previous.mcp.url != body.policy.mcp.url
+                and not body.credential.get_secret_value() and not body.clear_credential
+                and runtime.security.unseal(original.credential)
+            ):
+                raise HTTPException(422, "Replace or clear the saved credential when changing the MCP endpoint.")
+        credential = (
+            runtime.security.seal("") if body.clear_credential else
+            runtime.security.seal(body.credential.get_secret_value()) if body.credential.get_secret_value()
+            else original.credential
+        )
+        if body.enabled and body.policy.use_proactively:
+            from .contracts import Grant
+            body.policy = await prepare_policy(runtime, request, user, Grant(
+                id=original.id, kind=original.kind, revision=original.revision,
+                credential=credential, read_only=body.read_only, policy=body.policy.model_dump(),
+            ), original=original)
+            await runtime.database.dots.open(user)
+        values: dict[str, Any] = {
+            "name": body.name, "enabled": body.enabled, "shared": body.shared, "read_only": body.read_only,
+            "policy": body.policy.model_dump_json(), "credential": credential, "revision": original.revision + 1,
+        }
+        sync_id = None
+        reconcile = runtime.product_automations is not None and bool(
+            previous.use_proactively or body.policy.use_proactively or previous.attention_tools is not None
+            or (original.read_only and previous.allowed_tools)
+        )
+        async with runtime.database.sessions.begin() as db:
+            await authorize_mutation(runtime, db, request, user)
+            # Discovery may race another edit. Commit only against the exact revision read above.
             changed = await db.scalar(update(Connection).where(
-                Connection.id == row.id, Connection.revision == row.revision,
+                Connection.id == original.id, Connection.revision == original.revision,
             ).values(**values).returning(Connection.id).execution_options(synchronize_session=False))
             if changed is None:
                 raise HTTPException(409, "The connection changed while saving. Refresh before trying again.")
-            await db.refresh(row)
-        return ConnectionView.model_validate(connection_view(row))
+            row = await db.get(Connection, original.id, populate_existing=True)
+            assert row is not None
+            if reconcile:
+                assert runtime.product_automations is not None
+                sync_id = await configure(
+                    runtime.product_automations, db, request.state.product_identity_grant,
+                    changed=frozenset({row.id}) if (
+                        previous.use_proactively or body.policy.use_proactively or previous.attention_tools is not None
+                    ) else frozenset(),
+                )
+            result = ConnectionView.model_validate(connection_view(row))
+            result.attention = await attention_view(
+                runtime.product_automations, runtime.database, db, user.id, native_grant(row),
+                shared=row.shared, enabled=row.enabled,
+            )
+        if sync_id is not None and runtime.product_automations is not None:
+            await runtime.product_automations.request_sync(sync_id)
+        return result
 
     @app.get("/api/gateway/defaults", operation_id="getGatewayDefaults")
     async def gateway_defaults(user: User = Depends(actor)) -> GatewayDefaults:

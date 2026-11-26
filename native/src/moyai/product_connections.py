@@ -18,7 +18,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
-from functools import wraps
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid5
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from .database import Database
     from .product_resources import ProductResources
+    from .runtime import Runtime
 
 Provider = Literal["github", "gitlab", "linear", "notion", "slack"]
 PROVIDERS = ("github", "gitlab", "linear", "notion", "slack")
@@ -231,7 +232,7 @@ class ProductConnections:
                     native_connections() if surface == "web" or (surface == "slack" and self.personal_github)
                     else (
                         Connection.kind.in_(["mcp", "litellm"])
-                        | (native_connections() & Connection.kind.in_(["gmail", "google_calendar"]))
+                        | (native_connections() & Connection.kind.in_(["github", "linear", "notion", "gmail", "google_calendar"]))
                         if surface == "automation" else Connection.kind.in_(["mcp", "litellm"])
                     ),
                 )))
@@ -313,6 +314,8 @@ class ProductConnections:
             raise PermissionError("The selected product account authority changed.")
 
     async def check(self, scope: RunScope, grant: Grant, *, write: bool = False) -> None:
+        if write and scope.attention:
+            raise PermissionError("Attention cannot write to connected accounts.")
         if grant.policy.get("oauth"):
             if grant not in scope.grants:
                 raise PermissionError("This personal account was not selected.")
@@ -969,7 +972,7 @@ class ConnectionRoute(APIRoute):
         return safe
 
 
-def routes(service: ProductConnections) -> APIRouter:
+def routes(service: ProductConnections, *, runtime: Runtime | None = None) -> APIRouter:
     """Mount before native CRUD/dynamic connection-ID routes in product mode."""
     from app.connection_authority import save_if_unchanged, set_policy
     from app.connector_errors import ConnectorError
@@ -1019,7 +1022,19 @@ def routes(service: ProductConnections) -> APIRouter:
                 response_model=route.response_model, operation_id=route.operation_id,
                 openapi_extra=route.openapi_extra, include_in_schema=route.include_in_schema,
             )
-    personal_callback = connectors.personal_slack.routes(router)
+    async def changed(provider: str, owner: str | None = None) -> None:
+        if runtime is not None:
+            from .connection_attention import provider_changed
+            await provider_changed(runtime, provider, owner=owner)
+
+    from . import personal_slack_attention
+
+    personal_callback = connectors.personal_slack.routes(
+        router,
+        after_change=partial(personal_slack_attention.changed, runtime) if runtime is not None else None,
+        attention_choice=partial(personal_slack_attention.choice, runtime) if runtime is not None else None,
+        attention_status=partial(personal_slack_attention.status, runtime) if runtime is not None else None,
+    )
 
     @router.get("/api/product/connections", operation_id="listOrganizationConnections")
     async def accounts(request: Request) -> list[OrganizationConnection]:
@@ -1151,6 +1166,7 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(save_if_unchanged, store, security, provider, value, label, expected)
         await source_database(connectors.record_check, provider, "healthy")
         await source_database(connectors.audit, provider, "Connected for the organization")
+        await changed(provider)
         return OrganizationConnectionConnected(connected=True, label=label)
 
     def dot_status() -> SlackDotConnectionStatus:
@@ -1191,6 +1207,7 @@ def routes(service: ProductConnections) -> APIRouter:
         if provider != "slack_dot":
             await source_database(connectors.expire_approvals, provider)
         await source_database(connectors.audit, provider, "Disconnected from the organization")
+        await changed(provider)
         return OrganizationConnectionDisconnected(connected=False)
 
     @router.patch("/api/connections/slack-dot/policy", operation_id="updateSlackDotConnectionPolicy")
@@ -1207,6 +1224,7 @@ def routes(service: ProductConnections) -> APIRouter:
         if not body.enabled or body.read_only:
             await source_database(connectors.expire_approvals, provider)
         await source_database(connectors.audit, provider, "Updated organization connection policy")
+        await changed(provider)
         return OrganizationConnectionPolicy.model_validate(await source_database(connectors.policy, provider))
 
     @router.post("/api/connections/{provider}/check", operation_id="checkOrganizationConnection")
@@ -1303,6 +1321,7 @@ def routes(service: ProductConnections) -> APIRouter:
         )
         await source_database(connectors.record_check, provider, "healthy")
         await source_database(connectors.audit, provider, "Authorized an organization connection")
+        await changed(provider)
         return RedirectResponse(app_path(service.product.settings.public_url, "/?connection=success#connections"), status_code=303)
 
     return router

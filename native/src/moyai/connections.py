@@ -151,8 +151,12 @@ def connection_tools(security: Security, *, read_only: bool = False) -> Toolset[
     catalog = ConnectionCatalog()
 
     def scoped(ctx: RunContext[RunScope], connection: SelectedConnection) -> AbstractToolset[RunScope]:
+        from .attention_policy import attention_reads
+
         grant, policy = connection.grant, connection.policy
-        if read_only and (not grant.read_only or not policy.allowed_tools):
+        restricted = read_only or ctx.deps.attention
+        reads = attention_reads(grant) if restricted else frozenset()
+        if restricted and not reads:
             raise PermissionError("Attention requires an explicit read-only tool policy.")
         if policy.oauth:
             from .personal_oauth_tools import PersonalOAuthToolset
@@ -207,7 +211,9 @@ def connection_tools(security: Security, *, read_only: bool = False) -> Toolset[
             ]
 
         return (
-            native.filtered(lambda _ctx, tool: policy.allows(tool.name) and (not read_only or read_only_tool(tool)))
+            native.filtered(lambda _ctx, tool: policy.allows(tool.name) and (
+                not restricted or (tool.name in reads and read_only_tool(tool))
+            ))
             .prepared(prepare_approval)
             .approval_required(lambda _ctx, tool, _args: policy.needs_approval(approval_requirement(tool)))
             .prefixed(connection.prefix)
@@ -238,6 +244,14 @@ def connection_tools(security: Security, *, read_only: bool = False) -> Toolset[
 
     def build(ctx: RunContext[RunScope], tool_name: str | None = None) -> AbstractToolset[RunScope]:
         connections = selected_connections(ctx.deps)
+        if (read_only or ctx.deps.attention) and any(
+            item.policy.product is not None and not (
+                item.grant.kind == "slack"
+                and item.policy.product.get("personal_owner") == ctx.deps.actor_id
+                and item.policy.product.get("access") == "personal_reads"
+            ) for item in connections
+        ):
+            raise PermissionError("Attention requires personal accounts, not workspace grants.")
         repositories = tuple(item for item in connections if item.shared_github)
         if tool_name is None:
             return CombinedToolset([

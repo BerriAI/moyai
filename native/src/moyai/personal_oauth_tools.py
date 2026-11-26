@@ -33,7 +33,7 @@ class PersonalOAuthToolset(AbstractToolset[RunScope]):
     async def native(self, *, write: bool = False):
         value = await self.service.credentials(self.scope, self.grant, write=write)
         return GitHub[RunScope](
-            id=self.id, auth=value["access_token"], read_only=self.grant.read_only,
+            id=self.id, auth=value["access_token"], read_only=self.grant.read_only or self.scope.attention,
             include_instructions=False,
         ).get_toolset()
 

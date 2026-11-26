@@ -52,18 +52,47 @@ turn exactly once.
 
 ## Connections and permissions
 
-Attention requires an enabled, owner-private, read-only native connection with a
-nonempty explicit `allowed_tools` policy. Only allowlisted tools that also have
-read-only annotations are exposed. Review the allowed operations and use
-provider-enforced read-only endpoints/scopes where available. MCP annotations
-alone are not treated as permission to expose an arbitrary tool catalog.
+Personal GitHub, Linear, Notion, Gmail and Calendar OAuth accounts can opt into
+automatic attention. Native MCP and LiteLLM MCP accounts can opt in while saving
+the connection: the server discovers declared read-only tools before the write
+transaction and saves the selected names as `attention_tools`. Initial consent
+can select the current read catalog; later edits preserve or narrow that selection
+without adding newly advertised tools. Discovery failure or an empty read catalog
+fails the proactive save with a clear error.
 
-There is no first-party Gmail or Calendar adapter in this change. These sources
-require an existing authenticated remote MCP connection with the above policy.
-Ordinary chat connections and canonical organization connections do not
-implicitly grant background monitoring access. Changing connection revisions
-requires reviewing and enabling the schedule again. The same account may remain
-selected for ordinary conversation without changing the captured observer scope.
+Attention intersects those names with ordinary connection permissions and current
+read-only tool annotations. It cannot execute writes, including previously
+approved writes. Ordinary chat keeps its original grant, allowed tools and approval
+policy; opting in never converts a writable chat connection into a read-only one.
+Gmail and Calendar remain read-only. Historical manually configured read-only
+connections with explicit `allowed_tools` retain their scope.
+
+Personal Slack can opt in during OAuth, limited to search, channel and thread
+reads. The one-use OAuth state binds the choice, and the callback enrolls only its
+exact saved personal account. An omitted choice preserves existing consent without
+opting in an unselected account. A separate `attention.consent_revision` fences
+Slack consent updates and pending OAuth choices; clients send it as
+`consent_revision` with attention edits or explicit OAuth choices. It does not
+change the canonical grant revision. OAuth reconnect and re-enable preserve
+previously narrowed read selections, including an empty selection after reduction.
+Organization access never substitutes for a
+revoked personal account. Shared workspace connections, including canonical
+GitLab, are excluded. Existing accounts do not opt in automatically.
+
+Consent changes persist with the existing automation's generation and sync intent.
+Disable, disconnect and permission changes fence stale executions. Owner-paused
+or retired attention stays paused or retired. Discovery can enroll up to 30
+accounts in one schedule. Each occurrence checks at most four, rotating fairly
+through the sorted pool using persisted admission history. Retries retain the
+same selection; skipped admissions do not advance rotation, while failed admitted
+checks do. Deferred accounts make a successful scan partial, and the limit remains
+12 research tool calls per occurrence. Adding a fifth account does not pause the check.
+Standalone installations report that scheduling is unavailable.
+
+The persisted purpose scope requires native protocol 16 and is not compatible
+with overlapping protocol-15 readers. Follow the maintenance compatibility and
+rollback requirements in [deployment guidance](pydantic-deployment.md).
+
 Conversational setup preserves the requested account subset. With multiple
 selected accounts it requires an explicit subset rather than defaulting to all.
 Edits may retain existing accounts without selecting them again, but adding an
@@ -71,15 +100,31 @@ account requires that account's current turn grant.
 
 ## Verification
 
+`test_connection_attention.py` covers provider opt-in and revocation, unchanged
+ordinary write approval, read-only execution, dynamic discovery and exact personal
+Slack consent on disposable PostgreSQL. External provider implementations in that
+suite are substituted; it is supplementary to actual-app verification.
+`test_connection_attention_publication.py` exercises actual publication, listing,
+owner controls and canonical Slack revocation on PostgreSQL. Canonical follow-ups
+use the additive v35 table; native follow-ups keep their historical table and
+foreign key. Neither storage path grants access without current owner consent.
 `test_personal_dot.py` covers identity, quiet checks, account isolation, source
 validation, deduplication, overlapping replies, revocation and the actual Temporal
 execution path. `test_dot_automations.py` exercises canonical admission and
 captured grants on disposable PostgreSQL. Inference tests cover the new agent's
 authorization and retry accounting. Browser checks exercise the real React app
 against synthetic APIs, including 1440, 768 and 320 pixel layouts.
+`test_attention_batches.py` covers bounded rotation, retries and deferred-account
+revocation. `test_dot_provider_records.py` checks native Slack/Notion response
+shapes and verifies that quoted content stays with its own identity and revision.
 
-These tests supplement the separate baseline/final actual-app proof: a real
-GitHub read-only MCP check posts into the Dot, a live model answers the user's
-reply using that context, and a repeat check leaves the chat unchanged. Calendar
-and email behavior must be verified with a suitable connected provider before
-claiming those integrations work.
+For connection enrollment, run the same workflow through the baseline and final
+applications with disposable PostgreSQL and Temporal. Enable proactive use on
+saved personal OAuth accounts, then save a personal MCP connection whose catalog
+offers both read and write tools. Check that one ready schedule is persisted,
+ordinary chat retains its approved tools, and a real configured model can read
+through the narrower attention grant without a write call. Adding a fifth account
+must keep that schedule active and rotate saved admissions through every account.
+Synthetic provider credentials and records verify enrollment and execution
+boundaries; they do not verify a provider's OAuth exchange, real inbox contents
+or external notification delivery.

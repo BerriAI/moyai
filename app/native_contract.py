@@ -9,9 +9,10 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Drain old participants before admitting Google accounts to attention workers
-# or direct Dot conversations; older workers do not understand these grants.
-NATIVE_PROTOCOL_REVISION = 15
+# Attention-specific read-tool consent extends persisted ConnectionPolicy.
+# Retire protocol-15 readers before writing it; they reject unknown policy keys.
+# All roles must also understand attention's attenuation of write-capable grants.
+NATIVE_PROTOCOL_REVISION = 16
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

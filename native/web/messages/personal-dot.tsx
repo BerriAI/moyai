@@ -47,7 +47,7 @@ export function DotWelcome({ dot, onDraft, hasDraft }: { dot: DotView; onDraft: 
     <h2>What should I know about your day?</h2>
     <p className="muted">This is your private, ongoing conversation. Tell me your priorities, ask for help, or pick up where we left off.</p>
     {dot.attention_available
-      ? <p className="muted">Connect Gmail or Google Calendar with “Use proactively” enabled, and I’ll check them automatically for useful developments and unfinished work. No reminders or schedules to set up.</p>
+      ? <p className="muted">Connect your personal accounts with “Use proactively” enabled, and I’ll check them automatically for useful developments and unfinished work. No reminders or schedules to set up.</p>
       : <p className="muted">You can chat here now. Proactive checks need the product automation service.</p>}
     <div className="dot-starters">
       {["Help me decide what to focus on today.", "Help me prepare for my upcoming meetings."].map(text =>
@@ -116,7 +116,7 @@ export function DotFollowing() {
       {error && <p role="alert">{error} <Button variant="outline" size="sm" onClick={() => setRefresh(value => value + 1)}>Retry</Button></p>}
       {!data && !error && <p role="status">Loading follow-ups…</p>}
       {data && <div className="dot-following-items">
-        {!items?.length && <p>{query ? "No matching follow-ups." : "Nothing to follow yet. With “Use proactively” enabled for Gmail or Google Calendar, useful discoveries will appear here automatically."}</p>}
+        {!items?.length && <p>{query ? "No matching follow-ups." : "Nothing to follow yet. With “Use proactively” enabled for your personal accounts, useful discoveries will appear here automatically."}</p>}
         {items?.map(item => <article key={item.id} className="dot-following-item">
           <h3>{item.title}</h3>
           <p>{item.summary}</p>

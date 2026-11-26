@@ -17,6 +17,18 @@ const descriptions: Record<PersonalOAuthView["provider"], string> = {
   gmail: "Let Moyai read your email and suggest replies or follow-ups.",
 }
 
+function connectedNotice(row: PersonalOAuthView) {
+  const destination = row.provider === "github" ? "private chats and linked Slack requests" : "private chats"
+  const connected = `${row.name} is connected for ${destination}.`
+  if (!row.use_proactively) return connected
+  switch (row.attention_status) {
+    case "active": return `${connected} Dot attention is active.`
+    case "pending": return `${connected} Dot is setting up its next check.`
+    case "paused": return `${connected} Dot attention is paused.`
+    default: return `${connected} Check its attention status below.`
+  }
+}
+
 export function PersonalConnections({ userId, individual, children }: { userId: string; individual: boolean; children?: React.ReactNode }) {
   const [revision, setRevision] = useState(0)
   const [state, setState] = useState<{ userId: string; rows?: PersonalOAuthView[]; error?: string }>({ userId })
@@ -50,6 +62,22 @@ export function PersonalConnections({ userId, individual, children }: { userId: 
     }
   }, [userId])
   const rows = state.userId === userId ? state.rows : undefined
+  useEffect(() => {
+    if (!rows?.some(row => row.attention_status === "pending") || busy !== null) return
+    const controller = new AbortController()
+    const started = generation.current, auth = csrfToken()
+    const timer = window.setTimeout(() => {
+      void listPersonalConnections({ signal: controller.signal }).then(
+        ({ data }) => {
+          if (!controller.signal.aborted && started === generation.current && auth === csrfToken()) {
+            setState({ userId, rows: data })
+          }
+        },
+        () => { /* Preserve the saved state; a later visit can retry. */ },
+      )
+    }, 2000)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [rows, busy, userId])
   const run = async (row: PersonalOAuthView, action: "connect" | "disconnect") => {
     if (pending.current) return
     pending.current = true
@@ -90,7 +118,7 @@ export function PersonalConnections({ userId, individual, children }: { userId: 
         path: { provider: row.provider }, body: { revision: row.revision, use_proactively: enabled },
       })
       if (current()) {
-        setNotice(enabled ? `${row.name} is included in Dot attention.` : `Proactive use of ${row.name} is off.`)
+        setNotice(enabled ? `Proactive use of ${row.name} is on.` : `Proactive use of ${row.name} is off.`)
         setRevision(value => value + 1)
       }
     } catch {
@@ -103,32 +131,33 @@ export function PersonalConnections({ userId, individual, children }: { userId: 
   const params = new URLSearchParams(location.search)
   const outcome = params.get("personal_connection")
   const connected = rows?.find(row => row.provider === params.get("provider") && row.connected)
-  const callbackNotice = outcome === "success" && connected ? `${connected.name} is connected and ready for your ${connected.use_proactively ? "Dot and private chats" : connected.provider === "github" ? "private chats and linked Slack requests" : "private chats"}.`
+  const callbackNotice = outcome === "success" && connected ? connectedNotice(connected)
     : outcome === "cancelled" ? "Authorization cancelled. Your existing connections are unchanged."
       : outcome === "expired" ? "This authorization request expired or was replaced. Click Connect to try again."
         : outcome === "failed" ? "The provider did not confirm authorization. Click Connect to try again." : ""
   return <section className="ns-personal-connections" aria-label="Your apps">
     <h2>Your apps</h2>
-    <p className="ns-help">Connect your own account and approve access. Enable proactive use of Gmail or Calendar to let your Dot check for useful updates and answer follow-ups.</p>
+    <p className="ns-help">Connect your own account and approve access. With “Use proactively” enabled, your Dot checks for useful updates automatically. Background checks only read; changes you request in chat still require approval.</p>
     {!individual ? <p className="ns-notice">Sign in with your individual work account to connect your apps.</p> : <>
       {(notice || callbackNotice) && <p className="ns-notice" role="status">{notice || callbackNotice}</p>}
       {state.error && <div className="ns-error" role="alert">{state.error} <Button variant="outline" onClick={() => setRevision(value => value + 1)}>Retry</Button></div>}
       {!rows && !state.error && <p role="status">Loading your apps…</p>}
       {rows && <div className="ns-records">{rows.map(row => {
         const Icon = row.provider === "github" ? Github : row.provider === "gmail" ? Mail : row.provider === "google_calendar" ? CalendarDays : Link2
+        const readOnly = row.provider === "gmail" || row.provider === "google_calendar"
         return <article className="ns-record" key={row.provider}>
           <Icon className="ns-record-icon" aria-hidden="true" />
           <div className="ns-record-copy">
             <div className="ns-record-title"><h3>{row.name}</h3>{row.connected && <span className="ns-badge ns-oauth-connected"><Check size={13} aria-hidden="true" />Connected</span>}</div>
             <p>{descriptions[row.provider]}</p>
             {row.provider === "github" && <p className="ns-help">GitHub grants repository access across the repositories your account can authorize, including private repositories, plus organization read access. Organization approval or SSO may still be required. Slack must use the same verified work email; results and files requested there are visible to the conversation.</p>}
-            <small>{row.connected ? typeof row.use_proactively === "boolean" ? "Your account · Read-only access" : "Your account · Changes require your approval" : row.configured ? "Approve access on the provider’s website." : "Not enabled on this Moyai deployment yet. Ask your administrator."}</small>
+            <small>{row.connected ? readOnly ? "Your account · Read-only access" : "Your account · Changes require your approval" : row.configured ? "Approve access on the provider’s website." : "Not enabled on this Moyai deployment yet. Ask your administrator."}</small>
             {typeof row.use_proactively === "boolean" && <div className="ns-google-attention">
               <label htmlFor={`proactive-${row.provider}`}><Switch id={`proactive-${row.provider}`}
                 checked={row.connected ? row.use_proactively : proactive[row.provider] ?? row.use_proactively}
                 disabled={busy !== null || !row.configured}
                 onCheckedChange={enabled => void updateAttention(row, enabled)} />Use proactively</label>
-              <p className="ns-help">{!row.connected ? "Dot checks periodically, messages you when useful, and can read this account in your Dot conversations."
+              <p className="ns-help">{!row.connected ? "Dot checks periodically with read-only tools and messages you when useful. You can turn this off at any time."
                 : row.attention_status === "active" ? "Included in your Dot’s scheduled attention checks."
                   : row.attention_status === "pending" ? "Saved. Dot is setting up its next check."
                     : row.attention_status === "paused" ? "Saved. Your Dot attention is paused."

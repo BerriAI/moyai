@@ -20,6 +20,8 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from .attention_policy import PERSONAL_OAUTH_KINDS, ConnectionAttentionView, declared_reads
+from .connection_attention import authorize_mutation
 from .connection_policy import ConnectionPolicy
 from .models import Connection, User
 from .oauth_models import OAuthAuthorization, OAuthCredential
@@ -54,7 +56,7 @@ async def connection_owner(
     database: Database, db: AsyncSession, actor_id: str, provider: str, surface: str,
 ) -> str | None:
     """Keep the sender's authority; resolve only a verified credential owner."""
-    if surface == "web" or (surface == "automation" and provider in {"gmail", "google_calendar"}):
+    if surface == "web" or (surface == "automation" and provider in PERSONAL_OAUTH_KINDS):
         return actor_id
     if surface != "slack" or provider != "github":
         return None
@@ -106,6 +108,7 @@ class PersonalOAuthView(BaseModel):
     revision: int = 0
     use_proactively: bool | None = None
     attention_status: Literal["disabled", "unavailable", "paused", "pending", "active"] | None = None
+    attention: ConnectionAttentionView | None = None
 
 
 class PersonalOAuthRequest(BaseModel):
@@ -222,10 +225,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             rows = {row.kind: row for row in await db.scalars(select(Connection).join(
                 OAuthCredential, OAuthCredential.connection_id == Connection.id,
             ).where(Connection.owner_id == user.id, Connection.shared.is_(False)))}
-            from .google_attention import status
-            attention: dict[str, Literal["unavailable", "paused", "pending", "active"]] = {
-                provider: await status(runtime.product_automations, db, user.id, row.id)
-                for provider, row in rows.items() if provider in {"gmail", "google_calendar"}
+            from .connection_attention import native_grant, view
+            attention = {
+                provider: await view(
+                    runtime.product_automations, database, db, user.id, native_grant(row),
+                    shared=row.shared, enabled=row.enabled,
+                ) for provider, row in rows.items()
             }
         return [
             PersonalOAuthView(
@@ -236,11 +241,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 use_proactively=(
                     ConnectionPolicy.model_validate_json(rows[provider].policy).use_proactively
                     if rows.get(provider) else True
-                ) if provider in {"gmail", "google_calendar"} else None,
+                ),
                 attention_status=(
-                    attention[provider] if rows.get(provider) and rows[provider].enabled
-                    and ConnectionPolicy.model_validate_json(rows[provider].policy).use_proactively else "disabled"
-                ) if provider in {"gmail", "google_calendar"} else None,
+                    attention[provider].status if provider in attention else
+                    "unavailable" if runtime.product_automations is None else "disabled"
+                ),
+                attention=attention.get(provider),
             ) for provider, name in PROVIDERS.items()
         ]
 
@@ -260,12 +266,13 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         state, verifier = STATE_PREFIX + secrets.token_urlsafe(32), secrets.token_urlsafe(48)
         await current(request, user)
         async with database.sessions.begin() as db:
+            await authorize_mutation(runtime, db, request, user)
             insert = postgres_insert if settings.postgres_url else sqlite_insert
-            await db.execute(insert(Connection).values(
+            created = await db.scalar(insert(Connection).values(
                 id=identity, owner_id=user.id, kind=provider, name=f"Personal {PROVIDERS[provider]}",
                 credential=security.seal(""), shared=False, read_only=False, enabled=False,
                 revision=1, policy=ConnectionPolicy(oauth=True).model_dump_json(),
-            ).on_conflict_do_nothing(index_elements=["id"]))
+            ).on_conflict_do_nothing(index_elements=["id"]).returning(Connection.id))
             await db.execute(insert(OAuthCredential).values(
                 connection_id=identity, encrypted="", revision=1,
             ).on_conflict_do_nothing(index_elements=["connection_id"]))
@@ -279,6 +286,8 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 authorization_revision=func.coalesce(OAuthCredential.authorization_revision, 0) + 1,
             ).returning(OAuthCredential.authorization_revision))
             assert revision is not None and authorization_revision is not None
+            account = await db.get(Connection, identity, populate_existing=True)
+            assert account is not None
             await db.execute(delete(OAuthAuthorization).where(
                 (OAuthAuthorization.expires_at < int(time.time()))
                 | ((OAuthAuthorization.owner_id == user.id) & (OAuthAuthorization.provider == provider)),
@@ -290,7 +299,10 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 expires_at=int(time.time()) + 600,
                 encrypted=security.seal(AuthorizationMaterial(
                     verifier=verifier, client_id=client,
-                    use_proactively=(body or PersonalOAuthRequest()).use_proactively,
+                    use_proactively=(
+                        body.use_proactively if body is not None else
+                        True if created is not None else ConnectionPolicy.model_validate_json(account.policy).use_proactively
+                    ),
                     authorization_revision=authorization_revision,
                 ).model_dump()),
             ))
@@ -319,6 +331,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         if len(state) > 200 or len(code) > 8192 or len(error) > 200:
             return result(provider, "failed")
         async with database.sessions.begin() as db:
+            await authorize_mutation(runtime, db, request, user)
             pending = (await db.execute(delete(OAuthAuthorization).where(
                 OAuthAuthorization.state_hash == digest(state),
                 OAuthAuthorization.owner_id == user.id, OAuthAuthorization.provider == provider,
@@ -342,13 +355,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         except ConnectorError:
             return result(provider, "failed")
         google = provider in {"gmail", "google_calendar"}
-        proactive = google and material.use_proactively
+        proactive = material.use_proactively
         if proactive and runtime.product_automations is not None:
             await database.dots.open(user)
         sync_id = None
         async with database.sessions.begin() as db:
-            if google and runtime.product_automations is not None:
-                await runtime.product_automations._writer(db)
+            await authorize_mutation(runtime, db, request, user)
             account = await db.scalar(select(Connection).where(
                 Connection.id == pending.connection_id, Connection.owner_id == user.id,
             ).with_for_update())
@@ -361,21 +373,26 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 return result(provider, "expired")
             account.enabled = True
             account.revision += 1
+            policy = ConnectionPolicy.model_validate_json(account.policy)
+            policy.use_proactively = proactive
+            if runtime.product_automations is not None and (proactive or policy.attention_tools is not None):
+                available = {name for name in declared_reads(provider, policy) or [] if policy.allows(name)}
+                policy.attention_tools = sorted(
+                    available if policy.attention_tools is None else available.intersection(policy.attention_tools)
+                )
             if google:
-                from app.connectors import TOOLS
                 account.read_only = True
-                account.policy = ConnectionPolicy(
-                    oauth=True, use_proactively=proactive,
-                    oauth_account=digest(material.client_id + ":" + tokens["subject"]),
-                    allowed_tools=[
-                        name.removeprefix(provider + "_")
-                        for name, spec in TOOLS.items() if spec[0] == provider and not spec[1]
-                    ],
-                ).model_dump_json()
+                policy.oauth_account = digest(material.client_id + ":" + tokens["subject"])
+                policy.allowed_tools = sorted(declared_reads(provider, policy) or [])
+            else:
+                # Until a provider's stable user identity is available, reconnect
+                # starts fresh discovery state without copying old private summaries.
+                policy.oauth_account = digest(f"{material.client_id}:{material.authorization_revision}")
+            account.policy = policy.model_dump_json()
             credential.encrypted = security.seal(tokens)
             credential.revision += 1
-            if google and runtime.product_automations is not None:
-                from .google_attention import configure
+            if runtime.product_automations is not None:
+                from .connection_attention import configure
                 await db.flush()
                 sync_id = await configure(runtime.product_automations, db, request.state.product_identity_grant)
         if sync_id is not None and runtime.product_automations is not None:
@@ -387,15 +404,14 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         provider: OAuthProvider, body: PersonalAttentionEdit, request: Request, user: User = Depends(actor),
     ) -> PersonalAttentionUpdated:
         require_individual(request)
-        if provider not in {"gmail", "google_calendar"}:
-            raise HTTPException(422, "Automatic proactive enrollment is supported for Google accounts.")
+        if body.use_proactively and runtime.product_automations is None:
+            raise HTTPException(409, "Background attention is unavailable on this installation.")
         await current(request, user)
         if body.use_proactively and runtime.product_automations is not None:
             await database.dots.open(user)
         sync_id = None
         async with database.sessions.begin() as db:
-            if runtime.product_automations is not None:
-                await runtime.product_automations._writer(db)
+            await authorize_mutation(runtime, db, request, user)
             account = await db.scalar(select(Connection).where(
                 Connection.id == connection_id(user.id, provider), Connection.owner_id == user.id,
                 Connection.shared.is_(False), Connection.enabled.is_(True),
@@ -403,14 +419,28 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             if account is None or account.revision != body.revision:
                 raise HTTPException(409, "The connection changed. Refresh and try again.")
             policy = ConnectionPolicy.model_validate_json(account.policy)
+            if body.use_proactively:
+                from .connection_attention import provider_enabled
+
+                if not await provider_enabled(database, db, provider):
+                    raise HTTPException(409, "This provider is disabled by the workspace.")
+                reads = sorted(name for name in declared_reads(provider, policy) or [] if policy.allows(name))
+                if policy.attention_tools is not None:
+                    reads = sorted(set(reads).intersection(policy.attention_tools))
+                if not reads:
+                    raise HTTPException(422, "This connection has no allowed read tools.")
+                policy.attention_tools = reads
             policy.use_proactively = body.use_proactively
             account.policy = policy.model_dump_json()
             account.revision += 1
             revision = account.revision
             await db.flush()
             if runtime.product_automations is not None:
-                from .google_attention import configure
-                sync_id = await configure(runtime.product_automations, db, request.state.product_identity_grant)
+                from .connection_attention import configure
+                sync_id = await configure(
+                    runtime.product_automations, db, request.state.product_identity_grant,
+                    changed=frozenset({account.id}),
+                )
         if sync_id is not None and runtime.product_automations is not None:
             await runtime.product_automations.request_sync(sync_id)
         return PersonalAttentionUpdated(revision=revision, use_proactively=body.use_proactively)
@@ -424,8 +454,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         identity = connection_id(user.id, provider)
         sync_id = None
         async with database.sessions.begin() as db:
-            if provider in {"gmail", "google_calendar"} and runtime.product_automations is not None:
-                await runtime.product_automations._writer(db)
+            await authorize_mutation(runtime, db, request, user)
             await db.execute(update(Connection).where(
                 Connection.id == identity, Connection.owner_id == user.id,
             ).values(enabled=False, revision=Connection.revision + 1))
@@ -435,10 +464,13 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             await db.execute(delete(OAuthAuthorization).where(
                 OAuthAuthorization.owner_id == user.id, OAuthAuthorization.provider == provider,
             ))
-            if provider in {"gmail", "google_calendar"} and runtime.product_automations is not None:
-                from .google_attention import configure
+            if runtime.product_automations is not None:
+                from .connection_attention import configure
                 await db.flush()
-                sync_id = await configure(runtime.product_automations, db, request.state.product_identity_grant)
+                sync_id = await configure(
+                    runtime.product_automations, db, request.state.product_identity_grant,
+                    changed=frozenset({identity}),
+                )
         if sync_id is not None and runtime.product_automations is not None:
             await runtime.product_automations.request_sync(sync_id)
         return PersonalOAuthDisconnected()

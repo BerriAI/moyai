@@ -78,7 +78,8 @@ DOT_DISCOVERY_SCHEMA_VERSION = "2026-11-24-dot-discovery-v31"
 DOT_SLACK_SCHEMA_VERSION = "2026-11-24-dot-slack-v32"
 SLACK_APPS_SCHEMA_VERSION = "2026-11-25-slack-apps-v33"
 OAUTH_AUTHORIZATION_SCHEMA_VERSION = "2026-11-25-oauth-authorization-v34"
-PRODUCT_SCHEMA_VERSION = OAUTH_AUTHORIZATION_SCHEMA_VERSION
+DOT_CANONICAL_ITEM_SCHEMA_VERSION = "2026-11-26-dot-canonical-items-v35"
+PRODUCT_SCHEMA_VERSION = DOT_CANONICAL_ITEM_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -177,6 +178,7 @@ MIGRATIONS = (
     (DOT_SLACK_SCHEMA_VERSION, frozenset({"moyai_dot_slack_preferences", "moyai_dot_slack_conversations"})),
     (SLACK_APPS_SCHEMA_VERSION, frozenset()),
     (OAUTH_AUTHORIZATION_SCHEMA_VERSION, frozenset()),
+    (DOT_CANONICAL_ITEM_SCHEMA_VERSION, frozenset({"moyai_dot_canonical_items"})),
 )
 
 # Existing tables can gain reviewed plain nullable columns without changing

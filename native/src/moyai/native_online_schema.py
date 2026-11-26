@@ -51,6 +51,7 @@ DOT_DISCOVERY_VERSION = "2026-11-24-dot-discovery-v31"
 DOT_SLACK_VERSION = "2026-11-24-dot-slack-v32"
 SLACK_APPS_VERSION = "2026-11-25-slack-apps-v33"
 OAUTH_AUTHORIZATION_VERSION = "2026-11-25-oauth-authorization-v34"
+DOT_CANONICAL_ITEM_VERSION = "2026-11-26-dot-canonical-items-v35"
 LEDGER = "moyai_native_online_migrations"
 ADDED = frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})
 PARENTS = ("moyai_sessions", "moyai_turns", "moyai_users")
@@ -399,6 +400,27 @@ def _oauth_authorization_columns(metadata: MetaData, schema: str) -> None:
     )
 
 
+def _dot_canonical_item_tables(metadata: MetaData, schema: str) -> None:
+    Table(
+        "moyai_dot_canonical_items", metadata,
+        Column("id", String(64), primary_key=True),
+        Column("owner_id", String(512), ForeignKey(f"{schema}.moyai_users.id"), nullable=False, index=True),
+        Column("connection_id", String(512), nullable=False),
+        Column("account_key", String(64), nullable=False),
+        Column("source_key", String(64), nullable=False),
+        Column("source_version", Text, nullable=False),
+        Column("content", Text, nullable=False),
+        Column("state", String(20), nullable=False),
+        Column("owner_controlled", Boolean, nullable=False),
+        Column("owner_revision", Integer, nullable=False),
+        Column("revision", Integer, nullable=False),
+        Column("snoozed_until", String(40), nullable=True),
+        Column("created_at", String(40), nullable=False),
+        Column("last_seen_at", String(40), nullable=False),
+        UniqueConstraint("owner_id", "source_key", name="dot_canonical_item_source"), schema=schema,
+    )
+
+
 EXPANSIONS = (
     Expansion(FROM_VERSION, TO_VERSION, ADDED, (), _goal_tables),
     Expansion(TO_VERSION, AUTOMATION_CHAT_VERSION, frozenset({"moyai_product_automation_turns"}), (),
@@ -428,6 +450,8 @@ EXPANSIONS = (
     Expansion(DOT_SLACK_VERSION, SLACK_APPS_VERSION, frozenset(), SLACK_APP_COLUMNS, _slack_app_columns),
     Expansion(SLACK_APPS_VERSION, OAUTH_AUTHORIZATION_VERSION, frozenset(),
               (("moyai_oauth_credentials", "authorization_revision"),), _oauth_authorization_columns),
+    Expansion(OAUTH_AUTHORIZATION_VERSION, DOT_CANONICAL_ITEM_VERSION,
+              frozenset({"moyai_dot_canonical_items"}), (), _dot_canonical_item_tables),
 )
 
 
