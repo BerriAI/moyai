@@ -33,7 +33,7 @@ for(const width of [1440,768,320])test(`Persistent Dot opens and keeps drafts at
  await page.getByRole('button',{name:'Help me prepare for my upcoming meetings.',exact:true}).click();
  const input=page.getByRole('textbox',{name:'Message Moyai',exact:true});
  assert.equal(await input.innerText(),'Help me prepare for my upcoming meetings.');
- assert.equal(await page.getByRole('button',{name:'Help me set up proactive attention for my connected accounts.',exact:true}).isEnabled(),false);
+ assert.equal(await page.getByRole('button',{name:'Help me decide what to focus on today.',exact:true}).isEnabled(),false);
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
  await page.reload();await page.getByRole('heading',{name:'What should I know about your day?'}).waitFor();
  assert.equal(state.opened,1,'Reload reads the saved Dot without creating another');
