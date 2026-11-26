@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 
 
@@ -67,14 +66,11 @@ def slack_record(record: dict, tool: str, arguments: dict) -> dict:
         and isinstance(record.get("text"), str)
     ):
         return record
-    # ts identifies a message, not all subsequent changes to it. Hash the
-    # observed content and reply metadata; do not claim a provider update token.
-    content = {key: record[key] for key in (
-        "text", "edited", "reply_count", "latest_reply", "blocks", "attachments",
-    ) if key in record}
-    revision = hashlib.sha256(json.dumps(
-        content, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    ).encode()).hexdigest()
+    # Search and history omit different optional metadata for the same message.
+    # Fingerprint the text actually exposed as evidence, not that representation.
+    # Each reply has its own ts and identity; reply-count changes do not create
+    # a new revision of the unchanged root message.
+    revision = hashlib.sha256(record["text"].encode()).hexdigest()
     result = dict(record)
     # Search supplies permalinks while history/replies need not. Use the same
     # account-scoped channel + message identity in every native read shape.

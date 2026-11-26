@@ -83,14 +83,31 @@ async def test_slack_search_and_thread_use_same_identity_and_observed_revision()
     ), "account-1", first) == ("account-1", first["id"], first["revision"])
 
 
-async def test_slack_revision_changes_for_edits_and_new_replies_not_pagination():
+async def test_slack_revision_changes_for_text_not_optional_response_metadata():
     message = {"type": "message", "ts": "1795683600.000001", "text": "Review today"}
     async def revision(row):
         result = await scan("slack", "channel", {"messages": [row], "has_more": False}, {"channel": "C123"})
         return next(item["revision"] for item in result["records"] if item.get("id", "").startswith("slack:"))
     original = await revision(message)
     assert await revision({**message, "edited": {"ts": "1795683700.000001"}, "text": "Review tomorrow"}) != original
-    assert await revision({**message, "reply_count": 1, "latest_reply": "1795683800.000001"}) != original
+    assert await revision({**message, "reply_count": 0}) == original
+    assert await revision({**message, "edited": {"ts": "1795683700.000001"}}) == original
+    assert await revision({**message, "reply_count": 1, "latest_reply": "1795683800.000001"}) == original
+    assert await revision({**message, "blocks": [], "attachments": []}) == original
+
+
+async def test_slack_new_replies_have_their_own_identity_without_revising_the_root():
+    result = await scan("slack", "thread", {
+        "messages": [
+            {"ts": "1795683600.000001", "text": "Review today", "reply_count": 1},
+            {"ts": "1795683800.000001", "thread_ts": "1795683600.000001", "text": "Review completed"},
+        ], "has_more": False,
+    }, {"channel": "C123", "thread_ts": "1795683600.000001"})
+    messages = [row for row in result["records"] if row.get("id", "").startswith("slack:")]
+    assert [row["id"] for row in messages] == [
+        "slack:C123:1795683600.000001", "slack:C123:1795683800.000001",
+    ]
+    assert not result["limited"]
 
 
 async def test_slack_messages_without_verified_channel_are_not_promoted_to_evidence():

@@ -58,8 +58,9 @@ dropped rows cannot turn a malformed response into a successful empty scan.
 Native Notion records retain their own page properties or block text alongside
 `last_edited_time`; child text is not borrowed as evidence for a parent. Native
 Slack search, channel and thread reads use the same channel/message identity.
-Their returned `revision` fingerprints observed content and reply metadata,
-because a message's `ts` is not a last-modified timestamp. Slack permalinks remain
+Their returned `revision` fingerprints the observed message text, because a
+message's `ts` is not a last-modified timestamp. Each reply has its own identity;
+optional metadata differences do not revise an unchanged root. Slack permalinks remain
 provider metadata; the stable source ID is displayed when no common URL is available.
 Known paginated tools also remain partial without explicit
 first-page exhaustion evidence; bare arrays never imply complete coverage.
