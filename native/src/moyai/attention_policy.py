@@ -1,8 +1,8 @@
 """Read-tool attenuation for attention; the original account grant stays intact."""
 
-from app.connection_attention_models import AttentionReason, ConnectionAttentionView
 from pydantic import BaseModel, ConfigDict, Field
 
+from .connection_attention_models import AttentionReason, ConnectionAttentionView
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant
 
