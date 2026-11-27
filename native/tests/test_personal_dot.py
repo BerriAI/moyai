@@ -14,7 +14,9 @@ from pydantic_ai import Conversation, ConversationTypeAdapter
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolReturnPart
 from sqlalchemy import select, update
 
+from moyai.automations.product_automation_context_models import ProductAutomationExecutionContext
 from moyai.automations.product_automation_models import ProductAutomationBinding, ProductAutomationTurn
+from moyai.automations.product_automations import ProductAutomationService
 from moyai.contracts import Grant, NewMessage, NewSession
 from moyai.database import grant_fingerprint
 from moyai.dot import validate_decision
@@ -34,13 +36,28 @@ async def observer(runtime, actor, destination=None, connection=None, automation
             )
             db.add(connection)
             await db.flush()
+        grants = await database.dots.grants(db, actor.id, [connection.id])
         if automation is None:
             automation = ProductAutomationBinding(
                 id=uuid4().hex, owner_id=actor.id, authority_version="synthetic",
                 source_revision=1, generation=1, state="active", definition_digest="a" * 64,
             )
             db.add(automation)
-        grants = await database.dots.grants(db, actor.id, [connection.id])
+            if database.product_authority_enabled:
+                # Product runs require the immutable consent captured by the
+                # automation service. Reused bindings keep their original capture.
+                await db.flush()
+                connections = [connection.id]
+                workspace = {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(grants)}
+                db.add(ProductAutomationExecutionContext(
+                    automation_id=automation.id, generation=automation.generation, owner_id=actor.id,
+                    authority_version=automation.authority_version, connection_ids=json.dumps(connections),
+                    workspace_context=json.dumps(workspace),
+                    fingerprint=ProductAutomationService._context_fingerprint(
+                        automation.id, automation.generation, actor.id,
+                        automation.authority_version, connections, workspace,
+                    ),
+                ))
         session = await database.create_session(actor, NewSession(visibility="private"), db=db)
         session.surface = "automation"
         turn = await database.admission.submit(actor, session.id, NewMessage(
