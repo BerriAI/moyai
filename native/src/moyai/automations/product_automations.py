@@ -25,7 +25,7 @@ with workflow.unsafe.imports_passed_through():
     from app.repository_identity import repository_origin, repository_provider
     from fastapi import APIRouter, HTTPException, Query, Request
     from pydantic import BaseModel, ConfigDict, Field, Json, ValidationError, field_validator
-    from sqlalchemy import select, text
+    from sqlalchemy import func, select, text
     from sqlalchemy.ext.asyncio import AsyncSession
     from temporalio.client import Client
     from temporalio.exceptions import ApplicationError
@@ -49,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
     from .product_automation_models import ProductAutomationTurn
 
 MAX_TRIGGERS = 16
+DISCOVERY_BATCH_SIZE = 4
 TERMINAL = ("completed", "failed", "stopped", "included")
 OLD_TERMINAL = ("idle", "completed", "failed", "cancelled", "interrupted")
 AUTOMATION_ID = r"^[0-9a-f]{32}$"
@@ -668,6 +669,30 @@ class ProductAutomationService:
             raise HTTPException(409, "The canonical workspace adapter is unavailable.")
         return connections, workspace
 
+    async def _attention_batch(
+        self, db: AsyncSession, binding: Binding, definition: Definition,
+        connections: list[str], workspace: dict,
+    ) -> tuple[list[str], dict]:
+        """Select one bounded cohort while the existing admission writer is held.
+
+        Only committed admissions consume a cohort. The occurrence receipt and
+        turn retain the selection across retries, failures and process restarts.
+        """
+        if definition.attention_mode != "discovery" or len(connections) <= DISCOVERY_BATCH_SIZE:
+            return connections, workspace
+        from ..database import grant_fingerprint
+
+        admitted = await db.scalar(select(func.count()).select_from(Occurrence).where(
+            Occurrence.automation_id == binding.id, Occurrence.generation == binding.generation,
+            Occurrence.turn_id.is_not(None),
+        ))
+        pool = sorted(connections)
+        batches = (len(pool) + DISCOVERY_BATCH_SIZE - 1) // DISCOVERY_BATCH_SIZE
+        start = (int(admitted or 0) % batches) * DISCOVERY_BATCH_SIZE
+        selected = pool[start:start + DISCOVERY_BATCH_SIZE]
+        grants = await self.database.dots.grants(db, binding.owner_id, selected)
+        return selected, {**workspace, "grants_key": grant_fingerprint(grants)}
+
     @staticmethod
     def _binding_view(binding: Binding | None) -> dict[str, Any] | None:
         if binding is None:
@@ -1197,7 +1222,7 @@ class ProductAutomationService:
             capture=active, invalid_context="pause",
         )
         if capacity_error:
-            binding.last_error = "Choose at most four attention accounts before resuming."
+            binding.last_error = "Choose at most 30 attention accounts before resuming."
         return identity
 
     async def mutate(
@@ -1455,6 +1480,7 @@ class ProductAutomationService:
                 ), {"id": identity, "since": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
                 if count >= definition.max_runs_per_hour:
                     return await receipt(db, row, binding, trigger_id, key, "skipped", "Hourly invocation limit reached.")
+            connections, workspace = await self._attention_batch(db, binding, definition, connections, workspace)
             session, turn = await self.database.admit_automation(
                 db, grant=original, title=f"Automation · {definition.name}",
                 prompt=definition.prompt, model=self.settings.resolve_model(definition.model or None),
@@ -1468,7 +1494,10 @@ class ProductAutomationService:
                     db, turn, automation_id=identity, generation=binding.generation,
                     destination=definition.session_id, grants_key=workspace["grants_key"],
                     discovery=definition.attention_mode == "discovery",
-                    sources=[source.model_dump() for source in definition.attention_sources],
+                    sources=[
+                        source.model_dump() for source in definition.attention_sources
+                        if source.connection_id in connections
+                    ],
                 )
             elif self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)
@@ -1513,6 +1542,7 @@ class ProductAutomationService:
             ), {"id": identity, "since": (datetime.now(UTC) - timedelta(hours=1)).isoformat()}) >= definition.max_runs_per_hour:
                 raise HTTPException(429, "The automation reached its hourly invocation limit.")
             connections, workspace = await self._execution_context(db, binding, principal, definition)
+            connections, workspace = await self._attention_batch(db, binding, definition, connections, workspace)
             session, turn = await self.database.admit_automation(
                 db, grant=original, title=f"Automation · {definition.name}", prompt=definition.prompt,
                 model=self.settings.resolve_model(definition.model or None),
@@ -1526,7 +1556,10 @@ class ProductAutomationService:
                     db, turn, automation_id=identity, generation=binding.generation,
                     destination=definition.session_id, grants_key=workspace["grants_key"],
                     discovery=definition.attention_mode == "discovery",
-                    sources=[source.model_dump() for source in definition.attention_sources],
+                    sources=[
+                        source.model_dump() for source in definition.attention_sources
+                        if source.connection_id in connections
+                    ],
                 )
             elif self.workspace is not None:
                 await self.workspace.bind_automation_turn(db, session, turn, workspace)

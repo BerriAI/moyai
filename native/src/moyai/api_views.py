@@ -12,6 +12,7 @@ from pydantic import MISSING, BaseModel, ConfigDict, Field, JsonValue, RootModel
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai_harness.ask_user import AskUserRequest
 
+from .attention_policy import ConnectionAttentionView
 from .gateway_config import GatewayConfig, GatewayDiscovery
 from .mcp_remote import RemoteMCPConfig
 from .preferences.general_preferences import GeneralPreferences
@@ -518,6 +519,7 @@ class ConnectionPolicyView(ApiView):
     oauth: bool = False
     oauth_account: str = ""
     use_proactively: bool = False
+    attention_tools: list[str] | None = None
     product: dict[str, JsonValue] | None = None
     mcp: RemoteMCPConfig | None = None
     gateway: GatewayConfig | None = None
@@ -535,6 +537,7 @@ class ConnectionView(ApiView):
     revision: int
     policy: ConnectionPolicyView
     source: Literal["product"] | None = None
+    attention: ConnectionAttentionView | None = None
 
 
 class ConnectionToolPreview(ApiView):

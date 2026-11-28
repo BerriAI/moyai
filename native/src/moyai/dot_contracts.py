@@ -20,7 +20,7 @@ class DotEvidence(BaseModel):
     source: str = Field(min_length=1, max_length=1000, description="Exact source URL or item ID returned by a connected tool.")
     source_version: str = Field(
         min_length=1, max_length=200,
-        description="Exact provider revision or last-modified timestamp for this item. Put the primary item first.",
+        description="Exact returned revision, modification timestamp, or observed-content fingerprint for this item. Put the primary item first.",
     )
     quote: str = Field(min_length=1, max_length=1000, description="Exact relevant quotation from that tool's result.")
 

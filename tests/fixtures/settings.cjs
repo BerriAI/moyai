@@ -7,12 +7,12 @@ const personalPath = '/api/connections/slack/personal';
 const mcpConnection = (patch={}) => ({
   id:'12345678-1234-1234-1234-123456789abc',name:'Research gateway',kind:'mcp',owner_id:'viewer',
   shared:false,read_only:true,enabled:true,revision:1,source:null,
-  policy:{require_approval:true,allowed_tools:['lookup'],product:null,mcp:{url:'https://gateway.example.com/mcp',transport:'streamable_http'}},
+  policy:{require_approval:true,use_proactively:false,allowed_tools:['lookup'],product:null,mcp:{url:'https://gateway.example.com/mcp',transport:'streamable_http'}},
   ...patch,
 });
 const gatewayConnection = (patch={}) => mcpConnection({
   name:'Personal LiteLLM',kind:'litellm',
-  policy:{require_approval:true,allowed_tools:null,product:null,mcp:null,
+  policy:{require_approval:true,use_proactively:false,allowed_tools:null,product:null,mcp:null,
     gateway:{url:'https://gateway.example.com',skills:true,mcp:true},
     gateway_discovery:{skills:{status:'ready',count:2,message:''},mcp:{status:'ready',count:3,message:''},skill_catalog:[]}},
   ...patch,
@@ -22,13 +22,15 @@ function defaults() {
     requests: [], individual: true, role:'admin', userId:'viewer', productMode:'existing', connections:[],
     personalApps: [['linear','Linear'],['notion','Notion'],['github','GitHub'],['google_calendar','Google Calendar'],['gmail','Gmail']].map(([provider,name])=>({
       provider,name,configured:['linear','notion'].includes(provider),connected:false,connection_id:null,
-      revision:0,use_proactively:['google_calendar','gmail'].includes(provider)?true:null,attention_status:null,
+      revision:0,use_proactively:true,attention_status:'disabled',
     })),
     general: {delivery_mode:'when_idle',connection_ids:null,personal_instructions:'',personal_instructions_revision:0},
     organizationConnections:[{id:'slack',connected:true,enabled:true,read_only:true,label:'Example workspace',identity:'Workspace app',tools:[],check_status:'healthy',checked_at:'2026-10-19T10:00:00Z'}],
     gatewayDefaults:{url:'https://gateway.example.com/v1'},gatewayDiscovery:gatewayConnection().policy.gateway_discovery,
     connectionCheck:{tool_count:1,tools:[{name:'lookup',description:'Search the synthetic research catalog.'}]},
-    personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.'},
+    personal: {available:true,connected:true,oauth_configured:true,label:'Example workspace · alex',health:'healthy',effective_source:'personal',limitation:'Personal Slack reads require your private web chat.',
+      connection_id:'personal-slack-owner',revision:1,use_proactively:false,
+      attention:{eligible:true,reason:null,use_proactively:false,status:'disabled',readable_tools:['search','channel','thread'],consent_revision:0}},
     learning:{available:true,
       personal:{enabled:false,revision:0,can_manage:true,pending:0,learned:0,last_status:null,last_saved_count:0},
       organization:{enabled:false,revision:0,can_manage:true,pending:0,learned:0,last_status:null,last_saved_count:0}},
@@ -106,9 +108,25 @@ async function settingsFixture() {
           const {credential,clear_credential,...metadata}=body;
           const row=mcpConnection({...metadata,id:randomUUID(),owner_id:state.userId,policy:{allowed_tools:null,require_approval:true,product:null,mcp:null,...body.policy}});
           if(row.kind==='litellm')row.policy.gateway_discovery=state.gatewayDiscovery;
+          if(row.policy.use_proactively)row.attention={eligible:true,reason:null,use_proactively:true,status:'pending',readable_tools:['lookup']};
           state.connections.push(row);return json(row);
         }
         return json(state.connections);
+      }
+      const attentionMatch=url.pathname.match(/^\/api\/connections\/([^/]+)\/attention$/);
+      if(attentionMatch&&req.method==='PATCH'){
+        const row=state.connections.find(item=>item.id===attentionMatch[1])??(state.personal.connection_id===attentionMatch[1]?state.personal:null);
+        if(!row)return json({detail:'Connection not found.'},404);
+        if(state.attentionGate)await state.attentionGate;
+        if(body.revision!==row.revision)return json({detail:'Connection changed.'},409);
+        if(row.policy){row.revision++;row.policy.use_proactively=body.use_proactively;}
+        else{
+          if(body.consent_revision!==row.attention.consent_revision)return json({detail:'Consent changed.'},409);
+          row.attention.consent_revision++;
+          row.use_proactively=body.use_proactively;
+        }
+        row.attention={...row.attention,use_proactively:body.use_proactively,status:body.use_proactively?'pending':'disabled'};
+        return json({revision:row.revision,attention:row.attention});
       }
       const connectionMatch=url.pathname.match(/^\/api\/connections\/([^/]+)(\/check)?$/);
       if(connectionMatch){
@@ -145,7 +163,8 @@ async function settingsFixture() {
       if(url.pathname==='/api/skills')return json({skills:[],has_more:false});
       if(url.pathname===personalPath){
         if(state.personalError)return json({detail:'Slack status is temporarily unavailable.'},503);
-        if(req.method==='DELETE')state.personal={...state.personal,connected:false,health:'absent',label:'',effective_source:'organization'};
+        if(req.method==='DELETE')state.personal={...state.personal,connected:false,health:'absent',label:'',effective_source:'organization',connection_id:null,use_proactively:false,
+          attention:{...state.personal.attention,eligible:false,reason:'disconnected',use_proactively:false,status:'disabled'}};
         return json(state.personal);
       }
       if(url.pathname===personalPath+'/check')return state.checkError?json({detail:'Reconnect your Slack account to restore access.'},409):json(state.personal);

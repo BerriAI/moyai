@@ -510,7 +510,7 @@ async def assert_disconnected(ctx, provider, response):
     assert response.status_code == 200, response.text
 
 
-async def test_disconnect_commits_revocation_and_pauses_full_manual_discovery(google):
+async def test_disconnect_commits_revocation_and_retains_five_remaining_discovery_accounts(google):
     ctx = google
     await connect(ctx, "gmail")
     calendar = await connect(ctx, "google_calendar")
@@ -548,14 +548,14 @@ async def test_disconnect_commits_revocation_and_pauses_full_manual_discovery(go
     await assert_disconnected(ctx, "gmail", response)
     row, definition, binding, _ = await saved(ctx)
     assert row["id"] == original["id"]
-    assert definition["connection_ids"] == selected
-    assert binding.state == "paused" and binding.generation > active_binding.generation
+    assert definition["connection_ids"] == sorted([*selected, calendar["connection_id"]])
+    assert binding.state == "active" and binding.generation > active_binding.generation
     async with ctx.product.database.sessions() as db:
         remaining = await db.get(Connection, calendar["connection_id"])
         assert remaining.enabled and ConnectionPolicy.model_validate_json(remaining.policy).use_proactively
     await ctx.service.reconcile(row["id"])
     assert len(ctx.remote.schedules) == 1
-    assert all(schedule.state.paused for schedule in ctx.remote.schedules.values())
+    assert all(not schedule.state.paused for schedule in ctx.remote.schedules.values())
 
 
 @pytest.mark.parametrize("destination_state", ["archived", "deleted"])

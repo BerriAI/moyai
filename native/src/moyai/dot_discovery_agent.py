@@ -16,13 +16,14 @@ from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded
 from pydantic_ai.tools import ToolDefinition
 from temporalio.common import RetryPolicy
 
+from .attention_policy import attention_reads
 from .connection_catalog import ConnectionToolSearch, connection_search
-from .connection_policy import ConnectionPolicy
 from .connections import connection_tools
 from .contracts import RunScope
 from .dot_contracts import DotJudgment, DotResearch
 from .dot_discovery import DiscoverySnapshot
 from .dot_evidence import COLLECTION_FIELDS, IDENTITY_FIELDS, VERSION_FIELDS, records, validate_evidence
+from .dot_provider_records import native_record
 from .dot_sources import (
     GITHUB_METHODS,
     github_reader,
@@ -95,7 +96,7 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
         return any(
             name == f"{grant.kind}_{grant.id[:8]}_{tool}"
             for grant in ctx.deps.grants
-            for tool in (ConnectionPolicy.model_validate(grant.policy).allowed_tools or [])
+            for tool in attention_reads(grant)
         )
 
     @staticmethod
@@ -109,7 +110,7 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
     def github_tool(ctx, name: str) -> str | None:
         return next((
             tool for grant in ctx.deps.grants if github_reader(grant)
-            for tool in (ConnectionPolicy.model_validate(grant.policy).allowed_tools or [])
+            for tool in attention_reads(grant)
             if name == f"{grant.kind}_{grant.id[:8]}_{tool}"
         ), None)
 
@@ -170,6 +171,11 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
         scanned = value == []
         allowed = self.scope(ctx, call.tool_name)
         tool = self.github_tool(ctx, call.tool_name)
+        native = next((
+            (grant.kind, call.tool_name.removeprefix(f"{grant.kind}_{grant.id[:8]}_"))
+            for grant in ctx.deps.grants
+            if call.tool_name.startswith(f"{grant.kind}_{grant.id[:8]}_")
+        ), (None, ""))
         paginated = tool in {"list_issues", "list_pull_requests"} or (
             tool in GITHUB_METHODS and args.get("method") == "get_comments"
         )
@@ -182,6 +188,7 @@ class DiscoveryBounds(AbstractCapability[RunScope]):
             complete |= provider_complete(record)
             if tool:
                 record = github_record(record)
+            record = native_record(*native, args, record)
             identity = next((record[key] for key in IDENTITY_FIELDS if record.get(key)), None)
             collection = any(isinstance(record.get(key), (list, dict)) for key in COLLECTION_FIELDS)
             identified = bool(identity and any(record.get(key) for key in VERSION_FIELDS))

@@ -159,6 +159,28 @@ const mcpSection=page=>page.getByRole('region',{name:'MCP connections',exact:tru
 const gatewaySection=page=>page.getByRole('region',{name:'LiteLLM gateways',exact:true});
 const connectionWrites=()=>fixture.state.requests.filter(r=>r.path.startsWith('/api/connections')&&['POST','PUT'].includes(r.method)&&!r.path.endsWith('/check'));
 
+for(const kind of ['mcp','litellm'])test(`${kind} attention preserves chat permissions and refreshes pending status`,async t=>{
+  fixture.reset();
+  const row=(kind==='mcp'?mcpConnection:gatewayConnection)({read_only:false});
+  row.policy.use_proactively=false;
+  row.attention={eligible:true,reason:null,use_proactively:false,status:'disabled',readable_tools:['lookup']};
+  fixture.state.connections=[row];
+  const page=await open(t,'connections');
+  const section=kind==='mcp'?mcpSection(page):gatewaySection(page);
+  await section.getByRole('switch',{name:'Use proactively',exact:true}).click();
+  await section.getByText('Saved. Dot is setting up its next check.',{exact:true}).waitFor();
+  const write=fixture.state.requests.find(r=>r.path===`/api/connections/${row.id}/attention`&&r.method==='PATCH');
+  assert.deepEqual(write.body,{revision:1,use_proactively:true});
+  assert.equal(row.read_only,false);
+  assert.equal(row.policy.require_approval,true);
+  row.attention.status='active';
+  await section.getByText('Included in your Dot’s scheduled attention checks.',{exact:true}).waitFor();
+  await section.getByRole('switch',{name:'Use proactively',exact:true}).click();
+  await section.getByText('Available in chat. Automatic checks are off.',{exact:true}).waitFor();
+  assert.equal(row.revision,3);
+  assert.equal(fixture.state.requests.filter(r=>r.path.endsWith('/attention')&&r.method==='PATCH').length,2);
+});
+
 const organizationAccount=(id,patch={})=>({
   id,connected:false,scope:'organization',enabled:true,read_only:false,oauth_configured:true,
   label:'',identity:'Not connected',tools:[],check_status:null,checked_at:null,app_registered:id==='github',...patch,
@@ -178,15 +200,57 @@ for(const theme of ['dark','light'])for(const width of [1440,768,320])test(`Pers
   assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections/linear/oauth').length,1);
 });
 test('Your apps reuses the existing Personal Slack authorization',async t=>{
-  fixture.reset();fixture.state.personal.connected=false;
+  fixture.reset();
   const page=await open(t,'connections');
   const apps=page.getByRole('region',{name:'Your apps',exact:true});
-  await apps.getByRole('button',{name:'Connect personal Slack',exact:true}).click();
+  await apps.getByRole('button',{name:'Reconnect personal Slack',exact:true}).click();
   await page.waitForURL('**/?fixture-oauth=1#settings/personal-slack');
   assert.equal(fixture.state.requests.filter(r=>r.path==='/api/connections/slack/personal/oauth'&&r.method==='POST').length,1);
   assert.equal(fixture.state.requests.filter(r=>r.path==='/api/personal-connections/slack/oauth').length,0);
+  assert.deepEqual(fixture.state.requests.find(r=>r.path===personalPath+'/oauth').body,{use_proactively:false,consent_revision:0},'reconnect preserves an existing opt-out');
 });
-for(const provider of ['google_calendar','gmail'])test(`${provider} connects with explicit proactive preference and no credential form`,async t=>{
+for(const proactive of [true,false])test(`New personal Slack carries proactive=${proactive} through the existing OAuth flow`,async t=>{
+  fixture.reset();Object.assign(fixture.state.personal,{connected:false,health:'absent',connection_id:null});
+  Object.assign(fixture.state.personal.attention,{eligible:false,reason:'disconnected'});
+  const page=await open(t,'connections');
+  const slack=page.getByRole('region',{name:'Your Slack connection',exact:true});
+  const toggle=slack.getByRole('switch',{name:'Use proactively',exact:true});
+  assert.equal(await toggle.isChecked(),true);
+  if(!proactive)await toggle.click();
+  await slack.getByRole('button',{name:'Connect personal Slack',exact:true}).click();
+  await page.waitForURL('**/?fixture-oauth=1#settings/personal-slack');
+  assert.deepEqual(fixture.state.requests.find(r=>r.path===personalPath+'/oauth').body,{use_proactively:proactive,consent_revision:0});
+});
+test('Personal Slack uses its canonical account for attention and refreshes pending status',async t=>{
+  fixture.reset();const page=await open(t,'connections');
+  const slack=page.getByRole('region',{name:'Your Slack connection',exact:true});
+  await slack.getByRole('switch',{name:'Use proactively',exact:true}).click();
+  await slack.getByText('Saved. Dot is setting up its next check.',{exact:true}).waitFor();
+  const write=fixture.state.requests.find(r=>r.path==='/api/connections/personal-slack-owner/attention');
+  assert.deepEqual(write.body,{revision:1,use_proactively:true,consent_revision:0});
+  fixture.state.personal.attention.status='active';
+  await slack.getByText('Included in your Dot’s scheduled attention checks.',{exact:true}).waitFor();
+  await slack.getByRole('switch',{name:'Use proactively',exact:true}).click();
+  await slack.getByText('Available in chat. Automatic checks are off.',{exact:true}).waitFor();
+  assert.equal(fixture.state.personal.use_proactively,false);
+  assert.equal(fixture.state.personal.attention.consent_revision,2);
+  assert.equal(fixture.state.requests.filter(r=>r.path==='/api/connections'&&r.method==='POST').length,0);
+});
+test('Revoked personal Slack access discards a late attention response',async t=>{
+  fixture.reset();
+  let release;fixture.state.attentionGate=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const page=await open(t,'connections');
+  const slack=page.getByRole('region',{name:'Your Slack connection',exact:true});
+  const request=page.waitForRequest(r=>r.method()==='PATCH'&&r.url().endsWith('/personal-slack-owner/attention'));
+  await slack.getByRole('switch',{name:'Use proactively',exact:true}).click();await request;
+  fixture.state.personal={...fixture.state.personal,available:false,connected:false,connection_id:null,attention:null,health:'absent'};
+  await page.evaluate(()=>window.dispatchEvent(new Event('moyai:access-changed')));
+  await slack.getByText('Sign in with your individual work account to connect Slack.',{exact:true}).waitFor();
+  release();
+  assert.equal(await slack.getByRole('switch',{name:'Use proactively',exact:true}).count(),0);
+  assert.equal(await slack.getByText('Saved. Dot is setting up its next check.',{exact:true}).count(),0);
+});
+for(const provider of ['github','linear','notion','google_calendar','gmail'])test(`${provider} connects with explicit proactive preference and no credential form`,async t=>{
   fixture.reset();const row=fixture.state.personalApps.find(item=>item.provider===provider);
   row.configured=true;
   const page=await open(t,'connections');
@@ -212,6 +276,22 @@ test('Connected Google app toggles attention with revision and displays pending/
   await app.getByRole('switch',{name:'Use proactively',exact:true}).click();
   await app.getByText('Saved. Dot is setting up its next check.',{exact:true}).waitFor();
   assert.equal(row.revision,5);
+});
+test('Personal account attention becomes active without reloading or claiming readiness early',async t=>{
+  fixture.reset();const row=fixture.state.personalApps.find(item=>item.provider==='github');
+  Object.assign(row,{configured:true,connected:true,connection_id:'github-owner',revision:3,use_proactively:true,attention_status:'pending'});
+  const page=await open(t,'connections');
+  await page.goto(fixture.base+'/?personal_connection=success&provider=github#settings/connections');
+  const apps=page.getByRole('region',{name:'Your apps',exact:true});
+  const app=apps.getByRole('article').filter({has:page.getByRole('heading',{name:'GitHub',exact:true})});
+  await app.getByText('Saved. Dot is setting up its next check.',{exact:true}).waitFor();
+  await app.getByText('Your account · Changes require your approval',{exact:true}).waitFor();
+  assert.match(await apps.getByRole('status').innerText(),/Dot is setting up its next check/);
+  assert.doesNotMatch(await apps.getByRole('status').innerText(),/attention is active|ready for your/);
+  row.attention_status='active';
+  await app.getByText('Included in your Dot’s scheduled attention checks.',{exact:true}).waitFor();
+  assert.match(await apps.getByRole('status').innerText(),/Dot attention is active/);
+  assert.equal(fixture.state.requests.filter(r=>r.method==='PATCH').length,0,'status refresh must not recreate enrollment');
 });
 test('Personal app errors retry and disconnect requires confirmation',async t=>{
   fixture.reset();fixture.state.personalAppsError=true;
@@ -334,7 +414,7 @@ for(const mode of ['existing','standalone'])test(`LiteLLM creation in ${mode} wa
   await page.getByRole('heading',{name:'My personal gateway',exact:true}).waitFor();
   assert.deepEqual(connectionWrites().map(({method,body})=>({method,body})),[{method:'POST',body:{
     name:'My personal gateway',kind:'litellm',credential:'synthetic-personal-key',shared:false,read_only:true,enabled:true,
-    policy:{require_approval:true,mcp:null,gateway:{url:fixture.state.gatewayDefaults.url,skills:true,mcp:true}},
+    policy:{require_approval:true,use_proactively:mode==='existing',mcp:null,gateway:{url:fixture.state.gatewayDefaults.url,skills:true,mcp:true}},
   }}]);
   assert.doesNotMatch(await page.locator('.ns-content').innerText(),/synthetic-personal-key/);
 });
@@ -462,7 +542,7 @@ for(const bearer of ['', 'synthetic-bearer'])test(`Hosted MCP creation supports 
   await mcpSection(page).getByRole('heading',{name:'My MCP gateway',exact:true}).waitFor();
   const [write]=connectionWrites();
   assert.equal(connectionWrites().length,1);assert.equal(write.method,'POST');
-  assert.deepEqual(write.body,{name:'My MCP gateway',kind:'mcp',credential:bearer,clear_credential:false,shared:false,read_only:true,enabled:true,policy:{require_approval:true,mcp:{url:'https://gateway.example.com/mcp',transport:'streamable_http'}}});
+  assert.deepEqual(write.body,{name:'My MCP gateway',kind:'mcp',credential:bearer,clear_credential:false,shared:false,read_only:true,enabled:true,policy:{require_approval:true,use_proactively:true,mcp:{url:'https://gateway.example.com/mcp',transport:'streamable_http'}}});
   if(bearer)assert.doesNotMatch(await page.locator('.ns-content').innerText(),/synthetic-bearer/);
 });
 

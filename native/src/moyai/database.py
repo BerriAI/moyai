@@ -589,6 +589,10 @@ class Database:
             if policy.get("oauth") and (
                 row.shared or owner is None or row.owner_id != owner
                 or await db.get(OAuthCredential, row.id) is None
+                or (
+                    surface == "automation" and row.kind not in {"gmail", "google_calendar"}
+                    and not (policy.get("use_proactively") and policy.get("attention_tools"))
+                )
             ):
                 raise HTTPException(403, "This personal OAuth connection is unavailable.")
             grants.append(Grant(

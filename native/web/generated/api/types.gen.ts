@@ -2919,6 +2919,83 @@ export type ComputerState = {
 };
 
 /**
+ * ConnectionAttentionEdit
+ */
+export type ConnectionAttentionEdit = {
+    /**
+     * Consent Revision
+     */
+    consent_revision?: number | null;
+    /**
+     * Readable Tools
+     */
+    readable_tools?: Array<string> | null;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Use Proactively
+     */
+    use_proactively: boolean;
+};
+
+/**
+ * ConnectionAttentionTools
+ */
+export type ConnectionAttentionTools = {
+    /**
+     * Readable Tools
+     */
+    readable_tools: Array<string>;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
+ * ConnectionAttentionUpdated
+ */
+export type ConnectionAttentionUpdated = {
+    attention: ConnectionAttentionView;
+    /**
+     * Revision
+     */
+    revision: number;
+};
+
+/**
+ * ConnectionAttentionView
+ */
+export type ConnectionAttentionView = {
+    /**
+     * Consent Revision
+     */
+    consent_revision: number | null;
+    /**
+     * Eligible
+     */
+    eligible: boolean;
+    /**
+     * Readable Tools
+     */
+    readable_tools: Array<string>;
+    /**
+     * Reason
+     */
+    reason: 'automation_unavailable' | 'shared_account' | 'disconnected' | 'unsupported_provider' | 'read_tools_required' | 'provider_disabled' | null;
+    /**
+     * Status
+     */
+    status: 'disabled' | 'unavailable' | 'paused' | 'pending' | 'active';
+    /**
+     * Use Proactively
+     */
+    use_proactively: boolean;
+};
+
+/**
  * ConnectionCheck
  */
 export type ConnectionCheck = {
@@ -2971,6 +3048,10 @@ export type ConnectionPolicy = {
      * Allowed Tools
      */
     allowed_tools?: Array<string> | null;
+    /**
+     * Attention Tools
+     */
+    attention_tools?: Array<string> | null;
     gateway?: GatewayConfigInput | null;
     gateway_discovery?: GatewayDiscoveryInput | null;
     mcp?: RemoteMcpConfigInput | null;
@@ -3006,6 +3087,10 @@ export type ConnectionPolicyView = {
      * Allowed Tools
      */
     allowed_tools: Array<string> | null;
+    /**
+     * Attention Tools
+     */
+    attention_tools: Array<string> | null;
     gateway: GatewayConfigOutput | null;
     gateway_discovery: GatewayDiscoveryOutput | null;
     mcp: RemoteMcpConfigOutput | null;
@@ -3051,6 +3136,7 @@ export type ConnectionToolPreview = {
  * ConnectionView
  */
 export type ConnectionView = {
+    attention: ConnectionAttentionView | null;
     /**
      * Enabled
      */
@@ -6092,6 +6178,7 @@ export type PersonalOAuthStart = {
  * PersonalOAuthView
  */
 export type PersonalOAuthView = {
+    attention: ConnectionAttentionView | null;
     /**
      * Attention Status
      */
@@ -6127,6 +6214,20 @@ export type PersonalOAuthView = {
 };
 
 /**
+ * PersonalSlackOAuthRequest
+ */
+export type PersonalSlackOAuthRequest = {
+    /**
+     * Consent Revision
+     */
+    consent_revision?: number | null;
+    /**
+     * Use Proactively
+     */
+    use_proactively?: boolean | null;
+};
+
+/**
  * PersonalSlackOAuthStart
  */
 export type PersonalSlackOAuthStart = {
@@ -6142,6 +6243,7 @@ export type PersonalSlackOAuthStart = {
  * The signed-in owner's personal Slack connection; grant material never leaves the server.
  */
 export type PersonalSlackStatus = {
+    attention: ConnectionAttentionView | null;
     /**
      * Available
      */
@@ -6150,6 +6252,10 @@ export type PersonalSlackStatus = {
      * Connected
      */
     connected: boolean;
+    /**
+     * Connection Id
+     */
+    connection_id: string | null;
     /**
      * Effective Source
      */
@@ -6170,6 +6276,14 @@ export type PersonalSlackStatus = {
      * Oauth Configured
      */
     oauth_configured: boolean;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Use Proactively
+     */
+    use_proactively: boolean;
 };
 
 /**
@@ -13005,11 +13119,23 @@ export type CheckPersonalSlackResponses = {
 export type CheckPersonalSlackResponse = CheckPersonalSlackResponses[keyof CheckPersonalSlackResponses];
 
 export type StartPersonalSlackOAuthData = {
-    body?: never;
+    /**
+     * Body
+     */
+    body?: PersonalSlackOAuthRequest | null;
     path?: never;
     query?: never;
     url: '/api/connections/slack/personal/oauth';
 };
+
+export type StartPersonalSlackOAuthErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type StartPersonalSlackOAuthError = StartPersonalSlackOAuthErrors[keyof StartPersonalSlackOAuthErrors];
 
 export type StartPersonalSlackOAuthResponses = {
     /**
@@ -13049,6 +13175,66 @@ export type UpdateConnectionResponses = {
 };
 
 export type UpdateConnectionResponse = UpdateConnectionResponses[keyof UpdateConnectionResponses];
+
+export type UpdateConnectionAttentionData = {
+    body: ConnectionAttentionEdit;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/connections/{connection_id}/attention';
+};
+
+export type UpdateConnectionAttentionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateConnectionAttentionError = UpdateConnectionAttentionErrors[keyof UpdateConnectionAttentionErrors];
+
+export type UpdateConnectionAttentionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionAttentionUpdated;
+};
+
+export type UpdateConnectionAttentionResponse = UpdateConnectionAttentionResponses[keyof UpdateConnectionAttentionResponses];
+
+export type ListConnectionAttentionToolsData = {
+    body?: never;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/connections/{connection_id}/attention/tools';
+};
+
+export type ListConnectionAttentionToolsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListConnectionAttentionToolsError = ListConnectionAttentionToolsErrors[keyof ListConnectionAttentionToolsErrors];
+
+export type ListConnectionAttentionToolsResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionAttentionTools;
+};
+
+export type ListConnectionAttentionToolsResponse = ListConnectionAttentionToolsResponses[keyof ListConnectionAttentionToolsResponses];
 
 export type CheckConnectionData = {
     body?: never;

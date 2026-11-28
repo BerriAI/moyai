@@ -181,10 +181,10 @@ class Definition(BaseModel):
         ):
             raise ValueError('Restricted discovery sources must belong to selected accounts.')
         if self.attention_mode == 'discovery' and (
-            self.kind != 'attention' or len(self.connection_ids) > 4 or len(self.prompt) > 2000
+            self.kind != 'attention' or len(self.prompt) > 2000
             or len(self.triggers) != 1
         ):
-            raise ValueError('Discovery requires one attention schedule, up to four approved accounts, and scan instructions of at most 2000 characters.')
+            raise ValueError('Discovery requires one attention schedule and scan instructions of at most 2000 characters.')
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
         if self.visibility == 'private' and any(t.event for t in self.triggers):

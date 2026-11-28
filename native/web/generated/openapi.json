@@ -5495,6 +5495,161 @@
         "title": "ComputerState",
         "type": "object"
       },
+      "ConnectionAttentionEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "consent_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consent Revision"
+          },
+          "readable_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readable Tools"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "use_proactively": {
+            "title": "Use Proactively",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revision",
+          "use_proactively"
+        ],
+        "title": "ConnectionAttentionEdit",
+        "type": "object"
+      },
+      "ConnectionAttentionTools": {
+        "properties": {
+          "readable_tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Readable Tools",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "readable_tools"
+        ],
+        "title": "ConnectionAttentionTools",
+        "type": "object"
+      },
+      "ConnectionAttentionUpdated": {
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/ConnectionAttentionView"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "attention"
+        ],
+        "title": "ConnectionAttentionUpdated",
+        "type": "object"
+      },
+      "ConnectionAttentionView": {
+        "properties": {
+          "consent_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consent Revision"
+          },
+          "eligible": {
+            "title": "Eligible",
+            "type": "boolean"
+          },
+          "readable_tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Readable Tools",
+            "type": "array"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "automation_unavailable",
+                  "shared_account",
+                  "disconnected",
+                  "unsupported_provider",
+                  "read_tools_required",
+                  "provider_disabled"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "disabled",
+              "unavailable",
+              "paused",
+              "pending",
+              "active"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "use_proactively": {
+            "title": "Use Proactively",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "eligible",
+          "reason",
+          "use_proactively",
+          "status",
+          "readable_tools",
+          "consent_revision"
+        ],
+        "title": "ConnectionAttentionView",
+        "type": "object"
+      },
       "ConnectionCheck": {
         "properties": {
           "tool_count": {
@@ -5592,6 +5747,21 @@
             ],
             "title": "Allowed Tools"
           },
+          "attention_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attention Tools"
+          },
           "gateway": {
             "anyOf": [
               {
@@ -5674,6 +5844,20 @@
             ],
             "title": "Allowed Tools"
           },
+          "attention_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attention Tools"
+          },
           "gateway": {
             "anyOf": [
               {
@@ -5745,6 +5929,7 @@
           "oauth",
           "oauth_account",
           "use_proactively",
+          "attention_tools",
           "product",
           "mcp",
           "gateway",
@@ -5780,6 +5965,16 @@
       },
       "ConnectionView": {
         "properties": {
+          "attention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionAttentionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -5849,7 +6044,8 @@
           "enabled",
           "revision",
           "policy",
-          "source"
+          "source",
+          "attention"
         ],
         "title": "ConnectionView",
         "type": "object"
@@ -10887,6 +11083,16 @@
       },
       "PersonalOAuthView": {
         "properties": {
+          "attention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionAttentionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "attention_status": {
             "anyOf": [
               {
@@ -10964,9 +11170,40 @@
           "connection_id",
           "revision",
           "use_proactively",
-          "attention_status"
+          "attention_status",
+          "attention"
         ],
         "title": "PersonalOAuthView",
+        "type": "object"
+      },
+      "PersonalSlackOAuthRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "consent_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consent Revision"
+          },
+          "use_proactively": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Proactively"
+          }
+        },
+        "title": "PersonalSlackOAuthRequest",
         "type": "object"
       },
       "PersonalSlackOAuthStart": {
@@ -10985,6 +11222,16 @@
       "PersonalSlackStatus": {
         "description": "The signed-in owner's personal Slack connection; grant material never leaves the server.",
         "properties": {
+          "attention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionAttentionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "available": {
             "title": "Available",
             "type": "boolean"
@@ -10992,6 +11239,17 @@
           "connected": {
             "title": "Connected",
             "type": "boolean"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
           },
           "effective_source": {
             "enum": [
@@ -11022,6 +11280,16 @@
           "oauth_configured": {
             "title": "Oauth Configured",
             "type": "boolean"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "use_proactively": {
+            "default": false,
+            "title": "Use Proactively",
+            "type": "boolean"
           }
         },
         "required": [
@@ -11031,7 +11299,11 @@
           "label",
           "health",
           "effective_source",
-          "limitation"
+          "limitation",
+          "connection_id",
+          "revision",
+          "use_proactively",
+          "attention"
         ],
         "title": "PersonalSlackStatus",
         "type": "object"
@@ -22234,6 +22506,23 @@
     "/api/connections/slack/personal/oauth": {
       "post": {
         "operationId": "startPersonalSlackOAuth",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PersonalSlackOAuthRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -22244,6 +22533,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Start"
@@ -22296,6 +22595,94 @@
           }
         },
         "summary": "Edit Connection"
+      }
+    },
+    "/api/connections/{connection_id}/attention": {
+      "patch": {
+        "operationId": "updateConnectionAttention",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionAttentionEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionAttentionUpdated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Attention"
+      }
+    },
+    "/api/connections/{connection_id}/attention/tools": {
+      "post": {
+        "operationId": "listConnectionAttentionTools",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionAttentionTools"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Tools"
       }
     },
     "/api/connections/{connection_id}/check": {

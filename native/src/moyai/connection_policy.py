@@ -38,6 +38,7 @@ class ConnectionPolicy(BaseModel):
     oauth: bool = False
     oauth_account: str = ""
     use_proactively: bool = False
+    attention_tools: list[str] | None = Field(default=None, max_length=200, exclude_if=lambda value: value is None)
     product: dict[str, object] | None = None
     mcp: RemoteMCPConfig | None = None
     gateway: GatewayConfig | None = None

@@ -294,10 +294,23 @@ async def test_activity_binds_root_model_and_measures_real_workspace_ensure_cont
     )
     monkeypatch.setattr("moyai.execution.activity.info", lambda: info)
     seen = []
+    observed = []
+
+    async def observe(database, values):
+        assert database is runtime.database
+        observed.append(values)
+        return True
+
+    # Check interceptor wiring independently of the bounded, best-effort SQL sink.
+    # Persistence and failed-sink behavior have their own tests above.
+    monkeypatch.setattr("moyai.performance.record", observe)
 
     class Next:
         async def execute_activity(self, input):
             seen.append(INFERENCE_ACTIVITY.get())
+            if info.activity_type == "agent__moyai__workspace__call":
+                assert len(observed) == 1
+                assert json.loads(observed[0]["content"])["status"] == "pending"
             return SimpleNamespace(error=None)
 
     interceptor = AuthorizedActivity(Next(), runtime.database)
@@ -313,9 +326,16 @@ async def test_activity_binds_root_model_and_measures_real_workspace_ensure_cont
     wire.serialized_run_context["run_id"] = prepared.scope.root_run_id
     info.activity_type = "agent__moyai__workspace__call"
     await interceptor.execute_activity(request)
-    row = await saved(runtime, turn.id, "computer")
-    assert json.loads(row.content)["mode"] == "cold"
-    assert json.loads(row.content)["status"] == "ready"
+    assert len(seen) == 3 and len(observed) == 2
+    pending, ready = observed
+    for values in observed:
+        assert values["session_id"] == turn.session_id and values["turn_id"] == turn.id
+        assert values["kind"] == PREFIX + "computer"
+        assert values["identity"] == f"{PREFIX}computer:{turn.id}"
+        assert json.loads(values["content"])["mode"] == "cold"
+    assert json.loads(ready["content"])["status"] == "ready"
+    assert ready["created_at"] == pending["created_at"]
+    assert json.loads(ready["content"])["finished_at"] >= ready["created_at"]
 
 
 async def test_restore_is_not_ready_until_sdk_ensure_and_keeps_original_mode_and_start(runtime, active):

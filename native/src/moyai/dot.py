@@ -10,12 +10,14 @@ from pydantic_ai import Conversation, ConversationTypeAdapter
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import func, select, update
 
+from .attention_policy import attention_reads
 from .automations.product_automation_models import ProductAutomationBinding, ProductAutomationTurn
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant, NewSession, RunScope
 from .dot_evidence import validate_decision
 from .dot_models import DotAttentionTurn, DotDiscoveryTurn, DotNotification, DotSlackConversation, PersonalDot
 from .models import Connection, Message, Session, Turn, User, now
+from .oauth_models import OAuthCredential
 from .private_instructions import individual
 
 if TYPE_CHECKING:
@@ -32,17 +34,27 @@ class Dots:
 
     async def grants(self, db: AsyncSession, owner: str, ids: list[str], *, lock: bool = False) -> list[Grant]:
         """Require explicit personal read-tool policy in addition to provider hints."""
+        from .connection_attention import provider_enabled, slack_consent
+
         if not ids:
             raise HTTPException(409, "Choose a personal read-only connection with an explicit read-tool allowlist.")
         query = select(Connection).where(Connection.id.in_(ids)).execution_options(populate_existing=True)
         rows = list(await db.scalars(query.with_for_update() if lock else query))
-        if len(rows) != len(set(ids)) or any(
-            row.owner_id != owner or row.shared or not row.enabled or not row.read_only
-            or not ConnectionPolicy.model_validate_json(row.policy).allowed_tools
-            for row in rows
-        ):
+        if any(row.owner_id != owner or row.shared or not row.enabled for row in rows):
             raise HTTPException(409, "Attention requires your private read-only accounts with explicitly allowed read tools.")
-        return await self.database.resolve_grants(db, owner, ids, shared_session=False, surface="automation")
+        grants = await self.database.resolve_grants(db, owner, ids, shared_session=False, surface="automation")
+        native_ids = {row.id for row in rows}
+        user = await db.get(User, owner, populate_existing=True)
+        for grant in grants:
+            if grant.policy.get("oauth") and not await provider_enabled(self.database, db, grant.kind):
+                raise HTTPException(409, "This provider is disabled by the workspace.")
+            reference = grant.policy.get("product") or {}
+            if not attention_reads(grant) or (grant.id not in native_ids and not (
+                grant.kind == "slack" and reference.get("personal_owner") == owner
+                and reference.get("access") == "personal_reads" and slack_consent(user) == grant.id
+            )):
+                raise HTTPException(409, "Attention requires your private accounts with explicitly allowed read tools.")
+        return grants
 
     async def worker_session(self, db: AsyncSession, session_id: str) -> bool:
         return bool(await db.scalar(select(DotAttentionTurn.turn_id).join(
@@ -72,20 +84,24 @@ class Dots:
         """
         if not await self.is_conversation(db, owner, session):
             return []
-        from .oauth_models import OAuthCredential
+        from .connection_attention import canonical_slack, native_grant, slack_consent
 
-        rows = await db.scalars(select(Connection).join(
+        rows = await db.execute(select(Connection, OAuthCredential.encrypted).outerjoin(
             OAuthCredential, OAuthCredential.connection_id == Connection.id,
         ).where(
             Connection.owner_id == owner, Connection.shared.is_(False),
-            Connection.enabled.is_(True), Connection.read_only.is_(True),
-            Connection.kind.in_(["gmail", "google_calendar"]),
+            Connection.enabled.is_(True),
         ).execution_options(populate_existing=True))
-        return [
-            row.id for row in rows
-            if (policy := ConnectionPolicy.model_validate_json(row.policy)).oauth
-            and policy.use_proactively and policy.allowed_tools
+        accounts = [
+            row.id for row, credential in rows
+            if (policy := ConnectionPolicy.model_validate_json(row.policy)).use_proactively
+            and (not policy.oauth or credential)
+            and attention_reads(native_grant(row))
         ]
+        identity = slack_consent(await db.get(User, owner))
+        if identity is not None and await canonical_slack(self.database, db, owner, identity) is not None:
+            accounts.append(identity)
+        return accounts
 
     async def delivery_session(self, db: AsyncSession, session_id: str | None, turn_id: str | None) -> str | None:
         """Public run links open the conversation, never the immutable observer."""
@@ -166,6 +182,8 @@ class Dots:
     async def authorize(
         self, db: AsyncSession, turn: Turn, *, scope: RunScope | None = None, publication: bool = False,
     ) -> DotAttentionTurn | None:
+        from .automations.product_automation_context_models import ProductAutomationExecutionContext
+        from .automations.product_automations import DISCOVERY_BATCH_SIZE, ProductAutomationService
         from .database import grant_fingerprint
 
         record = await db.get(DotAttentionTurn, turn.id)
@@ -175,11 +193,11 @@ class Dots:
             return None
         if scope is not None and not scope.attention:
             raise PermissionError("Attention must use its restricted execution mode.")
-        if scope is not None and scope.discovery != (await db.get(DotDiscoveryTurn, turn.id) is not None):
+        discovery = await db.get(DotDiscoveryTurn, turn.id)
+        if scope is not None and scope.discovery != (discovery is not None):
             raise PermissionError("The discovery execution mode changed.")
         if scope is not None and scope.discovery:
             from .dot_sources import repositories
-            discovery = await db.get(DotDiscoveryTurn, turn.id)
             assert discovery is not None
             if scope.discovery_repositories != repositories(
                 scope.grants, json.loads(self.database.security.unseal(discovery.sources)),
@@ -199,7 +217,33 @@ class Dots:
             or binding.generation != record.generation or binding.state == "deleted"
         ):
             raise PermissionError("This attention check was paused or changed.")
-        grants = await self.grants(db, turn.actor_id, json.loads(turn.connections), lock=publication)
+        selected = json.loads(turn.connections)
+        captured = (
+            await db.get(ProductAutomationExecutionContext, (binding.id, record.generation))
+            if self.database.product_authority_enabled else None
+        )
+        if captured is None:
+            if self.database.product_authority_enabled:
+                raise PermissionError("The attention check has no captured account consent.")
+            grants = await self.grants(db, turn.actor_id, selected, lock=publication)
+        else:
+            pool, workspace = json.loads(captured.connection_ids), json.loads(captured.workspace_context)
+            if (
+                captured.owner_id != binding.owner_id or captured.authority_version != binding.authority_version
+                or captured.fingerprint != ProductAutomationService._context_fingerprint(
+                    binding.id, record.generation, binding.owner_id, binding.authority_version, pool, workspace,
+                )
+                or not selected or len(set(selected)) != len(selected) or not set(selected) <= set(pool)
+                or (discovery is not None and len(selected) > DISCOVERY_BATCH_SIZE)
+                or (discovery is None and sorted(selected) != sorted(pool))
+            ):
+                raise PermissionError("The attention check's captured account selection changed.")
+            # A deferred account changing or revoking consent invalidates the
+            # current occurrence too. Publication holds every native row fence.
+            all_grants = await self.grants(db, turn.actor_id, pool, lock=publication)
+            if workspace != {"format": "moyai-attention-v1", "grants_key": grant_fingerprint(all_grants)}:
+                raise PermissionError("The attention account pool changed. Review and enable it again.")
+            grants = [grant for grant in all_grants if grant.id in selected]
         if grant_fingerprint(grants) != record.grants_key or (
             scope is not None and scope.grants_key != record.grants_key
         ):

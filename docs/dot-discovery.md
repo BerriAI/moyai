@@ -1,7 +1,8 @@
 # General proactive attention
 
 `kind="attention", attention_mode="discovery"` uses one standing, owner-approved
-schedule for up to two private read-only accounts. The owner can opt in through
+schedule for up to 30 private accounts, using only their approved read tools.
+Each occurrence checks at most four accounts. The owner can opt in through
 ordinary Dot chat; they do not configure a reminder for each finding. A private
 prompt supplies priorities. Optional `attention_sources` provide owner-approved
 GitHub repository URLs when the scope is narrower than an account. This option
@@ -19,6 +20,15 @@ renames, so the requested name alone does not verify the response. Structured
 comment envelopes are decoded, and provider URL casing is normalized.
 The existing automation tools own creation, review, enable, pause and timing.
 Discovery does not introduce another scheduler or create automations per item.
+
+Admission rotates through the stable sorted account pool in batches of at most
+four. Existing committed occurrence records determine the next batch, and each
+turn stores its exact selected accounts. Retries and process restarts retain that
+selection; skipped admissions consume no batch, while failed admitted checks
+advance rotation. Scheduled and manual checks share this sequence within the
+current consent generation. The full captured pool remains subject to authority
+checks, including accounts deferred to a later batch. Deferred accounts make a
+successful scan partial, so one batch cannot claim a clean check of every account.
 
 ## Execution and privacy
 
@@ -45,6 +55,13 @@ Provider pagination, next-page cursors and incomplete-result signals also make
 a scan partial, as do failed, denied, interrupted or unrecognized tool results.
 Unsupported rows inside a nonempty collection also make it partial; silently
 dropped rows cannot turn a malformed response into a successful empty scan.
+Native Notion records retain their own page properties or block text alongside
+`last_edited_time`; child text is not borrowed as evidence for a parent. Native
+Slack search, channel and thread reads use the same channel/message identity.
+Their returned `revision` fingerprints the observed message text, because a
+message's `ts` is not a last-modified timestamp. Each reply has its own identity;
+optional metadata differences do not revise an unchanged root. Slack permalinks remain
+provider metadata; the stable source ID is displayed when no common URL is available.
 Known paginated tools also remain partial without explicit
 first-page exhaustion evidence; bare arrays never imply complete coverage.
 A snapshot older than fifteen minutes cannot publish.
@@ -79,7 +96,7 @@ does not.
 
 ## Bounds and release
 
-Bounds: four accounts; one trigger; 2,000 characters of private priorities;
+Bounds: 30 enrolled accounts, at most four per occurrence; one trigger; 2,000 characters of private priorities;
 12 research tool calls and sixteen model requests; 30 returned records and 16,000
 characters per tool result; 12 validated observations; four judgment requests
 and four memory reads/searches; 180 KB of serialized model input per request.

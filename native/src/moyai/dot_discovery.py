@@ -13,11 +13,12 @@ from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.messages import RetryPromptPart, ToolReturnPart
 from sqlalchemy import select
 
+from .attention_policy import attention_reads
 from .connection_policy import ConnectionPolicy
 from .contracts import Grant, RunScope
 from .dot_contracts import DotItemEdit, DotItemsView, DotItemView, DotJudgment, DotObservation, DotResearch
 from .dot_evidence import validate_evidence, verified_closed
-from .dot_models import DotAttentionTurn, DotDiscoveryTurn, DotItem, PersonalDot
+from .dot_models import DotAttentionTurn, DotCanonicalItem, DotDiscoveryTurn, DotItem, PersonalDot
 from .dot_sources import repositories, source_allowed
 from .models import Connection, Message, Session, Turn, User, now
 from .private_instructions import individual
@@ -68,16 +69,33 @@ class Discovery:
     def __init__(self, database: Database):
         self.database = database
 
-    def unpack(self, item: DotItem) -> DotObservation:
+    def unpack(self, item: DotItem | DotCanonicalItem) -> DotObservation:
         return DotObservation.model_validate_json(self.database.security.unseal(item.content))
 
-    def view(self, item: DotItem) -> DotItemView:
+    def view(self, item: DotItem | DotCanonicalItem) -> DotItemView:
         observation = self.unpack(item)
         return DotItemView(
             id=item.id, revision=item.revision, connection_id=item.connection_id,
             title=observation.title, summary=observation.summary, source=observation.evidence[0].source,
             state=item.state, snoozed_until=item.snoozed_until, last_seen_at=item.last_seen_at,
         )
+
+    async def item(self, db: AsyncSession, identity: str) -> DotItem | DotCanonicalItem | None:
+        return await db.get(DotItem, identity) or await db.get(DotCanonicalItem, identity)
+
+    async def items(
+        self, db: AsyncSession, owner: str, accounts: list[str], *, limit: int,
+        active: bool = False, oldest: bool = False,
+    ) -> list[DotItem | DotCanonicalItem]:
+        """One bounded view over historical native and canonical account items."""
+        result: list[DotItem | DotCanonicalItem] = []
+        for model in (DotItem, DotCanonicalItem):
+            query = select(model).where(model.owner_id == owner, model.account_key.in_(accounts))
+            if active:
+                query = query.where(model.state.in_(("open", "snoozed")))
+            order = (model.last_seen_at, model.id) if oldest else (model.last_seen_at.desc(), model.id.desc())
+            result.extend(await db.scalars(query.order_by(*order).limit(limit)))
+        return sorted(result, key=lambda item: (item.last_seen_at, item.id), reverse=not oldest)[:limit]
 
     async def active(self, db: AsyncSession, destination: str) -> bool:
         return bool(await db.scalar(select(DotDiscoveryTurn.turn_id).join(
@@ -87,6 +105,22 @@ class Discovery:
             Turn.status.not_in(("completed", "failed", "stopped", "included")),
         ).limit(1)))
 
+    async def deferred_count(self, db: AsyncSession, turn: Turn) -> int:
+        """Read immutable enrollment after the caller validates the full pool."""
+        if not self.database.product_authority_enabled:
+            return 0
+        from .automations.product_automation_context_models import ProductAutomationExecutionContext
+
+        attention = await db.get(DotAttentionTurn, turn.id)
+        if attention is None:
+            return 0
+        captured = await db.get(
+            ProductAutomationExecutionContext, (attention.automation_id, attention.generation),
+        )
+        if captured is None:
+            raise PermissionError("The attention check has no captured account consent.")
+        return len(set(json.loads(captured.connection_ids)) - set(json.loads(turn.connections)))
+
     async def scan_prompt(self, db: AsyncSession, turn: Turn, destination: str) -> str:
         """Research receives provider references, never private summaries or chat."""
         accounts = json.loads(turn.connections)
@@ -95,12 +129,12 @@ class Discovery:
         assert occurrence is not None
         sources = json.loads(self.database.security.unseal(occurrence.sources))
         restricted = repositories(grants, sources)
-        items = list(await db.scalars(select(DotItem).where(
-            DotItem.owner_id == turn.actor_id, DotItem.account_key.in_([account_key(grant) for grant in grants]),
-            DotItem.state.in_(("open", "snoozed")),
-        ).order_by(DotItem.last_seen_at).limit(20)))
+        items = await self.items(
+            db, turn.actor_id, [account_key(grant) for grant in grants], limit=20, active=True, oldest=True,
+        )
         return json.dumps({
             "connection_ids": accounts, "current_time": now(),
+            "deferred_account_count": await self.deferred_count(db, turn),
             "starting_locations": sources,
             "revisit": [
                 {"connection_id": item.connection_id, "source": self.unpack(item).evidence[0].source}
@@ -141,10 +175,10 @@ class Discovery:
             allowed = {
                 f"{grant.kind}_{grant.id[:8]}_{name}": grant.id
                 for grant in scope.grants
-                for name in (ConnectionPolicy.model_validate(grant.policy).allowed_tools or [])
+                for name in attention_reads(grant)
             }
             checked: set[str] = set()
-            partial = False
+            partial = bool(await self.deferred_count(db, turn))
             for message in ConversationTypeAdapter.validate_json(conversation).messages:
                 for part in message.parts:
                     if not isinstance(part, (ToolReturnPart, RetryPromptPart)) or part.tool_name not in allowed:
@@ -164,15 +198,13 @@ class Discovery:
                 research.coverage = "blocked"
             elif partial or checked != {grant.id for grant in scope.grants}:
                 research.coverage = "partial"
-            items = list(await db.scalars(select(DotItem).where(
-                DotItem.owner_id == scope.actor_id, DotItem.account_key.in_(accounts.values()),
-            ).order_by(DotItem.last_seen_at.desc()).limit(30)))
+            items = await self.items(db, scope.actor_id, list(accounts.values()), limit=30)
             # Include the exact revision of every observed identity even if its
             # older record falls outside the bounded context catalog.
             revisions = {}
             for account, source, _ in identities:
                 key = digest([scope.actor_id, accounts[account], source])
-                item = await db.get(DotItem, key)
+                item = await self.item(db, key)
                 revisions[key] = item.revision if item else 0
             messages = list(await db.scalars(select(Message).where(
                 Message.session_id == attention.destination_session_id,
@@ -222,7 +254,7 @@ class Discovery:
             observation = snapshot.research.observations[change.observation]
             account, source, version = snapshot.identities[change.observation]
             key = digest([turn.actor_id, snapshot.accounts[account], source])
-            item = await db.get(DotItem, key)
+            item = await self.item(db, key)
             if (item.revision if item else 0) != snapshot.revisions[key]:
                 continue  # A newer owner edit or publication wins over this observer.
             if item is not None and item.owner_controlled and (
@@ -233,7 +265,8 @@ class Discovery:
             if item is None:
                 if change.state == "resolved":
                     continue
-                item = DotItem(
+                model = DotItem if await db.get(Connection, account) is not None else DotCanonicalItem
+                item = model(
                     id=key, owner_id=turn.actor_id, connection_id=account, account_key=snapshot.accounts[account],
                     source_key=digest([snapshot.accounts[account], source]), owner_revision=0, revision=0,
                 )
@@ -267,28 +300,31 @@ class Discovery:
         return dot.session_id
 
     async def list(self, actor: User) -> DotItemsView:
+        from .connection_attention import slack_consent
+
         async with self.database.sessions.begin() as db:
             await self.owner_session(db, actor)
-            accounts = list(await db.scalars(select(Connection).where(
+            accounts = list(await db.scalars(select(Connection.id).where(
                 Connection.owner_id == actor.id, Connection.shared.is_(False),
-                Connection.enabled.is_(True), Connection.read_only.is_(True),
+                Connection.enabled.is_(True),
             )))
+            personal_slack = slack_consent(await db.get(User, actor.id))
+            if personal_slack is not None:
+                accounts.append(personal_slack)
             visible = []
             for account in accounts:
                 try:
-                    grants = await self.database.dots.grants(db, actor.id, [account.id])
+                    grants = await self.database.dots.grants(db, actor.id, [account])
                 except (HTTPException, PermissionError):
                     continue
                 visible.extend(account_key(grant) for grant in grants)
-            items = list(await db.scalars(select(DotItem).where(
-                DotItem.owner_id == actor.id, DotItem.account_key.in_(visible),
-            ).order_by(DotItem.last_seen_at.desc()).limit(ITEM_LIMIT + 1)))
+            items = await self.items(db, actor.id, visible, limit=ITEM_LIMIT + 1)
             return DotItemsView(items=[self.view(item) for item in items[:ITEM_LIMIT]], limited=len(items) > ITEM_LIMIT)
 
     async def edit(self, actor: User, identity: str, body: DotItemEdit) -> DotItemView:
         async with self.database.sessions.begin() as db:
             await self.owner_session(db, actor, lock=True)
-            item = await db.get(DotItem, identity)
+            item = await self.item(db, identity)
             if item is None or item.owner_id != actor.id:
                 raise HTTPException(404, "Follow-up not found.")
             grants = await self.database.dots.grants(db, actor.id, [item.connection_id], lock=True)

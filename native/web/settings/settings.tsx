@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -24,6 +25,7 @@ import { MoyaiBrand, SidebarToggle } from "../brand"
 import { AppearanceToggle } from "../appearance-toggle"
 import { ProductGitLabSetup } from "./product-gitlab-settings"
 import { PersonalConnections } from "./personal-connections"
+import { ConnectionAttention } from "./connection-attention"
 import type { GeneralPreferences } from "./general-preferences"
 import {
   checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
@@ -95,6 +97,13 @@ export function connectionInput(values: FormValues, policy: ConnectionPolicy, or
       throw new Error("Changing the server URL requires a replacement bearer token or “Clear saved token”.")
     }
     nextPolicy = { ...policy, mcp: { url, transport: "streamable_http" } }
+  }
+  if (typeof values.use_proactively === "boolean") {
+    nextPolicy = {
+      ...nextPolicy,
+      use_proactively: values.use_proactively && values.shared !== true
+        && (kind !== "litellm" || values.gateway_mcp !== false),
+    }
   }
   const input: ConnectionInputWritable = {
     name: String(values.name ?? ""), kind, credential,
@@ -783,7 +792,7 @@ function ProductConnectionsPage({ user, onStartPrivateChat }: { user: SettingsUs
   const authorizationResult = new URLSearchParams(location.search).get("connection")
   return <>
     <PersonalConnections userId={user.id} individual={user.individual !== false}>
-      <ProductPersonalSlack embedded onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
+      <ProductPersonalSlack key={user.id} embedded onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
     </PersonalConnections>
     <section aria-label="Organization connections">
     <h2>Organization connections</h2>
@@ -792,7 +801,7 @@ function ProductConnectionsPage({ user, onStartPrivateChat }: { user: SettingsUs
     {authorizationResult === "success" && <p className="ns-notice" role="status">Authorization completed. Your current connections are shown below.</p>}
     <LoadState resource={resource}>{data => {
       const rows = data.filter(row => contains(search, row.id, row.label, row.identity) && (filter === "all" || row.id === filter))
-      return <><p className="ns-help">Connect a service, approve Moyai's access, and return here. These accounts are shared with your workspace.</p>
+      return <><p className="ns-help">Connect a service, approve Moyai's access, and return here. These shared accounts are available to your workspace and are not included in your personal Dot’s automatic checks.</p>
         <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Connected service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...Object.entries(productProviders).map(([value, label]) => ({ value, label }))]} />} />
         {rows.length ? <ProductConnectionRows connections={rows} admin={user.role === "admin"} busy={mutation.busy} onManage={open} onConnect={connect} /> : <Empty filtered={Boolean(search) || filter !== "all"} noun="organization connections" onClear={() => { setSearch(""); setFilter("all") }} />}
         {selected && <ProductConnectionDialog connection={selected.connection} mode={selected.mode} admin={user.role === "admin"} opener={opener}
@@ -804,12 +813,12 @@ function ProductConnectionsPage({ user, onStartPrivateChat }: { user: SettingsUs
     <section className="ns-mcp-connections" aria-label="LiteLLM gateways">
       <h2>LiteLLM gateways</h2>
       <p className="ns-help">Connect your personal key for Skills Hub and MCP tools in private chats. Model access is managed by your workspace.</p>
-      <ConnectionsPage user={user} initialKind="litellm" allowedKinds={["litellm"]} />
+      <ConnectionsPage user={user} initialKind="litellm" allowedKinds={["litellm"]} dotAttention />
     </section>
     <section className="ns-mcp-connections" aria-label="MCP connections">
       <h2>MCP connections</h2>
       <p className="ns-help">Connect a remote MCP server or gateway. Personal connections work in private chats; administrators can share their connections with the workspace.</p>
-      <ConnectionsPage user={user} initialKind="mcp" allowedKinds={["mcp"]} />
+      <ConnectionsPage user={user} initialKind="mcp" allowedKinds={["mcp"]} dotAttention />
     </section>
   </>
 }
@@ -933,15 +942,40 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
   }}</LoadState>
 }
 function ProductPersonalSlack({ individual, onStartPrivateChat, embedded = false }: { individual: boolean; onStartPrivateChat: () => void; embedded?: boolean }) {
-  const resource = useResource("/connections/slack/personal", signal => getPersonalSlack({ signal }).then(({ data }) => data))
+  const [accessVersion, setAccessVersion] = useState(0)
+  const resource = useResource(`/connections/slack/personal:${individual}:${accessVersion}`, signal => getPersonalSlack({ signal }).then(({ data }) => data))
   const mutation = useMutation(), [disconnect, setDisconnect] = useState(false)
   const [checked, setChecked] = useState(false)
+  const [proactive, setProactive] = useState(true)
+  const proactiveId = useId()
+  useEffect(() => {
+    const clear = () => { setDisconnect(false); setChecked(false); setAccessVersion(value => value + 1) }
+    window.addEventListener("moyai:access-changed", clear)
+    window.addEventListener("moyai:signed-out", clear)
+    return () => {
+      window.removeEventListener("moyai:access-changed", clear)
+      window.removeEventListener("moyai:signed-out", clear)
+    }
+  }, [])
+  useEffect(() => {
+    if (resource.loading || resource.data?.attention?.status !== "pending" || mutation.busy) return
+    const timer = window.setTimeout(resource.refresh, 2000)
+    return () => window.clearTimeout(timer)
+  }, [resource.data, resource.loading, resource.refresh, mutation.busy])
   return <LoadState resource={resource}>{data => {
     const healthy = data.connected && data.health === "healthy"
     const canStart = data.available && individual
+    const attentionAvailable = data.attention?.reason !== "automation_unavailable" && data.attention?.reason !== "provider_disabled"
     const connect = () => {
       let url: string
-      void mutation.run(async () => { url = (await startPersonalSlackOAuth()).data.url }, () => window.location.assign(productRedirect(url, location.origin)))
+      void mutation.run(async () => {
+        url = (await startPersonalSlackOAuth({
+          body: {
+            use_proactively: data.connected ? data.use_proactively : proactive && attentionAvailable,
+            ...(data.attention?.consent_revision != null ? { consent_revision: data.attention.consent_revision } : {}),
+          },
+        })).data.url
+      }, () => window.location.assign(productRedirect(url, location.origin)))
     }
     return <section className="ns-personal-slack" aria-label="Your Slack connection">
       <div className="ns-connection-card">
@@ -951,7 +985,16 @@ function ProductPersonalSlack({ individual, onStartPrivateChat, embedded = false
             <span className={`ns-connection-status ${healthy ? "is-connected" : ""}`}><span aria-hidden="true" />{data.connected ? healthy ? "Connected" : "Needs attention" : "Not connected"}</span>
           </div>
         </div>
-        <p className="ns-help">Available in your private web chats. Not used in shared chats, Slack threads, or automations.</p>
+        <p className="ns-help">Available in your private chats. With “Use proactively” enabled, your Dot also checks your Slack account for useful updates using read-only tools.</p>
+        {data.connected && data.connection_id && data.attention && <ConnectionAttention connection={{
+          id: data.connection_id, revision: data.revision, shared: false, attention: data.attention,
+        }} onUpdated={resource.refresh} />}
+        {!data.connected && data.available && <div className="ns-google-attention">
+          <label htmlFor={proactiveId}><Switch id={proactiveId} checked={proactive && attentionAvailable}
+            disabled={mutation.busy || !data.oauth_configured || !attentionAvailable}
+            onCheckedChange={setProactive} />Use proactively</label>
+          <p className="ns-help">{attentionAvailable ? "Dot checks periodically and messages you when useful. You can turn this off at any time." : "Background attention is unavailable for this account."}</p>
+        </div>}
         {data.connected && !healthy && <p className="ns-notice" role="status">Reconnect to restore access. Moyai will not switch to a workspace account if this connection fails.</p>}
         {!data.connected && data.effective_source === "organization" && <p className="ns-help">Your chats currently use the workspace Slack connection.</p>}
         {!data.available && <p className="ns-notice" role="status">Sign in with your individual work account to connect Slack.</p>}
@@ -1080,7 +1123,7 @@ function ConnectionCheckDialog({ connection, onClose }: { connection: Connection
   </DialogContent></Dialog>
 }
 
-function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user: SettingsUser; initialKind?: ConnectionInputWritable["kind"]; allowedKinds?: readonly ConnectionInputWritable["kind"][] }) {
+function ConnectionsPage({ user, initialKind = "github", allowedKinds, dotAttention = false }: { user: SettingsUser; initialKind?: ConnectionInputWritable["kind"]; allowedKinds?: readonly ConnectionInputWritable["kind"][]; dotAttention?: boolean }) {
   const [accessVersion, setAccessVersion] = useState(0)
   const resource = useResource(`/connections:${user.id}:${user.role}:${user.individual}:${accessVersion}`, loadConnections)
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
@@ -1088,6 +1131,11 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
   const [checking, setChecking] = useState<Connection | null>(null)
   const mutation = useMutation()
   const defaults = useResource(`/gateway-defaults:${user.id}`, useCallback(async (signal: AbortSignal) => (await getGatewayDefaults({ signal })).data, []))
+  useEffect(() => {
+    if (resource.loading || !resource.data?.some(row => row.attention?.status === "pending")) return
+    const timer = window.setTimeout(resource.refresh, 2000)
+    return () => window.clearTimeout(timer)
+  }, [resource.data, resource.loading, resource.refresh])
   useEffect(() => {
     setEditor(null); setDisable(null); setChecking(null)
     const clearAccess = () => { setEditor(null); setDisable(null); setChecking(null); setAccessVersion(value => value + 1) }
@@ -1125,6 +1173,7 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
             })}</dl>
             <p className="ns-help">MCP tools load through tool search. Select a skill with / in chat to use it.</p>
           </>}
+          {dotAttention && canManage(row) && <ConnectionAttention connection={row} onUpdated={resource.refresh} />}
           <small>{row.owner_id === user.id ? row.shared && user.role !== "admin" ? "Administrator access is required to edit this shared connection." : "Your connection" : "Managed by another workspace member"}</small></div>
         <div className="ns-row-actions">
           {row.kind === "mcp" && row.enabled && user.individual !== false && <Button variant="outline" size="sm" onClick={() => setChecking(row)}>Check connection<span className="visually-hidden"> {row.name}</span></Button>}
@@ -1132,7 +1181,7 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
           {canManage(row) && <><Button variant="outline" size="sm" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.name}</span></Button>{row.enabled && <Button variant="ghost" size="sm" onClick={() => setDisable(row)}>Disable<span className="visually-hidden"> {row.name}</span></Button>}</>}
         </div>
       </article>)}</div> : <Empty filtered={Boolean(search) || filter !== "all"} noun={mcpOnly ? "MCP connections" : "connections"} onClear={() => { setSearch(""); setFilter("all") }} />}
-      {editor && (editor === "new" || data.some(row => row.id === editor.id && canManage(row))) && <Editor title={editor === "new" ? gatewayOnly ? "Connect LiteLLM Gateway" : mcpOnly ? "Add MCP connection" : "Add connection" : "Edit connection"} description="Connect your own accounts. LiteLLM connects personal MCP tools and Skills Hub; model access stays managed by your workspace." initial={editor === "new" ? { name: "", kind: initialKind, url: defaults.data?.url ?? "", credential: "", clear_credential: false, shared: false, read_only: true, enabled: true, gateway_skills: true, gateway_mcp: true } : { name: editor.name, kind: editor.kind, url: editor.policy.gateway?.url ?? editor.policy.mcp?.url ?? "", credential: "", clear_credential: false, shared: editor.shared, read_only: editor.read_only, enabled: editor.enabled, gateway_skills: editor.policy.gateway?.skills ?? true, gateway_mcp: editor.policy.gateway?.mcp ?? true }} fields={values => [
+      {editor && (editor === "new" || data.some(row => row.id === editor.id && canManage(row))) && <Editor title={editor === "new" ? gatewayOnly ? "Connect LiteLLM Gateway" : mcpOnly ? "Add MCP connection" : "Add connection" : "Edit connection"} description="Connect your own accounts. LiteLLM connects personal MCP tools and Skills Hub; model access stays managed by your workspace." initial={editor === "new" ? { name: "", kind: initialKind, url: defaults.data?.url ?? "", credential: "", clear_credential: false, shared: false, read_only: true, enabled: true, gateway_skills: true, gateway_mcp: true, use_proactively: dotAttention } : { name: editor.name, kind: editor.kind, url: editor.policy.gateway?.url ?? editor.policy.mcp?.url ?? "", credential: "", clear_credential: false, shared: editor.shared, read_only: editor.read_only, enabled: editor.enabled, gateway_skills: editor.policy.gateway?.skills ?? true, gateway_mcp: editor.policy.gateway?.mcp ?? true, use_proactively: editor.policy.use_proactively ?? false }} fields={values => [
         { name: "name", label: "Account name", required: true, maxLength: 150 }, { name: "kind", label: "Service", type: "select", options: services, disabled: editor !== "new" },
         ...(values.kind === "mcp" ? [{ name: "url", label: "Server URL", type: "url" as const, required: true, hint: "For example, https://gateway.example.com/mcp. Use a Streamable HTTP endpoint; OAuth and local stdio servers are not supported." }] : []),
         ...(values.kind === "litellm" ? [
@@ -1149,6 +1198,10 @@ function ConnectionsPage({ user, initialKind = "github", allowedKinds }: { user:
         },
         ...(values.kind === "mcp" && editor !== "new" ? [{ name: "clear_credential", label: "Clear saved token", type: "checkbox" as const, hint: "Remove the saved bearer token and connect without authentication.", disabled: Boolean(values.credential) }] : []),
         { name: "read_only", label: "Read only", type: "checkbox", hint: values.kind === "litellm" ? "Read-only MCP tools and skill browsing. Turn off to allow changes and skill uploads, subject to approval." : values.kind === "mcp" ? "Only tools the server marks read-only are available. These annotations describe the server’s behavior; connect only to servers you trust." : undefined }, { name: "enabled", label: "Enable this connection", type: "checkbox" },
+        ...(dotAttention && values.shared !== true && (values.kind !== "litellm" || values.gateway_mcp !== false) ? [{
+          name: "use_proactively", label: "Use proactively", type: "checkbox" as const,
+          hint: "Let your Dot check this account automatically using its read-only tools and message you when useful. Chat permissions stay as configured above.",
+        }] : []),
         ...(user.role === "admin" && values.kind !== "litellm" ? [{ name: "shared", label: "Share with workspace members", type: "checkbox" as const }] : []),
       ]} onSave={async values => { await (editor === "new" ? createConnection({ body: connectionInput(values, { require_approval: true }) }) : updateConnection({ path: { connection_id: editor.id }, body: connectionInput(values, editor.policy, editor) })); resource.refresh() }} onClose={() => setEditor(null)} />}
       {checking && data.some(row => row.id === checking.id && row.revision === checking.revision && row.enabled) && <ConnectionCheckDialog key={`${checking.id}:${checking.revision}`} connection={checking} onClose={() => setChecking(null)} />}
@@ -1350,7 +1403,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />
                     : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} onStartPrivateChat={onStartPrivateChat} /> : <ConnectionsPage user={user} />
-                      : current === "personal-slack" ? <ProductPersonalSlack onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
+                      : current === "personal-slack" ? <ProductPersonalSlack key={user.id} onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
                       : current === "secrets" ? productMode === "existing" ? <ProductSecretsPage user={user} /> : <SecretsPage user={user} />
                         : current === "users" ? <UsersPage user={user} />
                           : current === "performance" || current === "usage" ? <AnalyticsPage kind={current} productMode={productMode} headingRef={heading} />

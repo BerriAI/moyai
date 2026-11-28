@@ -61,6 +61,21 @@ these contracts. Incompatible schema, framework or protocol changes require a
 coordinated maintenance window with all previous runtime owners retired.
 Compatible replacements must preserve the activated contracts and schema receipts.
 
+Native protocol 16 introduces attention-specific read-tool consent in persisted
+connection policies and permits attention to attenuate an otherwise write-capable
+personal grant. Protocol-15 readers reject the new policy key, and their workers
+do not implement this attenuation. This change is **not compatible with overlapping
+old and new runtime owners**. Use the existing coordinated maintenance procedure;
+retire all old roles before protocol-16 writers run. All native role fingerprints
+change. Schema v35 adds `moyai_dot_canonical_items` for follow-ups backed by real
+canonical personal grants; the native-account item table, its foreign key and
+all historical migration receipts remain unchanged. The expansion is registered
+in both the offline migration inventory and frozen online schema inventory.
+Its additive DDL does not make protocol-15/16 execution overlap safe. Policies without
+the new key and existing manually selected read-only attention grants remain
+readable. Once new consent has been saved, returning to protocol 15 requires
+restoring compatible data as well as code.
+
 Native execution protocol 2 records split activity queues, bundled skill startup,
 and on-demand workspace acquisition. It retains the `pydantic-v1` core identity
 but changes every native role fingerprint. The v14 application migration

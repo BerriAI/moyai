@@ -56,11 +56,26 @@ def repositories(grants: list[Grant], sources: list[dict[str, str]]) -> dict[str
         owner, repository = urlsplit(source.source).path.strip("/").split("/")
         result.setdefault(grant.id, []).append((owner.casefold(), repository.casefold()))
     if any(
-        identity not in result and not google_reader(grant)
+        identity not in result and not personal_reader(grant)
         for identity, grant in selected.items()
     ):
         raise ValueError("Choose a repository for every restricted discovery account.")
     return result
+
+
+def personal_reader(grant: Grant) -> bool:
+    """Other opted-in personal sources may coexist with repository restrictions."""
+    from .attention_policy import attention_reads
+
+    policy = ConnectionPolicy.model_validate(grant.policy)
+    return google_reader(grant) or bool(
+        attention_reads(grant) and (
+            policy.use_proactively or (
+                policy.product is not None and policy.product.get("personal_owner")
+                and policy.product.get("access") == "personal_reads"
+            )
+        )
+    )
 
 
 def source_allowed(source: str, allowed: list[tuple[str, str]]) -> bool:

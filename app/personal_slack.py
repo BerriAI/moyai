@@ -9,8 +9,9 @@ from urllib.parse import urlencode
 
 from fastapi import HTTPException, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from .connection_attention_models import ConnectionAttentionView
 from .connector_errors import ConnectorError
 from .db import database
 from .security import digest
@@ -31,11 +32,28 @@ class PersonalSlackStatus(BaseModel):
     health: Literal['healthy', 'error', 'absent']
     effective_source: Literal['personal', 'organization', 'none']
     limitation: str
+    connection_id: str | None = None
+    revision: int = 0
+    use_proactively: bool = False
+    attention: ConnectionAttentionView | None = None
+
+
+class PersonalSlackOAuthRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    use_proactively: bool | None = None
+    consent_revision: int | None = Field(default=None, ge=0)
 
 
 class PersonalSlackOAuthStart(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True)
     url: str
+
+
+@dataclass(frozen=True)
+class PersonalSlackAttentionChoice:
+    use_proactively: bool
+    consent_revision: int
 
 
 @dataclass
@@ -108,11 +126,13 @@ class PersonalSlack:
             credentials = {**credentials, AUTHORITY: authority(original, previous["encrypted"])}
         else:
             credentials = new_credentials(credentials)
+        saved_revision = secrets.token_hex(24)
         changed = self.store.execute('''UPDATE personal_slack_grants SET encrypted=?,label=?,health='healthy',revision=?
             WHERE owner_id=? AND revision=?''', (self.security.encrypt(json.dumps(credentials)), label,
-                secrets.token_hex(24), owner, revision))
+                saved_revision, owner, revision))
         if not changed:
             raise ConnectorError('Personal Slack changed. Retry from Settings > Personal Slack.')
+        return saved_revision
 
     def record_error(self, owner, revision):
         self.store.execute("UPDATE personal_slack_grants SET health='error' WHERE owner_id=? AND revision=?", (owner, revision))
@@ -232,7 +252,7 @@ class PersonalSlack:
                 'effective_source': 'personal' if connected else 'organization' if self.store.rows("SELECT 1 FROM connections WHERE provider='slack'") else 'none',
                 'limitation': LIMITATION}
 
-    def routes(self, app, checkpoints=None):
+    def routes(self, app, checkpoints=None, *, after_change=None, attention_choice=None, attention_status=None):
         async def flush():
             if checkpoints:
                 await checkpoints.flush()
@@ -250,15 +270,31 @@ class PersonalSlack:
         @app.get('/api/connections/slack/personal', operation_id='getPersonalSlack')
         async def status(request: Request) -> PersonalSlackStatus:
             _, owner = await database(actor, request, required=False)
-            return await database(self.status, owner)
+            return await status_view(owner)
+
+        async def status_view(owner):
+            result = PersonalSlackStatus.model_validate(await database(self.status, owner))
+            return await attention_status(owner, result) if attention_status and owner else result
 
         @app.post('/api/connections/slack/personal/oauth', operation_id='startPersonalSlackOAuth')
-        async def start(request: Request) -> PersonalSlackOAuthStart:
+        async def start(request: Request, body: PersonalSlackOAuthRequest | None = None) -> PersonalSlackOAuthStart:
             sid, owner = await database(actor, request, True)
             if not self.connectors.configured_oauth('slack'):
                 raise HTTPException(409, 'Configure the Slack OAuth client first.')
-            state = OAUTH_STATE_PREFIX + secrets.token_urlsafe(32)
             revision = await database(self.revision, owner)
+            selected = body.use_proactively if body is not None else None
+            consent_revision = body.consent_revision if body is not None else None
+            if attention_choice:
+                choice = await attention_choice(request, owner, revision, selected, consent_revision)
+                selected, consent_revision = choice.use_proactively, choice.consent_revision
+            elif selected:
+                raise HTTPException(409, 'Background attention is unavailable on this installation.')
+            # The stored state hash binds the choice to this exact one-use
+            # session/owner/revision request; changing the marker invalidates it.
+            state = (
+                OAUTH_STATE_PREFIX + ('attention-on:' if selected else 'attention-off:')
+                + (str(consent_revision) if consent_revision is not None else '-') + ':' + secrets.token_urlsafe(32)
+            )
             await database(self.store.execute, 'INSERT INTO personal_slack_states VALUES(?,?,?,?,?)',
                 (digest(state), digest(sid), owner, revision, time.time() + 600))
             await flush()
@@ -282,10 +318,17 @@ class PersonalSlack:
                 credentials = await self.exchange(code=code)
                 label = await self.verify(credentials)
                 await database(actor, request)
-                await database(self.save, owner, credentials, label, row['revision'])
+                saved_revision = await database(self.save, owner, credentials, label, row['revision'])
             except Exception:
                 raise HTTPException(409, FAILURE) from None
             await flush()
+            if after_change:
+                receipt = state.removeprefix(OAUTH_STATE_PREFIX).split(':')
+                await after_change(
+                    owner, request=request, revision=saved_revision,
+                    use_proactively=state.startswith(OAUTH_STATE_PREFIX + 'attention-on:'),
+                    consent_revision=int(receipt[1]) if len(receipt) == 3 and receipt[1].isdigit() else None,
+                )
             return RedirectResponse('/?connection=success#personal-slack', status_code=303)
 
         @app.delete('/api/connections/slack/personal', operation_id='disconnectPersonalSlack')
@@ -293,7 +336,9 @@ class PersonalSlack:
             _, owner = await database(actor, request, True)
             await database(self.disconnect, owner)
             await flush()
-            return await database(self.status, owner)
+            if after_change:
+                await after_change(owner)
+            return await status_view(owner)
 
         @app.post('/api/connections/slack/personal/check', operation_id='checkPersonalSlack')
         async def check(request: Request) -> PersonalSlackStatus:
@@ -310,7 +355,7 @@ class PersonalSlack:
                 await flush()
                 raise HTTPException(409, FAILURE) from None
             await flush()
-            return await database(self.status, owner)
+            return await status_view(owner)
 
         return callback
 
