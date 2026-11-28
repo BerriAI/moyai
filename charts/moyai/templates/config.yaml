@@ -27,6 +27,23 @@ metadata:
   name: {{ $name }}-config
 data:
   {{- $fixed := dict "DATA_DIR" "/data" "MOYAI_INSTALL_TOPOLOGY" "split" "MOYAI_CORE" "pydantic" "MOYAI_COLOCATED_ROLES" "true" "MOYAI_INSTALLATION_ID" .Values.installationId "MOYAI_PUBLIC_URL" (trimSuffix "/" .Values.publicUrl) "MOYAI_BROKER_URL" (trimSuffix "/" (default .Values.publicUrl .Values.brokerUrl)) "TEMPORAL_NAMESPACE" .Values.temporal.namespace "MOYAI_TEMPORAL_MODE" (ternary "bundled" "external" .Values.temporal.bundled) "TEMPORAL_TLS" (ternary "false" (toString .Values.temporal.tls) .Values.temporal.bundled) -}}
+  {{- $workspace := .Values.kubernetesWorkspaces -}}
+  {{- if $workspace.enabled -}}
+    {{- if eq (include "moyai.account" .) "default" -}}
+      {{- fail "Use a dedicated service account for Kubernetes workspace access" -}}
+    {{- end -}}
+    {{- if has $workspace.namespace (list .Release.Namespace $workspace.routerNamespace "default" "kube-system" "kube-public" "kube-node-lease") -}}
+      {{- fail "Use a dedicated workspace namespace separate from the application, router and system namespaces" -}}
+    {{- end -}}
+    {{- $_ := set $fixed "SANDBOX_PROVIDER" (default "kubernetes" (get .Values.config "SANDBOX_PROVIDER")) -}}
+    {{- $_ := set $fixed "SANDBOX_NAMESPACE" (required "kubernetesWorkspaces.namespace is required" $workspace.namespace) -}}
+    {{- $_ := set $fixed "SANDBOX_WARM_POOL" (required "kubernetesWorkspaces.warmPool is required" $workspace.warmPool) -}}
+    {{- $_ := set $fixed "SANDBOX_TEMPLATE" (required "kubernetesWorkspaces.template is required" $workspace.template) -}}
+    {{- $_ := set $fixed "SANDBOX_ROUTER_URL" (required "kubernetesWorkspaces.routerUrl is required" $workspace.routerUrl) -}}
+    {{- $_ := set $fixed "SANDBOX_ROUTER_TOKEN_FILE" "/var/run/secrets/workspace-router/token" -}}
+  {{- else if eq (get .Values.config "SANDBOX_PROVIDER") "kubernetes" -}}
+    {{- fail "Set kubernetesWorkspaces.enabled to install Kubernetes workspace access" -}}
+  {{- end -}}
   {{- $_ := set $fixed "TEMPORAL_ADDRESS" (ternary (printf "%s-temporal:7233" $name) .Values.temporal.address .Values.temporal.bundled) -}}
   {{- if .Values.temporal.bundled }}{{ $_ := set $fixed "TEMPORAL_API_KEY" "" }}{{ end -}}
   {{- if not (get $fixed "TEMPORAL_ADDRESS") }}{{ fail "temporal.address is required for external Temporal" }}{{ end -}}

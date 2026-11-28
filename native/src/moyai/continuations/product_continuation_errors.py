@@ -4,6 +4,14 @@ from temporalio.exceptions import ApplicationError
 
 PREPARATION_BLOCKED_TYPE = "ProductPreparationBlocked"
 MESSAGES = {
+    "workspace_volume_unavailable": (
+        "The recorded Kubernetes workspace could not be reattached. "
+        "Verify its original claim and volume before resuming this conversation."
+    ),
+    "workspace_snapshot_unsupported": "This workspace provider does not support filesystem image capture.",
+    "workspace_import_unsupported": (
+        "Kubernetes workspaces do not support prepared environments or automatic repository and session imports."
+    ),
     "workspace_checkpoint_missing": (
         "This conversation's computer expired without a current, verified checkpoint. "
         "Saved messages, approvals and downloads are retained. No action was replayed "

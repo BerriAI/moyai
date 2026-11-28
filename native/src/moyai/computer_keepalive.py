@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import modal
 from fastapi import HTTPException
 from opentelemetry.trace import Span, get_current_span
-from pydantic_ai.workspaces import WorkspaceUnavailableError
+from pydantic_ai.workspaces import WorkspaceRef, WorkspaceUnavailableError
 from temporalio import activity
 
 from .contracts import RunScope
@@ -63,7 +63,9 @@ async def _keep_computer_alive(runtime: Runtime, scope: RunScope, span: Span) ->
                 # On-demand acquisition may happen later in this same turn.
                 span.set_attribute("moyai.keepalive.result", "no_computer")
                 return Keepalive(True, delay)
-            if session.workspace_scope != scope.workspace_key or reference.get("provider") not in {"modal", "lambda"}:
+            if session.workspace_scope != scope.workspace_key or reference.get("provider") not in {
+                "modal", "lambda", "kubernetes",
+            }:
                 span.set_attribute("moyai.keepalive.result", "scope_changed")
                 return Keepalive(False)
             span.set_attribute("pydantic_ai.workspace.id", reference["id"])
@@ -74,6 +76,13 @@ async def _keep_computer_alive(runtime: Runtime, scope: RunScope, span: Span) ->
 
     try:
         async with asyncio.timeout(15):
+            if reference["provider"] == "kubernetes":
+                from .kubernetes_workspace import KubernetesSandbox
+
+                backend = KubernetesSandbox(runtime.settings).resume(scope, WorkspaceRef(**reference))
+                await backend.working_dir()
+                span.set_attribute("moyai.keepalive.result", "refreshed")
+                return Keepalive(True, delay)
             if reference["provider"] == "lambda":
                 from .lambda_control import LambdaControl
 

@@ -69,6 +69,12 @@ async def preserve_failed_workspace(runtime: Runtime, turn_id: str) -> None:
             session.last_actor_id, session.last_model = scope.actor_id, scope.model
             session.last_grants = scope.grants_key
             session.revision += 1
+            if reference and reference.get("provider") == "kubernetes":
+                session.save_warning = (
+                    "Work was interrupted. The recorded Kubernetes volume retains workspace files. "
+                    "Confirm the outcome of interrupted commands before continuing."
+                )
+                return
             session.save_warning = WARNING
             if not reference or reference.get("provider") not in {"modal", "lambda"}:
                 return

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..contracts import Grant, PreparedTurn, RunScope
 from ..models import Session, Turn
 from ..product_identity import ProductGrant, ProductPrincipal
+from .product_continuation_errors import MESSAGES
 from .product_continuation_models import ProductContinuation, ProductExecutionContext
 from .product_continuation_schema import identifier
 
@@ -380,6 +381,10 @@ class ProductWorkspaceCompatibility:
             "gitlab_project_id": target,
         }
 
+    def _check_new_workspace(self, context: dict[str, Any]) -> None:
+        if self.runtime.settings.sandbox_provider == "kubernetes" and (context["repo_url"] or context["environment_build_id"]):
+            raise HTTPException(409, MESSAGES["workspace_import_unsupported"])
+
     async def automation_blockers(self, db: AsyncSession, owner_id: str, definition: Any) -> list[str]:
         selection = {
             name: getattr(definition, name, None)
@@ -388,6 +393,7 @@ class ProductWorkspaceCompatibility:
         } if not isinstance(definition, dict) else definition
         try:
             context = await self._selection(db, selection, require_ready=True)
+            self._check_new_workspace(context)
             if context["repo_url"] and not context["environment_build_id"] and not self.repository_bootstrap_available():
                 return ["Prepare and select a validated environment for this repository before enabling automation."]
         except HTTPException as error:
@@ -401,6 +407,7 @@ class ProductWorkspaceCompatibility:
             raise HTTPException(503, "Current product authority is unavailable.")
         await self.identity.authorize_admission(db, principal.grant)
         context = await self._selection(db, selection, require_ready=True)
+        self._check_new_workspace(context)
         if (
             context["repo_url"] and not context["environment_build_id"] and "environment_build_id" not in selection
             and not self.repository_bootstrap_available()

@@ -75,7 +75,7 @@ Each installation needs its own ID and Compose project.
 | `MOYAI_PUBLIC_URL` | The HTTPS URL your browser and workers can reach, optionally including `/moyai`. |
 | `LITELLM_API_BASE`, `LITELLM_API_KEY`, `AGENT_MODEL` | Gateway URL, key, and an enabled model that supports Responses. |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | A token pair for your Modal workspace. |
-| `SANDBOX_PROVIDER` | `modal` (default) or `lambda`. See the [AWS deployment guide](../../docs/aws-lambda-microvms.md#deploy-the-application-on-aws). |
+| `SANDBOX_PROVIDER` | `modal` (default), [`lambda`](../../docs/aws-lambda-microvms.md#deploy-the-application-on-aws), or [`kubernetes` for in-cluster workers](../../charts/moyai/README.md#kubernetes-workspaces). |
 | `LAMBDA_REGION`, `LAMBDA_IMAGE`, `LAMBDA_IMAGE_VERSION`, `LAMBDA_CHECKPOINT_BUCKET` | Required for Lambda; use an image version whose state is `SUCCESSFUL`. |
 | `LAMBDA_CHECKPOINT_PREFIX` | A separate checkpoint/launch-receipt prefix for this installation. |
 | `MOYAI_COMPUTER_TIMEOUT`, `MOYAI_COMPUTER_IDLE_TIMEOUT` | Lifetime and idle window in seconds (defaults 3600 and 600). Lambda idle suspension retains RAM/disk; total lifetime including suspension is capped at 28800 seconds. |

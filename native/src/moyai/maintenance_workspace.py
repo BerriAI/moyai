@@ -24,7 +24,7 @@ from .continuations.product_continuation_errors import preparation_blocked
 from .contracts import PreparedTurn
 from .history_handoff import AgentCheckpoint, CheckpointSave, save_history_checkpoint
 from .models import Event, Session, Turn, now
-from .product_drain import DrainDecision
+from .product_drain import RESUME_ONLY, DrainDecision
 from .product_drain_models import ProductDrainReceipt, ProductDrainState
 from .workspace_recovery import (
     WorkspaceCheckpoint,
@@ -49,6 +49,10 @@ CAPTURE_RESULT = "maintenance_capture_result"
 WAIT_NOTICE_SECONDS = 2
 logger = logging.getLogger(__name__)
 WAIT_MESSAGES = {
+    "workspace_snapshot_unsupported": (
+        "Maintenance is blocked because this workspace provider cannot capture a filesystem image. "
+        "Resume maintenance admission to continue the task on its original volume."
+    ),
     "workspace_in_use": "Maintenance is waiting for computer control and the current computer action to settle.",
     "workspace_uncertain_effect": "Maintenance is waiting for an existing action or model-request receipt to settle. No action will be replayed.",
     "capture_unknown": "Maintenance is blocked because the filesystem capture outcome is unknown. Inspect the saved capture receipt; another snapshot will not be dispatched.",
@@ -67,7 +71,9 @@ def wait_reason(error: BaseException) -> str | None:
         return "intent_changed"
     if error.type in {"ProductPreparationBlocked", "MoyaiMaintenanceWait"} and len(error.details) == 1:
         code = error.details[0]
-        if isinstance(code, str) and code in {"workspace_in_use", "workspace_uncertain_effect", "storage_unavailable"}:
+        if isinstance(code, str) and code in {
+            "workspace_in_use", "workspace_uncertain_effect", "storage_unavailable", "workspace_snapshot_unsupported",
+        }:
             return code
     return None
 
@@ -279,6 +285,32 @@ async def preserve(
     service = runtime.product_drain
     if service is None:
         raise RuntimeError("Workspace preservation requires maintenance authority.")
+    if graph.workspace and graph.workspace.get("provider") == "kubernetes":
+        # A live volume can reattach across workers. It cannot prove a frozen
+        # maintenance checkpoint. Keep the live workflow quiescent until unpaused.
+        async with database.sessions.begin() as db:
+            state = await db.get(ProductDrainState, 1, with_for_update={"read": True})
+            session, turn = await locked_scope(database, db, scope, status="running")
+            await database.swarms.authorize(db, turn, scope=scope)
+            if (
+                state is None or turn.workflow_id != workflow_id or session.workspace_scope != scope.workspace_key
+                or json.loads(session.workspace or "null") != graph.workspace or session.snapshot is not None
+            ):
+                raise preparation_blocked("workspace_checkpoint_invalid")
+            if not state.paused:
+                if session.save_warning == WAIT_MESSAGES["workspace_snapshot_unsupported"]:
+                    session.save_warning = None
+                await service.mark_resumed(db, turn.id, state.generation)
+                return CheckpointSave()
+            await require_settled(db, session.id)
+            if any(await service._unsettled(db, turn.id)):
+                raise preparation_blocked("workspace_uncertain_effect")
+            await service._park(
+                db, turn.id, state.generation, workflow_id=workflow_id, workflow_run_id=workflow_run_id,
+                boundary=boundary, phase=RESUME_ONLY,
+            )
+        # Commit the live workflow's receipt before returning the wait reason.
+        raise preparation_blocked("workspace_snapshot_unsupported")
     saved_graph = await save_history_checkpoint(replace(
         graph, prepared=replace(graph.prepared, workspace=graph.workspace),
         deployment_handoff=None, allow_history_only=False,
@@ -459,6 +491,8 @@ async def resume(
         or point.phase != "captured"
     ):
         raise PermissionError("This is not the preserved execution's direct continuation.")
+    if point.workspace and point.workspace.get("provider") == "kubernetes":
+        raise preparation_blocked("workspace_snapshot_unsupported")
     service = runtime.product_drain
     if service is None:
         raise RuntimeError("Workspace restoration requires maintenance authority.")

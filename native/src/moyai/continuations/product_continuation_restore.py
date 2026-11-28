@@ -179,7 +179,9 @@ class ModalRecoveryTransport:
                 raise ValueError("The old execution owner could not be verified; native work is blocked.") from None
 
     async def native(self, scope: RunScope, context: dict[str, Any], reference: dict | None) -> Any:
-        provider = reference.get("provider") if reference else self.runtime.settings.sandbox_provider
+        provider = reference.get("provider") if reference else (
+            scope.workspace_provider or self.runtime.settings.sandbox_provider
+        )
         if provider == "lambda":
             from ..lambda_control import LambdaControl
             from ..lambda_workspace import LambdaProductComputer
@@ -194,9 +196,9 @@ class ModalRecoveryTransport:
             computer = LambdaProductComputer(self.runtime.settings, vm.id)
             await computer.filesystem.write_bytes.aio(GUEST.read_bytes(), "/opt/moyai/product_restore.py")
             return computer
+        if provider != "modal":
+            raise preparation_blocked("workspace_import_unsupported")
         if reference:
-            if reference.get("provider") != "modal":
-                raise ValueError("Product restoration requires the native Modal workspace.")
             sandbox = await modal.Sandbox.from_id.aio(reference["id"])
             if await sandbox.poll.aio() is not None:
                 raise ValueError("The native computer stopped; restore its latest native snapshot before resuming.")
@@ -379,6 +381,12 @@ class ProductWorkspaceRestorer:
                 raise ValueError("The workspace transition plan failed integrity verification.")
         if plan is None and not context.get("environment_snapshot_id") and not context.get("repo_url"):
             return prepared
+        provider = prepared.workspace.get("provider") if prepared.workspace else (
+            scope.workspace_provider or self.runtime.settings.sandbox_provider
+        )
+        if provider == "kubernetes":
+            # Check the destination before capturing files or draining the source workflow.
+            raise preparation_blocked("workspace_import_unsupported")
         from ..performance import computer_timing
         mode = "reuse" if prepared.workspace else "restore" if plan else "cold"
         async with (

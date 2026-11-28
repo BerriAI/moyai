@@ -84,6 +84,30 @@ def test_lambda_configuration_preserves_native_provider_without_modal_credential
     assert configured.lambda_checkpoint_timeout == 900
 
 
+def test_kubernetes_installation_without_cloud_credentials(install_environment):
+    from moyai.deployment_checks import validate
+    from moyai.settings import Settings
+
+    del install_environment["MODAL_TOKEN_ID"], install_environment["MODAL_TOKEN_SECRET"]
+    install_environment.update(
+        MOYAI_INSTALL_TOPOLOGY="split", SANDBOX_PROVIDER="kubernetes", SANDBOX_NAMESPACE="workspaces",
+        SANDBOX_WARM_POOL="pool", SANDBOX_TEMPLATE="shell", SANDBOX_ROUTER_URL="https://router.routing.svc",
+        SANDBOX_ROUTER_TOKEN_FILE="/var/run/secrets/workspace-router/token",
+    )
+    _, values = prepared(install_environment)
+    configured = validate(values)
+    source = load_product_config(values)
+    split = Settings(**source.native_overrides(), _env_file=None)
+    for resolved in (configured, split):
+        assert resolved.sandbox_provider == "kubernetes"
+        assert resolved.sandbox_installation_id == "test"
+        assert resolved.sandbox_namespace == "workspaces"
+        assert resolved.sandbox_template == "shell"
+        assert resolved.sandbox_warm_pool == "pool"
+        assert resolved.sandbox_router_url == "https://router.routing.svc"
+        assert resolved.sandbox_router_token_file == "/var/run/secrets/workspace-router/token"
+
+
 @pytest.mark.parametrize("runtime", [None, "gvisor", "vm"])
 def test_installer_preserves_modal_runtime_for_every_role(install_environment, runtime):
     from moyai.deployment_checks import validate
@@ -501,7 +525,8 @@ async def test_ingress_opens_only_after_confirmed_resume(install_environment, mo
     assert "upgrade" not in persisted
 
 
-async def test_split_provision_uses_installed_interpreter_for_canonical_schema(install_environment, monkeypatch):
+@pytest.mark.parametrize(("provider", "core"), [("modal", "legacy"), ("kubernetes", "pydantic")])
+async def test_split_provision_uses_installed_interpreter_for_canonical_schema(install_environment, monkeypatch, provider, core):
     import subprocess
     import sys
 
@@ -509,6 +534,7 @@ async def test_split_provision_uses_installed_interpreter_for_canonical_schema(i
 
     install_environment["MOYAI_INSTALL_TOPOLOGY"] = "split"
     _, values = prepared(install_environment)
+    values["SANDBOX_PROVIDER"] = provider
     calls = []
 
     def migrate(command, **kwargs):
@@ -519,6 +545,7 @@ async def test_split_provision_uses_installed_interpreter_for_canonical_schema(i
     monkeypatch.setattr(product_start, "prepare_native_schema", AsyncMock(return_value={"app_schema": "verified"}))
     result = await deployment_bootstrap.provision(values, fresh=False)
     assert calls[0][0] == [sys.executable, "-m", "app.schema_migrations", "--apply"]
+    assert calls[0][1]["MOYAI_CORE"] == core
     assert calls[0][1]["MOYAI_DATABASE_INITIALIZE"] == "false"
     assert result == {"product": {"schema_revision": 21, "status": "ready"}, "native": {"app_schema": "verified"}}
 

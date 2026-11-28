@@ -79,6 +79,8 @@ class Settings(BaseSettings):
                 not self.object_storage_bucket or not self.encryption_key or not self.session_secret):
             raise ValueError('Temporal with CHECKPOINT_DIR requires shared object storage and explicit '
                              'ENCRYPTION_KEY and SESSION_SECRET; periodic SQLite backups do not preserve workflow payloads.')
+        if self.sandbox_provider == 'kubernetes' and self.moyai_core != 'pydantic':
+            raise ValueError('Kubernetes workspaces require the native execution core.')
         if self.sandbox_prepared_pool_size:
             if not self.temporal_enabled or self.sandbox_provider != 'modal':
                 raise ValueError('Prepared workspaces require Temporal and the Modal provider.')
@@ -278,7 +280,15 @@ class Settings(BaseSettings):
     agent_harness: str = 'deepagents-temporal'
     # Exact saved model IDs; other gateway/provider combinations must opt in.
     native_web_search_models: list[str] = Field(default_factory=lambda: [ASTRA])
-    sandbox_provider: Literal['modal', 'substrate', 'lambda'] = 'modal'
+    sandbox_provider: Literal['modal', 'substrate', 'lambda', 'kubernetes'] = 'modal'
+    moyai_installation_id: str = ''
+    sandbox_namespace: str = ''
+    sandbox_template: str = ''
+    sandbox_warm_pool: str = ''
+    sandbox_router_url: str = ''
+    sandbox_router_token: str = Field(default='', repr=False)
+    sandbox_router_token_file: str = ''
+    sandbox_rpc_python: str = '/opt/workspace-rpc/bin/python'
     lambda_region: str = 'us-east-1'
     lambda_image: str = ''
     lambda_image_version: str = ''
@@ -638,6 +648,12 @@ class Settings(BaseSettings):
         return value
 
     def missing_sandbox(self, provider=None) -> list[str]:
+        if (provider or self.sandbox_provider) == 'kubernetes':
+            required = {'MOYAI_INSTALLATION_ID': self.moyai_installation_id, 'SANDBOX_NAMESPACE': self.sandbox_namespace,
+                        'SANDBOX_TEMPLATE': self.sandbox_template, 'SANDBOX_WARM_POOL': self.sandbox_warm_pool,
+                        'SANDBOX_ROUTER_URL': self.sandbox_router_url,
+                        'SANDBOX_ROUTER_TOKEN or SANDBOX_ROUTER_TOKEN_FILE': self.sandbox_router_token or self.sandbox_router_token_file}
+            return [key for key, value in required.items() if not value]
         if (provider or self.sandbox_provider) == 'lambda':
             required = {'LAMBDA_REGION': self.lambda_region, 'LAMBDA_IMAGE': self.lambda_image,
                         'LAMBDA_IMAGE_VERSION': self.lambda_image_version,

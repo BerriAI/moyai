@@ -53,6 +53,8 @@ class BrowserLogin(Toolset[RunScope]):
             if not reason.strip():
                 raise ToolFailed("Explain why browser sign-in is needed.")
             reference = ctx.workspace.ref
+            if (reference.provider if reference else ctx.deps.workspace_provider) == "kubernetes":
+                raise ToolFailed("Kubernetes workspaces do not provide a shared browser for sign-in.")
             if reference is None or reference.provider != "modal":
                 raise ToolFailed("Use browser_open to start the shared browser before requesting sign-in.")
             metadata = await self.prepare(

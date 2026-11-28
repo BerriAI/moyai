@@ -32,7 +32,12 @@ COPY pyproject.toml uv.lock ./
 COPY native/pyproject.toml ./native/
 RUN uv sync --frozen --no-dev --no-install-workspace
 
+FROM python-base AS workspace-rpc
+COPY native/workspace-rpc/ /opt/workspace-rpc-project/
+RUN UV_PROJECT_ENVIRONMENT=/opt/workspace-rpc uv sync --project /opt/workspace-rpc-project --locked --no-dev --no-install-project
+
 FROM python-base
+COPY --from=workspace-rpc /opt/workspace-rpc /opt/workspace-rpc
 COPY pyproject.toml uv.lock ./
 COPY native/pyproject.toml ./native/
 COPY --from=dependencies /app/.venv /app/.venv

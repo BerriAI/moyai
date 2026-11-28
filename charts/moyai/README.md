@@ -15,7 +15,7 @@ resources, DNS or Cloudflare policies are created.
 
 - Kubernetes 1.29+, Helm 3.19+ and an existing namespace.
 - A private S3-compatible bucket and workload credentials or storage keys.
-- A reachable LiteLLM Responses-capable model and Modal credentials.
+- A reachable LiteLLM Responses endpoint and credentials for the selected workspace provider.
 - PostgreSQL and Temporal, or the bundled dev dependencies below.
 - An ingress/tunnel preserving Host, streaming and WebSockets, with a public
   broker URL that reaches this pod before activation.
@@ -25,7 +25,8 @@ resources, DNS or Cloudflare policies are created.
 Create secrets through your secret manager/ExternalSecrets **before** installing.
 Keep credentials out of Helm values and Git. The Secret named by runtimeSecret
 contains OBJECT_STORAGE_BUCKET, OBJECT_STORAGE_REGION, LITELLM_API_BASE,
-LITELLM_API_KEY, AGENT_MODEL, MODAL_TOKEN_ID, MODAL_TOKEN_SECRET and MODAL_APP_NAME.
+LITELLM_API_KEY and AGENT_MODEL. The default Modal provider also uses MODAL_TOKEN_ID,
+MODAL_TOKEN_SECRET and MODAL_APP_NAME.
 Optional keys include storage credentials, TEMPORAL_API_KEY, WORKSPACE_PASSWORD
 and Cloudflare settings from [the Docker installer](../../deploy/docker/README.md).
 Missing signing/encryption keys are generated once into the private state PVC.
@@ -42,7 +43,7 @@ databases, buckets and queues.
 After a Moyai release publishes this chart:
 
     helm install product-dev oci://ghcr.io/berriai/charts/moyai \
-      --version 0.1.0 --namespace moyai-product-dev -f product-dev.yaml
+      --version 0.2.0 --namespace moyai-product-dev -f product-dev.yaml
 
 A release chart pins the image digest built from the same revision. For a source
 checkout, build/push its Docker image and explicitly set image.digest. An older
@@ -74,6 +75,128 @@ For external services, leave bundled flags false and set temporal.address,
 temporal.namespace and temporal.tls. Set the database URL in the existing Secret.
 Use persistence.existingClaim to adopt an existing state claim; an existing service
 account needs serviceAccount.create=false and serviceAccount.name.
+
+## Kubernetes workspaces
+
+The opt-in provider uses the SIG sandbox controller and extensions v1.0.12, the
+Python SDK 1.0.12 and sandboxd built from tag v1.0.12. Install the controller,
+reviewed template, warm pool and private router before the application. These
+can be separately pinned releases. The application worker uses a separate
+interpreter for the process RPC client, supplied in the matching release image.
+
+    installationId: dev01
+    kubernetesWorkspaces:
+      enabled: true
+      namespace: session-workspaces
+      warmPool: session-pool
+      template: session-runtime
+      routerUrl: https://router.routing.svc.cluster.local
+      routerNamespace: routing
+      routerPodLabels: {app: sandbox-router}
+      routerAudience: workspace-router
+
+Enabling this block makes Kubernetes the default for new workspaces. To change
+that default later, set `config.SANDBOX_PROVIDER` to the new provider and
+supply its credentials. Keep the block enabled while existing sessions retain
+Kubernetes workspace references.
+
+Allocate one dedicated workspace namespace and one least-privilege application
+service account per installation. Install the workspace namespace with Pod
+Security Admission enforcing the `restricted` profile and a CNI that implements
+NetworkPolicy. Keep credentials, application pods and router pods outside this
+namespace. Restrict who can create or change templates, claims, pools, pods and
+network policies there.
+
+The chart creates a Role and RoleBinding in the workspace namespace. It grants
+get/create/watch/patch/delete on sandbox claims, get on sandboxes and volume
+claims, and get on the named pool and template. The worker records the bound
+volume UID on its owning claim so recovery can detect a replaced volume. The chart mounts
+an API credential and a separate short-lived router credential only into the
+initializer and worker. The kubelet rotates both. The initializer reads the
+configured template and pool, checks claim permissions, loads the isolated RPC
+client and calls the private router health endpoint. A successful preflight
+does not exercise a process RPC. Run a real session before promoting an install.
+
+With `application.mode: externalFleets`, the chart manages the workspace
+RoleBinding but the operator supplies the role pods. Configure the external
+worker and installation initializer with the bound service account and the
+same projected API and router credentials as the single-pod template. Keep
+those token mounts out of other roles.
+
+Configure an operator-owned router with TLS and HTTP/2, a certificate trusted by
+the application and RPC interpreter, and TokenReview authentication with
+`--authz-tokenreview-require-token=true` and
+`--authz-tokenreview-audiences=workspace-router`. Grant the router its own
+TokenReview and discovery permissions. Limit router ingress to the trusted
+application pod or a dedicated authenticated proxy. TokenReview establishes the
+caller identity. The worker presents a separate per-claim credential to the
+runtime. Restrict router egress to DNS, the Kubernetes API and the workspace
+runtime port. Configure the authenticated broker endpoint separately using the
+private broker instructions below. Inference credentials belong to the application.
+
+The chart's workspace NetworkPolicy denies egress and accepts TCP 9090 solely
+from the selected router pods. This policy covers **every pod** in the specified
+workspace namespace. Kubernetes combines allowed traffic across NetworkPolicies.
+Set the template's `networkPolicyManagement: Unmanaged` and check for overlapping
+policies before permitting untrusted workloads.
+
+The [example pool and template](examples/workspace-pool.yaml) use
+`extensions.agents.x-k8s.io/v1beta1`. Replace the placeholder image digest and
+select a suitable StorageClass before installing them.
+
+- Set `spec.envVarsInjectionPolicy: Allowed` and `spec.volumeClaimTemplatesPolicy: Disallowed`.
+- Set `spec.podTemplate.spec.automountServiceAccountToken: false`. Use a
+  dedicated unprivileged pod identity and omit secret mounts and environment
+  imports. Use an unprivileged, digest-pinned sandboxd image containing a shell
+  and Python 3. Apply CPU, memory and storage limits.
+- Make the first container serve sandboxd on TCP 9090 with working directory
+  and root directory `/workspace`. Include
+  `--auth-token-sha256=$(WORKSPACE_TOKEN_DIGEST)` in its container arguments.
+  Leave the digest environment variable undefined in the template. Each claim
+  supplies its own digest. The bearer credential stays with the worker.
+- Mount a writable volume at `/workspace` by its `spec.volumeClaimTemplates`
+  name. Use a dynamically provisioned ReadWriteOnce or ReadWriteOncePod volume.
+  A session keeps its files when the worker or runtime pod is replaced.
+- Set the pool's `spec.sandboxTemplateRef.name` to the configured template and
+  `spec.replicas: 0`. The per-claim digest requires a fresh sandbox for every
+  allocation. Keep the namespace, pool, installation identity and encryption
+  key stable for existing workspaces.
+
+This provider supports shell commands, workspace files and reconnecting to
+the original volume. Deleting a conversation in the UI is reversible and
+retains its claim, pod and storage. Budget resources for retained conversations.
+Releasing a claim ends that workspace and triggers the controller's cleanup.
+The StorageClass reclaim policy determines what happens to the underlying disk.
+
+The native UI can start a coding session without a repository selection.
+Desktop and browser controls, credential-bearing commands, automatic repository
+imports, prepared environments, and machine snapshots are unavailable with this
+provider. Finish active sessions before a release that requires a maintenance
+snapshot. If a pause interrupts a session, use the maintenance resume command
+once outstanding requests and effects have settled. The session can continue
+on its original volume. Worker retirement still requires a completed drain.
+
+Build the coding image from the same source revision as the worker. The supplied
+Dockerfile includes the runtime, shell, Python, Git, Node, npm and the bundled
+skills at the paths used by the worker. From the repository root run
+`docker build -f deploy/docker/Dockerfile.workspace -t workspace-runtime:local .`.
+Use the resulting image digest in the workspace template.
+
+For a disposable installation, run `native/tests/kubernetes_session_probe.py`
+inside the worker using its application interpreter. Pass `create <fresh-uuid>`
+and save the two returned IDs. Replace the worker and the first workspace pod,
+then run `verify <same-uuid> <first-id> <second-id>`. Release the two test
+claims with `cleanup` and the same three arguments.
+
+For a deployment outside Helm, supply the corresponding `SANDBOX_PROVIDER`,
+`SANDBOX_NAMESPACE`, `SANDBOX_WARM_POOL`, `SANDBOX_TEMPLATE`,
+`SANDBOX_ROUTER_URL` and `MOYAI_INSTALLATION_ID` settings to the native
+installation. Set `SANDBOX_ROUTER_TOKEN_FILE` to a rotating token mount or use
+a private `SANDBOX_ROUTER_TOKEN`. Run the initializer and execution worker
+with in-cluster service account credentials. `SANDBOX_RPC_PYTHON` selects the
+isolated interpreter when the installation uses a different filesystem layout.
+Install it from the independent lock with
+`uv sync --project native/workspace-rpc --locked --no-dev --no-install-project`.
 
 ## Ingress and Cloudflare
 

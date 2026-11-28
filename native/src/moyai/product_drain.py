@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 
 from .inference_usage import InferenceUsage
-from .models import ComputerOperation, Effect, Turn, now
+from .models import ComputerOperation, Effect, Session, Turn, now
 from .product_drain_models import ProductDrainReceipt, ProductDrainState, ProductDrainWorker
 from .product_inference import ProductInferenceRequest
 from .product_role_authority import ProductRoleAuthority
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 DRAIN_VERSION = "moyai-product-maintenance-v1"
 # Included steering inputs are finished; the parent retains its own drain checks.
 TERMINAL_TURNS = ("completed", "failed", "stopped", "resumed", "included")
+RESUME_ONLY = "resume_only"
 SETTLED_REQUESTS = ("completed", "failed", "not_dispatched")
 
 
@@ -157,7 +158,7 @@ class ProductDrainService:
                 if expected[0].requested_drain or any(w.requested_drain for w in workers):
                     raise ProductDrainError("A live maintenance worker has not retired.")
                 await self._require_adoption_retired(db)
-                counts = await self._counts(db, state)
+                counts = await self._counts(db, state, for_resume=True)
                 if counts["unsafe_turns"] or counts["effects"] or counts["requests"]:
                     raise ProductDrainError("Execution or unknown outcomes still prevent resume.")
             self._write_intent(state, owner, paused=paused, request_key=request_key, fingerprint=fingerprint)
@@ -243,12 +244,7 @@ class ProductDrainService:
             if turn is None or turn.workflow_id != workflow_id:
                 raise ProductDrainError("The maintenance checkpoint does not own this turn.")
             if not state.paused:
-                receipts = await db.scalars(select(ProductDrainReceipt).where(
-                    ProductDrainReceipt.turn_id == turn_id,
-                    ProductDrainReceipt.resumed_generation.is_(None),
-                ))
-                for receipt in receipts:
-                    receipt.resumed_generation, receipt.resumed_at = state.generation, now()
+                await self.mark_resumed(db, turn_id, state.generation)
                 return DrainDecision(state.generation, False)
             effects, requests = await self._unsettled(db, turn_id)
             await self._park(
@@ -258,10 +254,27 @@ class ProductDrainService:
             return DrainDecision(state.generation, True)
 
     @staticmethod
+    async def mark_resumed(db: AsyncSession, turn_id: str, generation: int) -> None:
+        receipts = await db.scalars(select(ProductDrainReceipt).where(
+            ProductDrainReceipt.turn_id == turn_id,
+            ProductDrainReceipt.resumed_generation.is_(None),
+        ))
+        for receipt in receipts:
+            receipt.resumed_generation, receipt.resumed_at = generation, now()
+
+    @staticmethod
     async def _park(
         db: AsyncSession, turn_id: str, generation: int, *, workflow_id: str,
         workflow_run_id: str, boundary: str, phase: str,
     ) -> None:
+        if phase == "parked":
+            # Pre-preparation and deferred waits also count toward release safety.
+            # A retained Kubernetes volume has no verified maintenance capture.
+            workspace = await db.scalar(select(Session.workspace).join(
+                Turn, Turn.session_id == Session.id,
+            ).where(Turn.id == turn_id))
+            if workspace and json.loads(workspace).get("provider") == "kubernetes":
+                phase = RESUME_ONLY
         values = {
             "workflow_id": workflow_id, "workflow_run_id": workflow_run_id,
             "boundary": boundary, "phase": phase,
@@ -292,11 +305,14 @@ class ProductDrainService:
                 boundary="deferred_waiting", phase="blocked" if effects or requests else "parked",
             )
 
-    async def _counts(self, db: AsyncSession, state: ProductDrainState) -> dict[str, int]:
+    async def _counts(self, db: AsyncSession, state: ProductDrainState, *, for_resume: bool = False) -> dict[str, int]:
+        # A live workflow can leave a pause on its retained volume. Only a
+        # parked receipt permits reporting a completed drain or retiring a worker.
+        phases = ("parked", RESUME_ONLY) if for_resume else ("parked",)
         turns = list(await db.scalars(select(Turn).where(Turn.status.not_in(TERMINAL_TURNS))))
         receipts = list(await db.scalars(select(ProductDrainReceipt).where(
             ProductDrainReceipt.generation == state.generation,
-            ProductDrainReceipt.phase == "parked",
+            ProductDrainReceipt.phase.in_(phases),
             ProductDrainReceipt.resumed_generation.is_(None),
         )))
         parked = {r.turn_id: r for r in receipts}
@@ -401,7 +417,7 @@ class ProductDrainService:
         client = await runtime.connect()
         for turn in turns:
             row = receipts.get(turn.id)
-            if paused and row is not None and row.generation == generation and row.phase == "parked":
+            if paused and row is not None and row.generation == generation and row.phase in {"parked", RESUME_ONLY}:
                 continue
             if not paused and row is None:
                 continue

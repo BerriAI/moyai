@@ -23,6 +23,7 @@ from sqlalchemy import delete, update
 from .browser_outcomes import BrowserNotDispatched, BrowserOutcomeUnknown, browser_result
 from .computer import (
     DESKTOP_VERSION,
+    KUBERNETES_DESKTOP_UNAVAILABLE,
     ComputerCommand,
     DesktopCommandFailed,
     authorize,
@@ -146,6 +147,8 @@ async def agent_request(
     try:
         await database.authorize_scope(scope)
         reference = workspace.ref
+        if reference is not None and reference.provider == "kubernetes":
+            raise BrowserNotDispatched(KUBERNETES_DESKTOP_UNAVAILABLE)
         if reference is None or reference.provider not in (
             {"modal", "lambda"} if surface == "desktop" else {"modal"}
         ):

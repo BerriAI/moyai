@@ -25,6 +25,7 @@ from pydantic_ai.workspaces import (
 from pydantic_ai.workspaces.protocol import validate_timeout
 
 from .contracts import RunScope
+from .kubernetes_workspace import KubernetesSandbox
 from .lambda_control import LambdaControl, LambdaVM, ObservationError
 from .settings import Settings
 
@@ -56,9 +57,14 @@ class WorkspaceProviders(AbstractCapability[RunScope]):
         self.lambda_sandbox = LambdaSandbox(settings)
 
     def get_workspace(self, ctx: RunContext[RunScope], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
-        provider = ref.provider if ref else self.settings.sandbox_provider
-        selected = self.lambda_sandbox if provider == "lambda" else self.modal
-        return selected.get_workspace(ctx, ref=ref)
+        provider = ref.provider if ref else (ctx.deps.workspace_provider or self.settings.sandbox_provider)
+        if provider == "modal":
+            return self.modal.get_workspace(ctx, ref=ref)
+        if provider == "lambda":
+            return self.lambda_sandbox.get_workspace(ctx, ref=ref)
+        if provider == "kubernetes":
+            return KubernetesSandbox(self.settings).get_workspace(ctx, ref=ref)
+        raise ValueError("Unsupported workspace provider.")
 
 
 class LambdaProductComputer:

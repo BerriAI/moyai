@@ -165,6 +165,11 @@ class OnDemandRepository(WrapperCapability[RunScope]):
             r"(?:github|gitlab)_[A-Za-z0-9]{8}_checkout", tool_def.name,
         ):
             return args
+        if ctx.deps.workspace_provider == "kubernetes":
+            if tool_def.name in {"browser_open", "browser_read", "browser_action", "desktop_read", "desktop_action"}:
+                raise ToolFailed("Kubernetes workspaces do not provide a live desktop or shared browser.")
+            if tool_def.name == "credentials_run":
+                raise ToolFailed("Credential commands require this task's isolated Modal workspace.")
         async with self.lock:
             if not self.ready:
                 await ctx.workspace.working_dir()

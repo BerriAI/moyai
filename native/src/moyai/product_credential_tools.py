@@ -121,6 +121,10 @@ async def run_command(
     if not ctx.tool_call_id:
         raise ToolFailed("The credential command requires a native tool identity.")
     identity = effect_id(ctx, ToolCallPart("credentials_run", {}, tool_call_id=ctx.tool_call_id))
+    reference = ctx.workspace.ref
+    if reference is None or reference.provider != "modal":
+        await refuse_command(service, ctx.deps, identity)
+        raise ToolFailed("Credential commands require this task's isolated Modal workspace.")
     try:
         bindings = await service.materialize(ctx.deps, args.request_ids)
         names = []
@@ -128,9 +132,6 @@ async def run_command(
             names.extend(json.loads(binding["value"]).keys() if binding["format"] == "env" else [binding["env_var"]])
         if len(set(names)) != len(names):
             raise ToolFailed("Selected credentials contain overlapping environment variables.")
-        reference = ctx.workspace.ref
-        if reference is None or reference.provider != "modal":
-            raise ToolFailed("Credential commands require this task's isolated Modal workspace.")
         await claim_command(service, ctx.deps, identity, bindings)
     except (HTTPException, PermissionError, ToolFailed):
         await refuse_command(service, ctx.deps, identity)
